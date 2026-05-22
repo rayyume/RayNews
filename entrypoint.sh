@@ -17,7 +17,7 @@ if [ -n "$TZ" ]; then
 fi
 
 # Write crontab: fetch every 15 minutes
-CRON_LINE="${PROXY_PREFIX}${TZ_PREFIX}cd /app && python fetcher.py >> /var/log/fetcher.log 2>&1"
+CRON_LINE="cd /app && ${PROXY_PREFIX}${TZ_PREFIX}python fetcher.py >> /var/log/fetcher.log 2>&1"
 echo "*/15 * * * * $CRON_LINE" > /etc/cron.d/raynews
 chmod 0644 /etc/cron.d/raynews
 crontab /etc/cron.d/raynews
