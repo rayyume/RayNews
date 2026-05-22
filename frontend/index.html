@@ -349,7 +349,7 @@ function openArticle(id) {
   document.body.style.overflow = 'hidden';
   document.getElementById('overlay').dataset.articleId = id;
   const shortDate = n.date ? n.date.slice(2) : '';
-  history.replaceState(null, '', '#/article/' + shortDate + '-' + id);
+  history.replaceState(null, '', '#/article/' + shortDate + '-' + n.id);
 
   // Image lightbox
   wrap.querySelectorAll('.article-body img').forEach(img => {

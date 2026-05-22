@@ -329,7 +329,7 @@ def fetch_telegraph(url: str) -> dict | None:
 
 
 # ─── Main Pipeline ────────────────────────────────────────
-def process_message(msg: dict) -> dict:
+def process_message(msg: dict, orig_msg_id: int) -> dict:
     """Process a single Telegram message into a news entry."""
     content = msg["html"]
     text = msg["text"]
@@ -340,6 +340,7 @@ def process_message(msg: dict) -> dict:
     time_info = parse_datetime(msg["datetime"])
 
     entry = {
+        "id": orig_msg_id,  # Use stable Telegram message ID
         "title": title,
         "source": source,
         "time": time_info.get("time", ""),
@@ -480,7 +481,7 @@ def run():
     # Process new messages with thread pool
     new_entries = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(process_message, msg): msg for msg in messages}
+        futures = {executor.submit(process_message, msg, msg["id"]): msg for msg in messages}
         for future in as_completed(futures):
             try:
                 new_entries.append(future.result())
@@ -512,10 +513,6 @@ def run():
     # Sort by timestamp descending
     all_items = existing_data["items"]
     all_items.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
-
-    # Re-assign sequential IDs
-    for i, entry in enumerate(all_items):
-        entry["id"] = i + 1
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     output = {
