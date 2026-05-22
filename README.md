@@ -1,6 +1,6 @@
 # RayNews 📡
 
-新闻聚合阅读器——从 Telegram 频道（配合 BroadcastChannel）抓取新闻消息，自动提取 Telegraph 全文，生成暗色模式新闻站。
+新闻聚合阅读器——从 Telegram 频道抓取新闻消息（通过 RSS-to-Telegram-Bot 推送），自动提取 Telegraph 全文，生成暗色模式新闻站。
 
 ![screenshot](https://github.com/user-attachments/assets/a5f64a6f-f3c2-4aaf-9c09-cb51fd0e0349)
 
@@ -9,24 +9,26 @@
 ```
 新闻源 (RSS/网页/API)
        ↓
- BroadcastChannel ──推送──→ Telegram 频道 (t.me/s/your_channel)
-                                    ↓
-                      RayNews Fetcher ──定时抓取──→ news.json
-                                    ↓
-                              Nginx + 前端 Vue SPA
+ RSS-to-Telegram-Bot ──推送──→ Telegram 频道 (t.me/s/your_channel)
+                                      ↓
+                        RayNews Fetcher ──定时抓取──→ news.json
+                                      ↓
+                                Nginx + 前端 Vue SPA
 ```
 
 **数据流说明：**
 
-1. **BroadcastChannel** —— 用开源工具 [BroadcastChannel](https://github.com/ccbikai/BroadcastChannel) 将 RSS/新闻源聚合后推送到一个 Telegram 频道
-2. **Telegram 频道** —— 作为中间存储，RayNews 从此频道的公开页面（t.me/s/频道名）抓取消息
+1. **[RSS-to-Telegram-Bot](https://github.com/Rongronggg9/RSS-to-Telegram-Bot)** —— 订阅 RSS 源，将新文章推送到你的 Telegram 频道
+2. **Telegram 频道** —— 作为中间存储，RayNews 从此频道的公开页面（`t.me/s/频道名`）抓取消息
 3. **RayNews Fetcher** —— Python 脚本，每 15 分钟增量抓取新消息，自动识别来源、提取 Telegraph 全文
 4. **前端** —— 纯 Vue 3 SPA，暗色风格，支持来源筛选、文章详情、分享
 
+> **注意：** RayNews 只负责**读取** Telegram 频道的数据，不做消息推送。推送需要用其他工具（如 [RSS-to-Telegram-Bot](https://github.com/Rongronggg9/RSS-to-Telegram-Bot)）或者手动在频道里发消息。
+
 ## 前置条件
 
-- 一个 Telegram 频道（公开或私有均可）
-- [BroadcastChannel](https://github.com/ccbikai/BroadcastChannel) 部署好，将你的新闻源推送到该频道
+- 一个 Telegram 公开频道
+- （可选）[RSS-to-Telegram-Bot](https://github.com/Rongronggg9/RSS-to-Telegram-Bot) 或其他工具将新闻推送到该频道
 
 ## 快速开始
 
