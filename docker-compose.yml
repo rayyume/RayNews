@@ -1,0 +1,23 @@
+services:
+  raynews:
+    # 本地构建使用 build: .
+    # 生产部署请取消注释下面这行，注释掉 build: .
+    build: .
+    # image: ghcr.io/your-org/raynews:latest
+    container_name: raynews
+    ports:
+      - "8090:80"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - PYTHONUNBUFFERED=1
+      # Telegram 频道（需配合 BroadcastChannel 使用）
+      - TELEGRAM_CHANNEL=${TELEGRAM_CHANNEL:-your_channel}
+      # 代理配置（通过 .env 注入，按需）
+      - HTTP_PROXY=${HTTP_PROXY:-}
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
+      - NO_PROXY=${NO_PROXY:-localhost,127.0.0.1}
+    # extra_hosts 按需在 .env 中配置，默认注释
+    # extra_hosts:
+    #  - "host.docker.internal:${HOST_IP:-}"
+    restart: unless-stopped

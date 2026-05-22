@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RayNew Reader</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📡</text></svg>">
+<style>
+/* ═══ Design Tokens ═══════════════════════════════ */
+:root {
+  --bg: #0a0a0c;
+  --bg-card: #111114;
+  --bg-card-hover: #16161a;
+  --bg-surface: #1a1a1f;
+  --text: #e8e8ed;
+  --text-2: #8b8b9e;
+  --text-3: #55556a;
+  --accent: #6e8efb;
+  --accent-dim: rgba(110,142,251,0.12);
+  --border: rgba(255,255,255,0.06);
+  --border-hover: rgba(255,255,255,0.12);
+  --radius: 12px;
+  --font: "SF Pro Display",-apple-system,"Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+}
+
+/* ═══ Reset ═══════════════════════════════════════ */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{font-size:16px;scroll-behavior:smooth;-webkit-font-smoothing:antialiased}
+body{font-family:var(--font);background:var(--bg);color:var(--text);line-height:1.6;overflow-x:hidden}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+::selection{background:var(--accent-dim);color:var(--text)}
+::-webkit-scrollbar{width:6px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.1);border-radius:3px}
+
+/* ═══ Layout ══════════════════════════════════════ */
+.app{max-width:960px;margin:0 auto;padding:0 20px}
+
+/* ═══ Header ══════════════════════════════════════ */
+.header{position:sticky;top:0;z-index:100;background:rgba(10,10,12,0.82);backdrop-filter:blur(20px) saturate(1.2);-webkit-backdrop-filter:blur(20px) saturate(1.2);border-bottom:1px solid var(--border);margin:0 -20px;padding:0 20px}
+.header-inner{max-width:960px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;height:56px}
+.logo{display:flex;align-items:center;gap:10px;font-weight:800;font-size:18px;letter-spacing:-0.02em}
+.logo-icon{width:28px;height:28px;background:linear-gradient(135deg,var(--accent),#a78bfa);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:900;color:#fff}
+.header-right{display:flex;align-items:center;gap:14px;font-size:12px;color:var(--text-3)}
+.status-dot{width:6px;height:6px;background:#22c55e;border-radius:50%;display:inline-block;margin-right:4px;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+.refresh-btn{background:none;border:1px solid var(--border);color:var(--text-2);padding:4px 12px;border-radius:100px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font);transition:all 0.15s}
+.refresh-btn:hover{border-color:var(--accent);color:var(--accent)}
+
+/* ═══ Filters ═════════════════════════════════════ */
+.filters{display:flex;gap:6px;padding:14px 0;overflow-x:auto;scrollbar-width:none}
+.filters::-webkit-scrollbar{display:none}
+.fbtn{padding:5px 14px;border-radius:100px;border:1px solid var(--border);background:transparent;color:var(--text-2);font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all 0.15s;font-family:var(--font)}
+.fbtn:hover{border-color:var(--border-hover);color:var(--text);background:var(--bg-card)}
+.fbtn.active{background:var(--accent-dim);border-color:var(--accent);color:var(--accent)}
+
+/* ═══ News List ═══════════════════════════════════ */
+.list{display:flex;flex-direction:column;gap:1px;background:var(--border);border-radius:var(--radius);overflow:hidden;margin-bottom:40px}
+.item{display:flex;gap:16px;padding:18px 20px;background:var(--bg-card);cursor:pointer;transition:background 0.12s;position:relative}
+.item:hover{background:var(--bg-card-hover)}
+.item-thumb{width:120px;height:80px;border-radius:6px;overflow:hidden;flex-shrink:0;background:var(--bg-surface)}
+.item-thumb img{width:100%;height:100%;object-fit:cover;transition:transform 0.3s}
+.item:hover .item-thumb img{transform:scale(1.05)}
+.item-body{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:space-between}
+.item-title{font-size:15px;font-weight:600;line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;transition:color 0.12s}
+.item:hover .item-title{color:#fff}
+.item-meta{display:flex;align-items:center;gap:10px;font-size:11px;color:var(--text-3);margin-top:8px}
+.badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:100px;font-weight:700;font-size:10px;letter-spacing:0.04em}
+.full-tag{color:var(--accent);font-size:10px;font-weight:700}
+.item-arrow{position:absolute;right:20px;top:50%;transform:translateY(-50%);color:var(--text-3);opacity:0;transition:opacity 0.12s,transform 0.12s;font-size:14px}
+.item:hover .item-arrow{opacity:1;transform:translateY(-50%) translateX(2px)}
+
+/* ═══ Empty State ═════════════════════════════════ */
+.empty{text-align:center;padding:60px 20px;color:var(--text-3)}
+.empty-icon{font-size:48px;margin-bottom:12px}
+.empty p{font-size:14px}
+
+/* ═══ Article Overlay ═════════════════════════════ */
+.overlay{position:fixed;inset:0;z-index:200;background:var(--bg);overflow-y:auto;transform:translateX(100%);transition:transform 0.35s cubic-bezier(0.4,0,0.2,1)}
+.overlay.open{transform:translateX(0)}
+.overlay-header{position:sticky;top:0;z-index:10;background:rgba(10,10,12,0.85);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-bottom:1px solid var(--border)}
+.overlay-header-inner{max-width:720px;margin:0 auto;display:flex;align-items:center;height:48px;padding:0 20px}
+.back-btn{display:flex;align-items:center;gap:6px;background:none;border:none;color:var(--accent);font-size:13px;font-weight:600;cursor:pointer;font-family:var(--font);padding:4px 0}
+.back-btn:hover{text-decoration:underline}
+.share-btn{display:flex;align-items:center;gap:6px;background:none;border:none;color:var(--text-2);font-size:13px;font-weight:600;cursor:pointer;font-family:var(--font);padding:4px 12px;margin-left:auto;border-radius:6px;transition:all 0.15s}
+.share-btn:hover{background:var(--bg-card);color:var(--accent)}
+.article-wrap{max-width:720px;margin:0 auto;padding:32px 20px 80px}
+.article-wrap h1{font-size:24px;font-weight:800;line-height:1.35;letter-spacing:-0.01em;margin-bottom:12px}
+.article-meta{display:flex;align-items:center;gap:12px;margin-bottom:28px;font-size:13px;color:var(--text-2);padding-bottom:20px;border-bottom:1px solid var(--border)}
+.article-body{font-size:15.5px;line-height:1.85}
+.article-body p{margin-bottom:1.2em}
+.article-body img{max-width:100%;border-radius:var(--radius);margin:1.2em 0;background:var(--bg-surface);cursor:zoom-in}
+.article-body figure{margin:1.2em 0}
+.article-body figcaption{font-size:12px;color:var(--text-3);margin-top:4px;text-align:center}
+.article-body h2,.article-body strong{font-size:18px;font-weight:700;display:block;margin:1.6em 0 0.6em}
+.article-body blockquote{border-left:3px solid var(--accent);padding:8px 0 8px 16px;margin:1.2em 0;color:var(--text-2);font-style:italic}
+.article-body a{color:var(--accent);text-decoration:underline;text-underline-offset:2px}
+.article-body ul,.article-body ol{padding-left:1.5em;margin-bottom:1.2em}
+.article-body li{margin-bottom:0.4em}
+.source-footer{margin-top:2em;padding-top:1.2em;border-top:1px solid var(--border);font-size:12px;color:var(--text-3);display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.source-footer a{color:var(--text-2)}
+
+/* ═══ Lightbox ════════════════════════════════════ */
+.lb{position:fixed;inset:0;z-index:300;background:rgba(0,0,0,0.92);backdrop-filter:blur(10px);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity 0.25s;cursor:zoom-out}
+.lb.open{opacity:1;pointer-events:auto}
+.lb img{max-width:92vw;max-height:92vh;border-radius:8px;object-fit:contain}
+
+/* ═══ Toast ═══════════════════════════════════════ */
+.toast{position:fixed;bottom:40px;left:50%;transform:translateX(-50%) translateY(20px);z-index:999;background:rgba(30,30,40,0.92);backdrop-filter:blur(12px);color:var(--text);padding:10px 24px;border-radius:100px;font-size:13px;font-weight:600;opacity:0;pointer-events:none;transition:all 0.3s cubic-bezier(0.4,0,0.2,1);border:1px solid var(--border)}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+
+/* ═══ Footer ══════════════════════════════════════ */
+.footer{text-align:center;padding:32px 0 48px;font-size:12px;color:var(--text-3);border-top:1px solid var(--border);margin-top:20px}
+
+/* ═══ Loading ═════════════════════════════════════ */
+@keyframes shimmer{0%{background-position:-200% 0}100%{background-position:200% 0}}
+.skeleton-item{display:flex;gap:16px;padding:18px 20px;background:var(--bg-card)}
+.skeleton-thumb{width:120px;height:80px;border-radius:6px;background:linear-gradient(90deg,var(--bg-surface) 25%,var(--bg-card-hover) 50%,var(--bg-surface) 75%);background-size:200% 100%;animation:shimmer 1.5s infinite}
+.skeleton-lines{flex:1;display:flex;flex-direction:column;gap:8px;padding:4px 0}
+.skeleton-line{height:14px;border-radius:4px;background:linear-gradient(90deg,var(--bg-surface) 25%,var(--bg-card-hover) 50%,var(--bg-surface) 75%);background-size:200% 100%;animation:shimmer 1.5s infinite}
+.skeleton-line:last-child{width:60%}
+
+/* ═══ Pagination ════════════════════════════════ */
+.pagination{display:flex;align-items:center;justify-content:center;gap:8px;padding:24px 0 8px}
+.page-btn{padding:6px 16px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-2);font-size:13px;font-weight:600;cursor:pointer;font-family:var(--font);transition:all 0.15s}
+.page-btn:hover{border-color:var(--accent);color:var(--accent)}
+.page-btn:disabled{opacity:0.3;cursor:default;border-color:var(--border);color:var(--text-3)}
+.page-info{font-size:12px;color:var(--text-3);padding:0 8px}
+
+/* ═══ Sidebar (collapsible source filter) ════════ */
+.sidebar-toggle{position:fixed;left:0;top:50%;transform:translateY(-50%);z-index:50;width:24px;height:48px;background:var(--bg-card);border:1px solid var(--border);border-left:none;border-radius:0 8px 8px 0;color:var(--text-3);font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.2s;padding:0}
+.sidebar-toggle:hover{background:var(--bg-card-hover);color:var(--accent)}
+.sidebar-toggle.open{left:200px}
+.sidebar{position:fixed;left:0;top:56px;bottom:0;z-index:40;width:200px;background:var(--bg-card);border-right:1px solid var(--border);transform:translateX(-100%);transition:transform 0.25s cubic-bezier(0.4,0,0.2,1);overflow-y:auto;padding:16px 12px}
+.sidebar.open{transform:translateX(0);box-shadow:4px 0 20px rgba(0,0,0,0.3)}
+.sidebar-header{font-size:12px;font-weight:700;color:var(--text-3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+.sidebar .filters{display:flex;flex-direction:column;gap:4px;padding:0;overflow:visible}
+.sidebar .fbtn{width:100%;text-align:left;padding:7px 12px;border-radius:6px;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media(max-width:768px){
+  .sidebar{width:180px}
+  .sidebar-toggle.open{left:180px}
+}
+
+/* ═══ Responsive ══════════════════════════════════ */
+@media(max-width:640px){
+  .item{padding:14px 16px}
+  .item-thumb{width:90px;height:64px}
+  .item-title{font-size:14px}
+  .item-arrow{display:none}
+  .article-wrap h1{font-size:20px}
+  .hide-m{display:none}
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <div class="header-inner">
+      <div class="logo">
+        <div class="logo-icon">R</div>
+        <span>RayNews</span>
+      </div>
+      <div class="header-right">
+        <span><span class="status-dot"></span>实时更新</span>
+        <span class="hide-m" id="count"></span>
+        <button class="refresh-btn" onclick="triggerRefresh()">刷新</button>
+      </div>
+    </div>
+  </header>
+
+  <button class="sidebar-toggle open" id="sidebarToggle" onclick="toggleSidebar()" title="来源筛选">✕</button>
+  <div class="sidebar open" id="sidebar">
+    <div class="sidebar-header">来源筛选</div>
+    <div class="filters" id="filters"></div>
+  </div>
+
+  <div class="list" id="list">
+    <div class="skeleton-item" style="border-bottom:1px solid var(--border)"><div class="skeleton-thumb"></div><div class="skeleton-lines"><div class="skeleton-line"></div><div class="skeleton-line"></div></div></div>
+    <div class="skeleton-item" style="border-bottom:1px solid var(--border)"><div class="skeleton-thumb"></div><div class="skeleton-lines"><div class="skeleton-line"></div><div class="skeleton-line"></div></div></div>
+    <div class="skeleton-item"><div class="skeleton-thumb"></div><div class="skeleton-lines"><div class="skeleton-line"></div><div class="skeleton-line"></div></div></div>
+  </div>
+  <div class="pagination" id="pagination"></div>
+  <div class="footer">RayNews - 👀open eyes to see the world. · 每 15 分钟更新</div>
+</div>
+
+<div class="overlay" id="overlay">
+  <header class="overlay-header"><div class="overlay-header-inner"><button class="back-btn" id="backBtn"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 12L6 8l4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>返回</button><button class="share-btn" id="shareBtn" onclick="shareArticle()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>分享</button></div></header>
+  <div class="article-wrap" id="articleWrap"></div>
+</div>
+
+<div class="lb" id="lb"><img src="" id="lbImg"></div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const API_URL = (location.hostname === 'localhost' || location.hostname === '127.0.0.1')
+  ? 'http://localhost:8080/news.json'
+  : '/news.json';
+const PAGE_SIZE = 30;
+
+let news = [];
+let filter = 'all';
+let currentPage = 1;
+
+async function triggerRefresh() {
+  const btn = document.querySelector('.refresh-btn');
+  btn.textContent = '抓取中...';
+  btn.disabled = true;
+  try {
+    await fetch('/api/refresh', { cache: 'no-store' });
+  } catch (e) { /* ignore */ }
+  await loadData();
+  btn.textContent = '刷新';
+  btn.disabled = false;
+}
+
+async function loadData() {
+  const list = document.getElementById('list');
+  list.innerHTML = `<div class="skeleton-item"><div class="skeleton-thumb"></div><div class="skeleton-lines"><div class="skeleton-line"></div><div class="skeleton-line"></div></div></div>`.repeat(3);
+
+  try {
+    const resp = await fetch(API_URL + '?t=' + Date.now());
+    const data = await resp.json();
+    news = data.items || [];
+    document.getElementById('count').textContent = news.length + ' 条新闻';
+    renderFilters();
+    renderList();
+  } catch (e) {
+    list.innerHTML = `<div class="empty"><div class="empty-icon">📡</div><p>暂无数据，等待首次抓取...</p></div>`;
+  }
+}
+
+function renderFilters() {
+  const sources = [...new Set(news.map(n => n.source))];
+  const el = document.getElementById('filters');
+  el.innerHTML = `<button class="fbtn active" data-f="all">全部</button>` +
+    sources.map(s => `<button class="fbtn" data-f="${esc(s)}">${esc(s)}</button>`).join('');
+  el.onclick = e => {
+    const btn = e.target.closest('.fbtn');
+    if (!btn) return;
+    el.querySelectorAll('.fbtn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    filter = btn.dataset.f;
+    currentPage = 1;
+    renderList();
+  };
+}
+
+function toggleSidebar() {
+  const sidebar = document.getElementById('sidebar');
+  const toggle = document.getElementById('sidebarToggle');
+  const isOpen = sidebar.classList.toggle('open');
+  toggle.classList.toggle('open', isOpen);
+  toggle.textContent = isOpen ? '✕' : '☰';
+  // Save preference
+  try { localStorage.setItem('raynews_sidebar', isOpen ? '1' : '0'); } catch(e) {}
+}
+
+function renderList() {
+  const all = filter === 'all' ? news : news.filter(n => n.source === filter);
+  const el = document.getElementById('list');
+  const totalPages = Math.max(1, Math.ceil(all.length / PAGE_SIZE));
+  if (currentPage > totalPages) currentPage = totalPages;
+
+  // Slice to current page
+  const start = (currentPage - 1) * PAGE_SIZE;
+  const items = all.slice(start, start + PAGE_SIZE);
+
+  document.getElementById('count').textContent = all.length + ' 条新闻';
+
+  if (!items.length) {
+    el.innerHTML = `<div class="empty"><div class="empty-icon">🔍</div><p>该分类暂无新闻</p></div>`;
+    renderPagination(0);
+    return;
+  }
+
+  el.innerHTML = items.map(n => `
+    <div class="item" onclick="openArticle(${n.id})">
+      ${n.thumb ? `<div class="item-thumb"><img src="${esc(n.thumb)}" alt="" loading="lazy"></div>` : ''}
+      <div class="item-body">
+        <div class="item-title">${esc(n.title)}</div>
+        <div class="item-meta">
+          <span class="badge" style="${badgeStyle(n.source)}">${esc(n.source)}</span>
+          <span>${formatTime(n.date, n.time)}</span>
+          ${n.has_full_content ? '<span class="full-tag">● 全文</span>' : ''}
+        </div>
+      </div>
+      <div class="item-arrow">›</div>
+    </div>
+  `).join('');
+  renderPagination(totalPages);
+}
+
+function renderPagination(totalPages) {
+  const el = document.getElementById('pagination');
+  if (totalPages <= 1) { el.innerHTML = ''; return; }
+  el.innerHTML = `
+    <button class="page-btn" onclick="goToPage(${currentPage - 1})" ${currentPage <= 1 ? 'disabled' : ''}>上一页</button>
+    <span class="page-info">${currentPage} / ${totalPages}</span>
+    <button class="page-btn" onclick="goToPage(${currentPage + 1})" ${currentPage >= totalPages ? 'disabled' : ''}>下一页</button>
+  `;
+}
+
+function goToPage(page) {
+  const all = filter === 'all' ? news : news.filter(n => n.source === filter);
+  const totalPages = Math.max(1, Math.ceil(all.length / PAGE_SIZE));
+  if (page < 1 || page > totalPages) return;
+  currentPage = page;
+  renderList();
+  document.getElementById('list').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function openArticle(id) {
+  const n = news.find(x => x.id === id);
+  if (!n) return;
+  // Already open for this article — skip
+  if (document.getElementById('overlay').classList.contains('open') && document.getElementById('overlay').dataset.articleId == id) return;
+  const wrap = document.getElementById('articleWrap');
+
+  let body = '';
+  // Cover image at top if not already in article body
+  const coverImg = (n.thumb && n.body_html && !n.body_html.includes(n.thumb))
+    ? `<div style="margin-bottom:20px"><img src="${esc(n.thumb)}" alt="" style="max-width:100%;border-radius:var(--radius);background:var(--bg-surface)"></div>`
+    : '';
+  if (n.body_html) {
+    body = `<div class="article-body">${coverImg}${n.body_html}</div>`;
+  } else {
+    body = `<div class="article-body">${coverImg}<p style="color:var(--text-2);padding:40px 0;text-align:center">暂无全文内容<br><span style="font-size:13px;color:var(--text-3)">${esc(n.summary || '')}</span></p></div>`;
+  }
+
+  wrap.innerHTML = `
+    <h1>${esc(n.title)}</h1>
+    <div class="article-meta">
+      <span class="badge" style="${badgeStyle(n.source)}">${esc(n.source)}</span>
+      <span>${formatTime(n.date, n.time)}</span>
+    </div>
+    ${body}
+  `;
+
+  document.getElementById('overlay').classList.add('open');
+  document.body.style.overflow = 'hidden';
+  document.getElementById('overlay').dataset.articleId = id;
+  const shortDate = n.date ? n.date.slice(2) : '';
+  history.replaceState(null, '', '#/article/' + shortDate + '-' + id);
+
+  // Image lightbox
+  wrap.querySelectorAll('.article-body img').forEach(img => {
+    img.addEventListener('click', e => {
+      e.stopPropagation();
+      document.getElementById('lbImg').src = img.src;
+      document.getElementById('lb').classList.add('open');
+    });
+  });
+}
+
+function formatTime(date, time) {
+  if (!date) return esc(time);
+  const today = new Date();
+  const todayStr = today.getFullYear() + '-' + String(today.getMonth()+1).padStart(2,'0') + '-' + String(today.getDate()).padStart(2,'0');
+  if (date === todayStr) {
+    return '今天 ' + esc(time);
+  }
+  const parts = date.split('-');
+  const short = parts[0].slice(2) + '/' + parts[1] + '/' + parts[2];
+  return short + ' ' + esc(time);
+}
+
+function showToast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.classList.remove('show'), 2000);
+}
+
+function shareArticle() {
+  const url = location.href;
+  navigator.clipboard.writeText(url).then(() => showToast('✅ 链接已复制')).catch(() => showToast('✅ 链接已复制'));
+}
+
+function closeArticle() {
+  document.getElementById('overlay').classList.remove('open');
+  document.body.style.overflow = '';
+  history.replaceState(null, '', window.location.pathname + window.location.search);
+}
+
+// Handle hash-based article links
+function handleHash() {
+  const match = location.hash.match(/^#\/article\/\d{2}-\d{2}-\d{2}-(\d+)$/);
+  if (match) {
+    const id = parseInt(match[1]);
+    // Wait for news to load, then open
+    const tryOpen = () => {
+      if (news.length > 0) {
+        openArticle(id);
+      } else {
+        setTimeout(tryOpen, 100);
+      }
+    };
+    tryOpen();
+  }
+}
+
+document.getElementById('backBtn').addEventListener('click', closeArticle);
+document.getElementById('lb').addEventListener('click', () => document.getElementById('lb').classList.remove('open'));
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    if (document.getElementById('lb').classList.contains('open')) {
+      document.getElementById('lb').classList.remove('open');
+    } else {
+      closeArticle();
+    }
+  }
+});
+
+function esc(s) {
+  if (!s) return '';
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// Dynamic badge color from source name hash
+const BADGE_COLORS = [
+  '#f59e0b','#22c55e','#3b82f6','#a855f7','#ec4899',
+  '#f97316','#14b8a6','#26a5e4','#ef4444','#06b6d4',
+  '#d946ef','#84cc16','#eab308','#0ea5e9','#8b5cf6',
+];
+const BADGE_CACHE = {};
+function badgeStyle(src) {
+  if (BADGE_CACHE[src]) return BADGE_CACHE[src];
+  let h = 0;
+  for (let i = 0; i < src.length; i++) h = (h * 31 + src.charCodeAt(i)) >>> 0;
+  const c = BADGE_COLORS[h % BADGE_COLORS.length];
+  const s = `background:${c}1c;color:${c}`;
+  BADGE_CACHE[src] = s;
+  return s;
+}
+
+loadData();
+// Restore sidebar preference
+try {
+  if (localStorage.getItem('raynews_sidebar') === '0') {
+    document.getElementById('sidebar').classList.remove('open');
+    document.getElementById('sidebarToggle').classList.remove('open');
+    document.getElementById('sidebarToggle').textContent = '☰';
+  }
+} catch(e) {}
+// Hash change from browser back/forward or direct URL paste
+window.addEventListener('hashchange', () => {
+  const match = location.hash.match(/^#\/article\/\d{2}-\d{2}-\d{2}-\d+$/);
+  if (match) handleHash();
+  else closeArticle();
+});
+// Handle initial hash from shared URL
+setTimeout(handleHash, 200);
+// Auto-refresh every 5 minutes
+setInterval(loadData, 300000);
+</script>
+</body>
+</html>
