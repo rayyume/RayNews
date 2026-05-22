@@ -28,7 +28,7 @@ TELEGRAM_POST_URL = f"https://t.me/{TELEGRAM_CHANNEL}/{{id}}?embed=1&mode=tme"
 OUTPUT_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
 OUTPUT_FILE = OUTPUT_DIR / "news.json"
 STATE_FILE = OUTPUT_DIR / "fetcher_state.json"
-MAX_WORKERS = 5
+MAX_WORKERS = 15
 REQUEST_TIMEOUT = 20
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 HEADERS = {"User-Agent": USER_AGENT}
@@ -134,6 +134,13 @@ def parse_messages(html: str) -> list[dict]:
                     img_url = "https:" + img_url
                 images.append(img_url)
 
+        # Videos
+        videos = []
+        for vwrap in msg.select(".tgme_widget_message_video_wrap"):
+            video_html = str(vwrap)
+            video_html = video_html.replace("preload muted autoplay loop playsinline", "controls preload metadata playsinline webkit-playsinline")
+            videos.append(video_html)
+
         # Link preview
         link_preview = msg.select_one(".tgme_widget_message_link_preview")
         link_preview_url = ""
@@ -155,6 +162,7 @@ def parse_messages(html: str) -> list[dict]:
             "text": content_text,
             "html": content_html,
             "images": images,
+            "videos": videos,
             "link_preview_url": link_preview_url,
             "link_preview_title": link_preview_title,
         })
@@ -355,10 +363,12 @@ def process_message(msg: dict) -> dict:
             log.info(f"  ✓ {title[:40]}... ({result['char_count']} chars, from Telegraph)")
         else:
             # Fallback to Telegram message content
-            entry["body_html"] = content
+            videos_html = "".join(msg.get("videos", []))
+            entry["body_html"] = videos_html + content
             log.info(f"  ~ {title[:40]}... (Telegraph failed, using Telegram fallback)")
     else:
-        entry["body_html"] = content
+        videos_html = "".join(msg.get("videos", []))
+        entry["body_html"] = videos_html + content
         plain = re.sub(r"<[^>]+>", " ", text).strip()
         entry["summary"] = plain[:250]
         log.info(f"  - {title[:40]}... (from Telegram)")

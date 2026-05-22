@@ -16,10 +16,9 @@ COPY frontend/ /usr/share/nginx/html/
 
 RUN mkdir -p /app/data /var/log/nginx /run/nginx
 
-# Crontab: fetch every 15 minutes
-RUN echo "*/15 * * * * cd /app && python fetcher.py >> /var/log/fetcher.log 2>&1" > /etc/cron.d/raynews && \
-    chmod 0644 /etc/cron.d/raynews && \
-    crontab /etc/cron.d/raynews
+# crontab is created dynamically in entrypoint.sh to capture runtime env vars
+RUN echo "# crontab created by entrypoint.sh" > /etc/cron.d/raynews && \
+    chmod 0644 /etc/cron.d/raynews
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

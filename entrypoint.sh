@@ -1,27 +1,32 @@
 #!/bin/bash
 set -e
 
-# Write proxy env to /etc/environment so cron inherits them
+# ─── Crontab: write dynamically with runtime env vars ────
+# Build proxy prefix for cron if env vars are set
+PROXY_PREFIX=""
 if [ -n "$HTTP_PROXY" ]; then
-  > /etc/environment
-  echo "HTTP_PROXY=$HTTP_PROXY" >> /etc/environment
-  echo "HTTPS_PROXY=$HTTPS_PROXY" >> /etc/environment
-  echo "NO_PROXY=$NO_PROXY" >> /etc/environment
-  echo "=== Proxy env written to /etc/environment for cron ==="
+  PROXY_PREFIX="HTTP_PROXY=$HTTP_PROXY HTTPS_PROXY=$HTTPS_PROXY NO_PROXY=$NO_PROXY "
+  echo "=== Proxy env injected into crontab ==="
 fi
 
-# Run fetcher once on startup
+# Write crontab: fetch every 15 minutes
+CRON_LINE="${PROXY_PREFIX}cd /app && python fetcher.py >> /var/log/fetcher.log 2>&1"
+echo "*/15 * * * * $CRON_LINE" > /etc/cron.d/raynews
+chmod 0644 /etc/cron.d/raynews
+crontab /etc/cron.d/raynews
+
+echo "=== Crontab installed ==="
+
+# ─── Initial fetch ──────────────────────────────────────
 echo "=== Running initial fetch ==="
 cd /app && python fetcher.py
 
-# Start cron daemon
+# ─── Start services ────────────────────────────────────
 echo "=== Starting cron ==="
 cron
 
-# Start refresh server (on-demand fetcher trigger)
 echo "=== Starting refresh server ==="
 python3 /app/refresh_server.py &
 
-# Start nginx in foreground
 echo "=== Starting nginx ==="
 nginx -g 'daemon off;'
