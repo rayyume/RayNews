@@ -71,6 +71,7 @@ The fetcher runs once on startup, then every 15 minutes via cron.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `TELEGRAM_CHANNEL` | `your_channel` | Telegram channel name (required) |
+| `TZ` | `Asia/Shanghai` | Container timezone, affects log timestamps |
 | `DATA_DIR` | `/app/data` | Data output directory (container path) |
 | `HTTP_PROXY` | (empty) | HTTP proxy |
 | `HTTPS_PROXY` | (empty) | HTTPS proxy |

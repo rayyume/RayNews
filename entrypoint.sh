@@ -9,8 +9,15 @@ if [ -n "$HTTP_PROXY" ]; then
   echo "=== Proxy env injected into crontab ==="
 fi
 
+# Inject TZ if set
+TZ_PREFIX=""
+if [ -n "$TZ" ]; then
+  TZ_PREFIX="TZ=$TZ "
+  echo "=== TZ=$TZ injected into crontab ==="
+fi
+
 # Write crontab: fetch every 15 minutes
-CRON_LINE="${PROXY_PREFIX}cd /app && python fetcher.py >> /var/log/fetcher.log 2>&1"
+CRON_LINE="${PROXY_PREFIX}${TZ_PREFIX}cd /app && python fetcher.py >> /var/log/fetcher.log 2>&1"
 echo "*/15 * * * * $CRON_LINE" > /etc/cron.d/raynews
 chmod 0644 /etc/cron.d/raynews
 crontab /etc/cron.d/raynews

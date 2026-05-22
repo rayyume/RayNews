@@ -34,7 +34,6 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 HEADERS = {"User-Agent": USER_AGENT}
 # Max historical pages to fetch on initial full sync
 MAX_HISTORY_PAGES = 200
-MAX_ARTICLES = 500  # Max articles to keep in news.json
 CST = dt_timezone(timedelta(hours=8))
 
 logging.basicConfig(
@@ -398,8 +397,9 @@ def fetch_all_new_messages(state: dict) -> list[dict]:
 
     log.info(f"Last seen message ID: {last_id}")
     is_first_run = last_id == 0
+
     if is_first_run:
-        log.info("First run: fetching all pages with today's messages")
+        log.info("First run: fetching only today's messages (Beijing time)")
         pages_limit = MAX_HISTORY_PAGES
     else:
         pages_limit = MAX_HISTORY_PAGES
@@ -418,31 +418,43 @@ def fetch_all_new_messages(state: dict) -> list[dict]:
 
         # Filter only new messages (id > last_id)
         new_msgs = [m for m in msgs if m["id"] > last_id]
-        if new_msgs:
-            log.info(f"  Page {pages_fetched}: {len(msgs)} messages, {len(new_msgs)} new (IDs {new_msgs[0]['id']}~{new_msgs[-1]['id']})")
-            all_msgs.extend(new_msgs)
-        else:
-            log.info(f"  Page {pages_fetched}: {len(msgs)} messages, all already seen")
-            if last_id > 0 and all(m["id"] < last_id for m in msgs):
-                log.info("  Caught up — stopping")
-                break
-            existing_ids = {m["id"] for m in all_msgs}
-            if all(m["id"] in existing_ids for m in msgs):
+
+        if is_first_run:
+            # On first run: only keep unique messages from today (Beijing time)
+            seen_ids = {m["id"] for m in all_msgs}
+            today_msgs = [m for m in new_msgs if is_from_today(m["datetime"]) and m["id"] not in seen_ids]
+            if today_msgs:
+                log.info(f"  Page {pages_fetched}: {len(today_msgs)} unique today's msgs (IDs {today_msgs[0]['id']}~{today_msgs[-1]['id']})")
+                all_msgs.extend(today_msgs)
+            else:
+                log.info(f"  Page {pages_fetched}: all already fetched (no new IDs) — stopping")
                 break
 
-        # On first run: stop when messages are from yesterday or earlier
-        if is_first_run and msgs:
-            if not is_from_today(msgs[0]["datetime"]):
-                log.info(f"  Earliest message is from before today — stopping")
-                # But include any messages from today that might be on this page
-                today_msgs = [m for m in new_msgs if is_from_today(m["datetime"])]
-                if today_msgs:
-                    # These were already added via new_msgs
-                    pass
+            # If even the newest message on this page is from before today, we're past today
+            if not is_from_today(msgs[-1]["datetime"]):
+                log.info(f"  Newest message is from before today — stopping")
                 break
+        else:
+            if new_msgs:
+                log.info(f"  Page {pages_fetched}: {len(msgs)} messages, {len(new_msgs)} new (IDs {new_msgs[0]['id']}~{new_msgs[-1]['id']})")
+                all_msgs.extend(new_msgs)
+            else:
+                log.info(f"  Page {pages_fetched}: {len(msgs)} messages, all already seen")
+                if all(m["id"] < last_id for m in msgs):
+                    log.info("  Caught up — stopping")
+                    break
+                existing_ids = {m["id"] for m in all_msgs}
+                if all(m["id"] in existing_ids for m in msgs):
+                    break
 
         # Paginate for next page
-        anchor = get_anchor_id(msgs)
+        if is_first_run:
+            # On first run: use OLDEST message ID as 'before' to avoid overlap
+            # (Telegram before=X returns messages with ID < X)
+            anchor = msgs[0]["id"]  # oldest on this page
+            log.info(f"  Next page before={anchor} (oldest on current page)")
+        else:
+            anchor = get_anchor_id(msgs)
         if anchor is None or anchor <= 1:
             break
         before = str(anchor)
@@ -451,7 +463,7 @@ def fetch_all_new_messages(state: dict) -> list[dict]:
             log.info("  Page has < 3 messages, likely end of channel")
             break
 
-    log.info(f"Fetched {pages_fetched} pages, {len(all_msgs)} new messages total")
+    log.info(f"Fetched {pages_fetched} pages, {len(all_msgs)} messages total")
     return all_msgs
 
 
@@ -498,10 +510,9 @@ def run():
             existing_data["items"].append(entry)
             existing_ids.add(key)
 
-    # Sort by timestamp descending, keep max MAX_ARTICLES
+    # Sort by timestamp descending
     all_items = existing_data["items"]
     all_items.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
-    all_items = all_items[:MAX_ARTICLES]
 
     # Re-assign sequential IDs
     for i, entry in enumerate(all_items):

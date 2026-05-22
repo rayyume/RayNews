@@ -71,6 +71,7 @@ docker compose up -d
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `TELEGRAM_CHANNEL` | `your_channel` | Telegram 频道名称（必填） |
+| `TZ` | `Asia/Shanghai` | 容器时区，影响日志时间戳 |
 | `DATA_DIR` | `/app/data` | 数据输出目录（容器内路径） |
 | `HTTP_PROXY` | (空) | HTTP 代理（如需翻墙） |
 | `HTTPS_PROXY` | (空) | HTTPS 代理 |
