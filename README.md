@@ -1,3 +1,7 @@
+<p align="center">
+  <b>🇨🇳 中文</b> | <a href="README.en.md">🇺🇸 English</a>
+</p>
+
 # RayNews 📡
 
 新闻聚合阅读器——从 Telegram 频道抓取新闻消息（通过 RSS-to-Telegram-Bot 推送），自动提取 Telegraph 全文，生成暗色模式新闻站。
