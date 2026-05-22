@@ -17,6 +17,7 @@ from urllib.parse import unquote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.utils import parsedate_to_datetime
 from datetime import timezone as dt_timezone, timedelta
+from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
@@ -315,6 +316,14 @@ def fetch_telegraph(url: str) -> dict | None:
         if address:
             address.decompose()
 
+        # Fix relative URLs in iframe, img, a, video, source tags
+        # Telegraph uses relative /embed/ paths that break on external sites
+        base_tg = "https://telegra.ph"
+        for tag in article.find_all(["iframe", "img", "a", "video", "source"]):
+            for attr in ["src", "href"]:
+                val = tag.get(attr, "")
+                if val and val.startswith("/"):
+                    tag[attr] = urljoin(base_tg, val)
         body_html = str(article)
         images = [img.get("src", "") for img in article.find_all("img") if img.get("src")]
 
