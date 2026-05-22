@@ -118,9 +118,8 @@ def parse_messages(html: str) -> list[dict]:
         content_html = ""
         if text_el:
             content_text = text_el.get_text("\n", strip=True)
-            # Get raw HTML but clean up Telegram-specific markup
-            raw_html = str(text_el)
-            content_html = raw_html
+            # Get inner HTML only, strip the outer wrapper element
+            content_html = text_el.decode_contents()
 
         # Images
         images = []
