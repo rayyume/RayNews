@@ -215,7 +215,7 @@ async function triggerRefresh() {
   btn.textContent = '抓取中...';
   btn.disabled = true;
   try {
-    await fetch('/api/refresh', { cache: 'no-store' });
+    await fetch('/refresh', { cache: 'no-store' });
   } catch (e) { /* ignore */ }
   await loadData();
   btn.textContent = '刷新';
