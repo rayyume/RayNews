@@ -1,9 +1,10 @@
 services:
   raynews:
-    # 本地构建使用 build: .
-    # 生产部署请取消注释下面这行，注释掉 build: .
+    # 🧪 本地测试：用 build: . 构建本地镜像（基于当前代码）
+    # 🚀 生产部署：注释掉 build 行，取消注释 image 行（拉取正式版本）
+    # 🟡 Beta 测试：拉取 ghcr.io/rayyume/raynews:vX.Y.Z-beta.N
     build: .
-    # image: ghcr.io/your-org/raynews:latest
+    # image: ghcr.io/rayyume/raynews:latest
     container_name: raynews
     ports:
       - "8090:80"
