@@ -91,13 +91,13 @@ docker compose pull
 
 ### Short-term
 
-- [ ] **Source Categorization** — Group and filter articles by source/tags
+- [ ] **Source Categorization** — Group article sources
 - [ ] **WeChat Official Account Articles** — Identify and extract full-text content from WeChat public accounts
 - [ ] **Auto-translate English Content** — Automatically translate English titles and articles (e.g. into Chinese)
 
 ### Long-term
 
-- [ ] **Custom AI API** — Bring your own AI API for article summaries and daily digests
+- [ ] **Custom AI API** — Bring your own AI API for article summaries, daily digests and article tags
 - [ ] **TTS News Reading** — Text-to-speech for listening to news
 - [ ] **iOS App** — Native iOS client
 
