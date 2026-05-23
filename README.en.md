@@ -87,6 +87,20 @@ docker compose build
 docker compose pull
 ```
 
+## Roadmap 🗺️
+
+### Short-term
+
+- [ ] **Source Categorization** — Group and filter articles by source/tags
+- [ ] **WeChat Official Account Articles** — Identify and extract full-text content from WeChat public accounts
+- [ ] **Auto-translate English Content** — Automatically translate English titles and articles (e.g. into Chinese)
+
+### Long-term
+
+- [ ] **Custom AI API** — Bring your own AI API for article summaries and daily digests
+- [ ] **TTS News Reading** — Text-to-speech for listening to news
+- [ ] **iOS App** — Native iOS client
+
 ## Tech Stack
 
 - Python 3.12 (fetcher + refresh server)
