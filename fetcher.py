@@ -452,16 +452,15 @@ def process_message(msg: dict, orig_msg_id: int) -> dict:
         if wechat_url:
             log.info(f"  Short content ({len(plain_body)} chars), fetching WeChat: {wechat_url[:60]}...")
             wechat_result = fetch_wechat_article(wechat_url)
-            if wechat_result and wechat_result["char_count"] >= 64:
-                # WeChat content has meaningful text — append it before the original content
-                # so the "via xxx" source link from the Telegram message is preserved
+            if wechat_result:
+                # Keep the original Telegram content (which has the "via xxx" source link)
+                # appended at the end so the source attribution is preserved
                 entry["has_full_content"] = True
                 entry["body_html"] = wechat_result["body_html"] + "\n" + content
                 entry["thumb"] = wechat_result["images"][0] if wechat_result["images"] and not thumb else thumb
                 log.info(f"  ✓ {title[:40]}... ({wechat_result['char_count']} chars, from WeChat)")
             else:
-                got = wechat_result["char_count"] if wechat_result else "None"
-                log.warning(f"  ✗ WeChat: no meaningful content ({got} chars), keeping original")
+                log.warning(f"  ✗ WeChat fetch failed, keeping original content")
 
     return entry
 
