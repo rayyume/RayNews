@@ -264,6 +264,14 @@ def extract_telegraph_url(content: str) -> str | None:
     return None
 
 
+def extract_wechat_url(content: str) -> str | None:
+    """Extract mp.weixin.qq.com URL from article content."""
+    match = re.search(r'https?://mp\.weixin\.qq\.com/[^"\'<>\s]+', content)
+    if match:
+        return match.group(0).rstrip('"').rstrip("'")
+    return None
+
+
 def extract_thumb(content: str) -> str:
     match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', content)
     if match:
@@ -337,6 +345,93 @@ def fetch_telegraph(url: str) -> dict | None:
         return None
 
 
+# ─── WeChat Article Fetching ──────────────────────────────
+def fetch_wechat_article(url: str) -> dict | None:
+    """Fetch full content from a WeChat article (mp.weixin.qq.com)."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+        "Referer": "https://mp.weixin.qq.com/",
+    }
+    try:
+        log.info(f"  Fetching WeChat: {url[:80]}...")
+        resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        # Main content container in WeChat articles
+        content_div = (
+            soup.select_one("#js_content")
+            or soup.select_one("#rich_media_content")
+        )
+        if not content_div:
+            log.warning(f"  WeChat: no content div found")
+            return None
+
+        # Fix lazy-loaded images: data-src → src, make absolute
+        for img in content_div.find_all("img"):
+            data_src = img.get("data-src", "")
+            src = img.get("src", "")
+            if data_src:
+                final_src = data_src
+                if final_src.startswith("//"):
+                    final_src = "https:" + final_src
+                img["src"] = final_src
+            elif src:
+                if src.startswith("//"):
+                    img["src"] = "https:" + src
+                elif src.startswith("/"):
+                    img["src"] = "https://mp.weixin.qq.com" + src
+
+        # Clean up WeChat-specific styling that hides content
+        if content_div.get("style"):
+            style = content_div["style"]
+            style = re.sub(r'visibility\s*:\s*hidden\s*;?\s*', '', style, flags=re.IGNORECASE)
+            style = re.sub(r'opacity\s*:\s*0\s*;?\s*', '', style, flags=re.IGNORECASE)
+            style = style.strip().rstrip(";")
+            if style:
+                content_div["style"] = style
+            else:
+                del content_div["style"]
+
+        # Strip inline styles from all child elements so page CSS handles formatting
+        for tag in content_div.find_all(True):
+            if tag.name == "img":
+                # Keep only width/height/display styles for images
+                style = tag.get("style", "")
+                if style:
+                    keep = {}
+                    for kv in style.split(";"):
+                        kv = kv.strip()
+                        if ":" in kv:
+                            k, v = kv.split(":", 1)
+                            k = k.strip().lower()
+                            if k in ("width", "height", "display", "max-width"):
+                                keep[k] = v.strip()
+                    if keep:
+                        tag["style"] = "; ".join(f"{k}: {v}" for k, v in keep.items())
+                    else:
+                        del tag["style"]
+            else:
+                tag.attrs.pop("style", None)
+
+        body_html = str(content_div)
+        images = [
+            img.get("src", "") for img in content_div.find_all("img") if img.get("src")
+        ]
+        text_content = content_div.get_text(strip=True)
+
+        log.info(f"  WeChat: {len(text_content)} chars, {len(images)} images")
+        return {
+            "body_html": body_html,
+            "images": images,
+            "char_count": len(text_content),
+        }
+    except Exception as e:
+        log.error(f"  WeChat fetch failed: {e}")
+        return None
+
+
 # ─── Main Pipeline ────────────────────────────────────────
 def process_message(msg: dict, orig_msg_id: int) -> dict:
     """Process a single Telegram message into a news entry."""
@@ -380,6 +475,26 @@ def process_message(msg: dict, orig_msg_id: int) -> dict:
         plain = re.sub(r"<[^>]+>", " ", text).strip()
         entry["summary"] = plain[:250]
         log.info(f"  - {title[:40]}... (from Telegram)")
+
+    # If body is too short (<64 chars) and original message has a WeChat URL,
+    # try fetching full article content from mp.weixin.qq.com
+    plain_body = re.sub(r"<[^>]+>", " ", entry["body_html"]).strip()
+    if len(plain_body) < 64:
+        wechat_url = extract_wechat_url(content)
+        if wechat_url:
+            log.info(f"  Short content ({len(plain_body)} chars), fetching WeChat: {wechat_url[:60]}...")
+            wechat_result = fetch_wechat_article(wechat_url)
+            if wechat_result:
+                # Only append the "via <source>" link from the original content,
+                # not the full original message (which repeats the title)
+                via_match = re.search(r'via\s*<a[^>]*>.*?</a>', content, re.DOTALL | re.IGNORECASE)
+                via_suffix = via_match.group(0) if via_match else ""
+                entry["has_full_content"] = True
+                entry["body_html"] = wechat_result["body_html"] + "\n" + via_suffix
+                entry["thumb"] = wechat_result["images"][0] if wechat_result["images"] and not thumb else thumb
+                log.info(f"  ✓ {title[:40]}... ({wechat_result['char_count']} chars, from WeChat)")
+            else:
+                log.warning(f"  ✗ WeChat fetch failed, keeping original content")
 
     return entry
 
