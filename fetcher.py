@@ -485,10 +485,12 @@ def process_message(msg: dict, orig_msg_id: int) -> dict:
             log.info(f"  Short content ({len(plain_body)} chars), fetching WeChat: {wechat_url[:60]}...")
             wechat_result = fetch_wechat_article(wechat_url)
             if wechat_result:
-                # Keep the original Telegram content (which has the "via xxx" source link)
-                # appended at the end so the source attribution is preserved
+                # Only append the "via <source>" link from the original content,
+                # not the full original message (which repeats the title)
+                via_match = re.search(r'via\s*<a[^>]*>.*?</a>', content, re.DOTALL | re.IGNORECASE)
+                via_suffix = via_match.group(0) if via_match else ""
                 entry["has_full_content"] = True
-                entry["body_html"] = wechat_result["body_html"] + "\n" + content
+                entry["body_html"] = wechat_result["body_html"] + "\n" + via_suffix
                 entry["thumb"] = wechat_result["images"][0] if wechat_result["images"] and not thumb else thumb
                 log.info(f"  ✓ {title[:40]}... ({wechat_result['char_count']} chars, from WeChat)")
             else:
