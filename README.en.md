@@ -91,8 +91,8 @@ docker compose pull
 
 ### Short-term
 
-- ~~[x] **Source Categorization** — Group and filter articles by source/tags~~
-- ~~[x] **WeChat Official Account Articles** — Identify and extract full-text content from WeChat public accounts~~
+- [x] **Source Categorization** — Group and filter articles by source/tags
+- [x] **WeChat Official Account Articles** — Identify and extract full-text content from WeChat public accounts
 - [ ] **Auto-translate English Content** — Automatically translate English titles and articles (e.g. into Chinese)
 
 ### Long-term
