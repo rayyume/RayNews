@@ -60,7 +60,7 @@ a:hover{text-decoration:underline}
 .fbtn.active{background:var(--accent-dim);border-color:var(--accent);color:var(--accent)}
 
 /* ═══ News List ═══════════════════════════════════ */
-.list{display:flex;flex-direction:column;gap:1px;background:var(--border);border-radius:var(--radius);overflow:hidden;margin-bottom:40px;scroll-margin-top:60px}
+.list{display:flex;flex-direction:column;gap:1px;background:var(--border);border-radius:var(--radius);overflow:hidden;margin-bottom:40px}
 .item{display:flex;gap:16px;padding:18px 20px;background:var(--bg-card);cursor:pointer;transition:background 0.12s;position:relative}
 .item:hover{background:var(--bg-card-hover)}
 .item-thumb{width:120px;height:80px;border-radius:6px;overflow:hidden;flex-shrink:0;background:var(--bg-surface)}
@@ -319,7 +319,10 @@ function goToPage(page) {
   if (page < 1 || page > totalPages) return;
   currentPage = page;
   renderList();
-  document.getElementById('list').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  // Smooth scroll to list top, offset by sticky header height (56px)
+  const list = document.getElementById('list');
+  const top = list.getBoundingClientRect().top + window.scrollY - 60;
+  window.scrollTo({ top, behavior: 'smooth' });
 }
 
 function openArticle(id) {
