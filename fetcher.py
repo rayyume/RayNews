@@ -394,6 +394,27 @@ def fetch_wechat_article(url: str) -> dict | None:
             else:
                 del content_div["style"]
 
+        # Strip inline styles from all child elements so page CSS handles formatting
+        for tag in content_div.find_all(True):
+            if tag.name == "img":
+                # Keep only width/height/display styles for images
+                style = tag.get("style", "")
+                if style:
+                    keep = {}
+                    for kv in style.split(";"):
+                        kv = kv.strip()
+                        if ":" in kv:
+                            k, v = kv.split(":", 1)
+                            k = k.strip().lower()
+                            if k in ("width", "height", "display", "max-width"):
+                                keep[k] = v.strip()
+                    if keep:
+                        tag["style"] = "; ".join(f"{k}: {v}" for k, v in keep.items())
+                    else:
+                        del tag["style"]
+            else:
+                tag.attrs.pop("style", None)
+
         body_html = str(content_div)
         images = [
             img.get("src", "") for img in content_div.find_all("img") if img.get("src")
