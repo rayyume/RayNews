@@ -489,7 +489,7 @@ def fetch_all_new_messages(state: dict) -> list[dict]:
     is_first_run = last_id == 0
 
     if is_first_run:
-        log.info("First run: fetching all available messages (no date filter)")
+        log.info("First run: fetching only today's messages (Beijing time)")
         pages_limit = MAX_HISTORY_PAGES
     else:
         pages_limit = MAX_HISTORY_PAGES
@@ -510,14 +510,19 @@ def fetch_all_new_messages(state: dict) -> list[dict]:
         new_msgs = [m for m in msgs if m["id"] > last_id]
 
         if is_first_run:
-            # On first run: keep ALL unique messages (no date filter)
+            # On first run: only keep unique messages from today (Beijing time)
             seen_ids = {m["id"] for m in all_msgs}
-            unique_msgs = [m for m in new_msgs if m["id"] not in seen_ids]
-            if unique_msgs:
-                log.info(f"  Page {pages_fetched}: {len(unique_msgs)} unique msgs (IDs {unique_msgs[0]['id']}~{unique_msgs[-1]['id']})")
-                all_msgs.extend(unique_msgs)
+            today_msgs = [m for m in new_msgs if is_from_today(m["datetime"]) and m["id"] not in seen_ids]
+            if today_msgs:
+                log.info(f"  Page {pages_fetched}: {len(today_msgs)} unique today's msgs (IDs {today_msgs[0]['id']}~{today_msgs[-1]['id']})")
+                all_msgs.extend(today_msgs)
             else:
                 log.info(f"  Page {pages_fetched}: all already fetched (no new IDs) — stopping")
+                break
+
+            # If even the newest message on this page is from before today, we're past today
+            if not is_from_today(msgs[-1]["datetime"]):
+                log.info(f"  Newest message is from before today — stopping")
                 break
         else:
             if new_msgs:
@@ -557,7 +562,6 @@ def run():
     log.info("Starting fetch cycle")
 
     state = load_state()
-    is_fresh_start = state.get("last_seen_id", 0) == 0
     messages = fetch_all_new_messages(state)
 
     if not messages:
@@ -574,33 +578,30 @@ def run():
             except Exception as e:
                 log.error(f"Message processing failed: {e}")
 
-    if is_fresh_start:
-        # Fresh start: use only new entries, don't merge with existing data
-        log.info(f"Fresh start: processing {len(new_entries)} entries from scratch")
-        all_items = new_entries
-    else:
-        # Incremental: merge with existing data (accumulate)
-        existing_data = {"items": []}
-        try:
-            if OUTPUT_FILE.exists():
-                existing_data = json.loads(OUTPUT_FILE.read_text(encoding="utf-8"))
-        except Exception as e:
-            log.warning(f"Could not read existing news.json: {e}")
+    # Merge with existing data (accumulate)
+    existing_data = {"items": []}
+    try:
+        if OUTPUT_FILE.exists():
+            existing_data = json.loads(OUTPUT_FILE.read_text(encoding="utf-8"))
+    except Exception as e:
+        log.warning(f"Could not read existing news.json: {e}")
 
-        # Build seen_ids from existing items to avoid duplicates
-        existing_ids = set()
-        for item in existing_data.get("items", []):
-            key = f"{item.get('title', '')}|{item.get('timestamp', 0)}"
+    # Build seen_ids from existing items to avoid duplicates
+    existing_ids = set()
+    for item in existing_data.get("items", []):
+        # Use a combination of title + timestamp as dedup key
+        key = f"{item.get('title', '')}|{item.get('timestamp', 0)}"
+        existing_ids.add(key)
+
+    # Only add truly new entries
+    for entry in new_entries:
+        key = f"{entry.get('title', '')}|{entry.get('timestamp', 0)}"
+        if key not in existing_ids:
+            existing_data["items"].append(entry)
             existing_ids.add(key)
 
-        # Only add truly new entries
-        for entry in new_entries:
-            key = f"{entry.get('title', '')}|{entry.get('timestamp', 0)}"
-            if key not in existing_ids:
-                existing_data["items"].append(entry)
-                existing_ids.add(key)
-
-        all_items = existing_data["items"]
+    # Sort by timestamp descending
+    all_items = existing_data["items"]
     all_items.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
