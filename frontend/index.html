@@ -156,9 +156,9 @@ a:hover{text-decoration:underline}
 .cat-body{display:flex;flex-direction:column;gap:2px}
 .cat-body.collapsed{display:none}
 .sidebar .fbtn{width:100%;text-align:left;padding:7px 12px 7px 24px;border-radius:6px;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sidebar .fbtn[data-f="all"]{padding:8px 12px;font-weight:700;letter-spacing:0.03em}
 .sidebar .fbtn.cat-active{background:var(--accent-dim);border-color:var(--accent);color:var(--accent)}
 .cat-header.cat-active{background:var(--accent-dim);color:var(--accent);border-radius:6px}
+.cat-header.active{background:var(--accent-dim);color:var(--accent);border-radius:6px}
 @media(max-width:768px){
   .sidebar{width:180px}
   .sidebar-toggle.open{left:180px}
@@ -270,8 +270,8 @@ async function loadData() {
 function renderFilters() {
   const sources = [...new Set(news.map(n => n.source))];
   const el = document.getElementById('filters');
-  // "All" button at top
-  let html = `<button class="fbtn active" data-f="all">All</button>`;
+  // "All" button at top (styled like cat-header for consistent look)
+  let html = '<div class="cat-header active" data-f="all" data-is-all="1">All</div>';
   // Category groups
   for (const cat of CATEGORY_ORDER) {
     const catSources = CATEGORY_MAP[cat].filter(s => sources.includes(s));
@@ -287,6 +287,12 @@ function renderFilters() {
 
   // Click handler using delegation
   el.onclick = e => {
+    // "All" click
+    const allDiv = e.target.closest('[data-is-all]');
+    if (allDiv) {
+      selectFilter('all');
+      return;
+    }
     // Category header click → toggle collapse
     const header = e.target.closest('.cat-header');
     if (header) {
@@ -319,7 +325,7 @@ function selectFilter(value) {
   renderList();
   // Highlight active item
   if (value === 'all') {
-    const allBtn = el.querySelector('.fbtn[data-f="all"]');
+    const allBtn = el.querySelector('[data-f="all"]');
     if (allBtn) allBtn.classList.add('active');
   } else if (value.startsWith('cat:')) {
     const cat = value.replace('cat:', '');

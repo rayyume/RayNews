@@ -56,11 +56,11 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);line-height:
 .cat-body{display:flex;flex-direction:column;gap:2px}
 .cat-body.collapsed{display:none}
 .sidebar .fbtn{width:100%;text-align:left;padding:7px 12px 7px 24px;border-radius:6px;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border:1px solid transparent;background:transparent;color:var(--text-2);cursor:pointer;transition:all 0.12s;font-family:var(--font)}
-.sidebar .fbtn[data-f="all"]{padding:8px 12px;font-weight:700;letter-spacing:0.03em}
 .sidebar .fbtn:hover{background:var(--bg-card-hover);color:var(--text)}
 .sidebar .fbtn.active{background:var(--accent-dim);border-color:var(--accent);color:var(--accent)}
 .sidebar .fbtn.cat-active{background:var(--accent-dim);border-color:var(--accent);color:var(--accent)}
 .cat-header.cat-active{background:var(--accent-dim);color:var(--accent);border-radius:6px}
+.cat-header.active{background:var(--accent-dim);color:var(--accent);border-radius:6px}
 
 /* News list */
 .list{display:flex;flex-direction:column;gap:1px;background:var(--border);border-radius:var(--radius);overflow:hidden;margin-bottom:40px;margin-top:16px}
@@ -135,7 +135,7 @@ function toggleSidebar() {
 function renderFilters() {
   const sources = [...new Set(demoNews.map(n => n.source))];
   const el = document.getElementById('filters');
-  let html = '<button class="fbtn active" data-f="all">All</button>';
+  let html = '<div class="cat-header active" data-f="all" data-is-all="1">All</div>';
   for (const cat of CATEGORY_ORDER) {
     const catSources = CATEGORY_MAP[cat].filter(s => sources.includes(s));
     if (catSources.length === 0) continue;
@@ -149,6 +149,13 @@ function renderFilters() {
   el.innerHTML = html;
 
   el.onclick = e => {
+    // "All" click
+    const allDiv = e.target.closest('[data-is-all]');
+    if (allDiv) {
+      selectFilter('all');
+      return;
+    }
+    // Category header click
     const header = e.target.closest('.cat-header');
     if (header) {
       const cat = header.dataset.cat;
@@ -175,7 +182,7 @@ function selectFilter(value) {
   filter = value;
   renderList();
   if (value === 'all') {
-    const allBtn = el.querySelector('.fbtn[data-f="all"]');
+    const allBtn = el.querySelector('[data-f="all"]');
     if (allBtn) allBtn.classList.add('active');
   } else if (value.startsWith('cat:')) {
     const cat = value.replace('cat:', '');
