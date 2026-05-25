@@ -144,7 +144,7 @@ function renderFilters() {
     const catSources = CATEGORY_MAP[cat].filter(s => sources.includes(s));
     if (catSources.length === 0) continue;
     const collapsedKey = 'raynews_cat_' + cat;
-    const isCollapsed = localStorage.getItem(collapsedKey) === '1';
+    const isCollapsed = localStorage.getItem(collapsedKey) !== '0';
     html += '<div class="cat-header" data-cat="' + cat + '">' + cat + '<span class="arrow ' + (isCollapsed ? '' : 'open') + '">▶</span></div>';
     html += '<div class="cat-body ' + (isCollapsed ? 'collapsed' : '') + '" data-cat="' + cat + '">';
     html += catSources.map(s => '<button class="fbtn" data-f="' + s + '">' + s + '</button>').join('');
