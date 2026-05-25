@@ -149,16 +149,16 @@ a:hover{text-decoration:underline}
 .sidebar.open{transform:translateX(0);box-shadow:4px 0 20px rgba(0,0,0,0.3)}
 .sidebar-header{font-size:12px;font-weight:700;color:var(--text-3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid var(--border)}
 .sidebar .filters{display:flex;flex-direction:column;gap:4px;padding:0;overflow:visible}
-.cat-header{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;margin:4px 0 0;border-radius:6px;font-size:12px;font-weight:700;color:var(--text-3);cursor:pointer;transition:all 0.15s;user-select:none;letter-spacing:0.03em}
+.cat-header{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;margin:2px 0;border-radius:6px;font-size:12px;font-weight:700;color:var(--text-3);cursor:pointer;transition:all 0.12s;user-select:none;letter-spacing:0.03em}
 .cat-header:hover{color:var(--text-2);background:var(--bg-card-hover)}
-.cat-header .arrow{font-size:10px;transition:transform 0.2s;color:var(--text-3)}
+.cat-header .arrow{font-size:10px;transition:transform 0.2s;color:var(--text-3);display:inline-block;width:10px;text-align:center}
 .cat-header .arrow.open{transform:rotate(90deg)}
 .cat-body{display:flex;flex-direction:column;gap:2px}
 .cat-body.collapsed{display:none}
 .sidebar .fbtn{width:100%;text-align:left;padding:7px 12px 7px 24px;border-radius:6px;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sidebar .fbtn.cat-active{background:var(--accent-dim);border-color:var(--accent);color:var(--accent)}
-.cat-header.cat-active{background:var(--accent-dim);color:var(--accent);border-radius:6px}
+.sidebar .fbtn.active{background:var(--accent-dim);border-color:var(--accent);color:var(--accent)}
 .cat-header.active{background:var(--accent-dim);color:var(--accent);border-radius:6px}
+.cat-header.active .arrow{color:var(--accent)}
 @media(max-width:768px){
   .sidebar{width:180px}
   .sidebar-toggle.open{left:180px}
@@ -194,9 +194,9 @@ a:hover{text-decoration:underline}
     </div>
   </header>
 
-  <button class="sidebar-toggle" id="sidebarToggle" onclick="toggleSidebar()" title="来源筛选">☰</button>
+  <button class="sidebar-toggle" id="sidebarToggle" onclick="toggleSidebar()" title="Source">☰</button>
   <div class="sidebar" id="sidebar">
-    <div class="sidebar-header">来源筛选</div>
+    <div class="sidebar-header">Source</div>
     <div class="filters" id="filters"></div>
   </div>
 
@@ -271,7 +271,7 @@ function renderFilters() {
   const sources = [...new Set(news.map(n => n.source))];
   const el = document.getElementById('filters');
   // "All" button at top (styled like cat-header for consistent look)
-  let html = '<div class="cat-header active" data-f="all" data-is-all="1">All</div>';
+  let html = '<div class="cat-header active" data-f="all" data-is-all="1">All<span class="arrow" style="opacity:0">▶</span></div>';
   // Category groups
   for (const cat of CATEGORY_ORDER) {
     const catSources = CATEGORY_MAP[cat].filter(s => sources.includes(s));
@@ -317,20 +317,20 @@ function renderFilters() {
 
 function selectFilter(value) {
   const el = document.getElementById('filters');
-  // Deactivate all buttons and category headers
-  el.querySelectorAll('.fbtn').forEach(b => b.classList.remove('active', 'cat-active'));
-  el.querySelectorAll('.cat-header').forEach(h => h.classList.remove('cat-active'));
+  // Clear ALL selection classes from ALL elements
+  el.querySelectorAll('.fbtn').forEach(b => b.classList.remove('active'));
+  el.querySelectorAll('.cat-header').forEach(h => h.classList.remove('active'));
   filter = value;
   currentPage = 1;
   renderList();
   // Highlight active item
   if (value === 'all') {
-    const allBtn = el.querySelector('[data-f="all"]');
-    if (allBtn) allBtn.classList.add('active');
+    const allDiv = el.querySelector('[data-is-all]');
+    if (allDiv) allDiv.classList.add('active');
   } else if (value.startsWith('cat:')) {
     const cat = value.replace('cat:', '');
     const header = el.querySelector(`.cat-header[data-cat="${cat}"]`);
-    if (header) header.classList.add('cat-active');
+    if (header) header.classList.add('active');
   } else {
     const btn = el.querySelector(`.fbtn[data-f="${esc(value)}"]`);
     if (btn) btn.classList.add('active');
