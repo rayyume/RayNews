@@ -43,7 +43,7 @@ a:hover{text-decoration:underline}
 /* ═══ Header ══════════════════════════════════════ */
 .header{position:sticky;top:0;z-index:100;background:rgba(10,10,12,0.82);backdrop-filter:blur(20px) saturate(1.2);-webkit-backdrop-filter:blur(20px) saturate(1.2);border-bottom:1px solid var(--border);margin:0 -20px;padding:0 20px}
 .header-inner{max-width:960px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;height:56px}
-.logo{display:flex;align-items:center;gap:10px;font-weight:800;font-size:18px;letter-spacing:-0.02em}
+.logo{display:flex;align-items:center;gap:10px;font-weight:800;font-size:18px;letter-spacing:-0.02em;cursor:pointer}
 .logo-icon{width:28px;height:28px;border-radius:8px;overflow:hidden;flex-shrink:0}
 .logo-icon img{width:100%;height:100%;object-fit:cover}
 .header-right{display:flex;align-items:center;gap:14px;font-size:12px;color:var(--text-3)}
@@ -118,6 +118,10 @@ a:hover{text-decoration:underline}
 .toast{position:fixed;bottom:40px;left:50%;transform:translateX(-50%) translateY(20px);z-index:999;background:rgba(30,30,40,0.92);backdrop-filter:blur(12px);color:var(--text);padding:10px 24px;border-radius:100px;font-size:13px;font-weight:600;opacity:0;pointer-events:none;transition:all 0.3s cubic-bezier(0.4,0,0.2,1);border:1px solid var(--border)}
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 
+/* ═══ Scroll-to-top Button ════════════════════════ */
+.scroll-top-btn{position:fixed;bottom:32px;right:24px;z-index:50;width:44px;height:44px;border-radius:50%;background:var(--bg-card);border:1px solid var(--border);color:var(--text-2);font-size:20px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.2s;box-shadow:0 4px 12px rgba(0,0,0,0.3);font-family:var(--font)}
+.scroll-top-btn:hover{background:var(--bg-card-hover);border-color:var(--accent);color:var(--accent)}
+
 /* ═══ Footer ══════════════════════════════════════ */
 .footer{text-align:center;padding:32px 0 48px;font-size:12px;color:var(--text-3);border-top:1px solid var(--border);margin-top:20px}
 
@@ -165,7 +169,7 @@ a:hover{text-decoration:underline}
 <div class="app">
   <header class="header">
     <div class="header-inner">
-      <div class="logo">
+      <div class="logo" onclick="goHome()" title="回到首页并刷新">
         <div class="logo-icon"><img src="/favicon-32x32.png?v=2" alt="RayNews"></div>
         <span>RayNews</span>
       </div>
@@ -203,6 +207,8 @@ a:hover{text-decoration:underline}
 <div class="lb" id="lb"><img src="" id="lbImg"></div>
 
 <div class="toast" id="toast"></div>
+
+<button class="scroll-top-btn" id="scrollTopBtn" onclick="scrollToCurrentTop()" title="回到顶部">↑</button>
 
 <script>
 const API_URL = (location.hostname === 'localhost' || location.hostname === '127.0.0.1')
@@ -319,10 +325,25 @@ function goToPage(page) {
   if (page < 1 || page > totalPages) return;
   currentPage = page;
   renderList();
-  // Smooth scroll to list top, offset by sticky header height (56px)
+  scrollToCurrentTop();
+}
+
+function scrollToCurrentTop() {
   const list = document.getElementById('list');
   const top = list.getBoundingClientRect().top + window.scrollY - 60;
   window.scrollTo({ top, behavior: 'smooth' });
+}
+
+async function goHome() {
+  // Reset to page 1 and all filter
+  currentPage = 1;
+  filter = 'all';
+  const filtersEl = document.getElementById('filters');
+  filtersEl.querySelectorAll('.fbtn').forEach(b => b.classList.remove('active'));
+  const allBtn = filtersEl.querySelector('.fbtn[data-f="all"]');
+  if (allBtn) allBtn.classList.add('active');
+  await triggerRefresh();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
 function openArticle(id) {
@@ -415,6 +436,19 @@ function handleHash() {
     tryOpen();
   }
 }
+
+// Click outside sidebar to close
+document.addEventListener('click', e => {
+  const sidebar = document.getElementById('sidebar');
+  const toggle = document.getElementById('sidebarToggle');
+  if (!sidebar.classList.contains('open')) return;
+  if (!sidebar.contains(e.target) && !toggle.contains(e.target)) {
+    sidebar.classList.remove('open');
+    toggle.classList.remove('open');
+    toggle.textContent = '☰';
+    try { localStorage.setItem('raynews_sidebar', '0'); } catch(e) {}
+  }
+});
 
 document.getElementById('backBtn').addEventListener('click', closeArticle);
 document.getElementById('lb').addEventListener('click', () => document.getElementById('lb').classList.remove('open'));
