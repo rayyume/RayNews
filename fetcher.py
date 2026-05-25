@@ -383,6 +383,17 @@ def fetch_wechat_article(url: str) -> dict | None:
                 elif src.startswith("/"):
                     img["src"] = "https://mp.weixin.qq.com" + src
 
+        # Clean up WeChat-specific styling that hides content
+        if content_div.get("style"):
+            style = content_div["style"]
+            style = re.sub(r'visibility\s*:\s*hidden\s*;?\s*', '', style, flags=re.IGNORECASE)
+            style = re.sub(r'opacity\s*:\s*0\s*;?\s*', '', style, flags=re.IGNORECASE)
+            style = style.strip().rstrip(";")
+            if style:
+                content_div["style"] = style
+            else:
+                del content_div["style"]
+
         body_html = str(content_div)
         images = [
             img.get("src", "") for img in content_div.find_all("img") if img.get("src")
