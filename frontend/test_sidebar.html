@@ -38,8 +38,6 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);line-height:
 .header-right{display:flex;align-items:center;gap:14px;font-size:12px;color:var(--text-3)}
 .status-dot{width:6px;height:6px;background:#22c55e;border-radius:50%;display:inline-block;margin-right:4px;animation:pulse 2s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
-.count-badge{font-size:12px;color:var(--text-3)}
-.hide-m{display:inline}
 
 /* Sidebar */
 .sidebar-toggle{position:fixed;left:0;top:50%;transform:translateY(-50%);z-index:50;width:24px;height:48px;background:var(--bg-card);border:1px solid var(--border);border-left:none;border-radius:0 8px 8px 0;color:var(--text-3);font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.2s;padding:0}
@@ -57,11 +55,11 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);line-height:
 .cat-header .arrow.open{transform:rotate(90deg)}
 .cat-body{display:flex;flex-direction:column;gap:2px}
 .cat-body.collapsed{display:none}
-.sidebar .fbtn{width:100%;text-align:left;padding:7px 12px;border-radius:6px;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border:1px solid transparent;background:transparent;color:var(--text-2);cursor:pointer;transition:all 0.12s;font-family:var(--font)}
+.sidebar .fbtn{width:100%;text-align:left;padding:7px 12px 7px 24px;border-radius:6px;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border:1px solid transparent;background:transparent;color:var(--text-2);cursor:pointer;transition:all 0.12s;font-family:var(--font)}
 .sidebar .fbtn:hover{background:var(--bg-card-hover);color:var(--text)}
 .sidebar .fbtn.active{background:var(--accent-dim);border-color:var(--accent);color:var(--accent)}
 .sidebar .fbtn.cat-active{background:var(--accent-dim);border-color:var(--accent);color:var(--accent)}
-.cat-header.cat-active{color:var(--accent)}
+.cat-header.cat-active{background:var(--accent-dim);color:var(--accent);border-radius:6px}
 
 /* News list */
 .list{display:flex;flex-direction:column;gap:1px;background:var(--border);border-radius:var(--radius);overflow:hidden;margin-bottom:40px;margin-top:16px}
@@ -88,7 +86,7 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);line-height:
       <div class="logo"><div class="logo-icon">R</div><span>RayNews</span></div>
       <div class="header-right">
         <span><span class="status-dot"></span>实时更新</span>
-        <span class="hide-m" id="count">52 条新闻</span>
+        <span id="count">52 条新闻</span>
       </div>
     </div>
   </header>
@@ -104,22 +102,23 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);line-height:
 </div>
 
 <script>
+// Source category mapping (abbreviated names matching fetcher output)
 const CATEGORY_MAP = {
-  'News': ['竹新社 - Telegram Channel', '风向旗参考快讯 - Telegram Channel', '界面新闻', '即刻精选 - Telegram Channel', '《联合早报》-国际-即时'],
-  'Tech': ['凤凰网科技', 'cnBeta全文版', '知识分子', '逛逛GitHub', '开源日记', '科技圈🎗在花频道📮 - Telegram Channel', 'MacRumors: Mac News and Rumors - All Stories', '少数派', '爱范儿', 'Chiphell - 分享与交流用户体验', 'Chiphell - 分享与交流用户体验 - 新品"纽斯"', 'APPDO 数字生活指南', 'XP Digital Lab - Telegram Channel', 'RaysBlog', 'Yummy 😋 - Telegram Channel', '阮一峰的网络日志', '小声逼逼 - Telegram Channel'],
-  'Biz': ['金十数据', '格隆汇 (最热文章 - 日排行)', '财经早餐', '凤凰网财经', '晚点 - 长报道', '投资界', '创业最前线', 'WBusiness商业', '包邮区', '理想生活实验室'],
+  'News': ['竹新社', '风向旗参考快讯', '界面新闻', '即刻精选', '联合早报'],
+  'Tech': ['凤凰网科技', 'cnBeta', '知识分子', '逛逛GitHub', '开源日记', '科技圈🎗在花频道📮', 'MacRumors', '少数派', '爱范儿', 'Chiphell', 'APPDO 数字生活指南', 'XP Digital Lab', 'RaysBlog', 'Yummy 😋', '阮一峰', '小声逼逼'],
+  'Biz': ['金十数据', '格隆汇', '财经早餐', '凤凰网财经', '晚点', '投资界', '创业最前线', 'WBusiness商业', '包邮区', '理想生活实验室'],
   'Info': ['美卡指南', '蓝翼说', '酒店圈儿', '银探', '济南本地宝'],
 };
 const CATEGORY_ORDER = ['News', 'Tech', 'Biz', 'Info'];
 let filter = 'all';
 
-// Demo news data: at least one article per source for testing
+// Demo data: one article per source
 const demoSources = Object.values(CATEGORY_MAP).flat();
 const demoNews = demoSources.map((s, i) => ({
   id: 1000 + i,
-  title: `[${s}] 测试文章标题 #${i + 1} — 这是一个示例新闻用于测试分类筛选`,
+  title: `[${s}] 测试文章标题 #${i + 1} — 用于验证分类筛选功能`,
   source: s,
-  time: '12:0' + (i % 10),
+  time: '12:' + String(i % 60).padStart(2, '0'),
   date: '2026-05-26',
   has_full_content: i % 3 === 0,
 }));
@@ -135,16 +134,16 @@ function toggleSidebar() {
 function renderFilters() {
   const sources = [...new Set(demoNews.map(n => n.source))];
   const el = document.getElementById('filters');
-  let html = `<button class="fbtn active" data-f="all">全部</button>`;
+  let html = '<button class="fbtn active" data-f="all">All</button>';
   for (const cat of CATEGORY_ORDER) {
     const catSources = CATEGORY_MAP[cat].filter(s => sources.includes(s));
     if (catSources.length === 0) continue;
     const collapsedKey = 'raynews_cat_' + cat;
     const isCollapsed = localStorage.getItem(collapsedKey) === '1';
-    html += `<div class="cat-header" data-cat="${cat}">${cat}<span class="arrow ${isCollapsed ? '' : 'open'}">▶</span></div>`;
-    html += `<div class="cat-body ${isCollapsed ? 'collapsed' : ''}" data-cat="${cat}">`;
-    html += catSources.map(s => `<button class="fbtn" data-f="${s}">${s}</button>`).join('');
-    html += `</div>`;
+    html += '<div class="cat-header" data-cat="' + cat + '">' + cat + '<span class="arrow ' + (isCollapsed ? '' : 'open') + '">▶</span></div>';
+    html += '<div class="cat-body ' + (isCollapsed ? 'collapsed' : '') + '" data-cat="' + cat + '">';
+    html += catSources.map(s => '<button class="fbtn" data-f="' + s + '">' + s + '</button>').join('');
+    html += '</div>';
   }
   el.innerHTML = html;
 
@@ -152,7 +151,7 @@ function renderFilters() {
     const header = e.target.closest('.cat-header');
     if (header) {
       const cat = header.dataset.cat;
-      const body = el.querySelector(`.cat-body[data-cat="${cat}"]`);
+      const body = el.querySelector('.cat-body[data-cat="' + cat + '"]');
       const arrow = header.querySelector('.arrow');
       if (body) {
         const nowCollapsed = body.classList.toggle('collapsed');
@@ -179,11 +178,10 @@ function selectFilter(value) {
     if (allBtn) allBtn.classList.add('active');
   } else if (value.startsWith('cat:')) {
     const cat = value.replace('cat:', '');
-    const header = el.querySelector(`.cat-header[data-cat="${cat}"]`);
+    const header = el.querySelector('.cat-header[data-cat="' + cat + '"]');
     if (header) header.classList.add('cat-active');
-    el.querySelectorAll(`.cat-body[data-cat="${cat}"] .fbtn`).forEach(b => b.classList.add('cat-active'));
   } else {
-    const btn = el.querySelector(`.fbtn[data-f="${value}"]`);
+    const btn = el.querySelector('.fbtn[data-f="' + value + '"]');
     if (btn) btn.classList.add('active');
   }
 }
@@ -205,18 +203,7 @@ function renderList() {
     el.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)">该分类暂无新闻</div>';
     return;
   }
-  el.innerHTML = filtered.map(n => `
-    <div class="item">
-      <div class="item-body">
-        <div class="item-title">${n.title}</div>
-        <div class="item-meta">
-          <span class="badge">${n.source}</span>
-          <span>${n.time}</span>
-          ${n.has_full_content ? '<span style="color:var(--accent);font-size:10px;font-weight:700">● 全文</span>' : ''}
-        </div>
-      </div>
-    </div>
-  `).join('');
+  el.innerHTML = filtered.map(n => '<div class="item"><div class="item-body"><div class="item-title">' + n.title + '</div><div class="item-meta"><span class="badge">' + n.source + '</span><span>' + n.time + '</span>' + (n.has_full_content ? '<span style="color:var(--accent);font-size:10px;font-weight:700">● 全文</span>' : '') + '</div></div></div>').join('');
 }
 
 renderFilters();

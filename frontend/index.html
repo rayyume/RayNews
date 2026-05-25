@@ -155,8 +155,9 @@ a:hover{text-decoration:underline}
 .cat-header .arrow.open{transform:rotate(90deg)}
 .cat-body{display:flex;flex-direction:column;gap:2px}
 .cat-body.collapsed{display:none}
-.sidebar .fbtn{width:100%;text-align:left;padding:7px 12px;border-radius:6px;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sidebar .fbtn{width:100%;text-align:left;padding:7px 12px 7px 24px;border-radius:6px;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sidebar .fbtn.cat-active{background:var(--accent-dim);border-color:var(--accent);color:var(--accent)}
+.cat-header.cat-active{background:var(--accent-dim);color:var(--accent);border-radius:6px}
 @media(max-width:768px){
   .sidebar{width:180px}
   .sidebar-toggle.open{left:180px}
@@ -224,11 +225,11 @@ const API_URL = (location.hostname === 'localhost' || location.hostname === '127
   : '/news.json';
 const PAGE_SIZE = 30;
 
-// Source category mapping
+// Source category mapping (using abbreviated source names from fetcher)
 const CATEGORY_MAP = {
-  'News': ['竹新社 - Telegram Channel', '风向旗参考快讯 - Telegram Channel', '界面新闻', '即刻精选 - Telegram Channel', '《联合早报》-国际-即时'],
-  'Tech': ['凤凰网科技', 'cnBeta全文版', '知识分子', '逛逛GitHub', '开源日记', '科技圈🎗在花频道📮 - Telegram Channel', 'MacRumors: Mac News and Rumors - All Stories', '少数派', '爱范儿', 'Chiphell - 分享与交流用户体验', 'Chiphell - 分享与交流用户体验 - 新品"纽斯"', 'APPDO 数字生活指南', 'XP Digital Lab - Telegram Channel', 'RaysBlog', 'Yummy 😋 - Telegram Channel', '阮一峰的网络日志', '小声逼逼 - Telegram Channel'],
-  'Biz': ['金十数据', '格隆汇 (最热文章 - 日排行)', '财经早餐', '凤凰网财经', '晚点 - 长报道', '投资界', '创业最前线', 'WBusiness商业', '包邮区', '理想生活实验室'],
+  'News': ['竹新社', '风向旗参考快讯', '界面新闻', '即刻精选', '联合早报'],
+  'Tech': ['凤凰网科技', 'cnBeta', '知识分子', '逛逛GitHub', '开源日记', '科技圈🎗在花频道📮', 'MacRumors', '少数派', '爱范儿', 'Chiphell', 'APPDO 数字生活指南', 'XP Digital Lab', 'RaysBlog', 'Yummy 😋', '阮一峰', '小声逼逼'],
+  'Biz': ['金十数据', '格隆汇', '财经早餐', '凤凰网财经', '晚点', '投资界', '创业最前线', 'WBusiness商业', '包邮区', '理想生活实验室'],
   'Info': ['美卡指南', '蓝翼说', '酒店圈儿', '银探', '济南本地宝'],
 };
 const CATEGORY_ORDER = ['News', 'Tech', 'Biz', 'Info'];
@@ -269,7 +270,7 @@ function renderFilters() {
   const sources = [...new Set(news.map(n => n.source))];
   const el = document.getElementById('filters');
   // "All" button at top
-  let html = `<button class="fbtn active" data-f="all">全部</button>`;
+  let html = `<button class="fbtn active" data-f="all">All</button>`;
   // Category groups
   for (const cat of CATEGORY_ORDER) {
     const catSources = CATEGORY_MAP[cat].filter(s => sources.includes(s));
@@ -323,8 +324,6 @@ function selectFilter(value) {
     const cat = value.replace('cat:', '');
     const header = el.querySelector(`.cat-header[data-cat="${cat}"]`);
     if (header) header.classList.add('cat-active');
-    // Also highlight all source buttons in this category
-    el.querySelectorAll(`.cat-body[data-cat="${cat}"] .fbtn`).forEach(b => b.classList.add('cat-active'));
   } else {
     const btn = el.querySelector(`.fbtn[data-f="${esc(value)}"]`);
     if (btn) btn.classList.add('active');
