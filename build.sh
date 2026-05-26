@@ -19,6 +19,7 @@ if [ "$CURRENT_BRANCH" = "beta" ]; then
   docker buildx build \
     --platform linux/amd64 \
     -t "${FULL_TAG}" \
+    -t "${IMAGE_NAME}:dev" \
     --push \
     .
 
