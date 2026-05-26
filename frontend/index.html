@@ -374,7 +374,7 @@ function renderList() {
 
   el.innerHTML = items.map(n => `
     <div class="item" onclick="openArticle(${n.id})">
-      ${n.thumb ? `<div class="item-thumb"><img src="${esc(n.thumb)}" alt="" loading="lazy"></div>` : ''}
+      ${n.thumb ? `<div class="item-thumb"><img src="/img-proxy?url=${encodeURIComponent(resolveImageUrl(n.thumb))}" alt="" loading="lazy"></div>` : ''}
       <div class="item-body">
         <div class="item-title">${esc(n.title)}</div>
         <div class="item-meta">
