@@ -39,7 +39,7 @@ a:hover{text-decoration:underline}
 ::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.1);border-radius:3px}
 
 /* ═══ Layout ══════════════════════════════════════ */
-.app{max-width:960px;margin:0 auto;padding:0 20px}
+.app{max-width:960px;margin:0 auto;padding:0 20px;position:relative}
 
 /* ═══ Header ══════════════════════════════════════ */
 .header{position:sticky;top:0;z-index:100;background:rgba(10,10,12,0.82);backdrop-filter:blur(20px) saturate(1.2);-webkit-backdrop-filter:blur(20px) saturate(1.2);border-bottom:1px solid var(--border);margin:0 -20px;padding:0 20px}
@@ -164,6 +164,11 @@ a:hover{text-decoration:underline}
   .sidebar-toggle.open{left:180px}
 }
 
+/* ═══ Pull-to-refresh indicator ════════════════ */
+.pull-indicator{position:absolute;left:0;right:0;top:-40px;height:40px;display:flex;align-items:center;justify-content:center;font-size:13px;color:var(--text-3);font-weight:600;transition:opacity 0.2s;pointer-events:none}
+.pull-indicator .spin{display:inline-block;width:16px;height:16px;border:2px solid var(--text-3);border-top-color:var(--accent);border-radius:50%;margin-right:8px;animation:ptr-spin 0.6s linear infinite}
+@keyframes ptr-spin{to{transform:rotate(360deg)}}
+
 /* ═══ Responsive ══════════════════════════════════ */
 @media(max-width:640px){
   .item{padding:14px 16px}
@@ -207,6 +212,7 @@ a:hover{text-decoration:underline}
   </div>
   <div class="pagination" id="pagination"></div>
   <div class="footer">RayNews - 👀open eyes to see the world. · 每 15 分钟更新</div>
+  <div class="pull-indicator" id="pullIndicator"><span class="spin"></span>刷新中...</div>
 </div>
 
 <div class="overlay" id="overlay">
@@ -238,6 +244,13 @@ const CATEGORY_ORDER = ['News', 'Tech', 'Biz', 'Info'];
 let news = [];
 let filter = 'all';
 let currentPage = 1;
+
+function getCategory(source) {
+  for (const [cat, sources] of Object.entries(CATEGORY_MAP)) {
+    if (sources.includes(source)) return cat;
+  }
+  return '';
+}
 
 async function triggerRefresh() {
   const btn = document.querySelector('.refresh-btn');
@@ -379,6 +392,7 @@ function renderList() {
         <div class="item-title">${esc(n.title)}</div>
         <div class="item-meta">
           <span class="badge" style="${badgeStyle(n.source)}">${esc(n.source)}</span>
+          ${getCategory(n.source) ? `<span class="badge" style="${badgeStyle(getCategory(n.source))}">${esc(getCategory(n.source))}</span>` : ''}
           <span>${formatTime(n.date, n.time)}</span>
           ${n.has_full_content ? '<span class="full-tag">● 全文</span>' : ''}
         </div>
@@ -628,6 +642,88 @@ window.addEventListener('hashchange', () => {
 setTimeout(handleHash, 200);
 // Auto-refresh every 5 minutes
 setInterval(loadData, 300000);
+// ═══ Mobile: swipe-to-go-back on article overlay ════════
+(function() {
+  const overlay = document.getElementById('overlay');
+  let sx = 0, sy = 0, swiping = false;
+
+  overlay.addEventListener('touchstart', e => {
+    if (document.getElementById('lb').classList.contains('open')) return;
+    sx = e.touches[0].clientX;
+    sy = e.touches[0].clientY;
+    swiping = false;
+  }, { passive: true });
+
+  overlay.addEventListener('touchmove', e => {
+    if (!overlay.classList.contains('open')) return;
+    const dx = e.touches[0].clientX - sx;
+    const dy = e.touches[0].clientY - sy;
+    if (sx < 50 && dx > 40 && Math.abs(dy) < Math.abs(dx) * 1.5) {
+      swiping = true;
+      const t = Math.min(dx / 250, 1);
+      overlay.style.transition = 'none';
+      overlay.style.transform = `translateX(${dx * 0.5}px)`;
+      overlay.style.opacity = 1 - t * 0.4;
+    }
+  }, { passive: true });
+
+  overlay.addEventListener('touchend', () => {
+    if (swiping) {
+      overlay.style.transition = '';
+      overlay.style.transform = '';
+      overlay.style.opacity = '';
+      closeArticle();
+      swiping = false;
+    }
+  }, { passive: true });
+})();
+
+// ═══ Mobile: pull-to-refresh on homepage ═════════════════
+(function() {
+  const indicator = document.getElementById('pullIndicator');
+  let startY = 0, pulling = false, released = false;
+  let pullDist = 0;
+
+  document.addEventListener('touchstart', e => {
+    if (document.getElementById('overlay').classList.contains('open')) return;
+    if (window.scrollY > 0) return;
+    if (e.target.closest('.sidebar') || e.target.closest('.sidebar-toggle') || e.target.closest('.refresh-btn') || e.target.closest('.page-btn')) return;
+    startY = e.touches[0].clientY;
+    pulling = true;
+    released = false;
+    pullDist = 0;
+  }, { passive: true });
+
+  document.addEventListener('touchmove', e => {
+    if (!pulling || released) return;
+    const dy = e.touches[0].clientY - startY;
+    pullDist = dy;
+    if (dy > 0 && window.scrollY === 0) {
+      const pullPx = Math.min(dy * 0.4, 25);
+      indicator.style.top = (pullPx - 40) + 'px';
+      indicator.style.opacity = Math.min(dy / 100, 0.8);
+      indicator.innerHTML = dy > 50 ? '↓ 释放刷新' : '↓ 下拉刷新';
+    }
+  }, { passive: true });
+
+  document.addEventListener('touchend', () => {
+    if (pulling && !released) {
+      indicator.style.transition = 'top 0.25s, opacity 0.25s';
+      indicator.style.top = '-40px';
+      indicator.style.opacity = '0';
+      setTimeout(() => { indicator.style.transition = ''; }, 300);
+      pulling = false;
+      if (pullDist > 60) {
+        released = true;
+        indicator.innerHTML = '🔄 刷新中...';
+        indicator.style.top = '0';
+        indicator.style.opacity = '1';
+        indicator.style.transition = 'top 0.2s, opacity 0.2s';
+        triggerRefresh();
+      }
+    }
+  }, { passive: true });
+})();
 </script>
 </body>
 </html>
