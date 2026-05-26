@@ -392,7 +392,6 @@ function renderList() {
         <div class="item-title">${esc(n.title)}</div>
         <div class="item-meta">
           <span class="badge" style="${badgeStyle(n.source)}">${esc(n.source)}</span>
-          ${getCategory(n.source) ? `<span class="badge" style="${badgeStyle(getCategory(n.source))}">${esc(getCategory(n.source))}</span>` : ''}
           <span>${formatTime(n.date, n.time)}</span>
           ${n.has_full_content ? '<span class="full-tag">● 全文</span>' : ''}
         </div>
