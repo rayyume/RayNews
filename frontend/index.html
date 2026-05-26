@@ -374,7 +374,7 @@ function renderList() {
 
   el.innerHTML = items.map(n => `
     <div class="item" onclick="openArticle(${n.id})">
-      ${n.thumb ? `<div class="item-thumb"><img src="/img-proxy?url=${encodeURIComponent(resolveImageUrl(n.thumb))}" alt="" loading="lazy"></div>` : ''}
+      ${n.thumb ? `<div class="item-thumb"><img src="${proxyImgSrc(n.thumb)}" alt="" loading="lazy"></div>` : ''}
       <div class="item-body">
         <div class="item-title">${esc(n.title)}</div>
         <div class="item-meta">
@@ -439,9 +439,9 @@ function openArticle(id) {
 
   let body = '';
   // Cover image at top if not already in article body
-  const coverSrc = n.thumb && !n.body_html?.includes(n.thumb) ? resolveImageUrl(n.thumb) : '';
+  const coverSrc = n.thumb && !n.body_html?.includes(n.thumb) ? proxyImgSrc(n.thumb) : '';
   const coverImg = coverSrc
-    ? `<div style="margin-bottom:20px"><img src="/img-proxy?url=${encodeURIComponent(coverSrc)}" alt="" style="max-width:100%;border-radius:var(--radius);background:var(--bg-surface)"></div>`
+    ? `<div style="margin-bottom:20px"><img src="${coverSrc}" alt="" style="max-width:100%;border-radius:var(--radius);background:var(--bg-surface)"></div>`
     : '';
   if (n.body_html) {
     body = `<div class="article-body">${coverImg}${proxyImages(n.body_html)}</div>`;
@@ -555,6 +555,8 @@ function esc(s) {
   return d.innerHTML;
 }
 
+const HOTLINK_DOMAINS = ['cdnfile.sspai.com'];
+
 function resolveImageUrl(url) {
   // Extract underlying source from wsrv.nl proxy URLs (used by sspai articles)
   const wsrvMatch = url.match(/^https?:\/\/wsrv\.nl\/\?url=([^&]+)/);
@@ -564,11 +566,29 @@ function resolveImageUrl(url) {
   return url;
 }
 
+function needsProxy(url) {
+  // Only proxy images from known hotlink-protected domains
+  try {
+    const hostname = new URL(url).hostname;
+    return HOTLINK_DOMAINS.some(d => hostname === d || hostname.endsWith('.' + d));
+  } catch {
+    return false;
+  }
+}
+
+function proxyImgSrc(url) {
+  // Return proxied URL if needed, otherwise original URL
+  const resolved = resolveImageUrl(url);
+  if (needsProxy(resolved)) {
+    return '/img-proxy?url=' + encodeURIComponent(resolved);
+  }
+  return resolved;
+}
+
 function proxyImages(html) {
   // Rewrite external image URLs through the backend proxy to bypass hotlink protection
   return html.replace(/(<img[^>]+src\s*=\s*["'])(https?:\/\/[^"']+)(["'][^>]*>)/gi, (match, prefix, url, suffix) => {
-    url = resolveImageUrl(url);
-    return prefix + '/img-proxy?url=' + encodeURIComponent(url) + suffix;
+    return prefix + proxyImgSrc(url) + suffix;
   });
 }
 
