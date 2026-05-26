@@ -460,6 +460,7 @@ function openArticle(id) {
   `;
 
   document.getElementById('overlay').classList.add('open');
+  document.getElementById('overlay').scrollTop = 0;
   document.body.style.overflow = 'hidden';
   document.getElementById('overlay').dataset.articleId = id;
   const shortDate = n.date ? n.date.slice(2) : '';
