@@ -6,6 +6,9 @@ import json
 import sys
 import logging
 import threading
+import urllib.parse
+
+import requests
 
 REFRESH_INTERVAL = 900  # 15 minutes
 
@@ -42,7 +45,9 @@ def periodic_refresh():
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/refresh":
+        parsed = urllib.parse.urlparse(self.path)
+
+        if parsed.path == "/refresh":
             body = run_fetcher()
             try:
                 self.send_response(200)
@@ -53,6 +58,47 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(body)
             except (BrokenPipeError, ConnectionResetError):
                 log.warning("Client disconnected before response could be written")
+
+        elif parsed.path == "/img-proxy":
+            params = urllib.parse.parse_qs(parsed.query)
+            img_url = params.get("url", [None])[0]
+            if not img_url:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b"Missing url parameter")
+                return
+
+            parsed_url = urllib.parse.urlparse(img_url)
+            if parsed_url.scheme not in ("http", "https"):
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b"Invalid URL scheme")
+                return
+
+            try:
+                proxy_headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "Referer": f"{parsed_url.scheme}://{parsed_url.netloc}/",
+                }
+                resp = requests.get(img_url, headers=proxy_headers, timeout=15, stream=True)
+                resp.raise_for_status()
+
+                content_type = resp.headers.get("Content-Type", "application/octet-stream")
+                body = resp.content
+
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Cache-Control", "public, max-age=86400")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as e:
+                log.warning(f"img-proxy failed for {img_url[:80]}: {e}")
+                self.send_response(502)
+                self.send_header("Content-Type", "text/plain")
+                self.end_headers()
+                self.wfile.write(f"Proxy error: {e}".encode())
+
         else:
             self.send_response(404)
             self.end_headers()

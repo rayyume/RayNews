@@ -439,11 +439,12 @@ function openArticle(id) {
 
   let body = '';
   // Cover image at top if not already in article body
-  const coverImg = (n.thumb && n.body_html && !n.body_html.includes(n.thumb))
-    ? `<div style="margin-bottom:20px"><img src="${esc(n.thumb)}" alt="" style="max-width:100%;border-radius:var(--radius);background:var(--bg-surface)"></div>`
+  const coverSrc = n.thumb && !n.body_html?.includes(n.thumb) ? n.thumb : '';
+  const coverImg = coverSrc
+    ? `<div style="margin-bottom:20px"><img src="/img-proxy?url=${encodeURIComponent(coverSrc)}" alt="" style="max-width:100%;border-radius:var(--radius);background:var(--bg-surface)"></div>`
     : '';
   if (n.body_html) {
-    body = `<div class="article-body">${coverImg}${n.body_html}</div>`;
+    body = `<div class="article-body">${coverImg}${proxyImages(n.body_html)}</div>`;
   } else {
     body = `<div class="article-body">${coverImg}<p style="color:var(--text-2);padding:40px 0;text-align:center">暂无全文内容<br><span style="font-size:13px;color:var(--text-3)">${esc(n.summary || '')}</span></p></div>`;
   }
@@ -552,6 +553,13 @@ function esc(s) {
   const d = document.createElement('div');
   d.textContent = s;
   return d.innerHTML;
+}
+
+function proxyImages(html) {
+  // Rewrite external image URLs through the backend proxy to bypass hotlink protection
+  return html.replace(/(<img[^>]+src\s*=\s*["'])(https?:\/\/[^"']+)(["'][^>]*>)/gi, (match, prefix, url, suffix) => {
+    return prefix + '/img-proxy?url=' + encodeURIComponent(url) + suffix;
+  });
 }
 
 // Dynamic badge color from source name hash
