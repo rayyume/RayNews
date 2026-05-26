@@ -241,14 +241,12 @@ let currentPage = 1;
 
 async function triggerRefresh() {
   const btn = document.querySelector('.refresh-btn');
-  btn.textContent = '抓取中...';
-  btn.disabled = true;
-  try {
-    await fetch('/refresh', { cache: 'no-store' });
-  } catch (e) { /* ignore */ }
+  // Fire the refresh request in background — don't await, fetcher may be slow
+  fetch('/refresh', { cache: 'no-store' }).catch(() => {});
+  // Show feedback immediately
+  showToast('🔄 正在后台抓取...');
+  // Reload news data right away
   await loadData();
-  btn.textContent = '刷新';
-  btn.disabled = false;
 }
 
 async function loadData() {
