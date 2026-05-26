@@ -98,6 +98,7 @@ docker compose pull
 
 ### Long-term
 
+- [ ] **Integrate [RSStT](https://github.com/Rongronggg9/RSS-to-Telegram-Bot)** — No extra deployment for RSStT, OOTB
 - [ ] **Custom AI API** — Bring your own AI API for article summaries and daily digests
 - [ ] **TTS News Reading** — Text-to-speech for listening to news
 - [ ] **iOS App** — Native iOS client

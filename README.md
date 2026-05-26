@@ -98,6 +98,7 @@ docker compose pull
 
 ### 长期
 
+- [ ] **集成[RSStT](https://github.com/Rongronggg9/RSS-to-Telegram-Bot)** — 用户无需额外部署机器人，开箱即用
 - [ ] **自定义 AI API** — 接入自定义 AI API，支持文章摘要和每日综述
 - [ ] **TTS 新闻阅读** — 文字转语音，听新闻
 - [ ] **iOS 客户端** — 原生 iOS 应用
