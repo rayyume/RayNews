@@ -439,7 +439,7 @@ function openArticle(id) {
 
   let body = '';
   // Cover image at top if not already in article body
-  const coverSrc = n.thumb && !n.body_html?.includes(n.thumb) ? n.thumb : '';
+  const coverSrc = n.thumb && !n.body_html?.includes(n.thumb) ? resolveImageUrl(n.thumb) : '';
   const coverImg = coverSrc
     ? `<div style="margin-bottom:20px"><img src="/img-proxy?url=${encodeURIComponent(coverSrc)}" alt="" style="max-width:100%;border-radius:var(--radius);background:var(--bg-surface)"></div>`
     : '';
@@ -555,9 +555,19 @@ function esc(s) {
   return d.innerHTML;
 }
 
+function resolveImageUrl(url) {
+  // Extract underlying source from wsrv.nl proxy URLs (used by sspai articles)
+  const wsrvMatch = url.match(/^https?:\/\/wsrv\.nl\/\?url=([^&]+)/);
+  if (wsrvMatch) {
+    return decodeURIComponent(wsrvMatch[1]);
+  }
+  return url;
+}
+
 function proxyImages(html) {
   // Rewrite external image URLs through the backend proxy to bypass hotlink protection
   return html.replace(/(<img[^>]+src\s*=\s*["'])(https?:\/\/[^"']+)(["'][^>]*>)/gi, (match, prefix, url, suffix) => {
+    url = resolveImageUrl(url);
     return prefix + '/img-proxy?url=' + encodeURIComponent(url) + suffix;
   });
 }
