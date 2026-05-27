@@ -7,39 +7,70 @@ import sys
 import logging
 import threading
 import urllib.parse
+import os
+import tempfile
 
 import requests
 
 REFRESH_INTERVAL = 900  # 15 minutes
 
+LOCK_FILE = "/tmp/raynews-fetcher.lock"
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [refresh] %(message)s")
 log = logging.getLogger("refresh")
 
 
+def acquire_lock() -> bool:
+    """Try to acquire a lock file atomically. Returns True if acquired."""
+    try:
+        os.makedirs(LOCK_FILE, exist_ok=False)
+        return True
+    except FileExistsError:
+        return False
+
+
+def release_lock():
+    """Remove the lock file."""
+    try:
+        os.rmdir(LOCK_FILE)
+    except OSError:
+        pass
+
+
 def run_fetcher():
-    """Run fetcher.py and return the result dict."""
+    """Run fetcher.py and return the result dict + HTTP status code."""
+    if not acquire_lock():
+        log.warning("Fetcher already running — skipping")
+        body = json.dumps({"status": "skipped", "error": "fetcher already running"}).encode()
+        return body, 429
     try:
         log.info("Triggering fetcher...")
         result = subprocess.run(
             ["python3", "/app/fetcher.py"],
             capture_output=True, text=True, timeout=120,
         )
+        is_ok = result.returncode == 0
         body = json.dumps({
-            "status": "ok",
+            "status": "ok" if is_ok else "error",
+            "returncode": result.returncode,
             "stdout": result.stdout[-300:],
             "stderr": result.stderr[-300:],
         }).encode()
         log.info(f"Fetcher done (exit={result.returncode})")
-        return body
+        return body, 200 if is_ok else 500
     except subprocess.TimeoutExpired:
-        return json.dumps({"status": "error", "error": "timeout"}).encode()
+        body = json.dumps({"status": "error", "error": "timeout"}).encode()
+        return body, 500
     except Exception as e:
-        return json.dumps({"status": "error", "error": str(e)}).encode()
+        body = json.dumps({"status": "error", "error": str(e)}).encode()
+        return body, 500
+    finally:
+        release_lock()
 
 
 def periodic_refresh():
     """Run fetcher periodically in the background."""
-    run_fetcher()
+    body, _ = run_fetcher()
     threading.Timer(REFRESH_INTERVAL, periodic_refresh).start()
 
 
@@ -48,9 +79,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
 
         if parsed.path == "/refresh":
-            body = run_fetcher()
+            body, status = run_fetcher()
             try:
-                self.send_response(200)
+                self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Access-Control-Allow-Origin", "*")
                 self.send_header("Content-Length", str(len(body)))
