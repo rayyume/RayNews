@@ -190,9 +190,11 @@ def load_state() -> dict:
 
 
 def save_state(state: dict):
-    """Save fetcher state."""
+    """Save fetcher state atomically (write to temp, then rename)."""
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    tmp = STATE_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(STATE_FILE)
 
 
 # ─── Source Detection ─────────────────────────────────────
@@ -571,14 +573,11 @@ def fetch_all_new_messages(state: dict) -> list[dict]:
                 if all(m["id"] in existing_ids for m in msgs):
                     break
 
-        # Paginate for next page
-        if is_first_run:
-            # On first run: use OLDEST message ID as 'before' to avoid overlap
-            # (Telegram before=X returns messages with ID < X)
-            anchor = msgs[0]["id"]  # oldest on this page
-            log.info(f"  Next page before={anchor} (oldest on current page)")
-        else:
-            anchor = get_anchor_id(msgs)
+        # Paginate for next page — always use OLDEST message ID
+        # Telegram before=X returns messages with ID < X, so using the oldest
+        # message on the current page avoids overlap with the next page
+        anchor = msgs[0]["id"]  # oldest on this page
+        log.info(f"  Next page before={anchor} (oldest on current page)")
         if anchor is None or anchor <= 1:
             break
         before = str(anchor)
@@ -644,7 +643,10 @@ def run():
         "count": len(all_items),
         "items": all_items,
     }
-    OUTPUT_FILE.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Atomic write: write to temp file, then rename
+    tmp = OUTPUT_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(OUTPUT_FILE)
     log.info(f"Wrote {len(all_items)} entries to {OUTPUT_FILE} (added {len(new_entries)} new)")
 
     # Update state with latest message ID
