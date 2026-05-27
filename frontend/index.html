@@ -39,7 +39,7 @@ a:hover{text-decoration:underline}
 ::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.1);border-radius:3px}
 
 /* ═══ Layout ══════════════════════════════════════ */
-.app{max-width:960px;margin:0 auto;padding:0 20px}
+.app{max-width:960px;margin:0 auto;padding:0 20px;position:relative}
 
 /* ═══ Header ══════════════════════════════════════ */
 .header{position:sticky;top:0;z-index:100;background:rgba(10,10,12,0.82);backdrop-filter:blur(20px) saturate(1.2);-webkit-backdrop-filter:blur(20px) saturate(1.2);border-bottom:1px solid var(--border);margin:0 -20px;padding:0 20px}
@@ -82,7 +82,7 @@ a:hover{text-decoration:underline}
 .empty p{font-size:14px}
 
 /* ═══ Article Overlay ═════════════════════════════ */
-.overlay{position:fixed;inset:0;z-index:200;background:var(--bg);overflow-y:auto;transform:translateX(100%);transition:transform 0.35s cubic-bezier(0.4,0,0.2,1)}
+.overlay{position:fixed;inset:0;z-index:200;background:var(--bg);overflow-y:auto;transform:translateX(100%);transition:transform 0.35s cubic-bezier(0.4,0,0.2,1);touch-action:pan-y}
 .overlay.open{transform:translateX(0)}
 .overlay-header{position:sticky;top:0;z-index:10;background:rgba(10,10,12,0.85);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-bottom:1px solid var(--border)}
 .overlay-header-inner{max-width:720px;margin:0 auto;display:flex;align-items:center;height:48px;padding:0 20px}
@@ -164,6 +164,11 @@ a:hover{text-decoration:underline}
   .sidebar-toggle.open{left:180px}
 }
 
+/* ═══ Pull-to-refresh indicator ════════════════ */
+.pull-indicator{position:absolute;left:0;right:0;top:-40px;height:40px;display:flex;align-items:center;justify-content:center;font-size:13px;color:var(--text-3);font-weight:600;transition:opacity 0.2s;pointer-events:none}
+.pull-indicator .spin{display:inline-block;width:16px;height:16px;border:2px solid var(--text-3);border-top-color:var(--accent);border-radius:50%;margin-right:8px;animation:ptr-spin 0.6s linear infinite}
+@keyframes ptr-spin{to{transform:rotate(360deg)}}
+
 /* ═══ Responsive ══════════════════════════════════ */
 @media(max-width:640px){
   .item{padding:14px 16px}
@@ -207,6 +212,7 @@ a:hover{text-decoration:underline}
   </div>
   <div class="pagination" id="pagination"></div>
   <div class="footer">RayNews - 👀open eyes to see the world. · 每 15 分钟更新</div>
+  <div class="pull-indicator" id="pullIndicator"><span class="spin"></span>刷新中...</div>
 </div>
 
 <div class="overlay" id="overlay">
@@ -239,16 +245,21 @@ let news = [];
 let filter = 'all';
 let currentPage = 1;
 
+function getCategory(source) {
+  for (const [cat, sources] of Object.entries(CATEGORY_MAP)) {
+    if (sources.includes(source)) return cat;
+  }
+  return '';
+}
+
 async function triggerRefresh() {
   const btn = document.querySelector('.refresh-btn');
-  btn.textContent = '抓取中...';
-  btn.disabled = true;
-  try {
-    await fetch('/refresh', { cache: 'no-store' });
-  } catch (e) { /* ignore */ }
+  // Fire the refresh request in background — don't await, fetcher may be slow
+  fetch('/refresh', { cache: 'no-store' }).catch(() => {});
+  // Show feedback immediately
+  showToast('🔄 正在后台抓取...');
+  // Reload news data right away
   await loadData();
-  btn.textContent = '刷新';
-  btn.disabled = false;
 }
 
 async function loadData() {
@@ -376,7 +387,7 @@ function renderList() {
 
   el.innerHTML = items.map(n => `
     <div class="item" onclick="openArticle(${n.id})">
-      ${n.thumb ? `<div class="item-thumb"><img src="${esc(n.thumb)}" alt="" loading="lazy"></div>` : ''}
+      ${n.thumb ? `<div class="item-thumb"><img src="${proxyImgSrc(n.thumb)}" alt="" loading="lazy"></div>` : ''}
       <div class="item-body">
         <div class="item-title">${esc(n.title)}</div>
         <div class="item-meta">
@@ -441,11 +452,12 @@ function openArticle(id) {
 
   let body = '';
   // Cover image at top if not already in article body
-  const coverImg = (n.thumb && n.body_html && !n.body_html.includes(n.thumb))
-    ? `<div style="margin-bottom:20px"><img src="${esc(n.thumb)}" alt="" style="max-width:100%;border-radius:var(--radius);background:var(--bg-surface)"></div>`
+  const coverSrc = n.thumb && !n.body_html?.includes(n.thumb) ? proxyImgSrc(n.thumb) : '';
+  const coverImg = coverSrc
+    ? `<div style="margin-bottom:20px"><img src="${coverSrc}" alt="" style="max-width:100%;border-radius:var(--radius);background:var(--bg-surface)"></div>`
     : '';
   if (n.body_html) {
-    body = `<div class="article-body">${coverImg}${n.body_html}</div>`;
+    body = `<div class="article-body">${coverImg}${proxyImages(n.body_html)}</div>`;
   } else {
     body = `<div class="article-body">${coverImg}<p style="color:var(--text-2);padding:40px 0;text-align:center">暂无全文内容<br><span style="font-size:13px;color:var(--text-3)">${esc(n.summary || '')}</span></p></div>`;
   }
@@ -460,6 +472,7 @@ function openArticle(id) {
   `;
 
   document.getElementById('overlay').classList.add('open');
+  document.getElementById('overlay').scrollTop = 0;
   document.body.style.overflow = 'hidden';
   document.getElementById('overlay').dataset.articleId = id;
   const shortDate = n.date ? n.date.slice(2) : '';
@@ -555,6 +568,43 @@ function esc(s) {
   return d.innerHTML;
 }
 
+const HOTLINK_DOMAINS = ['cdnfile.sspai.com'];
+
+function resolveImageUrl(url) {
+  // Extract underlying source from wsrv.nl proxy URLs (used by sspai articles)
+  const wsrvMatch = url.match(/^https?:\/\/wsrv\.nl\/\?url=([^&]+)/);
+  if (wsrvMatch) {
+    return decodeURIComponent(wsrvMatch[1]);
+  }
+  return url;
+}
+
+function needsProxy(url) {
+  // Only proxy images from known hotlink-protected domains
+  try {
+    const hostname = new URL(url).hostname;
+    return HOTLINK_DOMAINS.some(d => hostname === d || hostname.endsWith('.' + d));
+  } catch {
+    return false;
+  }
+}
+
+function proxyImgSrc(url) {
+  // Return proxied URL if needed, otherwise original URL
+  const resolved = resolveImageUrl(url);
+  if (needsProxy(resolved)) {
+    return '/img-proxy?url=' + encodeURIComponent(resolved);
+  }
+  return resolved;
+}
+
+function proxyImages(html) {
+  // Rewrite external image URLs through the backend proxy to bypass hotlink protection
+  return html.replace(/(<img[^>]+src\s*=\s*["'])(https?:\/\/[^"']+)(["'][^>]*>)/gi, (match, prefix, url, suffix) => {
+    return prefix + proxyImgSrc(url) + suffix;
+  });
+}
+
 // Dynamic badge color from source name hash
 const BADGE_COLORS = [
   '#f59e0b','#22c55e','#3b82f6','#a855f7','#ec4899',
@@ -591,6 +641,90 @@ window.addEventListener('hashchange', () => {
 setTimeout(handleHash, 200);
 // Auto-refresh every 5 minutes
 setInterval(loadData, 300000);
+// ═══ Mobile: swipe-to-go-back on article overlay ════════
+(function() {
+  const overlay = document.getElementById('overlay');
+  let sx = 0, sy = 0, swiping = false;
+
+  overlay.addEventListener('touchstart', e => {
+    if (document.getElementById('lb').classList.contains('open')) return;
+    sx = e.touches[0].clientX;
+    sy = e.touches[0].clientY;
+    swiping = false;
+    // Prevent browser's back-swipe gesture on overlay
+    if (sx < 50) e.preventDefault();
+  }, { passive: false });
+
+  overlay.addEventListener('touchmove', e => {
+    if (!overlay.classList.contains('open')) return;
+    const dx = e.touches[0].clientX - sx;
+    const dy = e.touches[0].clientY - sy;
+    if (sx < 50 && dx > 40 && Math.abs(dy) < Math.abs(dx) * 1.5) {
+      swiping = true;
+      const t = Math.min(dx / 250, 1);
+      overlay.style.transition = 'none';
+      overlay.style.transform = `translateX(${dx * 0.5}px)`;
+      overlay.style.opacity = 1 - t * 0.4;
+    }
+  }, { passive: true });
+
+  overlay.addEventListener('touchend', () => {
+    if (swiping) {
+      overlay.style.transition = '';
+      overlay.style.transform = '';
+      overlay.style.opacity = '';
+      closeArticle();
+      swiping = false;
+    }
+  }, { passive: true });
+})();
+
+// ═══ Mobile: pull-to-refresh on homepage ═════════════════
+(function() {
+  const indicator = document.getElementById('pullIndicator');
+  let startY = 0, pulling = false, released = false;
+  let pullDist = 0;
+
+  document.addEventListener('touchstart', e => {
+    if (document.getElementById('overlay').classList.contains('open')) return;
+    if (window.scrollY > 0) return;
+    if (e.target.closest('.sidebar') || e.target.closest('.sidebar-toggle') || e.target.closest('.refresh-btn') || e.target.closest('.page-btn')) return;
+    startY = e.touches[0].clientY;
+    pulling = true;
+    released = false;
+    pullDist = 0;
+  }, { passive: true });
+
+  document.addEventListener('touchmove', e => {
+    if (!pulling || released) return;
+    const dy = e.touches[0].clientY - startY;
+    pullDist = dy;
+    if (dy > 0 && window.scrollY === 0) {
+      const pullPx = Math.min(dy * 0.4, 25);
+      indicator.style.top = (pullPx - 40) + 'px';
+      indicator.style.opacity = Math.min(dy / 100, 0.8);
+      indicator.innerHTML = dy > 50 ? '↓ 释放刷新' : '↓ 下拉刷新';
+    }
+  }, { passive: true });
+
+  document.addEventListener('touchend', () => {
+    if (pulling && !released) {
+      indicator.style.transition = 'top 0.25s, opacity 0.25s';
+      indicator.style.top = '-40px';
+      indicator.style.opacity = '0';
+      setTimeout(() => { indicator.style.transition = ''; }, 300);
+      pulling = false;
+      if (pullDist > 60) {
+        released = true;
+        indicator.innerHTML = '🔄 刷新中...';
+        indicator.style.top = '0';
+        indicator.style.opacity = '1';
+        indicator.style.transition = 'top 0.2s, opacity 0.2s';
+        triggerRefresh();
+      }
+    }
+  }, { passive: true });
+})();
 </script>
 </body>
 </html>
