@@ -58,7 +58,7 @@ cp .env.example .env
 docker compose up -d
 ```
 
-The fetcher runs once on startup, then every 15 minutes via cron.
+The fetcher runs once on startup, then every 15 minutes.
 
 ### 4. Access
 
