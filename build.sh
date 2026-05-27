@@ -74,6 +74,32 @@ elif [ "$CURRENT_BRANCH" = "main" ]; then
   git checkout main
   echo "=== Beta synced with main ==="
 
+  # Create GitHub Release
+  echo "=== Creating GitHub Release v${VERSION} ==="
+  RELEASE_NOTES=$(cat <<'EOF'
+### **Debug**
+### **Feature**
+EOF
+)
+  # Generate release body from git log since last tag
+  LAST_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+  if [ -n "$LAST_TAG" ]; then
+    LOG=$(git log "$LAST_TAG"..HEAD --oneline --no-merges --format="  - %s")
+    if echo "$LOG" | grep -qiE 'fix|修复|bug|issue'; then
+      FIXES=$(echo "$LOG" | grep -iE 'fix|修复|bug|issue' | sed 's/  - /- /')
+      FEATS=$(echo "$LOG" | grep -viE 'fix|修复|bug|issue|bump|chore' | sed 's/  - /- /')
+      [ -n "$FIXES" ] && RELEASE_NOTES="### **Debug**\n$FIXES\n---\n### **Feature**\n$FEATS"
+    fi
+  fi
+  # Get GitHub token from git remote URL
+  TOKEN=$(git remote get-url origin | sed 's|https://[^:]*:\([^@]*\)@.*|\1|')
+  curl -sL -X POST \
+    -H "Accept: application/vnd.github+json" \
+    -H "Authorization: token $TOKEN" \
+    https://api.github.com/repos/rayyume/RayNews/releases \
+    -d "$(printf '{"tag_name":"v%s","name":"v%s","body":"%s"}' "$VERSION" "$VERSION" "$RELEASE_NOTES")" > /dev/null
+  echo "=== Release v${VERSION} created ==="
+
 else
   echo "ERROR: Unsupported branch '${CURRENT_BRANCH}'"
   echo "Use 'beta' for test builds or 'main' for production releases."
