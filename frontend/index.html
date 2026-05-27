@@ -46,8 +46,8 @@ a:hover{text-decoration:underline}
 .app{max-width:960px;margin:0 auto;padding:0 20px;position:relative}
 
 /* ═══ Header ══════════════════════════════════════ */
-.header{position:sticky;top:0;z-index:100;background:rgba(10,10,12,0.82);backdrop-filter:blur(20px) saturate(1.2);-webkit-backdrop-filter:blur(20px) saturate(1.2);border-bottom:1px solid var(--border);margin:0 -20px;padding:0 20px}
-.header-inner{max-width:960px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;height:56px}
+.header{position:sticky;top:0;z-index:100;background:rgba(10,10,12,0.82);backdrop-filter:blur(20px) saturate(1.2);-webkit-backdrop-filter:blur(20px) saturate(1.2);border-bottom:1px solid var(--border);margin:0 -20px;padding:env(safe-area-inset-top,0px) 20px 0}
+.header-inner{max-width:960px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;min-height:56px}
 .logo{display:flex;align-items:center;gap:10px;font-weight:800;font-size:18px;letter-spacing:-0.02em;cursor:pointer}
 .logo-icon{width:28px;height:28px;border-radius:8px;overflow:hidden;flex-shrink:0}
 .logo-icon img{width:100%;height:100%;object-fit:cover}
@@ -88,8 +88,8 @@ a:hover{text-decoration:underline}
 /* ═══ Article Overlay ═════════════════════════════ */
 .overlay{position:fixed;inset:0;z-index:200;background:var(--bg);overflow-y:auto;transform:translateX(100%);transition:transform 0.35s cubic-bezier(0.4,0,0.2,1);touch-action:pan-y}
 .overlay.open{transform:translateX(0)}
-.overlay-header{position:sticky;top:0;z-index:10;background:rgba(10,10,12,0.85);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-bottom:1px solid var(--border)}
-.overlay-header-inner{max-width:720px;margin:0 auto;display:flex;align-items:center;height:48px;padding:0 20px}
+.overlay-header{position:sticky;top:0;z-index:10;background:rgba(10,10,12,0.85);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-bottom:1px solid var(--border);padding-top:env(safe-area-inset-top,0px)}
+.overlay-header-inner{max-width:720px;margin:0 auto;display:flex;align-items:center;min-height:48px;padding:0 20px}
 .back-btn{display:flex;align-items:center;gap:6px;background:none;border:none;color:var(--accent);font-size:13px;font-weight:600;cursor:pointer;font-family:var(--font);padding:4px 0}
 .back-btn:hover{text-decoration:underline}
 .share-btn{display:flex;align-items:center;gap:6px;background:none;border:none;color:var(--text-2);font-size:13px;font-weight:600;cursor:pointer;font-family:var(--font);padding:4px 12px;margin-left:auto;border-radius:6px;transition:all 0.15s}
@@ -292,8 +292,37 @@ async function loadData() {
     renderFilters();
     renderList();
   } catch (e) {
-    const msg = e.name === 'AbortError' ? '连接超时，轻触重试或检查网络' : '暂无数据，等待首次抓取...';
-    list.innerHTML = `<div class="empty"><div class="empty-icon">📡</div><p>${msg}</p><button class="refresh-btn" onclick="loadData()" style="margin-top:12px">重试</button></div>`;
+    const msg = e.name === 'AbortError' ? '连接超时，轻触重试或检查网络' : '加载失败，点击重试';
+    list.innerHTML = '<div class="empty"><div class="empty-icon">📡</div><p>' + msg + '</p><button class="refresh-btn" onclick="loadData()" style="margin-top:12px">重试</button></div>';
+  }
+}
+
+async function loadDataWithRetry(retries, delay) {
+  if (!retries) retries = 3;
+  if (!delay) delay = 2000;
+  for (let i = 0; i < retries; i++) {
+    const list = document.getElementById('list');
+    if (i > 0) {
+      list.innerHTML = '<div class="empty"><div class="empty-icon">⏳</div><p>加载中 (' + i + '/' + (retries-1) + ')...</p></div>';
+      await new Promise(r => setTimeout(r, delay));
+    }
+    try {
+      const controller = new AbortController();
+      const to = setTimeout(function() { controller.abort(); }, 8000);
+      const resp = await fetch(API_URL + '?t=' + Date.now(), { signal: controller.signal });
+      clearTimeout(to);
+      const data = await resp.json();
+      news = data.items || [];
+      document.getElementById('count').textContent = news.length + ' 条新闻';
+      renderFilters();
+      renderList();
+      return;
+    } catch (e) {
+      if (i === retries - 1) {
+        const msg = e.name === 'AbortError' ? '连接超时，轻触重试或检查网络' : '加载失败，点击重试';
+        list.innerHTML = '<div class="empty"><div class="empty-icon">📡</div><p>' + msg + '</p><button class="refresh-btn" onclick="loadData()" style="margin-top:12px">重试</button></div>';
+      }
+    }
   }
 }
 
@@ -640,8 +669,8 @@ function badgeStyle(src) {
   BADGE_CACHE[src] = s;
   return s;
 }
-
-loadData();
+// Initial load
+loadDataWithRetry();
 // Restore sidebar preference
 try {
   if (localStorage.getItem('raynews_sidebar') === '1') {
