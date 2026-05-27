@@ -66,6 +66,14 @@ elif [ "$CURRENT_BRANCH" = "main" ]; then
 
   echo "=== VERSION bumped to ${NEXT}, BETA_REVISION reset to 1 ==="
 
+  # Sync beta branch with main
+  echo "=== Syncing beta branch with main ==="
+  git checkout beta
+  git merge main --ff-only
+  git push origin beta
+  git checkout main
+  echo "=== Beta synced with main ==="
+
 else
   echo "ERROR: Unsupported branch '${CURRENT_BRANCH}'"
   echo "Use 'beta' for test builds or 'main' for production releases."
