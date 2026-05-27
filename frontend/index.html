@@ -479,9 +479,7 @@ function goToPage(page) {
 }
 
 function scrollToCurrentTop() {
-  const list = document.getElementById('list');
-  const top = list.getBoundingClientRect().top + window.scrollY - 60;
-  window.scrollTo({ top, behavior: 'smooth' });
+  window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
 async function goHome() {

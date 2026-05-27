@@ -74,22 +74,15 @@ elif [ "$CURRENT_BRANCH" = "main" ]; then
   git checkout main
   echo "=== Beta synced with main ==="
 
-  # Create GitHub Release
+  # Create GitHub Release (concise notes)
   echo "=== Creating GitHub Release v${VERSION} ==="
-  RELEASE_NOTES=$(cat <<'EOF'
-### **Debug**
-### **Feature**
-EOF
-)
-  # Generate release body from git log since last tag
   LAST_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
   if [ -n "$LAST_TAG" ]; then
-    LOG=$(git log "$LAST_TAG"..HEAD --oneline --no-merges --format="  - %s")
-    if echo "$LOG" | grep -qiE 'fix|修复|bug|issue'; then
-      FIXES=$(echo "$LOG" | grep -iE 'fix|修复|bug|issue' | sed 's/  - /- /')
-      FEATS=$(echo "$LOG" | grep -viE 'fix|修复|bug|issue|bump|chore' | sed 's/  - /- /')
-      [ -n "$FIXES" ] && RELEASE_NOTES="### **Debug**\n$FIXES\n---\n### **Feature**\n$FEATS"
-    fi
+    LOG=$(git log "$LAST_TAG"..HEAD --oneline --no-merges --format="  - %s" | grep -viE 'bump|chore|beta' | head -10)
+    [ -z "$LOG" ] && LOG="  - 常规更新"
+    RELEASE_NOTES="### 主要改动\n$LOG"
+  else
+    RELEASE_NOTES="### 主要改动\n- 初始正式发布 v${VERSION}"
   fi
   # Get GitHub token from git remote URL
   TOKEN=$(git remote get-url origin | sed 's|https://[^:]*:\([^@]*\)@.*|\1|')
