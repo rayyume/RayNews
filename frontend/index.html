@@ -259,18 +259,46 @@ function getCategory(source) {
 }
 
 async function triggerRefresh() {
-  const btn = document.querySelector('.refresh-btn');
   // Fire the refresh request in background
   fetch('/refresh', { cache: 'no-store' }).catch(() => {});
   showToast('🔄 正在后台抓取...');
-  // Incrementally load only new articles since the latest known timestamp
-  if (news.length > 0) {
-    const maxTs = Math.max(...news.map(n => n.timestamp));
-    await loadSince(maxTs);
+
+  const beforeTs = news.length > 0 ? Math.max(...news.map(n => n.timestamp)) : 0;
+
+  // First try once immediately
+  if (beforeTs > 0) {
+    const found = await loadSince(beforeTs);
+    if (found) {
+      showToast('✅ 已更新');
+      resetPullIndicator();
+      return;
+    }
   } else {
     await loadData();
+    resetPullIndicator();
+    return;
   }
-  // Reset pull-to-refresh indicator after refresh
+
+  // Poll every 2s until new data arrives or 120s timeout
+  const maxWait = 120000;
+  const pollInterval = 2000;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < maxWait) {
+    await new Promise(r => setTimeout(r, pollInterval));
+    const found = await loadSince(beforeTs);
+    if (found) {
+      showToast('✅ 已更新');
+      resetPullIndicator();
+      return;
+    }
+  }
+
+  showToast('⏰ 刷新超时，请稍后重试');
+  resetPullIndicator();
+}
+
+function resetPullIndicator() {
   const indicator = document.getElementById('pullIndicator');
   if (indicator) {
     indicator.style.transition = 'top 0.25s, opacity 0.25s';
@@ -308,11 +336,11 @@ async function loadSince(timestamp) {
     clearTimeout(timeout);
     const data = await resp.json();
     const newItems = data.items || [];
-    if (newItems.length === 0) return;
+    if (newItems.length === 0) return false;
     // Prepend new items, dedup by id
     const existingIds = new Set(news.map(n => n.id));
     const fresh = newItems.filter(n => !existingIds.has(n.id));
-    if (fresh.length === 0) return;
+    if (fresh.length === 0) return false;
     news = fresh.concat(news);
     // Re-sort by timestamp descending
     news.sort((a, b) => b.timestamp - a.timestamp);
@@ -320,12 +348,14 @@ async function loadSince(timestamp) {
     // If overlay (article reader) is open, defer DOM refresh until user closes it
     if (document.getElementById('overlay').classList.contains('open')) {
       _pendingUpdate = true;
-      return;
+      return true;
     }
     renderFilters();
     renderList();
+    return true;
   } catch (e) {
     // Silently ignore incremental fetch errors
+    return false;
   }
 }
 
@@ -517,7 +547,8 @@ function scrollToCurrentTop() {
 async function goHome() {
   currentPage = 1;
   selectFilter('all');
-  await triggerRefresh();
+  // Fire refresh asynchronously — don't block scrollTo
+  triggerRefresh();
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
