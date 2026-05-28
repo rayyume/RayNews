@@ -249,6 +249,7 @@ const CATEGORY_ORDER = ['News', 'Tech', 'Biz', 'Info'];
 let news = [];
 let filter = 'all';
 let currentPage = 1;
+let _pendingUpdate = false;
 
 function getCategory(source) {
   for (const [cat, sources] of Object.entries(CATEGORY_MAP)) {
@@ -316,6 +317,11 @@ async function loadSince(timestamp) {
     // Re-sort by timestamp descending
     news.sort((a, b) => b.timestamp - a.timestamp);
     document.getElementById('count').textContent = (data.total || news.length) + ' 条新闻';
+    // If overlay (article reader) is open, defer DOM refresh until user closes it
+    if (document.getElementById('overlay').classList.contains('open')) {
+      _pendingUpdate = true;
+      return;
+    }
     renderFilters();
     renderList();
   } catch (e) {
@@ -638,6 +644,13 @@ function closeArticle() {
   document.getElementById('overlay').classList.remove('open');
   document.body.style.overflow = '';
   history.replaceState(null, '', window.location.pathname + window.location.search);
+  // If new articles arrived while reading, refresh the list now
+  if (_pendingUpdate) {
+    _pendingUpdate = false;
+    document.getElementById('count').textContent = news.length + ' 条新闻';
+    renderFilters();
+    renderList();
+  }
 }
 
 // Handle hash-based article links
