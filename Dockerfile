@@ -17,10 +17,12 @@ COPY frontend/ /usr/share/nginx/html/
 RUN mkdir -p /app/data /var/log/nginx /run/nginx
 
 # Inject VERSION into sw.js template
-COPY VERSION /app/VERSION
+COPY VERSION BETA_REVISION /app/
 RUN VERSION=$(cat /app/VERSION) && \
+    BETA_REV=$(cat /app/BETA_REVISION) && \
+    FULL_VERSION="${VERSION}-beta.${BETA_REV}" && \
     sed -i "s/{{VERSION}}/$VERSION/g" /usr/share/nginx/html/sw.js && \
-    sed -i "s/{{VERSION}}/$VERSION/g" /usr/share/nginx/html/index.html
+    sed -i "s/{{FULL_VERSION}}/$FULL_VERSION/g" /usr/share/nginx/html/index.html
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
