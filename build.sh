@@ -42,6 +42,7 @@ elif [ "$CURRENT_BRANCH" = "main" ]; then
 
   docker buildx build \
     --platform linux/amd64 \
+    --build-arg FULL_VERSION_OVERRIDE="v${VERSION}" \
     -t "${IMAGE_NAME}:latest" \
     -t "${IMAGE_NAME}:v${VERSION}" \
     --push \
