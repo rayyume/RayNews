@@ -103,7 +103,7 @@ def api_news_list(params: dict) -> bytes:
     try:
         page = int(params.get("page", ["1"])[0])
         size = int(params.get("size", ["30"])[0])
-        size = min(max(size, 1), 100)
+        size = min(max(size, 1), 2000)
         since = params.get("since", [None])[0]
     except (ValueError, IndexError):
         return json.dumps({"error": "invalid params"}).encode()
