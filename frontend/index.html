@@ -636,6 +636,15 @@ function renderArticleBody(wrap, data, id) {
   } else {
     bodyEl.innerHTML = `<p style="color:var(--text-2);padding:40px 0;text-align:center">暂无全文内容</p>`;
   }
+  // Dedup cover image: if any img in the body matches the thumb, remove prepended cover
+  if (data.thumb) {
+    const thumbProxy = proxyImgSrc(data.thumb);
+    const hasDup = Array.from(bodyEl.querySelectorAll('img')).some(img => img.src === thumbProxy || img.src === data.thumb);
+    if (hasDup) {
+      const prev = bodyEl.previousElementSibling;
+      if (prev && prev.tagName === 'DIV' && prev.querySelector('img')) prev.remove();
+    }
+  }
   // Attach lightbox
   bodyEl.querySelectorAll('img').forEach(img => {
     img.addEventListener('click', e => {
