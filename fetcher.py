@@ -9,6 +9,7 @@ telegra.ph links. Outputs news.json
 import json
 import os
 import re
+import sqlite3
 import logging
 import html as html_mod
 from datetime import datetime, timezone
@@ -29,6 +30,7 @@ TELEGRAM_POST_URL = f"https://t.me/{TELEGRAM_CHANNEL}/{{id}}?embed=1&mode=tme"
 OUTPUT_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
 OUTPUT_FILE = OUTPUT_DIR / "news.json"
 STATE_FILE = OUTPUT_DIR / "fetcher_state.json"
+DB_FILE = OUTPUT_DIR / "news.db"
 MAX_WORKERS = 15
 REQUEST_TIMEOUT = 20
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -43,6 +45,79 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger("fetcher")
+
+
+# ─── SQLite ──────────────────────────────────────────────
+def init_db() -> sqlite3.Connection:
+    """Initialize SQLite DB and return connection."""
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(DB_FILE))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS articles (
+            id INTEGER PRIMARY KEY,
+            title TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL DEFAULT '',
+            time TEXT DEFAULT '',
+            date TEXT DEFAULT '',
+            timestamp INTEGER NOT NULL DEFAULT 0,
+            thumb TEXT DEFAULT '',
+            has_full_content INTEGER DEFAULT 0,
+            telegraph_url TEXT DEFAULT '',
+            body_html TEXT DEFAULT '',
+            summary TEXT DEFAULT ''
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON articles(timestamp DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_source ON articles(source)")
+    conn.commit()
+    return conn
+
+
+def upsert_articles(conn: sqlite3.Connection, entries: list[dict]):
+    """Batch insert or update articles into SQLite."""
+    sql = """INSERT OR REPLACE INTO articles
+        (id, title, source, time, date, timestamp, thumb,
+         has_full_content, telegraph_url, body_html, summary)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+    rows = []
+    for e in entries:
+        rows.append((
+            e.get("id", 0),
+            e.get("title", ""),
+            e.get("source", ""),
+            e.get("time", ""),
+            e.get("date", ""),
+            e.get("timestamp", 0),
+            e.get("thumb", ""),
+            1 if e.get("has_full_content") else 0,
+            e.get("telegraph_url", ""),
+            e.get("body_html", ""),
+            e.get("summary", ""),
+        ))
+    conn.executemany(sql, rows)
+    conn.commit()
+    log.info(f"SQLite: upserted {len(rows)} articles"
+             f" (total: {conn.execute('SELECT COUNT(*) FROM articles').fetchone()[0]})")
+
+
+def migrate_news_json(conn: sqlite3.Connection):
+    """Import existing news.json into SQLite if DB is empty."""
+    count = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
+    if count > 0:
+        return  # already migrated
+    if not OUTPUT_FILE.exists():
+        return
+    try:
+        data = json.loads(OUTPUT_FILE.read_text(encoding="utf-8"))
+        items = data.get("items", [])
+        if items:
+            upsert_articles(conn, items)
+            log.info(f"Migrated {len(items)} articles from news.json to SQLite")
+    except Exception as e:
+        log.warning(f"Migration from news.json failed: {e}")
 
 
 # ─── Helpers ──────────────────────────────────────────────
@@ -599,6 +674,13 @@ def run():
 
     if not messages:
         log.info("No new messages — keeping existing news.json")
+        # Still ensure SQLite is initialized from existing data
+        try:
+            conn = init_db()
+            migrate_news_json(conn)
+            conn.close()
+        except Exception as e:
+            log.error(f"SQLite init failed: {e}")
         return
 
     # Process new messages with thread pool
@@ -654,6 +736,16 @@ def run():
     state["last_seen_id"] = max(state.get("last_seen_id", 0), max_id)
     save_state(state)
     log.info(f"Updated state: last_seen_id = {state['last_seen_id']}")
+
+    # ── SQLite sync ──
+    try:
+        conn = init_db()
+        migrate_news_json(conn)
+        upsert_articles(conn, new_entries)
+        conn.close()
+    except Exception as e:
+        log.error(f"SQLite write failed: {e}")
+
     log.info("Fetch cycle complete")
 
 

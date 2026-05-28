@@ -234,10 +234,8 @@ a:hover{text-decoration:underline}
 <button class="scroll-top-btn" id="scrollTopBtn" onclick="scrollToCurrentTop()" title="回到顶部">↑</button>
 
 <script>
-const API_URL = (location.hostname === 'localhost' || location.hostname === '127.0.0.1')
-  ? 'http://localhost:8080/news.json'
-  : '/news.json';
 const PAGE_SIZE = 30;
+const INITIAL_LOAD_SIZE = 200;  // Load enough for client-side pagination
 
 // Source category mapping (using abbreviated source names from fetcher)
 const CATEGORY_MAP = {
@@ -261,12 +259,16 @@ function getCategory(source) {
 
 async function triggerRefresh() {
   const btn = document.querySelector('.refresh-btn');
-  // Fire the refresh request in background — don't await, fetcher may be slow
+  // Fire the refresh request in background
   fetch('/refresh', { cache: 'no-store' }).catch(() => {});
-  // Show feedback immediately
   showToast('🔄 正在后台抓取...');
-  // Reload news data right away
-  await loadData();
+  // Incrementally load only new articles since the latest known timestamp
+  if (news.length > 0) {
+    const maxTs = Math.max(...news.map(n => n.timestamp));
+    await loadSince(maxTs);
+  } else {
+    await loadData();
+  }
   // Reset pull-to-refresh indicator after refresh
   const indicator = document.getElementById('pullIndicator');
   if (indicator) {
@@ -283,17 +285,41 @@ async function loadData() {
 
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
-    const resp = await fetch(API_URL + '?t=' + Date.now(), { signal: controller.signal });
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    const resp = await fetch('/api/news?size=' + INITIAL_LOAD_SIZE + '&t=' + Date.now(), { signal: controller.signal });
     clearTimeout(timeout);
     const data = await resp.json();
     news = data.items || [];
-    document.getElementById('count').textContent = news.length + ' 条新闻';
+    document.getElementById('count').textContent = data.total + ' 条新闻';
     renderFilters();
     renderList();
   } catch (e) {
     const msg = e.name === 'AbortError' ? '连接超时，轻触重试或检查网络' : '加载失败，点击重试';
     list.innerHTML = '<div class="empty"><div class="empty-icon">📡</div><p>' + msg + '</p><button class="refresh-btn" onclick="loadData()" style="margin-top:12px">重试</button></div>';
+  }
+}
+
+async function loadSince(timestamp) {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    const resp = await fetch('/api/news?since=' + timestamp + '&size=' + INITIAL_LOAD_SIZE + '&t=' + Date.now(), { signal: controller.signal });
+    clearTimeout(timeout);
+    const data = await resp.json();
+    const newItems = data.items || [];
+    if (newItems.length === 0) return;
+    // Prepend new items, dedup by id
+    const existingIds = new Set(news.map(n => n.id));
+    const fresh = newItems.filter(n => !existingIds.has(n.id));
+    if (fresh.length === 0) return;
+    news = fresh.concat(news);
+    // Re-sort by timestamp descending
+    news.sort((a, b) => b.timestamp - a.timestamp);
+    document.getElementById('count').textContent = (data.total || news.length) + ' 条新闻';
+    renderFilters();
+    renderList();
+  } catch (e) {
+    // Silently ignore incremental fetch errors
   }
 }
 
@@ -303,17 +329,17 @@ async function loadDataWithRetry(retries, delay) {
   for (let i = 0; i < retries; i++) {
     const list = document.getElementById('list');
     if (i > 0) {
-      list.innerHTML = '<div class="empty"><div class="empty-icon">⏳</div><p>加载中 (' + i + '/' + (retries-1) + ')...</p></div>';
+      list.innerHTML = '<div class="empty"><div class="empty-icon">⏳</div><p>获取中 (' + i + '/' + (retries-1) + ')...</p></div>';
       await new Promise(r => setTimeout(r, delay));
     }
     try {
       const controller = new AbortController();
-      const to = setTimeout(function() { controller.abort(); }, 8000);
-      const resp = await fetch(API_URL + '?t=' + Date.now(), { signal: controller.signal });
+      const to = setTimeout(function() { controller.abort(); }, 15000);
+      const resp = await fetch('/api/news?size=' + INITIAL_LOAD_SIZE + '&t=' + Date.now(), { signal: controller.signal });
       clearTimeout(to);
       const data = await resp.json();
       news = data.items || [];
-      document.getElementById('count').textContent = news.length + ' 条新闻';
+      document.getElementById('count').textContent = data.total + ' 条新闻';
       renderFilters();
       renderList();
       return;
@@ -491,30 +517,59 @@ async function goHome() {
 
 function openArticle(id) {
   const n = news.find(x => x.id === id);
-  if (!n) return;
-  // Already open for this article — skip
-  if (document.getElementById('overlay').classList.contains('open') && document.getElementById('overlay').dataset.articleId == id) return;
   const wrap = document.getElementById('articleWrap');
 
-  let body = '';
-  // Cover image at top if not already in article body
-  const coverSrc = n.thumb && !n.body_html?.includes(n.thumb) ? proxyImgSrc(n.thumb) : '';
+  // If article not in memory, fetch metadata from API
+  if (!n) {
+    document.getElementById('overlay').classList.add('open');
+    document.getElementById('overlay').scrollTop = 0;
+    document.body.style.overflow = 'hidden';
+    document.getElementById('overlay').dataset.articleId = id;
+    wrap.innerHTML = '<p style="color:var(--text-2);text-align:center;padding:60px 0">加载中...</p>';
+    fetch('/api/news/' + id)
+      .then(r => { if (!r.ok) throw new Error('not found'); return r.json(); })
+      .then(data => {
+        const coverSrc = data.thumb ? proxyImgSrc(data.thumb) : '';
+        const coverImg = coverSrc
+          ? `<div style="margin-bottom:20px"><img src="${coverSrc}" alt="" style="max-width:100%;border-radius:var(--radius);background:var(--bg-surface)"></div>`
+          : '';
+        wrap.innerHTML = `
+          <h1>${esc(data.title || '')}</h1>
+          <div class="article-meta">
+            <span class="badge" style="${badgeStyle(data.source || '')}">${esc(data.source || '')}</span>
+            <span>${formatTime(data.date || '', data.time || '')}</span>
+          </div>
+          ${coverImg}
+          <div class="article-body" id="articleBody">
+            <p style="color:var(--text-2);text-align:center;padding:40px 0">加载中...</p>
+          </div>
+        `;
+        renderArticleBody(wrap, data, id);
+      })
+      .catch(() => {
+        wrap.innerHTML = '<p style="color:var(--text-2);text-align:center;padding:60px 0">文章未找到</p>';
+      });
+    return;
+  }
+
+  // Already open for this article — skip
+  if (document.getElementById('overlay').classList.contains('open') && document.getElementById('overlay').dataset.articleId == id) return;
+
+  // Show placeholder immediately while body loads
+  const coverSrc = n.thumb ? proxyImgSrc(n.thumb) : '';
   const coverImg = coverSrc
     ? `<div style="margin-bottom:20px"><img src="${coverSrc}" alt="" style="max-width:100%;border-radius:var(--radius);background:var(--bg-surface)"></div>`
     : '';
-  if (n.body_html) {
-    body = `<div class="article-body">${coverImg}${proxyImages(n.body_html)}</div>`;
-  } else {
-    body = `<div class="article-body">${coverImg}<p style="color:var(--text-2);padding:40px 0;text-align:center">暂无全文内容<br><span style="font-size:13px;color:var(--text-3)">${esc(n.summary || '')}</span></p></div>`;
-  }
-
   wrap.innerHTML = `
     <h1>${esc(n.title)}</h1>
     <div class="article-meta">
       <span class="badge" style="${badgeStyle(n.source)}">${esc(n.source)}</span>
       <span>${formatTime(n.date, n.time)}</span>
     </div>
-    ${body}
+    ${coverImg}
+    <div class="article-body" id="articleBody">
+      <p style="color:var(--text-2);text-align:center;padding:40px 0">加载中...</p>
+    </div>
   `;
 
   document.getElementById('overlay').classList.add('open');
@@ -524,8 +579,28 @@ function openArticle(id) {
   const shortDate = n.date ? n.date.slice(2) : '';
   history.replaceState(null, '', '#/article/' + shortDate + '-' + n.id);
 
-  // Image lightbox
-  wrap.querySelectorAll('.article-body img').forEach(img => {
+  // Fetch full article body from API
+  fetch('/api/news/' + id)
+    .then(r => r.json())
+    .then(data => renderArticleBody(wrap, data, id))
+    .catch(() => {
+      const bodyEl = document.getElementById('articleBody');
+      if (bodyEl) bodyEl.innerHTML = '<p style="color:var(--text-2);padding:40px 0;text-align:center">加载失败</p>';
+    });
+}
+
+function renderArticleBody(wrap, data, id) {
+  const bodyEl = document.getElementById('articleBody');
+  if (!bodyEl) return;
+  if (data.body_html) {
+    bodyEl.innerHTML = proxyImages(data.body_html);
+  } else if (data.summary) {
+    bodyEl.innerHTML = `<p style="color:var(--text-2);padding:20px 0;text-align:center">暂无全文内容<br><span style="font-size:13px;color:var(--text-3)">${esc(data.summary || '')}</span></p>`;
+  } else {
+    bodyEl.innerHTML = `<p style="color:var(--text-2);padding:40px 0;text-align:center">暂无全文内容</p>`;
+  }
+  // Attach lightbox
+  bodyEl.querySelectorAll('img').forEach(img => {
     img.addEventListener('click', e => {
       e.stopPropagation();
       document.getElementById('lbImg').src = img.src;
@@ -685,8 +760,13 @@ window.addEventListener('hashchange', () => {
 });
 // Handle initial hash from shared URL
 setTimeout(handleHash, 200);
-// Auto-refresh every 5 minutes
-setInterval(loadData, 300000);
+// Auto-refresh: check for new articles every 60 seconds (incremental)
+setInterval(function() {
+  if (news.length > 0) {
+    const maxTs = Math.max(...news.map(n => n.timestamp));
+    loadSince(maxTs);
+  }
+}, 60000);
 // ═══ Mobile: swipe-to-go-back on article overlay ════════
 (function() {
   const overlay = document.getElementById('overlay');
