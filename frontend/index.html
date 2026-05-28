@@ -218,7 +218,7 @@ a:hover{text-decoration:underline}
     <div class="skeleton-item"><div class="skeleton-thumb"></div><div class="skeleton-lines"><div class="skeleton-line"></div><div class="skeleton-line"></div></div></div>
   </div>
   <div class="pagination" id="pagination"></div>
-  <div class="footer">RayNews - 👀open eyes to see the world. · 每 15 分钟更新 · v{{FULL_VERSION}}</div>
+  <div class="footer">RayNews - 👀open eyes to see the world. · 每 15 分钟更新 · {{FULL_VERSION}}</div>
   <div class="pull-indicator" id="pullIndicator"><span class="spin"></span>刷新中...</div>
 </div>
 
@@ -235,7 +235,7 @@ a:hover{text-decoration:underline}
 
 <script>
 const PAGE_SIZE = 30;
-const INITIAL_LOAD_SIZE = 200;  // Load enough for client-side pagination
+const INITIAL_LOAD_SIZE = 2000;  // Load enough for client-side pagination
 
 // Source category mapping (using abbreviated source names from fetcher)
 const CATEGORY_MAP = {

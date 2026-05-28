@@ -22,7 +22,7 @@ ARG FULL_VERSION_OVERRIDE=""
 COPY VERSION BETA_REVISION /app/
 RUN VERSION=$(cat /app/VERSION) && \
     BETA_REV=$(cat /app/BETA_REVISION) && \
-    FULL_VERSION="${FULL_VERSION_OVERRIDE:-${VERSION}-beta.${BETA_REV}}" && \
+    FULL_VERSION="${FULL_VERSION_OVERRIDE:-v${VERSION}-beta.${BETA_REV}}" && \
     sed -i "s/{{VERSION}}/$VERSION/g" /usr/share/nginx/html/sw.js && \
     sed -i "s/{{FULL_VERSION}}/$FULL_VERSION/g" /usr/share/nginx/html/index.html
 
