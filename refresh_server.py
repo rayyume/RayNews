@@ -22,13 +22,26 @@ DB_FILE = DATA_DIR / "news.db"
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [refresh] %(message)s")
 log = logging.getLogger("refresh")
 
+# Persistent SQLite connection — avoid connect overhead per request
+_db_conn = None
+
 
 def get_db() -> sqlite3.Connection:
-    """Open a read-only-ish connection to the SQLite DB."""
-    conn = sqlite3.connect(str(DB_FILE))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")  # allow concurrent read while writer active
-    return conn
+    global _db_conn
+    if _db_conn is None:
+        _db_conn = sqlite3.connect(str(DB_FILE))
+        _db_conn.row_factory = sqlite3.Row
+        _db_conn.execute("PRAGMA journal_mode=WAL")
+        _db_conn.execute("PRAGMA synchronous=NORMAL")
+    return _db_conn
+
+
+# In-memory cache for article detail responses — invalidated on fetcher run
+_article_cache: dict[int, bytes] = {}
+
+
+def clear_article_cache():
+    _article_cache.clear()
 
 
 def acquire_lock() -> bool:
@@ -68,6 +81,8 @@ def run_fetcher():
             "stderr": result.stderr[-300:],
         }).encode()
         log.info(f"Fetcher done (exit={result.returncode})")
+        if is_ok:
+            clear_article_cache()
         return body, 200 if is_ok else 500
     except subprocess.TimeoutExpired:
         body = json.dumps({"status": "error", "error": "timeout"}).encode()
@@ -92,7 +107,6 @@ def api_meta() -> bytes:
     try:
         conn = get_db()
         count = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
-        conn.close()
         return json.dumps({"count": count}).encode()
     except Exception as e:
         return json.dumps({"error": str(e)}).encode()
@@ -129,7 +143,6 @@ def api_news_list(params: dict) -> bytes:
                 (size, offset),
             ).fetchall()
             total = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
-        conn.close()
 
         items = [dict(r) for r in rows]
         return json.dumps({
@@ -143,16 +156,20 @@ def api_news_list(params: dict) -> bytes:
 
 
 def api_news_detail(article_id: int) -> bytes:
-    """GET /api/news/<id> — single article with body_html."""
+    """GET /api/news/<id> — single article with body_html (cached)."""
+    cached = _article_cache.get(article_id)
+    if cached is not None:
+        return cached
     try:
         conn = get_db()
         row = conn.execute(
             "SELECT * FROM articles WHERE id = ?", (article_id,)
         ).fetchone()
-        conn.close()
         if not row:
             return json.dumps({"error": "not found"}).encode()
-        return json.dumps(dict(row), ensure_ascii=False).encode()
+        result = json.dumps(dict(row), ensure_ascii=False).encode()
+        _article_cache[article_id] = result
+        return result
     except Exception as e:
         return json.dumps({"error": str(e)}).encode()
 
