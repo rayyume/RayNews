@@ -227,7 +227,7 @@ def _get_news_db():
     """Persistent connection to news.db for batch queries."""
     global _news_conn
     if _news_conn is None and os.path.exists(NEWS_DB):
-        _news_conn = sqlite3.connect(NEWS_DB)
+        _news_conn = sqlite3.connect(NEWS_DB, check_same_thread=False)
         _news_conn.row_factory = sqlite3.Row
     return _news_conn
 

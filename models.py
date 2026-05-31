@@ -61,7 +61,7 @@ def get_db() -> sqlite3.Connection:
     global _db
     if _db is None:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        _db = sqlite3.connect(str(DB_FILE))
+        _db = sqlite3.connect(str(DB_FILE), check_same_thread=False)
         _db.row_factory = sqlite3.Row
         _db.execute("PRAGMA journal_mode=WAL")
         _db.execute("PRAGMA foreign_keys=ON")
