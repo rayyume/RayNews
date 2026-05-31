@@ -43,8 +43,26 @@ self.addEventListener('activate', event => {
 self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
 
-  // ── API: network-first + background cache (no cold-start delay) ──
+  // ── API list: network-first + background cache (no cold-start delay) ──
   if (url.pathname.startsWith('/api/')) {
+    // Article detail: stale-while-revalidate (fast re-opens via SW cache)
+    if (/^\/api\/news\/\d+$/.test(url.pathname)) {
+      event.respondWith(
+        caches.open(API_CACHE).then(cache => {
+          return cache.match(event.request).then(cached => {
+            const fetchPromise = fetch(event.request).then(network => {
+              if (network.ok) {
+                cache.put(event.request, network.clone());
+              }
+              return network;
+            }).catch(() => cached);
+            return cached || fetchPromise;
+          });
+        })
+      );
+      return;
+    }
+    // List / other API: network-first (avoids cold-start cache delay)
     event.respondWith(
       fetch(event.request).then(network => {
         if (network.ok) {
