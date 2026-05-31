@@ -10,7 +10,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY fetcher.py refresh_server.py models.py auth.py web_server.py ai_service.py .
+COPY fetcher.py refresh_server.py models.py auth.py web_server.py ai_service.py notifier.py .
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY frontend/ /usr/share/nginx/html/
 

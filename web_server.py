@@ -392,6 +392,51 @@ def ai_translate(article_id):
         return jsonify({"error": f"AI request failed: {str(e)}"}), 502
 
 
+@app.route("/ai/daily-summary", methods=["POST"])
+@require_auth
+def ai_daily_summary():
+    config = get_ai_config(g.user_id)
+    if not config or not config.get("enabled"):
+        return jsonify({"error": "AI not configured. Go to Settings → AI to set up."}), 400
+    if not config.get("api_key"):
+        return jsonify({"error": "API key not configured"}), 400
+
+    # Fetch top 20 articles from news.db
+    articles = _fetch_recent_articles(20)
+    if not articles:
+        return jsonify({"error": "no articles available"}), 404
+
+    try:
+        svc = AIService(
+            api_key=config["api_key"],
+            endpoint=config["endpoint"],
+            model=config["model"],
+            provider_type=config.get("provider_type", "openai"),
+        )
+        summary = svc.daily_summary(articles)
+        return jsonify({"summary": summary, "article_count": len(articles)})
+    except Exception as e:
+        return jsonify({"error": f"AI request failed: {str(e)}"}), 502
+
+
+def _fetch_recent_articles(limit: int = 20) -> list[dict]:
+    """Fetch most recent articles from news.db."""
+    import sqlite3
+    if not os.path.exists(NEWS_DB):
+        return []
+    try:
+        conn = sqlite3.connect(NEWS_DB)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT id, title, source, date, time FROM articles ORDER BY timestamp DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
 def _fetch_article_body(article_id: int) -> dict | None:
     """Fetch full article body from news.db."""
     import sqlite3
@@ -408,6 +453,89 @@ def _fetch_article_body(article_id: int) -> dict | None:
         return dict(row) if row else None
     except Exception:
         return None
+
+
+# ─── Settings Routes ────────────────────────────────────────
+
+@app.route("/settings", methods=["GET"])
+@require_auth
+def get_settings():
+    settings = get_user_settings(g.user_id)
+    if not settings:
+        return jsonify({
+            "auto_translate_title": False,
+            "auto_translate_content": False,
+            "daily_summary_enabled": False,
+            "notification_config": {},
+        })
+    # Parse notification_config JSON
+    safe = dict(settings)
+    nc = safe.get("notification_config", "{}")
+    if isinstance(nc, str):
+        try:
+            nc = json.loads(nc)
+        except (json.JSONDecodeError, TypeError):
+            nc = {}
+    safe["notification_config"] = nc
+    return jsonify(safe)
+
+
+@app.route("/settings", methods=["PUT"])
+@require_auth
+def update_settings():
+    data = request.get_json(silent=True) or {}
+    # Normalize notification_config to JSON string for storage
+    if "notification_config" in data:
+        nc = data["notification_config"]
+        data["notification_config"] = json.dumps(nc) if isinstance(nc, dict) else nc
+    settings = set_user_settings(g.user_id, **data)
+    if not settings:
+        return jsonify({"error": "update failed"}), 400
+    # Parse back
+    safe = dict(settings)
+    nc = safe.get("notification_config", "{}")
+    if isinstance(nc, str):
+        try:
+            nc = json.loads(nc)
+        except (json.JSONDecodeError, TypeError):
+            nc = {}
+    safe["notification_config"] = nc
+    return jsonify(safe)
+
+
+import json
+
+
+@app.route("/settings/test-notification", methods=["POST"])
+@require_auth
+def test_notification():
+    """Send a test email via the user's configured notification channel."""
+    settings = get_user_settings(g.user_id)
+    if not settings:
+        return jsonify({"error": "settings not found"}), 400
+
+    nc = settings.get("notification_config", "{}")
+    if isinstance(nc, str):
+        try:
+            nc = json.loads(nc)
+        except (json.JSONDecodeError, TypeError):
+            nc = {}
+
+    config = nc.get("resend", {})
+    api_key = config.get("api_key", "")
+    to_email = config.get("to_email", "")
+
+    if not api_key or not to_email:
+        return jsonify({"error": "notification not configured. Set Resend API key and email in Settings."}), 400
+
+    try:
+        from notifier import send_email
+        result = send_email(api_key, to_email,
+                            "RayNews 测试通知",
+                            "<h2>✅ 配置成功</h2><p>这是一封来自 RayNews 的测试邮件，通知功能正常工作。</p>")
+        return jsonify({"ok": True, "id": result.get("id", "")})
+    except Exception as e:
+        return jsonify({"error": f"send failed: {str(e)}"}), 502
 
 
 # ─── Health (unused section divider) ────────────────────────

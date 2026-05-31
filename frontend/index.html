@@ -311,6 +311,11 @@ a:hover{text-decoration:underline}
 .ai-action-btn:disabled{opacity:0.4;cursor:default;border-color:var(--border);color:var(--text-3);background:var(--bg-card)}
 .ai-result{margin-top:12px;padding:14px 16px;background:var(--bg);border-radius:10px;font-size:13px;line-height:1.7;color:var(--text);border:1px solid var(--border);max-height:400px;overflow-y:auto;white-space:pre-wrap;word-break:break-word}
 .ai-hidden{display:none}
+
+/* ═══ Settings Tabs ══════════════════════════════════════ */
+.settings-tab{padding:8px 16px;border:none;background:none;color:var(--text-3);font-size:13px;font-weight:600;cursor:pointer;font-family:var(--font);border-bottom:2px solid transparent;margin-bottom:-1px;transition:all 0.15s}
+.settings-tab:hover{color:var(--text)}
+.settings-tab.active{color:var(--accent);border-bottom-color:var(--accent)}
 </style>
 </head>
 <body>
@@ -432,42 +437,89 @@ a:hover{text-decoration:underline}
 
 <div class="toast" id="toast"></div>
 
-<!-- ═══ AI Settings Panel ═════════════════════════════════ -->
+<!-- ═══ Settings Panel ═════════════════════════════════ -->
 <div class="ai-overlay" id="aiOverlay">
   <div class="ai-backdrop" onclick="closeAISettings()" style="position:absolute;inset:0"></div>
   <div class="ai-panel">
     <div class="ai-header">
-      <h2>🤖 AI 配置</h2>
+      <h2>⚙️ 设置</h2>
       <button class="ai-close" onclick="closeAISettings()">✕</button>
     </div>
-    <div class="ai-body" id="aiBody">
-      <label class="ai-label">API 格式</label>
-      <select class="ai-select" id="aiProviderType">
-        <option value="openai">OpenAI 兼容格式</option>
-        <option value="claude">Claude/Anthropic 格式</option>
-      </select>
-      <p class="ai-hint">DeepSeek、OpenAI、Ollama 选 OpenAI 格式；Anthropic Claude 选 Claude 格式；MiniMax 两者都支持</p>
-
-      <label class="ai-label">API 端点</label>
-      <input class="ai-input" id="aiEndpoint" placeholder="https://api.openai.com/v1">
-      <p class="ai-hint">例如：https://api.deepseek.com、https://api.minimax.chat/v1</p>
-
-      <label class="ai-label">API Key</label>
-      <input class="ai-input" id="aiApiKey" type="password" placeholder="sk-...">
-
-      <label class="ai-label">模型</label>
-      <input class="ai-input" id="aiModel" placeholder="gpt-4o-mini">
-
-      <label class="ai-label">服务商名称（仅用于显示）</label>
-      <input class="ai-input" id="aiProvider" placeholder="DeepSeek">
-
-      <div class="ai-toggle" onclick="document.getElementById('aiEnabled').click()">
-        <input type="checkbox" id="aiEnabled" onclick="event.stopPropagation()">
-        <span>启用 AI 功能</span>
+    <div class="ai-body" id="settingsBody">
+      <!-- Tabs -->
+      <div style="display:flex;gap:4px;margin-bottom:16px;border-bottom:1px solid var(--border);padding-bottom:0">
+        <button class="settings-tab active" data-tab="ai" onclick="switchSettingsTab('ai')">🤖 AI</button>
+        <button class="settings-tab" data-tab="notify" onclick="switchSettingsTab('notify')">🔔 通知</button>
+        <button class="settings-tab" data-tab="general" onclick="switchSettingsTab('general')">📋 通用</button>
       </div>
 
-      <div id="aiStatus"></div>
-      <button class="ai-save-btn" id="aiSaveBtn" onclick="saveAIConfig()">保存配置</button>
+      <!-- AI Tab -->
+      <div id="settingsTabAi">
+        <label class="ai-label">API 格式</label>
+        <select class="ai-select" id="aiProviderType">
+          <option value="openai">OpenAI 兼容格式</option>
+          <option value="claude">Claude/Anthropic 格式</option>
+        </select>
+        <p class="ai-hint">DeepSeek/Ollama 选 OpenAI；Anthropic 选 Claude</p>
+
+        <label class="ai-label">API 端点</label>
+        <input class="ai-input" id="aiEndpoint" placeholder="https://api.openai.com/v1">
+        <p class="ai-hint">例如：https://api.deepseek.com</p>
+
+        <label class="ai-label">API Key</label>
+        <input class="ai-input" id="aiApiKey" type="password" placeholder="sk-...">
+
+        <label class="ai-label">模型</label>
+        <input class="ai-input" id="aiModel" placeholder="gpt-4o-mini">
+
+        <label class="ai-label">服务商名称</label>
+        <input class="ai-input" id="aiProvider" placeholder="DeepSeek">
+
+        <div class="ai-toggle" onclick="document.getElementById('aiEnabled').click()">
+          <input type="checkbox" id="aiEnabled" onclick="event.stopPropagation()">
+          <span>启用 AI 功能</span>
+        </div>
+
+        <button class="ai-save-btn" onclick="saveAIConfig()">保存 AI 配置</button>
+      </div>
+
+      <!-- Notification Tab -->
+      <div id="settingsTabNotify" style="display:none">
+        <label class="ai-label">Resend API Key</label>
+        <input class="ai-input" id="notifyResendKey" type="password" placeholder="re_...">
+        <p class="ai-hint">在 <a href="https://resend.com" target="_blank" style="color:var(--accent)">resend.com</a> 获取</p>
+
+        <label class="ai-label">接收邮箱</label>
+        <input class="ai-input" id="notifyToEmail" type="email" placeholder="you@example.com">
+        <p class="ai-hint">用于接收每日摘要和测试通知</p>
+
+        <div class="ai-toggle" onclick="document.getElementById('dailySummaryToggle').click()">
+          <input type="checkbox" id="dailySummaryToggle" onclick="event.stopPropagation()">
+          <span>📅 每日摘要推送</span>
+        </div>
+
+        <button class="ai-save-btn" onclick="saveNotifyConfig()" style="margin-top:14px">保存通知配置</button>
+        <button class="ai-save-btn" onclick="testNotification()" style="margin-top:8px;background:var(--bg-card);color:var(--text);border:1px solid var(--border)">📧 发送测试邮件</button>
+      </div>
+
+      <!-- General Tab -->
+      <div id="settingsTabGeneral" style="display:none">
+        <div class="ai-toggle" onclick="document.getElementById('autoTranslateTitle').click()">
+          <input type="checkbox" id="autoTranslateTitle" onclick="event.stopPropagation()">
+          <span>🌐 自动翻译标题</span>
+        </div>
+
+        <div class="ai-toggle" onclick="document.getElementById('autoTranslateContent').click()" style="margin-top:8px">
+          <input type="checkbox" id="autoTranslateContent" onclick="event.stopPropagation()">
+          <span>📄 自动翻译内容</span>
+        </div>
+        <p class="ai-hint" style="margin-top:8px">开启后，打开文章时自动调用 AI 翻译</p>
+
+        <button class="ai-save-btn" onclick="saveGeneralSettings()" style="margin-top:16px">保存通用设置</button>
+        <button class="ai-save-btn" onclick="triggerDailySummary()" style="margin-top:8px;background:var(--bg-card);color:var(--text);border:1px solid var(--border)">📊 生成每日摘要</button>
+      </div>
+
+      <div id="settingsStatus"></div>
     </div>
   </div>
 </div>
@@ -761,17 +813,37 @@ document.addEventListener('click', e => {
   }
 });
 
-// ═══ AI Settings + Actions ═════════════════════════════
+// ═══ Settings (AI + Notification + General) ═════════════
 
 function openSettings() {
   closeUserMenu();
-  loadAIConfig();
   document.getElementById('aiOverlay').classList.add('open');
+  loadAIConfig();
+  loadNotifyConfig();
+  loadGeneralSettings();
+  document.getElementById('settingsStatus').className = '';
+  document.getElementById('settingsStatus').textContent = '';
 }
 
 function closeAISettings() {
   document.getElementById('aiOverlay').classList.remove('open');
 }
+
+function switchSettingsTab(tab) {
+  document.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
+  document.querySelector('.settings-tab[data-tab="' + tab + '"]').classList.add('active');
+  ['ai','notify','general'].forEach(t => {
+    document.getElementById('settingsTab' + t.charAt(0).toUpperCase() + t.slice(1)).style.display = t === tab ? '' : 'none';
+  });
+}
+
+function showSettingsStatus(msg, type) {
+  const el = document.getElementById('settingsStatus');
+  el.className = 'ai-status ' + (type || 'ok');
+  el.textContent = msg;
+}
+
+// ─── AI Config ───────────────────────────────────────────
 
 async function loadAIConfig() {
   try {
@@ -787,12 +859,6 @@ async function loadAIConfig() {
 }
 
 async function saveAIConfig() {
-  const btn = document.getElementById('aiSaveBtn');
-  btn.disabled = true;
-  btn.textContent = '保存中...';
-  const statusEl = document.getElementById('aiStatus');
-  statusEl.className = '';
-  statusEl.textContent = '';
   try {
     const resp = await fetch('/ai/config', {
       method: 'PUT',
@@ -807,21 +873,100 @@ async function saveAIConfig() {
       }),
     });
     const data = await resp.json();
-    if (data.error) {
-      statusEl.className = 'ai-status err';
-      statusEl.textContent = '❌ ' + data.error;
-    } else {
-      statusEl.className = 'ai-status ok';
-      statusEl.textContent = '✅ 配置已保存';
-      // Reload to get masked key
-      loadAIConfig();
-    }
-  } catch (e) {
-    statusEl.className = 'ai-status err';
-    statusEl.textContent = '❌ 保存失败';
-  }
-  btn.disabled = false;
-  btn.textContent = '保存配置';
+    if (data.error) { showSettingsStatus('❌ ' + data.error, 'err'); return; }
+    showSettingsStatus('✅ AI 配置已保存');
+    loadAIConfig();
+  } catch (e) { showSettingsStatus('❌ 保存失败', 'err'); }
+}
+
+// ─── Notification Config ─────────────────────────────────
+
+async function loadNotifyConfig() {
+  try {
+    const data = await apiFetch('/settings');
+    if (!data) return;
+    const nc = data.notification_config || {};
+    const resend = nc.resend || {};
+    document.getElementById('notifyResendKey').value = resend.api_key || '';
+    document.getElementById('notifyToEmail').value = resend.to_email || '';
+    document.getElementById('dailySummaryToggle').checked = !!data.daily_summary_enabled;
+  } catch (e) {}
+}
+
+async function saveNotifyConfig() {
+  // First get existing settings
+  const existing = await apiFetch('/settings') || {};
+  const nc = (existing.notification_config || {});
+  nc.resend = {
+    api_key: document.getElementById('notifyResendKey').value,
+    to_email: document.getElementById('notifyToEmail').value,
+  };
+  try {
+    const resp = await fetch('/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
+      body: JSON.stringify({
+        notification_config: nc,
+        daily_summary_enabled: document.getElementById('dailySummaryToggle').checked ? 1 : 0,
+      }),
+    });
+    const data = await resp.json();
+    if (data.error) { showSettingsStatus('❌ ' + data.error, 'err'); return; }
+    showSettingsStatus('✅ 通知配置已保存');
+    loadNotifyConfig();
+  } catch (e) { showSettingsStatus('❌ 保存失败', 'err'); }
+}
+
+async function testNotification() {
+  showSettingsStatus('📧 正在发送...');
+  try {
+    const data = await apiFetch('/settings/test-notification', { method: 'POST' });
+    if (!data) { showSettingsStatus('❌ 请求失败', 'err'); return; }
+    if (data.error) { showSettingsStatus('❌ ' + data.error, 'err'); return; }
+    showSettingsStatus('✅ 测试邮件已发送！ID: ' + (data.id || ''));
+  } catch (e) { showSettingsStatus('❌ 发送失败', 'err'); }
+}
+
+// ─── General Settings ────────────────────────────────────
+
+async function loadGeneralSettings() {
+  try {
+    const data = await apiFetch('/settings');
+    if (!data) return;
+    document.getElementById('autoTranslateTitle').checked = !!data.auto_translate_title;
+    document.getElementById('autoTranslateContent').checked = !!data.auto_translate_content;
+  } catch (e) {}
+}
+
+async function saveGeneralSettings() {
+  try {
+    const resp = await fetch('/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
+      body: JSON.stringify({
+        auto_translate_title: document.getElementById('autoTranslateTitle').checked ? 1 : 0,
+        auto_translate_content: document.getElementById('autoTranslateContent').checked ? 1 : 0,
+      }),
+    });
+    const data = await resp.json();
+    if (data.error) { showSettingsStatus('❌ ' + data.error, 'err'); return; }
+    showSettingsStatus('✅ 通用设置已保存');
+  } catch (e) { showSettingsStatus('❌ 保存失败', 'err'); }
+}
+
+// ─── Daily Summary ───────────────────────────────────────
+
+async function triggerDailySummary() {
+  showSettingsStatus('📊 正在生成每日摘要...');
+  try {
+    const data = await apiFetch('/ai/daily-summary', { method: 'POST' });
+    if (!data) { showSettingsStatus('❌ 请求失败', 'err'); return; }
+    if (data.error) { showSettingsStatus('❌ ' + data.error, 'err'); return; }
+    // Show result in a scrollable area
+    const el = document.getElementById('settingsStatus');
+    el.className = 'ai-status ok';
+    el.innerHTML = '✅ 基于 ' + data.article_count + ' 篇文章生成：<br><br><div style="max-height:300px;overflow-y:auto;white-space:pre-wrap;font-size:12px;line-height:1.6;padding:8px;background:var(--bg);border-radius:6px;margin-top:4px">' + esc(data.summary) + '</div>';
+  } catch (e) { showSettingsStatus('❌ 生成失败', 'err'); }
 }
 
 // ═══ AI Actions on Article ═══════════════════════════════
