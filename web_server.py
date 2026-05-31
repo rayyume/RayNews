@@ -124,6 +124,22 @@ def admin_set_role(user_id):
 
 # ─── Health ───────────────────────────────────────────────────
 
+# ─── Preview-restricted Refresh ──────────────────────────
+
+@app.route("/auth/refresh", methods=["POST", "GET"])
+@require_role("user", "admin")
+def protected_refresh():
+    """Trigger fetcher refresh. Protected from preview users."""
+    import requests as http_req
+    try:
+        resp = http_req.get("http://127.0.0.1:8081/refresh", timeout=30)
+        return jsonify(resp.json()), resp.status_code
+    except Exception as e:
+        return jsonify({"error": str(e)}), 502
+
+
+# ─── Health ───────────────────────────────────────────────────
+
 @app.route("/auth/health", methods=["GET"])
 def health():
     return jsonify({"ok": True})

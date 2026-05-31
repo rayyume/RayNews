@@ -491,6 +491,10 @@ function updateUserUI() {
       document.getElementById('userAvatarLetter').textContent = (authUser.nickname || authUser.email)[0].toUpperCase();
     }
     document.getElementById('adminPanelBtn').style.display = authUser.role === 'admin' ? '' : 'none';
+
+    // Preview users: hide refresh button
+    const refreshBtn = document.querySelector('.refresh-btn');
+    if (refreshBtn) refreshBtn.style.display = authUser.role === 'preview' ? 'none' : '';
   } else {
     // Show login button in header
     const existingAvatar = document.querySelector('.header-avatar');
@@ -537,8 +541,21 @@ function getCategory(source) {
 }
 
 async function triggerRefresh() {
+  // Preview users cannot refresh
+  if (authUser && authUser.role === 'preview') {
+    showToast('🔒 预览用户无此权限');
+    resetPullIndicator();
+    return;
+  }
+
   // Fire the refresh request in background
-  fetch('/refresh', { cache: 'no-store' }).catch(() => {});
+  let refreshUrl = '/refresh';
+  let fetchOpts = { cache: 'no-store' };
+  if (authToken) {
+    refreshUrl = '/auth/refresh';
+    fetchOpts = { method: 'POST', headers: { 'Authorization': 'Bearer ' + authToken } };
+  }
+  fetch(refreshUrl, fetchOpts).catch(() => {});
   showToast('🔄 正在后台抓取...');
 
   const beforeTs = news.length > 0 ? Math.max(...news.map(n => n.timestamp)) : 0;
@@ -808,6 +825,11 @@ function renderList() {
 }
 
 function renderPagination(totalPages) {
+  // Preview users: no pagination
+  if (authUser && authUser.role === 'preview') {
+    document.getElementById('pagination').innerHTML = '';
+    return;
+  }
   const el = document.getElementById('pagination');
   if (totalPages <= 1) { el.innerHTML = ''; return; }
   el.innerHTML = `
@@ -1198,6 +1220,7 @@ setInterval(function() {
   document.addEventListener('touchstart', e => {
     if (document.getElementById('overlay').classList.contains('open')) return;
     if (window.scrollY > 0) return;
+    if (authUser && authUser.role === 'preview') return;
     if (e.target.closest('.sidebar') || e.target.closest('.sidebar-toggle') || e.target.closest('.refresh-btn') || e.target.closest('.page-btn')) return;
     startY = e.touches[0].clientY;
     pulling = true;
