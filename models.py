@@ -1,0 +1,139 @@
+"""RayNews data models — user auth, favorites, AI configs, settings."""
+
+import sqlite3
+import json
+import bcrypt
+from pathlib import Path
+
+DATA_DIR = Path(__file__).parent / "data"
+DB_FILE = DATA_DIR / "raynews.db"
+
+# ─── Schema ───────────────────────────────────────────────────
+
+SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS users (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    email       TEXT    NOT NULL UNIQUE,
+    password    TEXT    NOT NULL,
+    nickname    TEXT    NOT NULL DEFAULT '',
+    role        TEXT    NOT NULL DEFAULT 'user'
+                        CHECK(role IN ('preview', 'user', 'admin')),
+    avatar_url  TEXT    NOT NULL DEFAULT '',
+    created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS favorites (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    article_id  INTEGER NOT NULL,
+    created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(user_id, article_id)
+);
+
+CREATE TABLE IF NOT EXISTS ai_configs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    provider    TEXT    NOT NULL DEFAULT 'openai',
+    api_key     TEXT    NOT NULL DEFAULT '',
+    endpoint    TEXT    NOT NULL DEFAULT 'https://api.openai.com/v1',
+    model       TEXT    NOT NULL DEFAULT 'gpt-4o-mini',
+    enabled     INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS user_settings (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id                 INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    auto_translate_title    INTEGER NOT NULL DEFAULT 0,
+    auto_translate_content  INTEGER NOT NULL DEFAULT 0,
+    daily_summary_enabled   INTEGER NOT NULL DEFAULT 0,
+    notification_config     TEXT    NOT NULL DEFAULT '{}'
+);
+"""
+
+# ─── Connection ───────────────────────────────────────────────
+
+_db = None
+
+
+def get_db() -> sqlite3.Connection:
+    global _db
+    if _db is None:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        _db = sqlite3.connect(str(DB_FILE))
+        _db.row_factory = sqlite3.Row
+        _db.execute("PRAGMA journal_mode=WAL")
+        _db.execute("PRAGMA foreign_keys=ON")
+        _db.executescript(SCHEMA_SQL)
+    return _db
+
+
+# ─── User helpers ─────────────────────────────────────────────
+
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    return bcrypt.checkpw(password.encode(), hashed.encode())
+
+
+def create_user(email: str, password: str, nickname: str = "",
+                role: str = "user") -> dict | None:
+    db = get_db()
+    try:
+        cur = db.execute(
+            "INSERT INTO users (email, password, nickname, role) VALUES (?, ?, ?, ?)",
+            (email, hash_password(password), nickname, role),
+        )
+        db.commit()
+        return get_user(cur.lastrowid)
+    except sqlite3.IntegrityError:
+        return None  # duplicate email
+
+
+def get_user(user_id: int) -> dict | None:
+    db = get_db()
+    row = db.execute(
+        "SELECT id, email, nickname, role, avatar_url, created_at FROM users WHERE id = ?",
+        (user_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_user_by_email(email: str) -> dict | None:
+    db = get_db()
+    row = db.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+    return dict(row) if row else None
+
+
+def update_user(user_id: int, **kwargs) -> dict | None:
+    allowed = {"nickname", "avatar_url", "role"}
+    updates = {k: v for k, v in kwargs.items() if k in allowed}
+    if not updates:
+        return get_user(user_id)
+    sets = ", ".join(f"{k} = ?" for k in updates)
+    vals = list(updates.values()) + [user_id]
+    db = get_db()
+    db.execute(f"UPDATE users SET {sets} WHERE id = ?", vals)
+    db.commit()
+    return get_user(user_id)
+
+
+def delete_user(user_id: int) -> bool:
+    db = get_db()
+    cur = db.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    db.commit()
+    return cur.rowcount > 0
+
+
+def list_users() -> list[dict]:
+    db = get_db()
+    rows = db.execute(
+        "SELECT id, email, nickname, role, avatar_url, created_at FROM users ORDER BY id"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def count_users() -> int:
+    db = get_db()
+    return db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
