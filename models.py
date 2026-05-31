@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS ai_configs (
     api_key     TEXT    NOT NULL DEFAULT '',
     endpoint    TEXT    NOT NULL DEFAULT 'https://api.openai.com/v1',
     model       TEXT    NOT NULL DEFAULT 'gpt-4o-mini',
+    provider_type TEXT NOT NULL DEFAULT 'openai'
+                    CHECK(provider_type IN ('openai', 'claude')),
     enabled     INTEGER NOT NULL DEFAULT 0
 );
 
@@ -64,6 +66,11 @@ def get_db() -> sqlite3.Connection:
         _db.execute("PRAGMA journal_mode=WAL")
         _db.execute("PRAGMA foreign_keys=ON")
         _db.executescript(SCHEMA_SQL)
+        # Migration: add provider_type column if it doesn't exist (pre-v3 schema)
+        try:
+            _db.execute("ALTER TABLE ai_configs ADD COLUMN provider_type TEXT NOT NULL DEFAULT 'openai'")
+        except sqlite3.OperationalError:
+            pass  # column already exists
     return _db
 
 
@@ -185,3 +192,79 @@ def is_favorited(user_id: int, article_id: int) -> bool:
         (user_id, article_id),
     ).fetchone()
     return row is not None
+
+
+# ─── AI Config ─────────────────────────────────────────────
+
+
+def get_ai_config(user_id: int) -> dict | None:
+    db = get_db()
+    row = db.execute(
+        "SELECT id, provider, api_key, endpoint, model, provider_type, enabled "
+        "FROM ai_configs WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def set_ai_config(user_id: int, **kwargs) -> dict:
+    """Upsert AI config. Allowed keys: provider, api_key, endpoint, model, provider_type, enabled."""
+    allowed = {"provider", "api_key", "endpoint", "model", "provider_type", "enabled"}
+    updates = {k: v for k, v in kwargs.items() if k in allowed}
+    if not updates:
+        return get_ai_config(user_id) or {}
+    db = get_db()
+    existing = get_ai_config(user_id)
+    if existing:
+        sets = ", ".join(f"{k} = ?" for k in updates)
+        vals = list(updates.values()) + [user_id]
+        db.execute(f"UPDATE ai_configs SET {sets} WHERE user_id = ?", vals)
+    else:
+        keys = ", ".join(updates.keys())
+        placeholders = ", ".join("?" for _ in updates)
+        vals = list(updates.values())
+        db.execute(
+            f"INSERT INTO ai_configs (user_id, {keys}) VALUES (?, {placeholders})",
+            [user_id] + vals,
+        )
+    db.commit()
+    return get_ai_config(user_id)
+
+
+# ─── User Settings ─────────────────────────────────────────
+
+
+def get_user_settings(user_id: int) -> dict | None:
+    db = get_db()
+    row = db.execute(
+        "SELECT id, auto_translate_title, auto_translate_content, "
+        "daily_summary_enabled, notification_config "
+        "FROM user_settings WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def set_user_settings(user_id: int, **kwargs) -> dict:
+    """Upsert settings."""
+    allowed = {"auto_translate_title", "auto_translate_content",
+               "daily_summary_enabled", "notification_config"}
+    updates = {k: v for k, v in kwargs.items() if k in allowed}
+    if not updates:
+        return get_user_settings(user_id) or {}
+    db = get_db()
+    existing = get_user_settings(user_id)
+    if existing:
+        sets = ", ".join(f"{k} = ?" for k in updates)
+        vals = list(updates.values()) + [user_id]
+        db.execute(f"UPDATE user_settings SET {sets} WHERE user_id = ?", vals)
+    else:
+        keys = ", ".join(updates.keys())
+        placeholders = ", ".join("?" for _ in updates)
+        vals = list(updates.values())
+        db.execute(
+            f"INSERT INTO user_settings (user_id, {keys}) VALUES (?, {placeholders})",
+            [user_id] + vals,
+        )
+    db.commit()
+    return get_user_settings(user_id)

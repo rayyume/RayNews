@@ -276,6 +276,41 @@ a:hover{text-decoration:underline}
 .fav-item-meta{font-size:11px;color:var(--text-3);margin-top:4px;display:flex;align-items:center;gap:8px}
 .fav-unfav{background:none;border:1px solid var(--border);color:var(--text-3);padding:2px 8px;border-radius:6px;font-size:11px;cursor:pointer;font-family:var(--font);transition:all 0.15s;flex-shrink:0}
 .fav-unfav:hover{border-color:#ef4444;color:#ef4444}
+
+/* ═══ AI Settings Panel ═══════════════════════════════════ */
+.ai-overlay{position:fixed;inset:0;z-index:400;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity 0.2s}
+.ai-overlay.open{opacity:1;pointer-events:auto}
+.ai-panel{background:var(--bg-card);border:1px solid var(--border);border-radius:16px;width:480px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.4)}
+.ai-header{display:flex;align-items:center;justify-content:space-between;padding:20px 24px;border-bottom:1px solid var(--border);flex-shrink:0}
+.ai-header h2{margin:0;font-size:18px;font-weight:700}
+.ai-close{background:none;border:none;color:var(--text-3);font-size:18px;cursor:pointer;padding:4px 8px;border-radius:6px;transition:all 0.15s}
+.ai-close:hover{background:var(--bg-card-hover);color:var(--text)}
+.ai-body{overflow-y:auto;padding:20px 24px;flex:1}
+.ai-label{display:block;font-size:12px;font-weight:700;color:var(--text-3);margin-bottom:4px;margin-top:14px}
+.ai-label:first-child{margin-top:0}
+.ai-input{width:100%;padding:9px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:13px;font-family:var(--font);outline:none;transition:border-color 0.15s;box-sizing:border-box}
+.ai-input:focus{border-color:var(--accent)}
+.ai-input::placeholder{color:var(--text-3)}
+.ai-select{width:100%;padding:9px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:13px;font-family:var(--font);outline:none;cursor:pointer;transition:border-color 0.15s;box-sizing:border-box;-webkit-appearance:none;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M3 5l3 3 3-3' stroke='%238b8b9e' stroke-width='1.5' fill='none'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center}
+.ai-select:focus{border-color:var(--accent)}
+.ai-hint{font-size:11px;color:var(--text-3);margin-top:4px}
+.ai-toggle{display:flex;align-items:center;gap:10px;margin-top:14px;padding:12px 16px;background:var(--bg);border-radius:10px;cursor:pointer}
+.ai-toggle input[type=checkbox]{width:18px;height:18px;accent-color:var(--accent);cursor:pointer}
+.ai-toggle span{font-size:13px;font-weight:600;color:var(--text)}
+.ai-save-btn{width:100%;padding:10px;margin-top:16px;border:none;border-radius:10px;background:var(--accent);color:#fff;font-size:14px;font-weight:700;cursor:pointer;font-family:var(--font);transition:opacity 0.15s}
+.ai-save-btn:hover{opacity:0.85}
+.ai-save-btn:disabled{opacity:0.4;cursor:default}
+.ai-status{padding:8px 12px;border-radius:8px;font-size:12px;margin-top:12px}
+.ai-status.ok{background:rgba(34,197,94,0.12);color:#22c55e}
+.ai-status.err{background:rgba(239,68,68,0.12);color:#ef4444}
+
+/* ═══ AI Action Buttons in Article ════════════════════════ */
+.ai-actions{display:flex;gap:8px;margin:16px 0;flex-wrap:wrap}
+.ai-action-btn{padding:6px 14px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-2);font-size:12px;font-weight:600;cursor:pointer;font-family:var(--font);transition:all 0.15s;display:flex;align-items:center;gap:6px}
+.ai-action-btn:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-dim)}
+.ai-action-btn:disabled{opacity:0.4;cursor:default;border-color:var(--border);color:var(--text-3);background:var(--bg-card)}
+.ai-result{margin-top:12px;padding:14px 16px;background:var(--bg);border-radius:10px;font-size:13px;line-height:1.7;color:var(--text);border:1px solid var(--border);max-height:400px;overflow-y:auto;white-space:pre-wrap;word-break:break-word}
+.ai-hidden{display:none}
 </style>
 </head>
 <body>
@@ -396,6 +431,46 @@ a:hover{text-decoration:underline}
 </div>
 
 <div class="toast" id="toast"></div>
+
+<!-- ═══ AI Settings Panel ═════════════════════════════════ -->
+<div class="ai-overlay" id="aiOverlay">
+  <div class="ai-backdrop" onclick="closeAISettings()" style="position:absolute;inset:0"></div>
+  <div class="ai-panel">
+    <div class="ai-header">
+      <h2>🤖 AI 配置</h2>
+      <button class="ai-close" onclick="closeAISettings()">✕</button>
+    </div>
+    <div class="ai-body" id="aiBody">
+      <label class="ai-label">API 格式</label>
+      <select class="ai-select" id="aiProviderType">
+        <option value="openai">OpenAI 兼容格式</option>
+        <option value="claude">Claude/Anthropic 格式</option>
+      </select>
+      <p class="ai-hint">DeepSeek、OpenAI、Ollama 选 OpenAI 格式；Anthropic Claude 选 Claude 格式；MiniMax 两者都支持</p>
+
+      <label class="ai-label">API 端点</label>
+      <input class="ai-input" id="aiEndpoint" placeholder="https://api.openai.com/v1">
+      <p class="ai-hint">例如：https://api.deepseek.com、https://api.minimax.chat/v1</p>
+
+      <label class="ai-label">API Key</label>
+      <input class="ai-input" id="aiApiKey" type="password" placeholder="sk-...">
+
+      <label class="ai-label">模型</label>
+      <input class="ai-input" id="aiModel" placeholder="gpt-4o-mini">
+
+      <label class="ai-label">服务商名称（仅用于显示）</label>
+      <input class="ai-input" id="aiProvider" placeholder="DeepSeek">
+
+      <div class="ai-toggle" onclick="document.getElementById('aiEnabled').click()">
+        <input type="checkbox" id="aiEnabled" onclick="event.stopPropagation()">
+        <span>启用 AI 功能</span>
+      </div>
+
+      <div id="aiStatus"></div>
+      <button class="ai-save-btn" id="aiSaveBtn" onclick="saveAIConfig()">保存配置</button>
+    </div>
+  </div>
+</div>
 
 <button class="scroll-top-btn" id="scrollTopBtn" onclick="goHome()" title="回到首页并刷新">↑</button>
 
@@ -686,8 +761,113 @@ document.addEventListener('click', e => {
   }
 });
 
-// Placeholder functions for future phases
-function openSettings() { closeUserMenu(); showToast('⚙️ 设置功能即将推出'); }
+// ═══ AI Settings + Actions ═════════════════════════════
+
+function openSettings() {
+  closeUserMenu();
+  loadAIConfig();
+  document.getElementById('aiOverlay').classList.add('open');
+}
+
+function closeAISettings() {
+  document.getElementById('aiOverlay').classList.remove('open');
+}
+
+async function loadAIConfig() {
+  try {
+    const data = await apiFetch('/ai/config');
+    if (!data) return;
+    document.getElementById('aiProviderType').value = data.provider_type || 'openai';
+    document.getElementById('aiEndpoint').value = data.endpoint || '';
+    document.getElementById('aiApiKey').value = data.api_key || '';
+    document.getElementById('aiModel').value = data.model || '';
+    document.getElementById('aiProvider').value = data.provider || '';
+    document.getElementById('aiEnabled').checked = !!data.enabled;
+  } catch (e) {}
+}
+
+async function saveAIConfig() {
+  const btn = document.getElementById('aiSaveBtn');
+  btn.disabled = true;
+  btn.textContent = '保存中...';
+  const statusEl = document.getElementById('aiStatus');
+  statusEl.className = '';
+  statusEl.textContent = '';
+  try {
+    const resp = await fetch('/ai/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
+      body: JSON.stringify({
+        provider: document.getElementById('aiProvider').value,
+        api_key: document.getElementById('aiApiKey').value,
+        endpoint: document.getElementById('aiEndpoint').value,
+        model: document.getElementById('aiModel').value,
+        provider_type: document.getElementById('aiProviderType').value,
+        enabled: document.getElementById('aiEnabled').checked ? 1 : 0,
+      }),
+    });
+    const data = await resp.json();
+    if (data.error) {
+      statusEl.className = 'ai-status err';
+      statusEl.textContent = '❌ ' + data.error;
+    } else {
+      statusEl.className = 'ai-status ok';
+      statusEl.textContent = '✅ 配置已保存';
+      // Reload to get masked key
+      loadAIConfig();
+    }
+  } catch (e) {
+    statusEl.className = 'ai-status err';
+    statusEl.textContent = '❌ 保存失败';
+  }
+  btn.disabled = false;
+  btn.textContent = '保存配置';
+}
+
+// ═══ AI Actions on Article ═══════════════════════════════
+
+async function aiSummarize(articleId) {
+  const btn = document.querySelector('.ai-summarize-btn');
+  const resultEl = document.getElementById('aiSummaryResult');
+  if (btn) btn.disabled = true;
+  resultEl.classList.remove('ai-hidden');
+  resultEl.textContent = '⏳ 正在生成摘要...';
+  try {
+    const data = await apiFetch('/ai/summarize/' + articleId, { method: 'POST' });
+    if (!data) { resultEl.textContent = '❌ 请求失败'; return; }
+    if (data.error) { resultEl.textContent = '❌ ' + data.error; return; }
+    resultEl.textContent = data.summary;
+  } catch (e) {
+    resultEl.textContent = '❌ 网络错误';
+  }
+  if (btn) btn.disabled = false;
+}
+
+async function aiTranslate(articleId) {
+  const btn = document.querySelector('.ai-translate-btn');
+  const resultEl = document.getElementById('aiTranslationResult');
+  if (btn) btn.disabled = true;
+  resultEl.classList.remove('ai-hidden');
+  resultEl.textContent = '⏳ 正在翻译...';
+  try {
+    const data = await apiFetch('/ai/translate/' + articleId, { method: 'POST' });
+    if (!data) { resultEl.textContent = '❌ 请求失败'; return; }
+    if (data.error) { resultEl.textContent = '❌ ' + data.error; return; }
+    resultEl.textContent = data.translation;
+  } catch (e) {
+    resultEl.textContent = '❌ 网络错误';
+  }
+  if (btn) btn.disabled = false;
+}
+
+function showAIActions(articleId) {
+  const aiSection = document.getElementById('aiActions');
+  if (!aiSection) return;
+  aiSection.dataset.articleId = articleId;
+  // Reset results
+  document.getElementById('aiSummaryResult').classList.add('ai-hidden');
+  document.getElementById('aiTranslationResult').classList.add('ai-hidden');
+}
 
 // ═══ Favorites ════════════════════════════════════════
 
@@ -1267,6 +1447,12 @@ function openArticle(id) {
           <span>${formatTime(data.date || '', data.time || '')}</span>
         </div>
         ${coverImg}
+        <div class="ai-actions" id="aiActions" data-article-id="${id}">
+          <button class="ai-action-btn ai-summarize-btn" onclick="aiSummarize(${id})">📝 摘要</button>
+          <button class="ai-action-btn ai-translate-btn" onclick="aiTranslate(${id})">🌐 翻译</button>
+        </div>
+        <div id="aiSummaryResult" class="ai-result ai-hidden"></div>
+        <div id="aiTranslationResult" class="ai-result ai-hidden"></div>
         <div class="article-body" id="articleBody">
           <p style="color:var(--text-2);text-align:center;padding:40px 0">加载中...</p>
         </div>
@@ -1305,6 +1491,12 @@ function openArticle(id) {
       <span>${formatTime(n.date, n.time)}</span>
     </div>
     ${coverImg}
+    <div class="ai-actions" id="aiActions" data-article-id="${id}">
+      <button class="ai-action-btn ai-summarize-btn" onclick="aiSummarize(${id})">📝 摘要</button>
+      <button class="ai-action-btn ai-translate-btn" onclick="aiTranslate(${id})">🌐 翻译</button>
+    </div>
+    <div id="aiSummaryResult" class="ai-result ai-hidden"></div>
+    <div id="aiTranslationResult" class="ai-result ai-hidden"></div>
     <div class="article-body" id="articleBody">
       <p style="color:var(--text-2);text-align:center;padding:40px 0">加载中...</p>
     </div>

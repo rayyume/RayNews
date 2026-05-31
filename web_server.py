@@ -14,8 +14,10 @@ from models import (
     update_user, delete_user, list_users, count_users,
     verify_password,
     add_favorite, remove_favorite, get_favorites, is_favorited,
+    get_ai_config, set_ai_config, get_user_settings, set_user_settings,
 )
 from auth import init_auth, create_token, require_auth, require_role
+from ai_service import AIService
 
 # ─── App Setup ────────────────────────────────────────────────
 
@@ -293,6 +295,119 @@ def remove_favorite_route(article_id):
 @require_auth
 def favorite_status(article_id):
     return jsonify({"favorited": is_favorited(g.user_id, article_id)})
+
+
+# ─── AI Routes ─────────────────────────────────────────────
+
+@app.route("/ai/config", methods=["GET"])
+@require_auth
+def get_ai_config_route():
+    config = get_ai_config(g.user_id)
+    if not config:
+        return jsonify({
+            "provider": "openai",
+            "endpoint": "https://api.openai.com/v1",
+            "model": "gpt-4o-mini",
+            "provider_type": "openai",
+            "enabled": False,
+            "api_key": "",
+        })
+    # Mask API key for security
+    safe = dict(config)
+    if safe.get("api_key"):
+        k = safe["api_key"]
+        safe["api_key"] = k[:6] + "****" + k[-4:] if len(k) > 10 else "****"
+    return jsonify(safe)
+
+
+@app.route("/ai/config", methods=["PUT"])
+@require_auth
+def set_ai_config_route():
+    data = request.get_json(silent=True) or {}
+    config = set_ai_config(g.user_id, **data)
+    # Mask API key in response
+    safe = dict(config) if config else {}
+    if safe.get("api_key"):
+        k = safe["api_key"]
+        safe["api_key"] = k[:6] + "****" + k[-4:] if len(k) > 10 else "****"
+    return jsonify(safe)
+
+
+@app.route("/ai/summarize/<int:article_id>", methods=["POST"])
+@require_auth
+def ai_summarize(article_id):
+    config = get_ai_config(g.user_id)
+    if not config or not config.get("enabled"):
+        return jsonify({"error": "AI not configured. Go to Settings → AI to set up."}), 400
+    if not config.get("api_key"):
+        return jsonify({"error": "API key not configured"}), 400
+
+    # Fetch article content from news.db
+    article = _fetch_article_body(article_id)
+    if not article:
+        return jsonify({"error": "article not found"}), 404
+
+    try:
+        svc = AIService(
+            api_key=config["api_key"],
+            endpoint=config["endpoint"],
+            model=config["model"],
+            provider_type=config.get("provider_type", "openai"),
+        )
+        summary = svc.summarize(
+            article_text=article.get("body_html") or article.get("summary") or "",
+            title=article.get("title", ""),
+        )
+        return jsonify({"summary": summary})
+    except Exception as e:
+        return jsonify({"error": f"AI request failed: {str(e)}"}), 502
+
+
+@app.route("/ai/translate/<int:article_id>", methods=["POST"])
+@require_auth
+def ai_translate(article_id):
+    config = get_ai_config(g.user_id)
+    if not config or not config.get("enabled"):
+        return jsonify({"error": "AI not configured. Go to Settings → AI to set up."}), 400
+    if not config.get("api_key"):
+        return jsonify({"error": "API key not configured"}), 400
+
+    article = _fetch_article_body(article_id)
+    if not article:
+        return jsonify({"error": "article not found"}), 404
+
+    try:
+        svc = AIService(
+            api_key=config["api_key"],
+            endpoint=config["endpoint"],
+            model=config["model"],
+            provider_type=config.get("provider_type", "openai"),
+        )
+        translation = svc.translate(
+            article_text=article.get("body_html") or article.get("summary") or "",
+            title=article.get("title", ""),
+        )
+        return jsonify({"translation": translation})
+    except Exception as e:
+        return jsonify({"error": f"AI request failed: {str(e)}"}), 502
+
+
+def _fetch_article_body(article_id: int) -> dict | None:
+    """Fetch full article body from news.db."""
+    import sqlite3
+    if not os.path.exists(NEWS_DB):
+        return None
+    try:
+        conn = sqlite3.connect(NEWS_DB)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT id, title, source, summary, body_html FROM articles WHERE id = ?",
+            (article_id,),
+        ).fetchone()
+        conn.close()
+        return dict(row) if row else None
+    except Exception:
+        return None
 
 
 # ─── Health (unused section divider) ────────────────────────
