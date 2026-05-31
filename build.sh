@@ -81,20 +81,25 @@ elif [ "$CURRENT_BRANCH" = "main" ]; then
   if [ -n "$LAST_TAG" ]; then
     LOG=$(git log "$LAST_TAG"..HEAD --oneline --no-merges --format="  - %s" | grep -viE 'bump|chore|beta' | head -10)
     [ -z "$LOG" ] && LOG="  - 常规更新"
-    RELEASE_NOTES="### 主要改动\\n$LOG"
+    RELEASE_NOTES="### **Debug**\\n$LOG"
   else
-    RELEASE_NOTES="### 主要改动\\n- 初始正式发布 v${VERSION}"
+    RELEASE_NOTES="### **Debug**\\n- 初始正式发布 v${VERSION}"
   fi
 
   # Extract GitHub token from remote URL (https://user:TOKEN@github.com/...)
   REMOTE_URL=$(git remote get-url origin)
   GITHUB_TOKEN=$(echo "$REMOTE_URL" | sed 's|.*://[^:]*:\([^@]*\)@.*|\1|')
 
-  curl -sL -X POST \
+  # Build release notes JSON safely with Python
+  python3 -c "
+import json
+payload = json.dumps({'tag_name': 'v${VERSION}', 'name': 'v${VERSION}', 'body': '''${RELEASE_NOTES}'''})
+print(payload)
+" | curl -sL -X POST \
     -H "Accept: application/vnd.github+json" \
     -H "Authorization: token $GITHUB_TOKEN" \
     https://api.github.com/repos/rayyume/RayNews/releases \
-    -d "$(printf '{"tag_name":"v%s","name":"v%s","body":"%s"}' "$VERSION" "$VERSION" "$RELEASE_NOTES")" > /dev/null
+    -d @- > /dev/null
   echo "=== Release v${VERSION} created ==="
 
 else
