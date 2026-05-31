@@ -250,6 +250,8 @@ let news = [];
 let filter = 'all';
 let currentPage = 1;
 let _pendingUpdate = false;
+// In-memory cache for article bodies — avoids re-fetching on re-open
+let articleBodyCache = {};
 
 function getCategory(source) {
   for (const [cat, sources] of Object.entries(CATEGORY_MAP)) {
@@ -319,6 +321,7 @@ async function loadData() {
     clearTimeout(timeout);
     const data = await resp.json();
     news = data.items || [];
+    articleBodyCache = {};
     document.getElementById('count').textContent = data.total + ' 条新闻';
     renderFilters();
     renderList();
@@ -375,6 +378,7 @@ async function loadDataWithRetry(retries, delay) {
       clearTimeout(to);
       const data = await resp.json();
       news = data.items || [];
+      articleBodyCache = {};
       document.getElementById('count').textContent = data.total + ' 条新闻';
       renderFilters();
       renderList();
@@ -580,26 +584,35 @@ function openArticle(id) {
     wrap.innerHTML = '<p style="color:var(--text-2);text-align:center;padding:60px 0">加载中...</p>';
     const ac1 = new AbortController();
     const t1 = setTimeout(() => ac1.abort(), 8000);
+    // Try cache first
+    const renderFull = (data) => {
+      articleBodyCache[id] = data;
+      const coverSrc = data.thumb ? proxyImgSrc(data.thumb) : '';
+      const coverImg = coverSrc
+        ? `<div style="margin-bottom:20px"><img src="${coverSrc}" alt="" style="max-width:100%;border-radius:var(--radius);background:var(--bg-surface)"></div>`
+        : '';
+      wrap.innerHTML = `
+        <h1>${esc(data.title || '')}</h1>
+        <div class="article-meta">
+          <span class="badge" style="${badgeStyle(data.source || '')}">${esc(data.source || '')}</span>
+          <span>${formatTime(data.date || '', data.time || '')}</span>
+        </div>
+        ${coverImg}
+        <div class="article-body" id="articleBody">
+          <p style="color:var(--text-2);text-align:center;padding:40px 0">加载中...</p>
+        </div>
+      `;
+      renderArticleBody(wrap, data, id);
+    };
+    if (articleBodyCache[id]) {
+      renderFull(articleBodyCache[id]);
+      return;
+    }
     fetch('/api/news/' + id, { signal: ac1.signal })
       .then(r => { if (!r.ok) throw new Error('not found'); return r.json(); })
       .then(data => {
         clearTimeout(t1);
-        const coverSrc = data.thumb ? proxyImgSrc(data.thumb) : '';
-        const coverImg = coverSrc
-          ? `<div style="margin-bottom:20px"><img src="${coverSrc}" alt="" style="max-width:100%;border-radius:var(--radius);background:var(--bg-surface)"></div>`
-          : '';
-        wrap.innerHTML = `
-          <h1>${esc(data.title || '')}</h1>
-          <div class="article-meta">
-            <span class="badge" style="${badgeStyle(data.source || '')}">${esc(data.source || '')}</span>
-            <span>${formatTime(data.date || '', data.time || '')}</span>
-          </div>
-          ${coverImg}
-          <div class="article-body" id="articleBody">
-            <p style="color:var(--text-2);text-align:center;padding:40px 0">加载中...</p>
-          </div>
-        `;
-        renderArticleBody(wrap, data, id);
+        renderFull(data);
       })
       .catch(() => {
         clearTimeout(t1);
@@ -636,16 +649,24 @@ function openArticle(id) {
   history.replaceState(null, '', '#/article/' + shortDate + '-' + n.id);
 
   // Fetch full article body from API
-  const ac2 = new AbortController();
-  const t2 = setTimeout(() => ac2.abort(), 8000);
-  fetch('/api/news/' + id, { signal: ac2.signal })
-    .then(r => r.json())
-    .then(data => { clearTimeout(t2); renderArticleBody(wrap, data, id); })
-    .catch(() => {
-      clearTimeout(t2);
-      const bodyEl = document.getElementById('articleBody');
-      if (bodyEl) bodyEl.innerHTML = '<p style="color:var(--text-2);padding:40px 0;text-align:center">加载失败</p>';
-    });
+  if (articleBodyCache[id]) {
+    renderArticleBody(wrap, articleBodyCache[id], id);
+  } else {
+    const ac2 = new AbortController();
+    const t2 = setTimeout(() => ac2.abort(), 8000);
+    fetch('/api/news/' + id, { signal: ac2.signal })
+      .then(r => r.json())
+      .then(data => {
+        clearTimeout(t2);
+        articleBodyCache[id] = data;
+        renderArticleBody(wrap, data, id);
+      })
+      .catch(() => {
+        clearTimeout(t2);
+        const bodyEl = document.getElementById('articleBody');
+        if (bodyEl) bodyEl.innerHTML = '<p style="color:var(--text-2);padding:40px 0;text-align:center">加载失败</p>';
+      });
+  }
 }
 
 function renderArticleBody(wrap, data, id) {
