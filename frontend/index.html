@@ -330,6 +330,7 @@ a:hover{text-decoration:underline}
     </div>
     <div class="user-menu-items">
       <button class="user-menu-item" onclick="openSettings()">⚙️ 设置</button>
+      <button class="user-menu-item" onclick="uploadAvatar()">🖼️ 更换头像</button>
       <button class="user-menu-item" onclick="openAdminPanel()" id="adminPanelBtn" style="display:none">👤 用户管理</button>
       <button class="user-menu-item" onclick="logout()">🚪 退出登录</button>
     </div>
@@ -349,6 +350,8 @@ a:hover{text-decoration:underline}
     </div>
   </div>
 </div>
+
+<input type="file" id="avatarInput" accept="image/jpeg,image/png,image/gif,image/webp" style="display:none">
 
 <div class="toast" id="toast"></div>
 
@@ -386,6 +389,92 @@ function loadAuth() {
     updateUserUI();
   }
 }
+
+function getAvatarUrl(user) {
+  if (user.avatar_url) return user.avatar_url;
+  // Gravatar fallback
+  const email = (user.email || '').trim().toLowerCase();
+  const hash = md5(email);
+  return 'https://www.gravatar.com/avatar/' + hash + '?d=mp&s=80';
+}
+
+// Tiny MD5 implementation (RFC 1321) for Gravatar
+function md5(s) {
+  function F(b,c,d){return b&c|~b&d}
+  function G(b,c,d){return b&d|c&~d}
+  function H(b,c,d){return b^c^d}
+  function I(b,c,d){return c^(b|~d)}
+  function rol(n,b){return n<<b|n>>>32-b}
+  function ff(a,b,c,d,x,s,t){return a=rol(a+F(b,c,d)+x+t|0,s),a+b|0}
+  function gg(a,b,c,d,x,s,t){return a=rol(a+G(b,c,d)+x+t|0,s),a+b|0}
+  function hh(a,b,c,d,x,s,t){return a=rol(a+H(b,c,d)+x+t|0,s),a+b|0}
+  function ii(a,b,c,d,x,s,t){return a=rol(a+I(b,c,d)+x+t|0,s),a+b|0}
+  var w=[],i,k,aa,bb,cc,dd,a=1732584193,b=-271733879,c=-1732584194,d=271733878;
+  s=unescape(encodeURIComponent(s));
+  for(i=0;i<s.length;i++)w[i>>2]|=s.charCodeAt(i)<<(i%4<<3);
+  w[i>>2]|=128<<(i%4<<3);
+  for(k=(i+8>>6<<4)+14,kk;kk<k;kk++)w[kk]=0;
+  w[k-1]=i*8;
+  for(i=0;i<w.length;i+=16){
+    aa=a,bb=b,cc=c,dd=d;
+    a=ff(a,b,c,d,w[i+0],7,-680876936);d=ff(d,a,b,c,w[i+1],12,-389564586);c=ff(c,d,a,b,w[i+2],17,606105819);b=ff(b,c,d,a,w[i+3],22,-1044525330);
+    a=ff(a,b,c,d,w[i+4],7,-176418897);d=ff(d,a,b,c,w[i+5],12,1200080426);c=ff(c,d,a,b,w[i+6],17,-1473231341);b=ff(b,c,d,a,w[i+7],22,-45705983);
+    a=ff(a,b,c,d,w[i+8],7,1770035416);d=ff(d,a,b,c,w[i+9],12,-1958414417);c=ff(c,d,a,b,w[i+10],17,-42063);b=ff(b,c,d,a,w[i+11],22,-1990404162);
+    a=ff(a,b,c,d,w[i+12],7,1804603682);d=ff(d,a,b,c,w[i+13],12,-40341101);c=ff(c,d,a,b,w[i+14],17,-1502002290);b=ff(b,c,d,a,w[i+15],22,1236535329);
+    a=gg(a,b,c,d,w[i+1],5,-165796510);d=gg(d,a,b,c,w[i+6],9,-1069501632);c=gg(c,d,a,b,w[i+11],14,643717713);b=gg(b,c,d,a,w[i+0],20,-373897302);
+    a=gg(a,b,c,d,w[i+5],5,-701558691);d=gg(d,a,b,c,w[i+10],9,38016083);c=gg(c,d,a,b,w[i+15],14,-660478335);b=gg(b,c,d,a,w[i+4],20,-405537848);
+    a=gg(a,b,c,d,w[i+9],5,568446438);d=gg(d,a,b,c,w[i+14],9,-1019803690);c=gg(c,d,a,b,w[i+3],14,-187363961);b=gg(b,c,d,a,w[i+8],20,1163531501);
+    a=gg(a,b,c,d,w[i+13],5,-1444681467);d=gg(d,a,b,c,w[i+2],9,-51403784);c=gg(c,d,a,b,w[i+7],14,1735328473);b=gg(b,c,d,a,w[i+12],20,-1926607734);
+    a=hh(a,b,c,d,w[i+5],4,-378558);d=hh(d,a,b,c,w[i+8],11,-2022574463);c=hh(c,d,a,b,w[i+11],16,1839030562);b=hh(b,c,d,a,w[i+14],23,-35309556);
+    a=hh(a,b,c,d,w[i+1],4,-1530992060);d=hh(d,a,b,c,w[i+4],11,1272893353);c=hh(c,d,a,b,w[i+7],16,-155497632);b=hh(b,c,d,a,w[i+10],23,-1094730640);
+    a=hh(a,b,c,d,w[i+13],4,681279174);d=hh(d,a,b,c,w[i+0],11,-358537222);c=hh(c,d,a,b,w[i+3],16,-722521979);b=hh(b,c,d,a,w[i+6],23,76029189);
+    a=hh(a,b,c,d,w[i+9],4,-640364487);d=hh(d,a,b,c,w[i+12],11,-421815835);c=hh(c,d,a,b,w[i+15],16,530742520);b=hh(b,c,d,a,w[i+2],23,-995338651);
+    a=ii(a,b,c,d,w[i+0],6,-198630844);d=ii(d,a,b,c,w[i+7],10,1126891415);c=ii(c,d,a,b,w[i+14],15,-1416354905);b=ii(b,c,d,a,w[i+5],21,-57434055);
+    a=ii(a,b,c,d,w[i+12],6,1700485571);d=ii(d,a,b,c,w[i+3],10,-1894986606);c=ii(c,d,a,b,w[i+10],15,-1051523);b=ii(b,c,d,a,w[i+1],21,-2054922799);
+    a=ii(a,b,c,d,w[i+8],6,1873313359);d=ii(d,a,b,c,w[i+15],10,-30611744);c=ii(c,d,a,b,w[i+6],15,-1560198380);b=ii(b,c,d,a,w[i+13],21,1309151649);
+    a=ii(a,b,c,d,w[i+4],6,-145523070);d=ii(d,a,b,c,w[i+11],10,-1120210379);c=ii(c,d,a,b,w[i+2],15,718787259);b=ii(b,c,d,a,w[i+9],21,-343485551);
+    a=a+aa|0,b=b+bb|0,c=c+cc|0,d=d+dd|0;
+  }
+  return (hex(a)+hex(b)+hex(c)+hex(d)).toLowerCase();
+  function hex(n){var h='0123456789abcdef',s='';for(var i=0;i<4;i++)s=h[(n>>(i*8+4))&15]+h[(n>>(i*8))&15]+s;return s}
+}
+
+// ═══ Avatar Upload ════════════════════════════════════
+function uploadAvatar() {
+  closeUserMenu();
+  document.getElementById('avatarInput').click();
+}
+
+document.getElementById('avatarInput').addEventListener('change', async function() {
+  const file = this.files[0];
+  if (!file) return;
+  if (file.size > 500 * 1024) { showToast('❌ 图片太大（最大 500KB）'); this.value = ''; return; }
+  if (!['image/jpeg','image/png','image/gif','image/webp'].includes(file.type)) {
+    showToast('❌ 不支持的格式（jpg/png/gif/webp）'); this.value = ''; return;
+  }
+  const reader = new FileReader();
+  reader.onload = async function(e) {
+    const dataUrl = e.target.result;
+    try {
+      const resp = await fetch('/auth/me/avatar', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
+        body: JSON.stringify({ image: dataUrl }),
+      });
+      const data = await resp.json();
+      if (data.error) { showToast('❌ ' + data.error); return; }
+      // Update local state
+      authUser.avatar_url = data.avatar_url;
+      localStorage.setItem('raynews_user', JSON.stringify(authUser));
+      updateUserUI();
+      showToast('✅ 头像已更新');
+    } catch (e) {
+      showToast('❌ 上传失败');
+    }
+  };
+  reader.readAsDataURL(file);
+  this.value = '';
+});
 
 function saveAuth(token, user) {
   authToken = token;
@@ -507,29 +596,17 @@ function updateUserUI() {
     }
     const hdrImg = document.getElementById('hdrAvatarImg');
     const hdrLetter = document.getElementById('hdrAvatarLetter');
-    if (authUser.avatar_url) {
-      hdrImg.src = authUser.avatar_url;
-      hdrImg.style.display = '';
-      hdrLetter.style.display = 'none';
-    } else {
-      hdrImg.style.display = 'none';
-      hdrLetter.style.display = '';
-      hdrLetter.textContent = (authUser.nickname || authUser.email)[0].toUpperCase();
-    }
+    hdrImg.src = getAvatarUrl(authUser);
+    hdrImg.style.display = '';
+    hdrLetter.style.display = 'none';
     existingAvatar.style.display = '';
 
     // Update user menu
     document.getElementById('userNickname').textContent = authUser.nickname || authUser.email.split('@')[0];
     document.getElementById('userEmail').textContent = authUser.email;
-    if (authUser.avatar_url) {
-      document.getElementById('userAvatarImg').src = authUser.avatar_url;
-      document.getElementById('userAvatarImg').style.display = '';
-      document.getElementById('userAvatarLetter').style.display = 'none';
-    } else {
-      document.getElementById('userAvatarImg').style.display = 'none';
-      document.getElementById('userAvatarLetter').style.display = '';
-      document.getElementById('userAvatarLetter').textContent = (authUser.nickname || authUser.email)[0].toUpperCase();
-    }
+    document.getElementById('userAvatarImg').src = getAvatarUrl(authUser);
+    document.getElementById('userAvatarImg').style.display = '';
+    document.getElementById('userAvatarLetter').style.display = 'none';
     document.getElementById('adminPanelBtn').style.display = authUser.role === 'admin' ? '' : 'none';
 
     // Preview users: hide refresh button

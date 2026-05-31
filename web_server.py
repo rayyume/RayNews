@@ -86,9 +86,76 @@ def me():
 @require_auth
 def update_me():
     data = request.get_json(silent=True) or {}
-    allowed = {k: data[k] for k in ("nickname", "avatar_url") if k in data}
+    allowed = {k: data[k] for k in ("nickname",) if k in data}
     user = update_user(g.user_id, **allowed)
     return jsonify(user) if user else (jsonify({"error": "not found"}), 404)
+
+
+# ─── Avatar Upload ─────────────────────────────────────────
+
+AVATARS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "avatars")
+AVATAR_MAX_SIZE = 500 * 1024  # 500KB
+ALLOWED_AVATAR_TYPES = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/gif": "gif",
+    "image/webp": "webp",
+}
+
+
+@app.route("/auth/me/avatar", methods=["PUT"])
+@require_auth
+def upload_avatar():
+    """Upload avatar as base64 data URL. Saves to data/avatars/{user_id}.{ext}."""
+    data = request.get_json(silent=True) or {}
+    image_data = data.get("image", "")
+
+    if not image_data:
+        return jsonify({"error": "image required"}), 400
+
+    # Parse data URL: data:image/{type};base64,{data}
+    if not image_data.startswith("data:"):
+        return jsonify({"error": "invalid image format"}), 400
+
+    try:
+        header, raw = image_data.split(",", 1)
+        mime = header.split(";")[0].split(":", 1)[1]  # e.g. image/jpeg
+        ext = ALLOWED_AVATAR_TYPES.get(mime)
+        if not ext:
+            return jsonify({"error": "unsupported image type (jpg/png/gif/webp only)"}), 400
+
+        import base64
+        raw_bytes = base64.b64decode(raw)
+
+        if len(raw_bytes) > AVATAR_MAX_SIZE:
+            return jsonify({"error": "image too large (max 500KB)"}), 400
+
+        # Ensure avatars directory exists
+        os.makedirs(AVATARS_DIR, exist_ok=True)
+
+        # Build filename: user_id with proper extension
+        old_paths = [
+            os.path.join(AVATARS_DIR, f"{g.user_id}.{old_ext}")
+            for old_ext in ALLOWED_AVATAR_TYPES.values()
+        ]
+        new_path = os.path.join(AVATARS_DIR, f"{g.user_id}.{ext}")
+
+        # Remove old avatar files with different extension
+        for p in old_paths:
+            if p != new_path and os.path.exists(p):
+                os.remove(p)
+
+        # Write new avatar
+        with open(new_path, "wb") as f:
+            f.write(raw_bytes)
+
+        avatar_url = f"/avatars/{g.user_id}.{ext}"
+        update_user(g.user_id, avatar_url=avatar_url)
+
+        return jsonify({"avatar_url": avatar_url}), 200
+
+    except (ValueError, IndexError, base64.binascii.Error) as e:
+        return jsonify({"error": "invalid image data"}), 400
 
 
 # ─── Admin Routes ─────────────────────────────────────────────
