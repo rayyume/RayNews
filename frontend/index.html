@@ -185,6 +185,44 @@ a:hover{text-decoration:underline}
   .article-wrap h1{font-size:20px}
   .hide-m{display:none}
 }
+
+/* ═══ Auth Modal ════════════════════════════════════ */
+.auth-modal{position:fixed;inset:0;z-index:400;display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity 0.2s}
+.auth-modal.open{opacity:1;pointer-events:auto}
+.auth-backdrop{position:absolute;inset:0;background:rgba(0,0,0,0.6)}
+.auth-panel{position:relative;background:var(--bg-card);border:1px solid var(--border);border-radius:16px;width:360px;max-width:90vw;padding:0;box-shadow:0 20px 60px rgba(0,0,0,0.4)}
+.auth-header{display:flex;align-items:center;justify-content:space-between;padding:20px 24px 0}
+.auth-header h2{margin:0;font-size:18px;font-weight:700}
+.auth-close{background:none;border:none;color:var(--text-3);font-size:18px;cursor:pointer;padding:4px 8px;border-radius:6px;transition:all 0.15s}
+.auth-close:hover{background:var(--bg-card-hover);color:var(--text)}
+.auth-body{padding:20px 24px 24px}
+.auth-input{width:100%;padding:10px 14px;margin-bottom:10px;border:1px solid var(--border);border-radius:10px;background:var(--bg);color:var(--text);font-size:14px;font-family:var(--font);outline:none;transition:border-color 0.15s;box-sizing:border-box}
+.auth-input:focus{border-color:var(--accent)}
+.auth-input::placeholder{color:var(--text-3)}
+.auth-btn{width:100%;padding:10px;border:none;border-radius:10px;background:var(--accent);color:#fff;font-size:14px;font-weight:700;cursor:pointer;font-family:var(--font);transition:opacity 0.15s}
+.auth-btn:hover{opacity:0.85}
+.auth-btn:disabled{opacity:0.4;cursor:default}
+.auth-error{color:#ef4444;font-size:12px;min-height:18px;margin:0 0 8px}
+.auth-switch{text-align:center;font-size:12px;color:var(--text-3);margin:12px 0 0}
+.auth-switch a{color:var(--accent);cursor:pointer}
+.auth-skip{text-align:center;font-size:12px;margin:8px 0 0}
+.auth-skip a{color:var(--text-3);cursor:pointer}
+.auth-skip a:hover{color:var(--accent)}
+
+/* ═══ User Menu ═════════════════════════════════════ */
+.user-menu{position:fixed;top:56px;right:16px;z-index:150;opacity:0;pointer-events:none;transform:translateY(-4px);transition:all 0.2s}
+.user-menu.open{opacity:1;pointer-events:auto;transform:translateY(0)}
+.user-menu-inner{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;min-width:220px;overflow:hidden;box-shadow:0 8px 30px rgba(0,0,0,0.3)}
+.user-menu-header{display:flex;align-items:center;gap:12px;padding:16px;border-bottom:1px solid var(--border)}
+.user-avatar{width:36px;height:36px;border-radius:50%;overflow:hidden;background:var(--accent-dim);display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0}
+.user-avatar img{width:100%;height:100%;object-fit:cover}
+.user-avatar span{font-size:14px;font-weight:700;color:var(--accent)}
+.user-info{flex:1;min-width:0}
+.user-info div:first-child{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.user-email{font-size:11px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.user-menu-items{display:flex;flex-direction:column}
+.user-menu-item{width:100%;text-align:left;padding:10px 16px;border:none;background:none;color:var(--text-2);font-size:13px;cursor:pointer;font-family:var(--font);transition:all 0.12s}
+.user-menu-item:hover{background:var(--bg-card-hover);color:var(--text)}
 </style>
 </head>
 <body>
@@ -229,6 +267,49 @@ a:hover{text-decoration:underline}
 
 <div class="lb" id="lb"><img src="" id="lbImg"></div>
 
+<!-- ═══ Auth Modal ═══════════════════════════════════════ -->
+<div class="auth-modal" id="authModal">
+  <div class="auth-backdrop" onclick="closeAuth()"></div>
+  <div class="auth-panel">
+    <div class="auth-header">
+      <h2 id="authTitle">登录</h2>
+      <button class="auth-close" onclick="closeAuth()">✕</button>
+    </div>
+    <div class="auth-body">
+      <div id="authForm">
+        <input type="email" id="authEmail" class="auth-input" placeholder="邮箱" autocomplete="email">
+        <input type="password" id="authPassword" class="auth-input" placeholder="密码" autocomplete="current-password">
+        <input type="text" id="authNickname" class="auth-input" placeholder="昵称（可选）" style="display:none">
+        <p id="authError" class="auth-error"></p>
+        <button class="auth-btn" id="authSubmitBtn" onclick="submitAuth()">登录</button>
+        <p class="auth-switch" id="authSwitch">没有账号？<a href="#" onclick="toggleAuthMode()">注册</a></p>
+        <p class="auth-skip"><a href="#" onclick="closeAuth()">跳过，先浏览</a></p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ User Menu ═══════════════════════════════════════ -->
+<div class="user-menu" id="userMenu">
+  <div class="user-menu-inner">
+    <div class="user-menu-header">
+      <div class="user-avatar" id="userAvatarBtn" onclick="toggleUserMenu()">
+        <img src="" id="userAvatarImg" alt="">
+        <span id="userAvatarLetter" style="display:none"></span>
+      </div>
+      <div class="user-info">
+        <div id="userNickname">用户</div>
+        <div id="userEmail" class="user-email"></div>
+      </div>
+    </div>
+    <div class="user-menu-items">
+      <button class="user-menu-item" onclick="openSettings()">⚙️ 设置</button>
+      <button class="user-menu-item" onclick="openAdminPanel()" id="adminPanelBtn" style="display:none">👤 用户管理</button>
+      <button class="user-menu-item" onclick="logout()">🚪 退出登录</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <button class="scroll-top-btn" id="scrollTopBtn" onclick="goHome()" title="回到首页并刷新">↑</button>
@@ -252,6 +333,201 @@ let currentPage = 1;
 let _pendingUpdate = false;
 // In-memory cache for article bodies — avoids re-fetching on re-open
 let articleBodyCache = {};
+
+// ═══ Auth State ══════════════════════════════════════════
+let authToken = null;
+let authUser = null;
+let authMode = 'login'; // 'login' | 'register'
+
+function loadAuth() {
+  authToken = localStorage.getItem('raynews_token');
+  try { const u = localStorage.getItem('raynews_user'); authUser = u ? JSON.parse(u) : null; } catch {}
+  if (authToken && authUser) {
+    updateUserUI();
+  }
+}
+
+function saveAuth(token, user) {
+  authToken = token;
+  authUser = user;
+  localStorage.setItem('raynews_token', token);
+  localStorage.setItem('raynews_user', JSON.stringify(user));
+  updateUserUI();
+}
+
+function logout() {
+  authToken = null;
+  authUser = null;
+  localStorage.removeItem('raynews_token');
+  localStorage.removeItem('raynews_user');
+  closeUserMenu();
+  updateUserUI();
+  showToast('已退出登录');
+}
+
+async function apiFetch(url, options = {}) {
+  const headers = options.headers || {};
+  if (authToken) headers['Authorization'] = 'Bearer ' + authToken;
+  const resp = await fetch(url, { ...options, headers });
+  if (resp.status === 401 && authToken) {
+    logout();
+    return null;
+  }
+  return resp.json();
+}
+
+// ═══ Auth Modal ══════════════════════════════════════════
+function showAuth() {
+  document.getElementById('authModal').classList.add('open');
+  document.getElementById('authEmail').value = '';
+  document.getElementById('authPassword').value = '';
+  document.getElementById('authNickname').value = '';
+  document.getElementById('authError').textContent = '';
+  document.getElementById('authSubmitBtn').disabled = false;
+  document.getElementById('authSubmitBtn').textContent = '登录';
+}
+
+function closeAuth() {
+  document.getElementById('authModal').classList.remove('open');
+}
+
+function toggleAuthMode() {
+  authMode = authMode === 'login' ? 'register' : 'login';
+  const isReg = authMode === 'register';
+  document.getElementById('authTitle').textContent = isReg ? '注册' : '登录';
+  document.getElementById('authSubmitBtn').textContent = isReg ? '注册' : '登录';
+  document.getElementById('authNickname').style.display = isReg ? '' : 'none';
+  document.getElementById('authSwitch').innerHTML = isReg
+    ? '已有账号？<a href="#" onclick="toggleAuthMode()">登录</a>'
+    : '没有账号？<a href="#" onclick="toggleAuthMode()">注册</a>';
+  document.getElementById('authError').textContent = '';
+}
+
+async function submitAuth() {
+  const email = document.getElementById('authEmail').value.trim();
+  const password = document.getElementById('authPassword').value;
+  const nickname = document.getElementById('authNickname').value.trim();
+  const btn = document.getElementById('authSubmitBtn');
+  const errEl = document.getElementById('authError');
+
+  if (!email || !password) { errEl.textContent = '请填写邮箱和密码'; return; }
+  btn.disabled = true;
+  btn.textContent = authMode === 'login' ? '登录中...' : '注册中...';
+  errEl.textContent = '';
+
+  try {
+    let data;
+    if (authMode === 'login') {
+      data = await apiFetch('/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ email, password }),
+        headers: { 'Content-Type': 'application/json' },
+      });
+    } else {
+      data = await apiFetch('/auth/register', {
+        method: 'POST',
+        body: JSON.stringify({ email, password, nickname }),
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (!data) { errEl.textContent = '请求失败'; btn.disabled = false; btn.textContent = '重试'; return; }
+    if (data.error) { errEl.textContent = data.error; btn.disabled = false; btn.textContent = '重试'; return; }
+    if (data.token) {
+      saveAuth(data.token, data.user);
+      closeAuth();
+      showToast(authMode === 'login' ? '✅ 登录成功' : '✅ 注册成功');
+    }
+  } catch (e) {
+    errEl.textContent = '网络错误';
+    btn.disabled = false;
+    btn.textContent = '重试';
+  }
+}
+
+// ═══ User Menu ══════════════════════════════════════════
+function updateUserUI() {
+  const avatarImg = document.getElementById('userAvatarImg');
+  const avatarLetter = document.getElementById('userAvatarLetter');
+  const headerRight = document.querySelector('.header-right');
+
+  // Remove existing auth button if any
+  const oldBtn = document.getElementById('loginBtn');
+  if (oldBtn) oldBtn.remove();
+
+  if (authUser) {
+    // Show avatar in header
+    let existingAvatar = document.querySelector('.header-avatar');
+    if (!existingAvatar) {
+      const wrap = document.createElement('div');
+      wrap.className = 'header-avatar';
+      wrap.onclick = toggleUserMenu;
+      wrap.innerHTML = '<div class="user-avatar" style="width:32px;height:32px"><img src="" alt="" id="hdrAvatarImg"><span id="hdrAvatarLetter" style="display:none"></span></div>';
+      headerRight.prepend(wrap);
+      existingAvatar = wrap;
+    }
+    const hdrImg = document.getElementById('hdrAvatarImg');
+    const hdrLetter = document.getElementById('hdrAvatarLetter');
+    if (authUser.avatar_url) {
+      hdrImg.src = authUser.avatar_url;
+      hdrImg.style.display = '';
+      hdrLetter.style.display = 'none';
+    } else {
+      hdrImg.style.display = 'none';
+      hdrLetter.style.display = '';
+      hdrLetter.textContent = (authUser.nickname || authUser.email)[0].toUpperCase();
+    }
+    existingAvatar.style.display = '';
+
+    // Update user menu
+    document.getElementById('userNickname').textContent = authUser.nickname || authUser.email.split('@')[0];
+    document.getElementById('userEmail').textContent = authUser.email;
+    if (authUser.avatar_url) {
+      document.getElementById('userAvatarImg').src = authUser.avatar_url;
+      document.getElementById('userAvatarImg').style.display = '';
+      document.getElementById('userAvatarLetter').style.display = 'none';
+    } else {
+      document.getElementById('userAvatarImg').style.display = 'none';
+      document.getElementById('userAvatarLetter').style.display = '';
+      document.getElementById('userAvatarLetter').textContent = (authUser.nickname || authUser.email)[0].toUpperCase();
+    }
+    document.getElementById('adminPanelBtn').style.display = authUser.role === 'admin' ? '' : 'none';
+  } else {
+    // Show login button in header
+    const existingAvatar = document.querySelector('.header-avatar');
+    if (existingAvatar) existingAvatar.style.display = 'none';
+    const btn = document.createElement('button');
+    btn.id = 'loginBtn';
+    btn.className = 'refresh-btn';
+    btn.textContent = '登录';
+    btn.onclick = showAuth;
+    headerRight.prepend(btn);
+  }
+}
+
+function toggleUserMenu() {
+  document.getElementById('userMenu').classList.toggle('open');
+}
+
+function closeUserMenu() {
+  document.getElementById('userMenu').classList.remove('open');
+}
+
+// Click outside user menu to close
+document.addEventListener('click', e => {
+  const menu = document.getElementById('userMenu');
+  const avatar = document.querySelector('.header-avatar');
+  if (menu.classList.contains('open') &&
+      !menu.contains(e.target) &&
+      (!avatar || !avatar.contains(e.target))) {
+    closeUserMenu();
+  }
+});
+
+// Placeholder functions for future phases
+function openSettings() { closeUserMenu(); showToast('⚙️ 设置功能即将推出'); }
+function openAdminPanel() { closeUserMenu(); showToast('👤 用户管理即将推出'); }
+
+// ═══ END Auth ══════════════════════════════════════════
 
 function getCategory(source) {
   for (const [cat, sources] of Object.entries(CATEGORY_MAP)) {
@@ -851,6 +1127,7 @@ function badgeStyle(src) {
   return s;
 }
 // Initial load
+loadAuth();
 loadDataWithRetry();
 // Restore sidebar preference
 try {
