@@ -862,12 +862,13 @@ function closeUserMenu() {
 }
 
 // Click outside user menu to close
-document.addEventListener('click', e => {
+document.addEventListener('mousedown', e => {
   const menu = document.getElementById('userMenu');
   const avatar = document.querySelector('.header-avatar');
   if (menu.classList.contains('open') &&
       !menu.contains(e.target) &&
-      (!avatar || !avatar.contains(e.target))) {
+      (!avatar || !avatar.contains(e.target)) &&
+      !e.target.closest('.user-menu-item')) {
     closeUserMenu();
   }
 });
