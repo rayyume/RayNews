@@ -249,6 +249,33 @@ a:hover{text-decoration:underline}
 .admin-del-btn{background:none;border:1px solid rgba(239,68,68,0.3);color:#ef4444;padding:4px 10px;border-radius:6px;font-size:11px;cursor:pointer;font-family:var(--font);transition:all 0.15s}
 .admin-del-btn:hover{background:rgba(239,68,68,0.12)}
 .admin-loading{text-align:center;padding:40px;color:var(--text-3);font-size:13px}
+
+/* ═══ Favorite Button ═══════════════════════════════════ */
+.fav-btn{display:flex;align-items:center;gap:6px;background:none;border:none;color:var(--text-3);font-size:13px;font-weight:600;cursor:pointer;font-family:var(--font);padding:4px 8px;margin-left:auto;border-radius:6px;transition:all 0.15s}
+.fav-btn:hover{background:var(--bg-card);color:var(--accent)}
+.fav-btn.on{color:var(--accent)}
+.fav-btn.on svg{fill:var(--accent)}
+.fav-btn.loading{opacity:0.4;pointer-events:none}
+
+/* ═══ Favorites Panel ════════════════════════════════════ */
+.fav-overlay{position:fixed;inset:0;z-index:400;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity 0.2s}
+.fav-overlay.open{opacity:1;pointer-events:auto}
+.fav-panel{background:var(--bg-card);border:1px solid var(--border);border-radius:16px;width:520px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.4)}
+.fav-header{display:flex;align-items:center;justify-content:space-between;padding:20px 24px;border-bottom:1px solid var(--border);flex-shrink:0}
+.fav-header h2{margin:0;font-size:18px;font-weight:700}
+.fav-close{background:none;border:none;color:var(--text-3);font-size:18px;cursor:pointer;padding:4px 8px;border-radius:6px;transition:all 0.15s}
+.fav-close:hover{background:var(--bg-card-hover);color:var(--text)}
+.fav-body{overflow-y:auto;padding:8px 0;flex:1}
+.fav-empty{text-align:center;padding:60px 20px;color:var(--text-3);font-size:14px}
+.fav-item{display:flex;gap:12px;padding:14px 24px;cursor:pointer;transition:background 0.12s}
+.fav-item:hover{background:var(--bg-card-hover)}
+.fav-item-thumb{width:72px;height:48px;border-radius:6px;overflow:hidden;flex-shrink:0;background:var(--bg-surface)}
+.fav-item-thumb img{width:100%;height:100%;object-fit:cover}
+.fav-item-body{flex:1;min-width:0}
+.fav-item-title{font-size:14px;font-weight:600;line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.fav-item-meta{font-size:11px;color:var(--text-3);margin-top:4px;display:flex;align-items:center;gap:8px}
+.fav-unfav{background:none;border:1px solid var(--border);color:var(--text-3);padding:2px 8px;border-radius:6px;font-size:11px;cursor:pointer;font-family:var(--font);transition:all 0.15s;flex-shrink:0}
+.fav-unfav:hover{border-color:#ef4444;color:#ef4444}
 </style>
 </head>
 <body>
@@ -287,7 +314,7 @@ a:hover{text-decoration:underline}
 </div>
 
 <div class="overlay" id="overlay">
-  <header class="overlay-header"><div class="overlay-header-inner"><button class="back-btn" id="backBtn"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 12L6 8l4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>返回</button><button class="share-btn" id="shareBtn" onclick="shareArticle()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>分享</button></div></header>
+  <header class="overlay-header"><div class="overlay-header-inner"><button class="back-btn" id="backBtn"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 12L6 8l4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>返回</button><button class="fav-btn" id="favBtn" onclick="toggleFavorite()" style="display:none" title="收藏"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></button><button class="share-btn" id="shareBtn" onclick="shareArticle()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>分享</button></div></header>
   <div class="article-wrap" id="articleWrap"></div>
 </div>
 
@@ -329,6 +356,7 @@ a:hover{text-decoration:underline}
       </div>
     </div>
     <div class="user-menu-items">
+      <button class="user-menu-item" onclick="openFavorites()">⭐ 我的收藏</button>
       <button class="user-menu-item" onclick="openSettings()">⚙️ 设置</button>
       <button class="user-menu-item" onclick="uploadAvatar()">🖼️ 更换头像</button>
       <button class="user-menu-item" onclick="openAdminPanel()" id="adminPanelBtn" style="display:none">👤 用户管理</button>
@@ -352,6 +380,20 @@ a:hover{text-decoration:underline}
 </div>
 
 <input type="file" id="avatarInput" accept="image/jpeg,image/png,image/gif,image/webp" style="display:none">
+
+<!-- ═══ Favorites Panel ═══════════════════════════════════ -->
+<div class="fav-overlay" id="favOverlay">
+  <div class="fav-backdrop" onclick="closeFavorites()" style="position:absolute;inset:0"></div>
+  <div class="fav-panel">
+    <div class="fav-header">
+      <h2>⭐ 我的收藏</h2>
+      <button class="fav-close" onclick="closeFavorites()">✕</button>
+    </div>
+    <div class="fav-body" id="favBody">
+      <div class="fav-empty">加载中...</div>
+    </div>
+  </div>
+</div>
 
 <div class="toast" id="toast"></div>
 
@@ -646,6 +688,120 @@ document.addEventListener('click', e => {
 
 // Placeholder functions for future phases
 function openSettings() { closeUserMenu(); showToast('⚙️ 设置功能即将推出'); }
+
+// ═══ Favorites ════════════════════════════════════════
+
+function openFavorites() {
+  closeUserMenu();
+  document.getElementById('favOverlay').classList.add('open');
+  document.getElementById('favBody').innerHTML = '<div class="fav-empty">加载中...</div>';
+  loadFavorites();
+}
+
+function closeFavorites() {
+  document.getElementById('favOverlay').classList.remove('open');
+}
+
+async function loadFavorites() {
+  try {
+    const data = await apiFetch('/favorites');
+    if (!data) return;
+    renderFavorites(data);
+  } catch (e) {
+    document.getElementById('favBody').innerHTML = '<div class="fav-empty">❌ 加载失败</div>';
+  }
+}
+
+function renderFavorites(data) {
+  const items = data.items || [];
+  if (items.length === 0) {
+    document.getElementById('favBody').innerHTML = '<div class="fav-empty">还没有收藏的文章</div>';
+    return;
+  }
+  document.getElementById('favBody').innerHTML = items.map(item => `
+    <div class="fav-item" onclick="openFavArticle(${item.article_id})">
+      ${item.thumb ? `<div class="fav-item-thumb"><img src="${proxyImgSrc(item.thumb)}" alt="" loading="lazy"></div>` : ''}
+      <div class="fav-item-body">
+        <div class="fav-item-title">${esc(item.title)}</div>
+        <div class="fav-item-meta">
+          <span class="badge" style="${badgeStyle(item.source)}">${esc(item.source)}</span>
+          <span>${formatTime(item.date, item.time)}</span>
+        </div>
+      </div>
+      <button class="fav-unfav" onclick="event.stopPropagation();unfavorite(${item.article_id})">取消</button>
+    </div>
+  `).join('');
+}
+
+function openFavArticle(id) {
+  closeFavorites();
+  openArticle(id);
+}
+
+async function unfavorite(articleId) {
+  try {
+    const resp = await fetch('/favorites/' + articleId, {
+      method: 'DELETE',
+      headers: { 'Authorization': 'Bearer ' + authToken },
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      showToast('✅ 已取消收藏');
+      loadFavorites();
+    }
+  } catch (e) {
+    showToast('❌ 操作失败');
+  }
+}
+
+async function toggleFavorite() {
+  const btn = document.getElementById('favBtn');
+  if (btn.classList.contains('loading')) return;
+  const articleId = parseInt(document.getElementById('overlay').dataset.articleId);
+  if (!articleId) return;
+  btn.classList.add('loading');
+  try {
+    if (btn.classList.contains('on')) {
+      // Unfavorite
+      const resp = await fetch('/favorites/' + articleId, {
+        method: 'DELETE',
+        headers: { 'Authorization': 'Bearer ' + authToken },
+      });
+      const data = await resp.json();
+      if (data.ok) {
+        btn.classList.remove('on');
+        btn.title = '收藏';
+        showToast('已取消收藏');
+      }
+    } else {
+      // Favorite
+      const resp = await fetch('/favorites', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
+        body: JSON.stringify({ article_id: articleId }),
+      });
+      const data = await resp.json();
+      if (data.ok) {
+        btn.classList.add('on');
+        btn.title = '取消收藏';
+        showToast('✅ 已收藏');
+      }
+    }
+  } catch (e) {
+    showToast('❌ 操作失败');
+  }
+  btn.classList.remove('loading');
+}
+
+async function checkFavoriteStatus(articleId) {
+  try {
+    const data = await apiFetch('/favorites/' + articleId + '/status');
+    if (data && data.favorited) {
+      document.getElementById('favBtn').classList.add('on');
+      document.getElementById('favBtn').title = '取消收藏';
+    }
+  } catch (e) {}
+}
 
 // ═══ Admin Panel ════════════════════════════════════
 async function openAdminPanel() {
@@ -1080,12 +1236,20 @@ function openArticle(id) {
   const n = news.find(x => x.id === id);
   const wrap = document.getElementById('articleWrap');
 
+  // Reset favorite button
+  const favBtn = document.getElementById('favBtn');
+  favBtn.classList.remove('on');
+  favBtn.title = '收藏';
+  favBtn.style.display = authToken ? '' : 'none';
+
   // If article not in memory, fetch metadata from API
   if (!n) {
     document.getElementById('overlay').classList.add('open');
     document.getElementById('overlay').scrollTop = 0;
     document.body.style.overflow = 'hidden';
     document.getElementById('overlay').dataset.articleId = id;
+    // Check favorite status
+    if (authToken) checkFavoriteStatus(id);
     wrap.innerHTML = '<p style="color:var(--text-2);text-align:center;padding:60px 0">加载中...</p>';
     const ac1 = new AbortController();
     const t1 = setTimeout(() => ac1.abort(), 8000);
@@ -1150,6 +1314,8 @@ function openArticle(id) {
   document.getElementById('overlay').scrollTop = 0;
   document.body.style.overflow = 'hidden';
   document.getElementById('overlay').dataset.articleId = id;
+  // Check favorite status
+  if (authToken) checkFavoriteStatus(id);
   const shortDate = n.date ? n.date.slice(2) : '';
   history.replaceState(null, '', '#/article/' + shortDate + '-' + n.id);
 

@@ -137,3 +137,51 @@ def list_users() -> list[dict]:
 def count_users() -> int:
     db = get_db()
     return db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+
+
+# ─── Favorites ─────────────────────────────────────────────
+
+
+def add_favorite(user_id: int, article_id: int) -> dict | None:
+    db = get_db()
+    try:
+        cur = db.execute(
+            "INSERT INTO favorites (user_id, article_id) VALUES (?, ?)",
+            (user_id, article_id),
+        )
+        db.commit()
+        row = db.execute(
+            "SELECT id, user_id, article_id, created_at FROM favorites WHERE id = ?",
+            (cur.lastrowid,),
+        ).fetchone()
+        return dict(row) if row else None
+    except sqlite3.IntegrityError:
+        return None  # already favorited
+
+
+def remove_favorite(user_id: int, article_id: int) -> bool:
+    db = get_db()
+    cur = db.execute(
+        "DELETE FROM favorites WHERE user_id = ? AND article_id = ?",
+        (user_id, article_id),
+    )
+    db.commit()
+    return cur.rowcount > 0
+
+
+def get_favorites(user_id: int) -> list[dict]:
+    db = get_db()
+    rows = db.execute(
+        "SELECT article_id, created_at FROM favorites WHERE user_id = ? ORDER BY created_at DESC",
+        (user_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def is_favorited(user_id: int, article_id: int) -> bool:
+    db = get_db()
+    row = db.execute(
+        "SELECT 1 FROM favorites WHERE user_id = ? AND article_id = ?",
+        (user_id, article_id),
+    ).fetchone()
+    return row is not None

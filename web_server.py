@@ -13,6 +13,7 @@ from models import (
     get_db, create_user, get_user, get_user_by_email,
     update_user, delete_user, list_users, count_users,
     verify_password,
+    add_favorite, remove_favorite, get_favorites, is_favorited,
 )
 from auth import init_auth, create_token, require_auth, require_role
 
@@ -189,7 +190,112 @@ def admin_set_role(user_id):
     return jsonify(user) if user else (jsonify({"error": "not found"}), 404)
 
 
-# ─── Health ───────────────────────────────────────────────────
+# ─── Favorites API ─────────────────────────────────────────
+
+NEWS_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "news.db")
+
+
+def _get_article_meta(article_id: int) -> dict | None:
+    """Fetch article title/source/date/thumb from news.db by id."""
+    if not os.path.exists(NEWS_DB):
+        return None
+    try:
+        conn = sqlite3.connect(NEWS_DB)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT id, title, source, date, time, thumb, has_full_content, timestamp FROM articles WHERE id = ?",
+            (article_id,),
+        ).fetchone()
+        conn.close()
+        return dict(row) if row else None
+    except Exception:
+        return None
+
+
+_news_conn = None
+
+
+def _get_news_db():
+    """Persistent connection to news.db for batch queries."""
+    global _news_conn
+    if _news_conn is None and os.path.exists(NEWS_DB):
+        _news_conn = sqlite3.connect(NEWS_DB)
+        _news_conn.row_factory = sqlite3.Row
+    return _news_conn
+
+
+def _get_article_meta_batch(article_ids: list[int]) -> dict[int, dict]:
+    """Fetch metadata for multiple articles at once."""
+    if not article_ids:
+        return {}
+    conn = _get_news_db()
+    if not conn:
+        return {}
+    try:
+        placeholders = ",".join("?" * len(article_ids))
+        rows = conn.execute(
+            f"SELECT id, title, source, date, time, thumb, has_full_content, timestamp FROM articles WHERE id IN ({placeholders})",
+            article_ids,
+        ).fetchall()
+        return {r["id"]: dict(r) for r in rows}
+    except Exception:
+        return {}
+
+
+import sqlite3
+
+
+@app.route("/favorites", methods=["GET"])
+@require_auth
+def list_favorites():
+    """List user's favorites with article metadata."""
+    favs = get_favorites(g.user_id)
+    article_ids = [f["article_id"] for f in favs]
+    articles = _get_article_meta_batch(article_ids)
+    items = []
+    for f in favs:
+        meta = articles.get(f["article_id"])
+        if meta:
+            items.append({
+                "article_id": f["article_id"],
+                "created_at": f["created_at"],
+                "title": meta["title"],
+                "source": meta["source"],
+                "date": meta["date"],
+                "time": meta["time"],
+                "thumb": meta["thumb"],
+                "has_full_content": meta["has_full_content"],
+            })
+    return jsonify({"items": items, "total": len(items)})
+
+
+@app.route("/favorites", methods=["POST"])
+@require_auth
+def add_favorite_route():
+    data = request.get_json(silent=True) or {}
+    article_id = data.get("article_id")
+    if not article_id or not isinstance(article_id, int):
+        return jsonify({"error": "article_id required (int)"}), 400
+    fav = add_favorite(g.user_id, article_id)
+    if fav is None:
+        return jsonify({"error": "already favorited"}), 409
+    return jsonify({"ok": True, "favorite": fav}), 201
+
+
+@app.route("/favorites/<int:article_id>", methods=["DELETE"])
+@require_auth
+def remove_favorite_route(article_id):
+    ok = remove_favorite(g.user_id, article_id)
+    return jsonify({"ok": ok}), 200 if ok else (jsonify({"error": "not found"}), 404)
+
+
+@app.route("/favorites/<int:article_id>/status", methods=["GET"])
+@require_auth
+def favorite_status(article_id):
+    return jsonify({"favorited": is_favorited(g.user_id, article_id)})
+
+
+# ─── Health (unused section divider) ────────────────────────
 
 # ─── Preview-restricted Refresh ──────────────────────────
 
