@@ -373,7 +373,7 @@ a:hover{text-decoration:underline}
     <div class="skeleton-item"><div class="skeleton-thumb"></div><div class="skeleton-lines"><div class="skeleton-line"></div><div class="skeleton-line"></div></div></div>
   </div>
   <div class="pagination" id="pagination"></div>
-  <div class="footer">RayNews - 👀open eyes to see the world. · 每 15 分钟更新 · {{FULL_VERSION}}</div>
+  <div class="footer">RayNews - 👀open eyes to see the world. · 每 15 分钟更新 · v3.0.0-beta.16</div>
   <div class="pull-indicator" id="pullIndicator"><span class="spin"></span>刷新中...</div>
 </div>
 
@@ -1127,31 +1127,37 @@ function closeSidebar() {
 async function aiSummarize(articleId) {
   const btn = document.querySelector('.ai-summarize-btn');
   if (btn) btn.disabled = true;
-  try {
-    const resp = await fetch('/ai/summarize/' + articleId, { method: 'POST', headers: { 'Authorization': 'Bearer ' + authToken } });
-    const data = await resp.json();
-    if (!data) { showToast('❌ 请求失败'); return; }
-    if (data.error) { showToast('❌ ' + data.error); return; }
-    // Insert summary at the VERY TOP of article content
-    const articleWrap = document.getElementById('articleWrap');
-    const existingSummary = document.getElementById('aiSummaryTop');
-    if (existingSummary) existingSummary.remove();
-    const summaryDiv = document.createElement('div');
-    summaryDiv.id = 'aiSummaryTop';
-    summaryDiv.style.cssText = 'background:rgba(110,142,251,0.08);border:1px solid var(--accent);border-radius:var(--radius);padding:14px 16px;margin-bottom:16px;font-size:13px;line-height:1.7;color:var(--text)';
-    summaryDiv.innerHTML = '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;font-size:11px;font-weight:700;color:var(--accent)">📝 AI 摘要</div>' + esc(data.summary);
+
+  // ⏳ Show loading state immediately
+  const articleWrap = document.getElementById('articleWrap');
+  let existingSummary = document.getElementById('aiSummaryTop');
+  if (!existingSummary) {
+    existingSummary = document.createElement('div');
+    existingSummary.id = 'aiSummaryTop';
+    existingSummary.style.cssText = 'background:rgba(110,142,251,0.08);border:1px solid var(--accent);border-radius:var(--radius);padding:14px 16px;margin-bottom:16px;font-size:13px;line-height:1.7;color:var(--text)';
+    existingSummary.innerHTML = '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;font-size:11px;font-weight:700;color:var(--accent)">📝 AI 摘要</div><span style="color:var(--text-3)">⏳ 生成中...</span>';
     // Insert at the very top of articleWrap, after the h1
     const h1 = articleWrap.querySelector('h1');
     const meta = articleWrap.querySelector('.article-meta');
     if (meta && meta.nextSibling) {
-      articleWrap.insertBefore(summaryDiv, meta.nextSibling);
+      articleWrap.insertBefore(existingSummary, meta.nextSibling);
     } else if (h1 && h1.nextSibling) {
-      articleWrap.insertBefore(summaryDiv, h1.nextSibling);
+      articleWrap.insertBefore(existingSummary, h1.nextSibling);
     } else {
-      articleWrap.prepend(summaryDiv);
+      articleWrap.prepend(existingSummary);
     }
+  } else {
+    existingSummary.innerHTML = '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;font-size:11px;font-weight:700;color:var(--accent)">📝 AI 摘要</div><span style="color:var(--text-3)">⏳ 生成中...</span>';
+  }
+
+  try {
+    const resp = await fetch('/ai/summarize/' + articleId, { method: 'POST', headers: { 'Authorization': 'Bearer ' + authToken } });
+    const data = await resp.json();
+    if (!data) { existingSummary.innerHTML = '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;font-size:11px;font-weight:700;color:var(--accent)">📝 AI 摘要</div><span style="color:var(--accent)">❌ 请求失败</span>'; return; }
+    if (data.error) { existingSummary.innerHTML = '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;font-size:11px;font-weight:700;color:var(--accent)">📝 AI 摘要</div><span style="color:#ef4444">❌ ' + esc(data.error) + '</span>'; return; }
+    existingSummary.innerHTML = '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;font-size:11px;font-weight:700;color:var(--accent)">📝 AI 摘要</div>' + esc(data.summary);
   } catch (e) {
-    showToast('❌ 网络错误: ' + (e.message || ''));
+    existingSummary.innerHTML = '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;font-size:11px;font-weight:700;color:var(--accent)">📝 AI 摘要</div><span style="color:#ef4444">❌ 网络错误: ' + esc(e.message || '') + '</span>';
   }
   if (btn) btn.disabled = false;
 }
@@ -1159,55 +1165,87 @@ async function aiSummarize(articleId) {
 async function aiTranslate(articleId) {
   const btn = document.querySelector('.ai-translate-btn');
   if (btn) btn.disabled = true;
+
+  // ⏳ Show loading inline after each paragraph
+  const bodyEl = document.getElementById('articleBody');
+  if (!bodyEl) { showToast('❌ 未找到文章内容'); if (btn) btn.disabled = false; return; }
+
+  // Remove existing translations
+  bodyEl.querySelectorAll('.ai-translation-inline').forEach(el => el.remove());
+
+  // Insert loading placeholder after each <p>
+  const paragraphs = bodyEl.querySelectorAll('p');
+  if (paragraphs.length === 0) {
+    showToast('❌ 文章没有可翻译的段落');
+    if (btn) btn.disabled = false;
+    return;
+  }
+  paragraphs.forEach((p, idx) => {
+    const loadingDiv = document.createElement('div');
+    loadingDiv.className = 'ai-translation-inline';
+    loadingDiv.style.cssText = 'font-size:inherit;line-height:1.7;color:var(--text-3);margin:0 0 0.25em 0';
+    loadingDiv.textContent = '⏳ 翻译中...';
+    p.parentNode.insertBefore(loadingDiv, p.nextSibling);
+  });
+
   try {
     const resp = await fetch('/ai/translate/' + articleId, { method: 'POST', headers: { 'Authorization': 'Bearer ' + authToken } });
     const data = await resp.json();
-    if (!data) { showToast('❌ 请求失败'); return; }
-    if (data.error) { showToast('❌ ' + data.error); return; }
-    // Parse body_html paragraphs and insert translation after each paragraph
-    const bodyEl = document.getElementById('articleBody');
-    if (!bodyEl) { showToast('❌ 未找到文章内容'); return; }
-    // Remove existing translations
+    if (!data) { showToast('❌ 请求失败'); bodyEl.querySelectorAll('.ai-translation-inline').forEach(el => el.remove()); if (btn) btn.disabled = false; return; }
+    if (data.error) { showToast('❌ ' + data.error); bodyEl.querySelectorAll('.ai-translation-inline').forEach(el => el.remove()); if (btn) btn.disabled = false; return; }
+
+    // Parse AI response: each line is "原文||译文" format
+    const pairs = data.translation.split(/\n\n/).filter(p => p.trim());
+    const currentPs = bodyEl.querySelectorAll('p');
+
+    // Remove loading placeholders
     bodyEl.querySelectorAll('.ai-translation-inline').forEach(el => el.remove());
-    const paragraphs = bodyEl.querySelectorAll('p');
-    if (paragraphs.length === 0) {
-      // Fallback: just show at bottom
-      const fallbackDiv = document.createElement('div');
-      fallbackDiv.className = 'ai-translation-inline';
-      fallbackDiv.style.cssText = 'margin-top:12px;padding:12px 16px;background:rgba(110,142,251,0.06);border-radius:8px;font-size:13px;line-height:1.7;color:var(--text-2);border-left:2px solid var(--accent)';
-      fallbackDiv.textContent = data.translation;
-      bodyEl.appendChild(fallbackDiv);
-    } else {
-      // Split translation into paragraphs
-      const transParagraphs = data.translation.split(/\n\s*\n/).filter(p => p.trim());
-      paragraphs.forEach((p, idx) => {
-        if (idx < transParagraphs.length && transParagraphs[idx].trim()) {
-          // Check if translation already exists after this paragraph
-          let next = p.nextElementSibling;
-          while (next && next.classList.contains('ai-translation-inline')) {
-            next.remove();
-            next = p.nextElementSibling;
-          }
-          const transDiv = document.createElement('div');
-          transDiv.className = 'ai-translation-inline';
-          transDiv.style.cssText = 'margin:0 0 1.2em 1.5em;padding:6px 10px;font-size:13px;line-height:1.7;color:var(--text-2);border-left:2px solid var(--accent);background:rgba(110,142,251,0.04);border-radius:4px';
-          transDiv.textContent = transParagraphs[idx].trim();
-          p.parentNode.insertBefore(transDiv, p.nextSibling);
+
+    // Immersive: insert translation right after each original <p>
+    currentPs.forEach((p, idx) => {
+      let transText = '';
+      // Try to find matching pair by structure (paragraph order)
+      if (idx < pairs.length) {
+        const pair = pairs[idx].trim();
+        const sepIdx = pair.indexOf('||');
+        if (sepIdx > -1) {
+          transText = pair.substring(sepIdx + 2).trim();
+        } else {
+          // Fallback: whole pair might be translation if no separator
+          transText = pair;
         }
-      });
-      // If more translation paragraphs than HTML paragraphs, append remaining
-      if (transParagraphs.length > paragraphs.length) {
-        for (let i = paragraphs.length; i < transParagraphs.length; i++) {
+      } else if (idx < pairs.length + 2) {
+        // Try matching by content similarity - skip for now
+      }
+
+      if (transText) {
+        const transDiv = document.createElement('div');
+        transDiv.className = 'ai-translation-inline';
+        transDiv.style.cssText = 'font-size:inherit;line-height:1.7;color:var(--text-2);margin:0 0 1em 0;padding-left:0;font-weight:400';
+        transDiv.textContent = transText;
+        p.parentNode.insertBefore(transDiv, p.nextSibling);
+      }
+    });
+
+    // If more translations than paragraphs, append remaining
+    if (pairs.length > currentPs.length) {
+      for (let i = currentPs.length; i < pairs.length; i++) {
+        const pair = pairs[i].trim();
+        const sepIdx = pair.indexOf('||');
+        const transText = sepIdx > -1 ? pair.substring(sepIdx + 2).trim() : pair;
+        if (transText) {
           const transDiv = document.createElement('div');
           transDiv.className = 'ai-translation-inline';
-          transDiv.style.cssText = 'margin:0 0 1.2em 1.5em;padding:6px 10px;font-size:13px;line-height:1.7;color:var(--text-2);border-left:2px solid var(--accent);background:rgba(110,142,251,0.04);border-radius:4px';
-          transDiv.textContent = transParagraphs[i].trim();
+          transDiv.style.cssText = 'font-size:inherit;line-height:1.7;color:var(--text-2);margin:0 0 1em 0;padding-left:0;font-weight:400';
+          transDiv.textContent = transText;
           bodyEl.appendChild(transDiv);
         }
       }
     }
+
     showToast('✅ 翻译完成');
   } catch (e) {
+    bodyEl.querySelectorAll('.ai-translation-inline').forEach(el => el.remove());
     showToast('❌ 网络错误: ' + (e.message || ''));
   }
   if (btn) btn.disabled = false;
@@ -1745,6 +1783,10 @@ function scrollToCurrentTop() {
 }
 
 async function goHome() {
+  if (authUser && authUser.role === 'preview') {
+    showToast('🔒 预览用户无此权限');
+    return;
+  }
   currentPage = 1;
   selectFilter('all');
   // Fire refresh asynchronously — don't block scrollTo

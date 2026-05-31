@@ -113,18 +113,30 @@ class AIService:
     # ─── Translate (bilingual) ───────────────────────────────
 
     def translate(self, article_text: str, title: str = "") -> str:
-        prompt = ("请将以下文章逐段翻译为中文。对于文章的每一段：\n"
-                  "1. 保留原文段落\n"
-                  "2. 在其下方给出中文翻译\n"
-                  "3. 译文段落用『翻译：』开头\n"
-                  "保持原文的所有段落和格式不变，逐段交替输出。")
+        # Strip HTML tags for clean translation input
+        import re
+        plain_text = re.sub(r'<[^>]+>', '', article_text)
+        plain_text = re.sub(r'\s*\n\s*', '\n', plain_text)
+        plain_text = plain_text.strip()
+
+        prompt = ("请将以下文章逐段翻译为中文。\n\n"
+                  "格式要求（非常重要）：\n"
+                  "1. 将文章按段落拆分，每段原文后面紧跟该段的中文翻译\n"
+                  "2. 原文段和译文段之间用『||』分隔\n"
+                  "3. 段与段之间用两个换行分隔\n"
+                  "4. 输出纯文本，不要任何 HTML 标签（不要 <b> <u> <br/> 等）\n"
+                  "5. 如果原文包含加粗或斜体，只保留纯文字含义\n\n"
+                  "示例格式：\n"
+                  "Today is Tuesday.||今天是星期二。\n\n"
+                  "The weather is sunny.||天气晴朗。\n\n"
+                  "Please output paragraph by paragraph exactly as shown above.")
         if title:
             prompt = f"文章标题：{title}\n\n{prompt}"
         messages = [
             {"role": "system",
-             "content": "你是一个专业的翻译助手。请逐段翻译文章，保持每段原文后紧跟中文译文。"},
+             "content": "你是一个专业的翻译助手。逐段翻译，每段原文后紧跟该段译文，用『||』分隔。只输出纯文本，不要 HTML 标签。"},
             {"role": "user",
-             "content": f"{prompt}\n\n文章内容：\n{article_text[:4000]}"},
+             "content": f"{prompt}\n\n文章内容：\n{plain_text[:4000]}"},
         ]
         return self.chat(messages, max_tokens=4000)
 
