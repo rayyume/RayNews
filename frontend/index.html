@@ -648,10 +648,10 @@ function openArticle(id) {
   const shortDate = n.date ? n.date.slice(2) : '';
   history.replaceState(null, '', '#/article/' + shortDate + '-' + n.id);
 
-  // Render article body: use summary directly for short articles, fetch body for full articles
-  if (n.has_full_content && articleBodyCache[id]) {
+  // Fetch full article body from API
+  if (articleBodyCache[id]) {
     renderArticleBody(wrap, articleBodyCache[id], id);
-  } else if (n.has_full_content) {
+  } else {
     const ac2 = new AbortController();
     const t2 = setTimeout(() => ac2.abort(), 8000);
     fetch('/api/news/' + id, { signal: ac2.signal })
@@ -666,9 +666,6 @@ function openArticle(id) {
         const bodyEl = document.getElementById('articleBody');
         if (bodyEl) bodyEl.innerHTML = '<p style="color:var(--text-2);padding:40px 0;text-align:center">加载失败</p>';
       });
-  } else {
-    // Short article: render summary directly from list data, no fetch needed
-    renderArticleBody(wrap, n, id);
   }
 }
 
