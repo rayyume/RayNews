@@ -227,7 +227,7 @@ a:hover{text-decoration:underline}
 /* ═══ Admin Panel ═══════════════════════════════════ */
 .admin-overlay{position:fixed;inset:0;z-index:400;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity 0.2s}
 .admin-overlay.open{opacity:1;pointer-events:auto}
-.admin-panel{background:var(--bg-card);border:1px solid var(--border);border-radius:16px;width:520px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.4)}
+.admin-panel{position:relative;z-index:1;background:var(--bg-card);border:1px solid var(--border);border-radius:16px;width:520px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.4)}
 .admin-header{display:flex;align-items:center;justify-content:space-between;padding:20px 24px;border-bottom:1px solid var(--border);flex-shrink:0}
 .admin-header h2{margin:0;font-size:18px;font-weight:700}
 .admin-close{background:none;border:none;color:var(--text-3);font-size:18px;cursor:pointer;padding:4px 8px;border-radius:6px;transition:all 0.15s}
@@ -260,7 +260,7 @@ a:hover{text-decoration:underline}
 /* ═══ Favorites Panel ════════════════════════════════════ */
 .fav-overlay{position:fixed;inset:0;z-index:400;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity 0.2s}
 .fav-overlay.open{opacity:1;pointer-events:auto}
-.fav-panel{background:var(--bg-card);border:1px solid var(--border);border-radius:16px;width:520px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.4)}
+.fav-panel{position:relative;z-index:1;background:var(--bg-card);border:1px solid var(--border);border-radius:16px;width:520px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.4)}
 .fav-header{display:flex;align-items:center;justify-content:space-between;padding:20px 24px;border-bottom:1px solid var(--border);flex-shrink:0}
 .fav-header h2{margin:0;font-size:18px;font-weight:700}
 .fav-close{background:none;border:none;color:var(--text-3);font-size:18px;cursor:pointer;padding:4px 8px;border-radius:6px;transition:all 0.15s}
@@ -280,7 +280,7 @@ a:hover{text-decoration:underline}
 /* ═══ AI Settings Panel ═══════════════════════════════════ */
 .ai-overlay{position:fixed;inset:0;z-index:400;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity 0.2s}
 .ai-overlay.open{opacity:1;pointer-events:auto}
-.ai-panel{background:var(--bg-card);border:1px solid var(--border);border-radius:16px;width:480px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.4)}
+.ai-panel{position:relative;z-index:1;background:var(--bg-card);border:1px solid var(--border);border-radius:16px;width:480px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.4)}
 .ai-header{display:flex;align-items:center;justify-content:space-between;padding:20px 24px;border-bottom:1px solid var(--border);flex-shrink:0}
 .ai-header h2{margin:0;font-size:18px;font-weight:700}
 .ai-close{background:none;border:none;color:var(--text-3);font-size:18px;cursor:pointer;padding:4px 8px;border-radius:6px;transition:all 0.15s}
