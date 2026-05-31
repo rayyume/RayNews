@@ -140,3 +140,13 @@ class AIService:
              "content": f"以下是今日新闻列表，请生成摘要：\n\n{articles_text}"},
         ]
         return self.chat(messages, max_tokens=2000)
+
+    # ─── Test connection ──────────────────────────────────────
+
+    def test_connection(self) -> str:
+        """Send a minimal prompt to verify API connectivity."""
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Reply with exactly one word: ok"},
+        ]
+        return self.chat(messages, max_tokens=10, temperature=0)

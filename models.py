@@ -87,6 +87,14 @@ def verify_password(password: str, hashed: str) -> bool:
 def create_user(email: str, password: str, nickname: str = "",
                 role: str = "user") -> dict | None:
     db = get_db()
+    # Check username uniqueness if provided
+    if nickname:
+        existing = db.execute(
+            "SELECT 1 FROM users WHERE nickname = ? AND nickname != ''",
+            (nickname,),
+        ).fetchone()
+        if existing:
+            return None  # duplicate username
     try:
         cur = db.execute(
             "INSERT INTO users (email, password, nickname, role) VALUES (?, ?, ?, ?)",
@@ -110,6 +118,13 @@ def get_user(user_id: int) -> dict | None:
 def get_user_by_email(email: str) -> dict | None:
     db = get_db()
     row = db.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_user_by_username(username: str) -> dict | None:
+    """Look up a user by nickname/username."""
+    db = get_db()
+    row = db.execute("SELECT * FROM users WHERE nickname = ?", (username,)).fetchone()
     return dict(row) if row else None
 
 

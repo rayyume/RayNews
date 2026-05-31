@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="mobile-web-app-capable" content="yes">
@@ -341,6 +341,9 @@ a:hover{text-decoration:underline}
   <div class="sidebar" id="sidebar">
     <div class="sidebar-header">Source</div>
     <div class="filters" id="filters"></div>
+    <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
+      <button class="fbtn" onclick="showDailySummary()" style="width:100%;text-align:left;padding:7px 12px;border-radius:6px;font-size:12px">📊 生成每日摘要</button>
+    </div>
   </div>
 
   <div class="list" id="list">
@@ -370,7 +373,7 @@ a:hover{text-decoration:underline}
     </div>
     <div class="auth-body">
       <div id="authForm">
-        <input type="email" id="authEmail" class="auth-input" placeholder="邮箱" autocomplete="email">
+        <input type="text" id="authLogin" class="auth-input" placeholder="邮箱 / 用户名" autocomplete="username">
         <input type="password" id="authPassword" class="auth-input" placeholder="密码" autocomplete="current-password">
         <input type="text" id="authNickname" class="auth-input" placeholder="昵称（可选）" style="display:none">
         <p id="authError" class="auth-error"></p>
@@ -481,17 +484,14 @@ a:hover{text-decoration:underline}
         </div>
 
         <button class="ai-save-btn" onclick="saveAIConfig()">保存 AI 配置</button>
+        <button class="ai-save-btn" onclick="testAIConnection()" style="margin-top:8px;background:var(--bg-card);color:var(--text);border:1px solid var(--border)">🔌 测试 API 连接</button>
       </div>
 
       <!-- Notification Tab -->
       <div id="settingsTabNotify" style="display:none">
-        <label class="ai-label">Resend API Key</label>
-        <input class="ai-input" id="notifyResendKey" type="password" placeholder="re_...">
-        <p class="ai-hint">在 <a href="https://resend.com" target="_blank" style="color:var(--accent)">resend.com</a> 获取</p>
-
         <label class="ai-label">接收邮箱</label>
         <input class="ai-input" id="notifyToEmail" type="email" placeholder="you@example.com">
-        <p class="ai-hint">用于接收每日摘要和测试通知</p>
+        <p class="ai-hint">用于接收每日摘要和测试通知。发件人固定为 news@rayyu.me</p>
 
         <div class="ai-toggle" onclick="document.getElementById('dailySummaryToggle').click()">
           <input type="checkbox" id="dailySummaryToggle" onclick="event.stopPropagation()">
@@ -520,6 +520,23 @@ a:hover{text-decoration:underline}
       </div>
 
       <div id="settingsStatus"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ Daily Summary Overlay ═══════════════════════════ -->
+<div class="ai-overlay" id="dailySummaryOverlay">
+  <div class="ai-backdrop" onclick="closeDailySummary()" style="position:absolute;inset:0"></div>
+  <div class="ai-panel" style="width:600px">
+    <div class="ai-header">
+      <h2>📊 每日摘要</h2>
+      <button class="ai-close" onclick="closeDailySummary()">✕</button>
+    </div>
+    <div class="ai-body" id="dailySummaryBody">
+      <div style="text-align:center;padding:20px;color:var(--text-3)">
+        <button class="ai-save-btn" onclick="generateDailySummary()">📊 生成每日摘要</button>
+        <p class="ai-hint" style="margin-top:8px">基于最近文章由 AI 生成摘要</p>
+      </div>
     </div>
   </div>
 </div>
@@ -554,9 +571,7 @@ let authMode = 'login'; // 'login' | 'register'
 function loadAuth() {
   authToken = localStorage.getItem('raynews_token');
   try { const u = localStorage.getItem('raynews_user'); authUser = u ? JSON.parse(u) : null; } catch {}
-  if (authToken && authUser) {
-    updateUserUI();
-  }
+  updateUserUI();
 }
 
 function getAvatarUrl(user) {
@@ -582,7 +597,7 @@ function md5(s) {
   s=unescape(encodeURIComponent(s));
   for(i=0;i<s.length;i++)w[i>>2]|=s.charCodeAt(i)<<(i%4<<3);
   w[i>>2]|=128<<(i%4<<3);
-  for(k=(i+8>>6<<4)+14,kk;kk<k;kk++)w[kk]=0;
+  for(k=(i+8>>6<<4)+14,kk=0;kk<k;kk++)w[kk]=0;
   w[k-1]=i*8;
   for(i=0;i<w.length;i+=16){
     aa=a,bb=b,cc=c,dd=d;
@@ -617,9 +632,19 @@ function uploadAvatar() {
 document.getElementById('avatarInput').addEventListener('change', async function() {
   const file = this.files[0];
   if (!file) return;
-  if (file.size > 500 * 1024) { showToast('❌ 图片太大（最大 500KB）'); this.value = ''; return; }
   if (!['image/jpeg','image/png','image/gif','image/webp'].includes(file.type)) {
     showToast('❌ 不支持的格式（jpg/png/gif/webp）'); this.value = ''; return;
+  }
+  // Auto-compress with canvas if too large
+  const MAX_BYTES = 500 * 1024;
+  let finalBlob = file;
+  if (file.size > MAX_BYTES) {
+    try {
+      finalBlob = await compressImage(file, MAX_BYTES);
+      showToast('⏳ 原始图片较大，已压缩为 ' + Math.round(finalBlob.size/1024) + 'KB');
+    } catch (e) {
+      showToast('❌ 压缩失败'); this.value = ''; return;
+    }
   }
   const reader = new FileReader();
   reader.onload = async function(e) {
@@ -632,18 +657,57 @@ document.getElementById('avatarInput').addEventListener('change', async function
       });
       const data = await resp.json();
       if (data.error) { showToast('❌ ' + data.error); return; }
-      // Update local state
       authUser.avatar_url = data.avatar_url;
       localStorage.setItem('raynews_user', JSON.stringify(authUser));
       updateUserUI();
       showToast('✅ 头像已更新');
     } catch (e) {
-      showToast('❌ 上传失败');
+      showToast('❌ 上传失败: ' + e.message);
     }
   };
-  reader.readAsDataURL(file);
+  if (finalBlob !== file) {
+    // Read compressed blob instead
+    reader.readAsDataURL(finalBlob);
+  } else {
+    reader.readAsDataURL(file);
+  }
   this.value = '';
 });
+
+// Compress image to fit under maxBytes using canvas
+function compressImage(file, maxBytes) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = function() {
+      let w = img.width, h = img.height;
+      const MAX_DIM = 800;
+      if (w > MAX_DIM || h > MAX_DIM) {
+        const ratio = Math.min(MAX_DIM / w, MAX_DIM / h);
+        w = Math.round(w * ratio);
+        h = Math.round(h * ratio);
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, w, h);
+      // Try successive quality levels
+      function tryQuality(q) {
+        canvas.toBlob(function(blob) {
+          if (!blob) { reject(new Error('canvas toBlob failed')); return; }
+          if (blob.size <= maxBytes || q <= 0.1) {
+            resolve(blob);
+          } else {
+            tryQuality(q - 0.15);
+          }
+        }, 'image/jpeg', q);
+      }
+      tryQuality(0.85);
+    };
+    img.onerror = function() { reject(new Error('failed to load image')); };
+    img.src = URL.createObjectURL(file);
+  });
+}
 
 function saveAuth(token, user) {
   authToken = token;
@@ -677,7 +741,7 @@ async function apiFetch(url, options = {}) {
 // ═══ Auth Modal ══════════════════════════════════════════
 function showAuth() {
   document.getElementById('authModal').classList.add('open');
-  document.getElementById('authEmail').value = '';
+  document.getElementById('authLogin').value = '';
   document.getElementById('authPassword').value = '';
   document.getElementById('authNickname').value = '';
   document.getElementById('authError').textContent = '';
@@ -702,32 +766,29 @@ function toggleAuthMode() {
 }
 
 async function submitAuth() {
-  const email = document.getElementById('authEmail').value.trim();
+  const loginVal = document.getElementById('authLogin').value.trim();
   const password = document.getElementById('authPassword').value;
   const nickname = document.getElementById('authNickname').value.trim();
   const btn = document.getElementById('authSubmitBtn');
   const errEl = document.getElementById('authError');
 
-  if (!email || !password) { errEl.textContent = '请填写邮箱和密码'; return; }
+  if (!loginVal || !password) { errEl.textContent = '请填写邮箱/用户名和密码'; return; }
   btn.disabled = true;
   btn.textContent = authMode === 'login' ? '登录中...' : '注册中...';
   errEl.textContent = '';
 
   try {
     let data;
-    if (authMode === 'login') {
-      data = await apiFetch('/auth/login', {
-        method: 'POST',
-        body: JSON.stringify({ email, password }),
-        headers: { 'Content-Type': 'application/json' },
-      });
-    } else {
-      data = await apiFetch('/auth/register', {
-        method: 'POST',
-        body: JSON.stringify({ email, password, nickname }),
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
+    const endpoint = authMode === 'login' ? '/auth/login' : '/auth/register';
+    const body = authMode === 'login'
+      ? JSON.stringify({ login: loginVal, password })
+      : JSON.stringify({ email: loginVal, password, nickname });
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      body,
+      headers: { 'Content-Type': 'application/json' },
+    });
+    data = await resp.json();
     if (!data) { errEl.textContent = '请求失败'; btn.disabled = false; btn.textContent = '重试'; return; }
     if (data.error) { errEl.textContent = data.error; btn.disabled = false; btn.textContent = '重试'; return; }
     if (data.token) {
@@ -736,7 +797,7 @@ async function submitAuth() {
       showToast(authMode === 'login' ? '✅ 登录成功' : '✅ 注册成功');
     }
   } catch (e) {
-    errEl.textContent = '网络错误';
+    errEl.textContent = '网络错误: ' + (e.message || '未知错误');
     btn.disabled = false;
     btn.textContent = '重试';
   }
@@ -859,6 +920,9 @@ async function loadAIConfig() {
 }
 
 async function saveAIConfig() {
+  const statusEl = document.getElementById('settingsStatus');
+  statusEl.className = 'ai-status ok';
+  statusEl.textContent = '⏳ 保存中...';
   try {
     const resp = await fetch('/ai/config', {
       method: 'PUT',
@@ -872,11 +936,70 @@ async function saveAIConfig() {
         enabled: document.getElementById('aiEnabled').checked ? 1 : 0,
       }),
     });
-    const data = await resp.json();
+    let data;
+    try {
+      data = await resp.json();
+    } catch (parseErr) {
+      const text = await resp.text();
+      console.error('saveAIConfig: JSON parse failed, got text:', text);
+      showSettingsStatus('❌ 服务器返回异常: ' + text.substring(0, 200), 'err');
+      return;
+    }
     if (data.error) { showSettingsStatus('❌ ' + data.error, 'err'); return; }
     showSettingsStatus('✅ AI 配置已保存');
     loadAIConfig();
-  } catch (e) { showSettingsStatus('❌ 保存失败', 'err'); }
+  } catch (e) { showSettingsStatus('❌ 保存失败: ' + e.message, 'err'); }
+}
+
+async function testAIConnection() {
+  const statusEl = document.getElementById('settingsStatus');
+  statusEl.className = 'ai-status ok';
+  statusEl.textContent = '⏳ 测试中...';
+  // Temporarily save current form values and test
+  const payload = {
+    provider: document.getElementById('aiProvider').value,
+    api_key: document.getElementById('aiApiKey').value,
+    endpoint: document.getElementById('aiEndpoint').value,
+    model: document.getElementById('aiModel').value,
+    provider_type: document.getElementById('aiProviderType').value,
+    enabled: 1,
+  };
+  if (!payload.api_key) { showSettingsStatus('❌ 请先填写 API Key', 'err'); return; }
+  if (!payload.endpoint) { showSettingsStatus('❌ 请先填写 API Endpoint', 'err'); return; }
+  try {
+    // Test by calling a light summary on a placeholder
+    const resp = await fetch('/ai/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
+      body: JSON.stringify(payload),
+    });
+    let cfgData;
+    try {
+      cfgData = await resp.json();
+    } catch (parseErr) {
+      const text = await resp.text();
+      console.error('testAIConnection: config save JSON parse failed, got text:', text);
+      showSettingsStatus('❌ 服务器返回异常: ' + text.substring(0, 200), 'err');
+      return;
+    }
+    if (cfgData.error) { showSettingsStatus('❌ ' + cfgData.error, 'err'); return; }
+    // Now trigger a quick test call
+    const testResp = await fetch('/ai/test-connection', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + authToken },
+    });
+    let testData;
+    try {
+      testData = await testResp.json();
+    } catch (parseErr) {
+      const text = await testResp.text();
+      console.error('testAIConnection: test JSON parse failed, got text:', text);
+      showSettingsStatus('❌ 服务器返回异常: ' + text.substring(0, 200), 'err');
+      return;
+    }
+    if (testData.error) { showSettingsStatus('❌ ' + testData.error, 'err'); return; }
+    showSettingsStatus('✅ 连接成功！模型响应：' + (testData.response || 'ok'), 'ok');
+  } catch (e) { showSettingsStatus('❌ 测试失败: ' + e.message, 'err'); }
 }
 
 // ─── Notification Config ─────────────────────────────────
@@ -887,7 +1010,6 @@ async function loadNotifyConfig() {
     if (!data) return;
     const nc = data.notification_config || {};
     const resend = nc.resend || {};
-    document.getElementById('notifyResendKey').value = resend.api_key || '';
     document.getElementById('notifyToEmail').value = resend.to_email || '';
     document.getElementById('dailySummaryToggle').checked = !!data.daily_summary_enabled;
   } catch (e) {}
@@ -898,7 +1020,6 @@ async function saveNotifyConfig() {
   const existing = await apiFetch('/settings') || {};
   const nc = (existing.notification_config || {});
   nc.resend = {
-    api_key: document.getElementById('notifyResendKey').value,
     to_email: document.getElementById('notifyToEmail').value,
   };
   try {
@@ -969,38 +1090,126 @@ async function triggerDailySummary() {
   } catch (e) { showSettingsStatus('❌ 生成失败', 'err'); }
 }
 
+// ═══ Daily Summary (Sidebar) ════════════════════════════
+
+function showDailySummary() {
+  document.getElementById('dailySummaryOverlay').classList.add('open');
+  closeSidebar();
+}
+
+function closeDailySummary() {
+  document.getElementById('dailySummaryOverlay').classList.remove('open');
+}
+
+async function generateDailySummary() {
+  const body = document.getElementById('dailySummaryBody');
+  body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)">⏳ 正在生成每日摘要...</div>';
+  try {
+    const data = await apiFetch('/ai/daily-summary', { method: 'POST' });
+    if (!data) { body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)">❌ 请求失败</div>'; return; }
+    if (data.error) { body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)">❌ ' + esc(data.error) + '</div>'; return; }
+    body.innerHTML = '<div style="max-height:400px;overflow-y:auto;white-space:pre-wrap;font-size:13px;line-height:1.7;padding:12px;background:var(--bg);border-radius:8px">' + esc(data.summary) + '</div><p style="font-size:11px;color:var(--text-3);margin-top:8px">基于 ' + data.article_count + ' 篇文章生成</p>';
+  } catch (e) {
+    body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)">❌ 生成失败: ' + esc(e.message) + '</div>';
+  }
+}
+
+function closeSidebar() {
+  const sidebar = document.getElementById('sidebar');
+  const toggle = document.getElementById('sidebarToggle');
+  sidebar.classList.remove('open');
+  toggle.classList.remove('open');
+  toggle.textContent = '☰';
+  try { localStorage.setItem('raynews_sidebar', '0'); } catch(e) {}
+}
+
 // ═══ AI Actions on Article ═══════════════════════════════
 
 async function aiSummarize(articleId) {
   const btn = document.querySelector('.ai-summarize-btn');
-  const resultEl = document.getElementById('aiSummaryResult');
   if (btn) btn.disabled = true;
-  resultEl.classList.remove('ai-hidden');
-  resultEl.textContent = '⏳ 正在生成摘要...';
   try {
-    const data = await apiFetch('/ai/summarize/' + articleId, { method: 'POST' });
-    if (!data) { resultEl.textContent = '❌ 请求失败'; return; }
-    if (data.error) { resultEl.textContent = '❌ ' + data.error; return; }
-    resultEl.textContent = data.summary;
+    const resp = await fetch('/ai/summarize/' + articleId, { method: 'POST', headers: { 'Authorization': 'Bearer ' + authToken } });
+    const data = await resp.json();
+    if (!data) { showToast('❌ 请求失败'); return; }
+    if (data.error) { showToast('❌ ' + data.error); return; }
+    // Insert summary at the VERY TOP of article content
+    const articleWrap = document.getElementById('articleWrap');
+    const existingSummary = document.getElementById('aiSummaryTop');
+    if (existingSummary) existingSummary.remove();
+    const summaryDiv = document.createElement('div');
+    summaryDiv.id = 'aiSummaryTop';
+    summaryDiv.style.cssText = 'background:rgba(110,142,251,0.08);border:1px solid var(--accent);border-radius:var(--radius);padding:14px 16px;margin-bottom:16px;font-size:13px;line-height:1.7;color:var(--text)';
+    summaryDiv.innerHTML = '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;font-size:11px;font-weight:700;color:var(--accent)">📝 AI 摘要</div>' + esc(data.summary);
+    // Insert at the very top of articleWrap, after the h1
+    const h1 = articleWrap.querySelector('h1');
+    const meta = articleWrap.querySelector('.article-meta');
+    if (meta && meta.nextSibling) {
+      articleWrap.insertBefore(summaryDiv, meta.nextSibling);
+    } else if (h1 && h1.nextSibling) {
+      articleWrap.insertBefore(summaryDiv, h1.nextSibling);
+    } else {
+      articleWrap.prepend(summaryDiv);
+    }
   } catch (e) {
-    resultEl.textContent = '❌ 网络错误';
+    showToast('❌ 网络错误: ' + (e.message || ''));
   }
   if (btn) btn.disabled = false;
 }
 
 async function aiTranslate(articleId) {
   const btn = document.querySelector('.ai-translate-btn');
-  const resultEl = document.getElementById('aiTranslationResult');
   if (btn) btn.disabled = true;
-  resultEl.classList.remove('ai-hidden');
-  resultEl.textContent = '⏳ 正在翻译...';
   try {
-    const data = await apiFetch('/ai/translate/' + articleId, { method: 'POST' });
-    if (!data) { resultEl.textContent = '❌ 请求失败'; return; }
-    if (data.error) { resultEl.textContent = '❌ ' + data.error; return; }
-    resultEl.textContent = data.translation;
+    const resp = await fetch('/ai/translate/' + articleId, { method: 'POST', headers: { 'Authorization': 'Bearer ' + authToken } });
+    const data = await resp.json();
+    if (!data) { showToast('❌ 请求失败'); return; }
+    if (data.error) { showToast('❌ ' + data.error); return; }
+    // Parse body_html paragraphs and insert translation after each paragraph
+    const bodyEl = document.getElementById('articleBody');
+    if (!bodyEl) { showToast('❌ 未找到文章内容'); return; }
+    // Remove existing translations
+    bodyEl.querySelectorAll('.ai-translation-inline').forEach(el => el.remove());
+    const paragraphs = bodyEl.querySelectorAll('p');
+    if (paragraphs.length === 0) {
+      // Fallback: just show at bottom
+      const fallbackDiv = document.createElement('div');
+      fallbackDiv.className = 'ai-translation-inline';
+      fallbackDiv.style.cssText = 'margin-top:12px;padding:12px 16px;background:rgba(110,142,251,0.06);border-radius:8px;font-size:13px;line-height:1.7;color:var(--text-2);border-left:2px solid var(--accent)';
+      fallbackDiv.textContent = data.translation;
+      bodyEl.appendChild(fallbackDiv);
+    } else {
+      // Split translation into paragraphs
+      const transParagraphs = data.translation.split(/\n\s*\n/).filter(p => p.trim());
+      paragraphs.forEach((p, idx) => {
+        if (idx < transParagraphs.length && transParagraphs[idx].trim()) {
+          // Check if translation already exists after this paragraph
+          let next = p.nextElementSibling;
+          while (next && next.classList.contains('ai-translation-inline')) {
+            next.remove();
+            next = p.nextElementSibling;
+          }
+          const transDiv = document.createElement('div');
+          transDiv.className = 'ai-translation-inline';
+          transDiv.style.cssText = 'margin:0 0 1.2em 1.5em;padding:6px 10px;font-size:13px;line-height:1.7;color:var(--text-2);border-left:2px solid var(--accent);background:rgba(110,142,251,0.04);border-radius:4px';
+          transDiv.textContent = transParagraphs[idx].trim();
+          p.parentNode.insertBefore(transDiv, p.nextSibling);
+        }
+      });
+      // If more translation paragraphs than HTML paragraphs, append remaining
+      if (transParagraphs.length > paragraphs.length) {
+        for (let i = paragraphs.length; i < transParagraphs.length; i++) {
+          const transDiv = document.createElement('div');
+          transDiv.className = 'ai-translation-inline';
+          transDiv.style.cssText = 'margin:0 0 1.2em 1.5em;padding:6px 10px;font-size:13px;line-height:1.7;color:var(--text-2);border-left:2px solid var(--accent);background:rgba(110,142,251,0.04);border-radius:4px';
+          transDiv.textContent = transParagraphs[i].trim();
+          bodyEl.appendChild(transDiv);
+        }
+      }
+    }
+    showToast('✅ 翻译完成');
   } catch (e) {
-    resultEl.textContent = '❌ 网络错误';
+    showToast('❌ 网络错误: ' + (e.message || ''));
   }
   if (btn) btn.disabled = false;
 }
@@ -1009,9 +1218,6 @@ function showAIActions(articleId) {
   const aiSection = document.getElementById('aiActions');
   if (!aiSection) return;
   aiSection.dataset.articleId = articleId;
-  // Reset results
-  document.getElementById('aiSummaryResult').classList.add('ai-hidden');
-  document.getElementById('aiTranslationResult').classList.add('ai-hidden');
 }
 
 // ═══ Favorites ════════════════════════════════════════
@@ -1031,9 +1237,10 @@ async function loadFavorites() {
   try {
     const data = await apiFetch('/favorites');
     if (!data) return;
+    if (data.error) { document.getElementById('favBody').innerHTML = '<div class="fav-empty">❌ ' + esc(data.error) + '</div>'; return; }
     renderFavorites(data);
   } catch (e) {
-    document.getElementById('favBody').innerHTML = '<div class="fav-empty">❌ 加载失败</div>';
+    document.getElementById('favBody').innerHTML = '<div class="fav-empty">❌ 加载失败: ' + e.message + '</div>';
   }
 }
 
@@ -1086,34 +1293,23 @@ async function toggleFavorite() {
   if (!articleId) return;
   btn.classList.add('loading');
   try {
-    if (btn.classList.contains('on')) {
-      // Unfavorite
-      const resp = await fetch('/favorites/' + articleId, {
-        method: 'DELETE',
-        headers: { 'Authorization': 'Bearer ' + authToken },
-      });
-      const data = await resp.json();
-      if (data.ok) {
-        btn.classList.remove('on');
-        btn.title = '收藏';
-        showToast('已取消收藏');
-      }
-    } else {
-      // Favorite
-      const resp = await fetch('/favorites', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
-        body: JSON.stringify({ article_id: articleId }),
-      });
-      const data = await resp.json();
-      if (data.ok) {
-        btn.classList.add('on');
-        btn.title = '取消收藏';
-        showToast('✅ 已收藏');
-      }
+    const isOn = btn.classList.contains('on');
+    const url = isOn ? '/favorites/' + articleId : '/favorites';
+    const resp = await fetch(url, {
+      method: isOn ? 'DELETE' : 'POST',
+      headers: isOn ? { 'Authorization': 'Bearer ' + authToken } : { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
+      body: isOn ? undefined : JSON.stringify({ article_id: articleId }),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      btn.classList.toggle('on');
+      btn.title = isOn ? '收藏' : '取消收藏';
+      showToast(isOn ? '已取消收藏' : '✅ 已收藏');
+    } else if (data.error) {
+      showToast('❌ ' + data.error);
     }
   } catch (e) {
-    showToast('❌ 操作失败');
+    showToast('❌ 操作失败: ' + e.message);
   }
   btn.classList.remove('loading');
 }
@@ -1587,17 +1783,15 @@ function openArticle(id) {
         : '';
       wrap.innerHTML = `
         <h1>${esc(data.title || '')}</h1>
-        <div class="article-meta">
+        <div class="article-meta" style="position:relative">
           <span class="badge" style="${badgeStyle(data.source || '')}">${esc(data.source || '')}</span>
           <span>${formatTime(data.date || '', data.time || '')}</span>
+          <span style="margin-left:auto;display:flex;gap:8px" id="aiActions" data-article-id="${id}">
+            <button class="ai-summarize-btn" onclick="aiSummarize(${id})" style="background:none;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:0;font-family:var(--font)">摘要</button>
+            <button class="ai-translate-btn" onclick="aiTranslate(${id})" style="background:none;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:0;font-family:var(--font)">翻译</button>
+          </span>
         </div>
         ${coverImg}
-        <div class="ai-actions" id="aiActions" data-article-id="${id}">
-          <button class="ai-action-btn ai-summarize-btn" onclick="aiSummarize(${id})">📝 摘要</button>
-          <button class="ai-action-btn ai-translate-btn" onclick="aiTranslate(${id})">🌐 翻译</button>
-        </div>
-        <div id="aiSummaryResult" class="ai-result ai-hidden"></div>
-        <div id="aiTranslationResult" class="ai-result ai-hidden"></div>
         <div class="article-body" id="articleBody">
           <p style="color:var(--text-2);text-align:center;padding:40px 0">加载中...</p>
         </div>
@@ -1631,18 +1825,18 @@ function openArticle(id) {
     : '';
   wrap.innerHTML = `
     <h1>${esc(n.title)}</h1>
-    <div class="article-meta">
+    <div class="article-meta" style="position:relative">
       <span class="badge" style="${badgeStyle(n.source)}">${esc(n.source)}</span>
       <span>${formatTime(n.date, n.time)}</span>
+      <span style="margin-left:auto;display:flex;gap:8px" id="aiActions" data-article-id="${id}">
+        <button class="ai-summarize-btn" onclick="aiSummarize(${id})" style="background:none;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:0;font-family:var(--font)">摘要</button>
+        <button class="ai-translate-btn" onclick="aiTranslate(${id})" style="background:none;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:0;font-family:var(--font)">翻译</button>
+      </span>
     </div>
     ${coverImg}
-    <div class="ai-actions" id="aiActions" data-article-id="${id}">
-      <button class="ai-action-btn ai-summarize-btn" onclick="aiSummarize(${id})">📝 摘要</button>
-      <button class="ai-action-btn ai-translate-btn" onclick="aiTranslate(${id})">🌐 翻译</button>
-    </div>
     <div id="aiSummaryResult" class="ai-result ai-hidden"></div>
     <div id="aiTranslationResult" class="ai-result ai-hidden"></div>
-    <div class="article-body" id="articleBody">
+    <div class="article-body" id="articleBody">`
       <p style="color:var(--text-2);text-align:center;padding:40px 0">加载中...</p>
     </div>
   `;
@@ -1702,6 +1896,9 @@ function renderArticleBody(wrap, data, id) {
       e.stopPropagation();
       document.getElementById('lbImg').src = img.src;
       document.getElementById('lb').classList.add('open');
+      // Allow zoom on lightbox
+      const vp = document.querySelector('meta[name=viewport]');
+      if (vp) vp.content = 'width=device-width, initial-scale=1.0, viewport-fit=cover';
     });
   });
 }
@@ -1728,13 +1925,10 @@ function showToast(msg) {
 
 function closeLightbox() {
   document.getElementById('lb').classList.remove('open');
-  // Reset iOS Safari native zoom that may have been applied under the lightbox
+  // Lock zoom back when lightbox closes
   const vp = document.querySelector('meta[name=viewport]');
   if (vp) {
     vp.content = 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no';
-    requestAnimationFrame(() => {
-      vp.content = 'width=device-width, initial-scale=1.0, viewport-fit=cover';
-    });
   }
 }
 

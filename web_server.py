@@ -10,7 +10,7 @@ from flask_cors import CORS
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from models import (
-    get_db, create_user, get_user, get_user_by_email,
+    get_db, create_user, get_user, get_user_by_email, get_user_by_username,
     update_user, delete_user, list_users, count_users,
     verify_password,
     add_favorite, remove_favorite, get_favorites, is_favorited,
@@ -53,6 +53,9 @@ def register():
 
     user = create_user(email, password, nickname, role)
     if user is None:
+        # Check if it was a duplicate email or duplicate username
+        if nickname and get_user_by_username(nickname):
+            return jsonify({"error": "username already taken"}), 409
         return jsonify({"error": "email already registered"}), 409
 
     token = create_token(user["id"], user["role"])
@@ -62,12 +65,15 @@ def register():
 @app.route("/auth/login", methods=["POST"])
 def login():
     data = request.get_json(silent=True) or {}
-    email = (data.get("email") or "").strip().lower()
+    login_val = (data.get("login") or data.get("email") or "").strip().lower()
     password = data.get("password") or ""
 
-    user = get_user_by_email(email)
+    # Try email first, then username
+    user = get_user_by_email(login_val)
+    if not user:
+        user = get_user_by_username(login_val)
     if not user or not verify_password(password, user["password"]):
-        return jsonify({"error": "invalid email or password"}), 401
+        return jsonify({"error": "invalid email/username or password"}), 401
 
     token = create_token(user["id"], user["role"])
     return jsonify({
@@ -323,14 +329,19 @@ def get_ai_config_route():
 @app.route("/ai/config", methods=["PUT"])
 @require_auth
 def set_ai_config_route():
-    data = request.get_json(silent=True) or {}
-    config = set_ai_config(g.user_id, **data)
-    # Mask API key in response
-    safe = dict(config) if config else {}
-    if safe.get("api_key"):
-        k = safe["api_key"]
-        safe["api_key"] = k[:6] + "****" + k[-4:] if len(k) > 10 else "****"
-    return jsonify(safe)
+    try:
+        data = request.get_json(silent=True) or {}
+        config = set_ai_config(g.user_id, **data)
+        # Mask API key in response
+        safe = dict(config) if config else {}
+        if safe.get("api_key"):
+            k = safe["api_key"]
+            safe["api_key"] = k[:6] + "****" + k[-4:] if len(k) > 10 else "****"
+        return jsonify(safe)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"server error: {str(e)}"}), 500
 
 
 @app.route("/ai/summarize/<int:article_id>", methods=["POST"])
@@ -390,6 +401,26 @@ def ai_translate(article_id):
         return jsonify({"translation": translation})
     except Exception as e:
         return jsonify({"error": f"AI request failed: {str(e)}"}), 502
+
+
+@app.route("/ai/test-connection", methods=["POST"])
+@require_auth
+def ai_test_connection():
+    """Test the user's AI API configuration with a minimal prompt."""
+    config = get_ai_config(g.user_id)
+    if not config or not config.get("api_key"):
+        return jsonify({"error": "AI not configured. Save API config first."}), 400
+    try:
+        svc = AIService(
+            api_key=config["api_key"],
+            endpoint=config["endpoint"],
+            model=config["model"],
+            provider_type=config.get("provider_type", "openai"),
+        )
+        response = svc.test_connection()
+        return jsonify({"ok": True, "response": response})
+    except Exception as e:
+        return jsonify({"error": f"Connection test failed: {str(e)}"}), 502
 
 
 @app.route("/ai/daily-summary", methods=["POST"])
@@ -509,7 +540,7 @@ import json
 @app.route("/settings/test-notification", methods=["POST"])
 @require_auth
 def test_notification():
-    """Send a test email via the user's configured notification channel."""
+    """Send a test email via Resend API using env var RESEND_API_KEY, always from news@rayyu.me."""
     settings = get_user_settings(g.user_id)
     if not settings:
         return jsonify({"error": "settings not found"}), 400
@@ -522,17 +553,21 @@ def test_notification():
             nc = {}
 
     config = nc.get("resend", {})
-    api_key = config.get("api_key", "")
+    # Always use RESEND_API_KEY from environment
+    api_key = os.environ.get("RESEND_API_KEY", "")
     to_email = config.get("to_email", "")
 
-    if not api_key or not to_email:
-        return jsonify({"error": "notification not configured. Set Resend API key and email in Settings."}), 400
+    if not api_key:
+        return jsonify({"error": "RESEND_API_KEY not set in server environment. Contact admin."}), 400
+    if not to_email:
+        return jsonify({"error": "notification not configured. Set recipient email in Settings."}), 400
 
     try:
         from notifier import send_email
         result = send_email(api_key, to_email,
                             "RayNews 测试通知",
-                            "<h2>✅ 配置成功</h2><p>这是一封来自 RayNews 的测试邮件，通知功能正常工作。</p>")
+                            "<h2>✅ 配置成功</h2><p>这是一封来自 RayNews 的测试邮件，通知功能正常工作。</p>",
+                            from_email="news@rayyu.me")
         return jsonify({"ok": True, "id": result.get("id", "")})
     except Exception as e:
         return jsonify({"error": f"send failed: {str(e)}"}), 502

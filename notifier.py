@@ -8,7 +8,7 @@ RESEND_API = "https://api.resend.com/emails"
 
 def send_email(api_key: str, to_email: str, subject: str,
                html_body: str, from_name: str = "RayNews",
-               from_email: str = "notifications@rayyu.me") -> dict:
+               from_email: str = "news@rayyu.me") -> dict:
     """Send an email via Resend API. Returns response dict."""
     resp = requests.post(
         RESEND_API,
