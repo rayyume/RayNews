@@ -414,18 +414,10 @@ function renderFilters() {
       selectFilter('all');
       return;
     }
-    // Category header click → toggle collapse
+    // Category header click → filter by this category (collapse managed by selectFilter)
     const header = e.target.closest('.cat-header');
     if (header) {
       const cat = header.dataset.cat;
-      const body = el.querySelector(`.cat-body[data-cat="${cat}"]`);
-      const arrow = header.querySelector('.arrow');
-      if (body) {
-        const nowCollapsed = body.classList.toggle('collapsed');
-        arrow.classList.toggle('open', !nowCollapsed);
-        try { localStorage.setItem('raynews_cat_' + cat, nowCollapsed ? '1' : '0'); } catch(e) {}
-      }
-      // Also filter by this category
       selectFilter('cat:' + cat);
       return;
     }
@@ -444,6 +436,29 @@ function selectFilter(value) {
   filter = value;
   currentPage = 1;
   renderList();
+
+  // Sync category collapse state: only expand the active category
+  let activeCat = '';
+  if (value === 'all') {
+    activeCat = '';  // collapse all
+  } else if (value.startsWith('cat:')) {
+    activeCat = value.replace('cat:', '');
+  } else {
+    // Find which category this source belongs to
+    activeCat = Object.entries(CATEGORY_MAP).find(([,sources]) => sources.includes(value))?.[0] || '';
+  }
+  for (const cat of CATEGORY_ORDER) {
+    const shouldExpand = cat === activeCat;
+    localStorage.setItem('raynews_cat_' + cat, shouldExpand ? '0' : '1');
+    const body = el.querySelector(`.cat-body[data-cat="${cat}"]`);
+    const header = el.querySelector(`.cat-header[data-cat="${cat}"]`);
+    if (body) body.classList.toggle('collapsed', !shouldExpand);
+    if (header) {
+      const arrow = header.querySelector('.arrow');
+      if (arrow) arrow.classList.toggle('open', shouldExpand);
+    }
+  }
+
   // Highlight active item
   if (value === 'all') {
     const allDiv = el.querySelector('[data-is-all]');
@@ -563,9 +578,12 @@ function openArticle(id) {
     document.body.style.overflow = 'hidden';
     document.getElementById('overlay').dataset.articleId = id;
     wrap.innerHTML = '<p style="color:var(--text-2);text-align:center;padding:60px 0">加载中...</p>';
-    fetch('/api/news/' + id)
+    const ac1 = new AbortController();
+    const t1 = setTimeout(() => ac1.abort(), 15000);
+    fetch('/api/news/' + id, { signal: ac1.signal })
       .then(r => { if (!r.ok) throw new Error('not found'); return r.json(); })
       .then(data => {
+        clearTimeout(t1);
         const coverSrc = data.thumb ? proxyImgSrc(data.thumb) : '';
         const coverImg = coverSrc
           ? `<div style="margin-bottom:20px"><img src="${coverSrc}" alt="" style="max-width:100%;border-radius:var(--radius);background:var(--bg-surface)"></div>`
@@ -584,6 +602,7 @@ function openArticle(id) {
         renderArticleBody(wrap, data, id);
       })
       .catch(() => {
+        clearTimeout(t1);
         wrap.innerHTML = '<p style="color:var(--text-2);text-align:center;padding:60px 0">文章未找到</p>';
       });
     return;
@@ -617,10 +636,13 @@ function openArticle(id) {
   history.replaceState(null, '', '#/article/' + shortDate + '-' + n.id);
 
   // Fetch full article body from API
-  fetch('/api/news/' + id)
+  const ac2 = new AbortController();
+  const t2 = setTimeout(() => ac2.abort(), 15000);
+  fetch('/api/news/' + id, { signal: ac2.signal })
     .then(r => r.json())
-    .then(data => renderArticleBody(wrap, data, id))
+    .then(data => { clearTimeout(t2); renderArticleBody(wrap, data, id); })
     .catch(() => {
+      clearTimeout(t2);
       const bodyEl = document.getElementById('articleBody');
       if (bodyEl) bodyEl.innerHTML = '<p style="color:var(--text-2);padding:40px 0;text-align:center">加载失败</p>';
     });
@@ -675,6 +697,18 @@ function showToast(msg) {
   el._t = setTimeout(() => el.classList.remove('show'), 2000);
 }
 
+function closeLightbox() {
+  document.getElementById('lb').classList.remove('open');
+  // Reset iOS Safari native zoom that may have been applied under the lightbox
+  const vp = document.querySelector('meta[name=viewport]');
+  if (vp) {
+    vp.content = 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no';
+    requestAnimationFrame(() => {
+      vp.content = 'width=device-width, initial-scale=1.0, viewport-fit=cover';
+    });
+  }
+}
+
 function shareArticle() {
   const url = location.href;
   navigator.clipboard.writeText(url).then(() => showToast('✅ 链接已复制')).catch(() => showToast('✅ 链接已复制'));
@@ -724,11 +758,11 @@ document.addEventListener('click', e => {
 });
 
 document.getElementById('backBtn').addEventListener('click', closeArticle);
-document.getElementById('lb').addEventListener('click', () => document.getElementById('lb').classList.remove('open'));
+document.getElementById('lb').addEventListener('click', closeLightbox);
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     if (document.getElementById('lb').classList.contains('open')) {
-      document.getElementById('lb').classList.remove('open');
+      closeLightbox();
     } else {
       closeArticle();
     }

@@ -43,20 +43,16 @@ self.addEventListener('activate', event => {
 self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
 
-  // ── API: stale-while-revalidate ──
+  // ── API: network-first + background cache (no cold-start delay) ──
   if (url.pathname.startsWith('/api/')) {
     event.respondWith(
-      caches.open(API_CACHE).then(cache => {
-        return cache.match(event.request).then(cached => {
-          const fetchPromise = fetch(event.request).then(network => {
-            if (network.ok) {
-              cache.put(event.request, network.clone());
-            }
-            return network;
-          }).catch(() => cached); // network fail → fallback to cache
-          // Return cached immediately, or wait for network if no cache
-          return cached || fetchPromise;
-        });
+      fetch(event.request).then(network => {
+        if (network.ok) {
+          caches.open(API_CACHE).then(cache => cache.put(event.request, network.clone()));
+        }
+        return network;
+      }).catch(() => {
+        return caches.open(API_CACHE).then(cache => cache.match(event.request));
       })
     );
     return;
