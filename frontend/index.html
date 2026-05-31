@@ -47,7 +47,7 @@ a:hover{text-decoration:underline}
 
 /* ═══ Header ══════════════════════════════════════ */
 .header{position:sticky;top:0;z-index:100;background:rgba(10,10,12,0.82);backdrop-filter:blur(20px) saturate(1.2);-webkit-backdrop-filter:blur(20px) saturate(1.2);border-bottom:1px solid var(--border);margin:0 -20px;padding:env(safe-area-inset-top,0px) 20px 0}
-.header-inner{max-width:960px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;min-height:56px}
+.header-inner{max-width:960px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;min-height:56px;position:relative}
 .logo{display:flex;align-items:center;gap:10px;font-weight:800;font-size:18px;letter-spacing:-0.02em;cursor:pointer}
 .logo-icon{width:28px;height:28px;border-radius:8px;overflow:hidden;flex-shrink:0}
 .logo-icon img{width:100%;height:100%;object-fit:cover}
@@ -210,7 +210,7 @@ a:hover{text-decoration:underline}
 .auth-skip a:hover{color:var(--accent)}
 
 /* ═══ User Menu ═════════════════════════════════════ */
-.user-menu{position:fixed;top:56px;right:16px;z-index:150;opacity:0;pointer-events:none;transform:translateY(-4px);transition:all 0.2s}
+.user-menu{position:absolute;right:0;top:100%;z-index:150;opacity:0;pointer-events:none;transform:translateY(-4px);transition:all 0.2s}
 .user-menu.open{opacity:1;pointer-events:auto;transform:translateY(0)}
 .user-menu-inner{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;min-width:220px;overflow:hidden;box-shadow:0 8px 30px rgba(0,0,0,0.3)}
 .user-menu-header{display:flex;align-items:center;gap:12px;padding:16px;border-bottom:1px solid var(--border)}
@@ -335,6 +335,27 @@ a:hover{text-decoration:underline}
         <button class="refresh-btn" onclick="triggerRefresh()">刷新</button>
       </div>
     </div>
+    <div class="user-menu" id="userMenu">
+      <div class="user-menu-inner">
+        <div class="user-menu-header">
+          <div class="user-avatar" id="userAvatarBtn" onclick="toggleUserMenu()">
+            <img src="" id="userAvatarImg" alt="">
+            <span id="userAvatarLetter" style="display:none"></span>
+          </div>
+          <div class="user-info">
+            <div id="userNickname"></div>
+            <div class="user-email" id="userEmail"></div>
+          </div>
+        </div>
+        <div class="user-menu-items">
+          <button class="user-menu-item" onclick="openFavorites()">⭐ 我的收藏</button>
+          <button class="user-menu-item" onclick="openSettings()">⚙️ 设置</button>
+          <button class="user-menu-item" onclick="uploadAvatar()">🖼️ 更换头像</button>
+          <button class="user-menu-item" onclick="openAdminPanel()" id="adminPanelBtn" style="display:none">👤 用户管理</button>
+          <button class="user-menu-item" onclick="logout()">🚪 退出登录</button>
+        </div>
+      </div>
+    </div>
   </header>
 
   <button class="sidebar-toggle" id="sidebarToggle" onclick="toggleSidebar()" title="Source">☰</button>
@@ -381,29 +402,6 @@ a:hover{text-decoration:underline}
         <p class="auth-switch" id="authSwitch">没有账号？<a href="#" onclick="toggleAuthMode()">注册</a></p>
         <p class="auth-skip"><a href="#" onclick="closeAuth()">跳过，先浏览</a></p>
       </div>
-    </div>
-  </div>
-</div>
-
-<!-- ═══ User Menu ═══════════════════════════════════════ -->
-<div class="user-menu" id="userMenu">
-  <div class="user-menu-inner">
-    <div class="user-menu-header">
-      <div class="user-avatar" id="userAvatarBtn" onclick="toggleUserMenu()">
-        <img src="" id="userAvatarImg" alt="">
-        <span id="userAvatarLetter" style="display:none"></span>
-      </div>
-      <div class="user-info">
-        <div id="userNickname">用户</div>
-        <div id="userEmail" class="user-email"></div>
-      </div>
-    </div>
-    <div class="user-menu-items">
-      <button class="user-menu-item" onclick="openFavorites()">⭐ 我的收藏</button>
-      <button class="user-menu-item" onclick="openSettings()">⚙️ 设置</button>
-      <button class="user-menu-item" onclick="uploadAvatar()">🖼️ 更换头像</button>
-      <button class="user-menu-item" onclick="openAdminPanel()" id="adminPanelBtn" style="display:none">👤 用户管理</button>
-      <button class="user-menu-item" onclick="logout()">🚪 退出登录</button>
     </div>
   </div>
 </div>
