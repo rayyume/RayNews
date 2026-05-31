@@ -314,7 +314,7 @@ async function loadData() {
 
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15000);
+    const timeout = setTimeout(() => controller.abort(), 8000);
     const resp = await fetch('/api/news?size=' + INITIAL_LOAD_SIZE + '&t=' + Date.now(), { signal: controller.signal });
     clearTimeout(timeout);
     const data = await resp.json();
@@ -331,7 +331,7 @@ async function loadData() {
 async function loadSince(timestamp) {
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15000);
+    const timeout = setTimeout(() => controller.abort(), 8000);
     const resp = await fetch('/api/news?since=' + timestamp + '&size=' + INITIAL_LOAD_SIZE + '&t=' + Date.now(), { signal: controller.signal });
     clearTimeout(timeout);
     const data = await resp.json();
@@ -370,7 +370,7 @@ async function loadDataWithRetry(retries, delay) {
     }
     try {
       const controller = new AbortController();
-      const to = setTimeout(function() { controller.abort(); }, 15000);
+      const to = setTimeout(function() { controller.abort(); }, 8000);
       const resp = await fetch('/api/news?size=' + INITIAL_LOAD_SIZE + '&t=' + Date.now(), { signal: controller.signal });
       clearTimeout(to);
       const data = await resp.json();
@@ -579,7 +579,7 @@ function openArticle(id) {
     document.getElementById('overlay').dataset.articleId = id;
     wrap.innerHTML = '<p style="color:var(--text-2);text-align:center;padding:60px 0">加载中...</p>';
     const ac1 = new AbortController();
-    const t1 = setTimeout(() => ac1.abort(), 15000);
+    const t1 = setTimeout(() => ac1.abort(), 8000);
     fetch('/api/news/' + id, { signal: ac1.signal })
       .then(r => { if (!r.ok) throw new Error('not found'); return r.json(); })
       .then(data => {
@@ -637,7 +637,7 @@ function openArticle(id) {
 
   // Fetch full article body from API
   const ac2 = new AbortController();
-  const t2 = setTimeout(() => ac2.abort(), 15000);
+  const t2 = setTimeout(() => ac2.abort(), 8000);
   fetch('/api/news/' + id, { signal: ac2.signal })
     .then(r => r.json())
     .then(data => { clearTimeout(t2); renderArticleBody(wrap, data, id); })
@@ -864,9 +864,7 @@ setInterval(function() {
     sx = e.touches[0].clientX;
     sy = e.touches[0].clientY;
     swiping = false;
-    // Prevent browser's back-swipe gesture on overlay
-    if (sx < 50) e.preventDefault();
-  }, { passive: false });
+  }, { passive: true });
 
   overlay.addEventListener('touchmove', e => {
     if (!overlay.classList.contains('open')) return;
@@ -874,6 +872,7 @@ setInterval(function() {
     const dy = e.touches[0].clientY - sy;
     if (sx < 50 && dx > 40 && Math.abs(dy) < Math.abs(dx) * 1.5) {
       swiping = true;
+      e.preventDefault(); // prevent native back-swipe only when actually swiping
       const t = Math.min(dx / 250, 1);
       overlay.style.transition = 'none';
       overlay.style.transform = `translateX(${dx * 0.5}px)`;
