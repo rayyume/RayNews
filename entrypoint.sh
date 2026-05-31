@@ -12,5 +12,8 @@ cd /app && python fetcher.py
 echo "=== Starting refresh server ==="
 python3 /app/refresh_server.py &
 
+echo "=== Starting web server ==="
+python3 /app/web_server.py &
+
 echo "=== Starting nginx ==="
 nginx -g 'daemon off;'
