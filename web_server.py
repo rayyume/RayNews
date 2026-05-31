@@ -65,11 +65,11 @@ def register():
 @app.route("/auth/login", methods=["POST"])
 def login():
     data = request.get_json(silent=True) or {}
-    login_val = (data.get("login") or data.get("email") or "").strip().lower()
+    login_val = (data.get("login") or data.get("email") or "").strip()
     password = data.get("password") or ""
 
-    # Try email first, then username
-    user = get_user_by_email(login_val)
+    # Try email first (case-insensitive), then username (case-sensitive)
+    user = get_user_by_email(login_val.lower())
     if not user:
         user = get_user_by_username(login_val)
     if not user or not verify_password(password, user["password"]):
@@ -182,7 +182,9 @@ def admin_delete_user(user_id):
     if user_id == g.user_id:
         return jsonify({"error": "cannot delete yourself"}), 400
     ok = delete_user(user_id)
-    return jsonify({"ok": ok}), 200 if ok else (jsonify({"error": "not found"}), 404)
+    if ok:
+        return jsonify({"ok": True}), 200
+    return jsonify({"error": "not found"}), 404
 
 
 @app.route("/auth/users/<int:user_id>/role", methods=["PUT"])
@@ -294,7 +296,9 @@ def add_favorite_route():
 @require_auth
 def remove_favorite_route(article_id):
     ok = remove_favorite(g.user_id, article_id)
-    return jsonify({"ok": ok}), 200 if ok else (jsonify({"error": "not found"}), 404)
+    if ok:
+        return jsonify({"ok": True}), 200
+    return jsonify({"error": "not found"}), 404
 
 
 @app.route("/favorites/<int:article_id>/status", methods=["GET"])
@@ -541,9 +545,7 @@ import json
 @require_auth
 def test_notification():
     """Send a test email via Resend API using env var RESEND_API_KEY, always from news@rayyu.me."""
-    settings = get_user_settings(g.user_id)
-    if not settings:
-        return jsonify({"error": "settings not found"}), 400
+    settings = get_user_settings(g.user_id) or {}
 
     nc = settings.get("notification_config", "{}")
     if isinstance(nc, str):

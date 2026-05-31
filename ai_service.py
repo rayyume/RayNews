@@ -113,13 +113,16 @@ class AIService:
     # ─── Translate (bilingual) ───────────────────────────────
 
     def translate(self, article_text: str, title: str = "") -> str:
-        prompt = ("请将以下文章翻译为中文，保留原文段落格式。"
-                  "输出格式：先显示原文，空一行后显示中文翻译。")
+        prompt = ("请将以下文章逐段翻译为中文。对于文章的每一段：\n"
+                  "1. 保留原文段落\n"
+                  "2. 在其下方给出中文翻译\n"
+                  "3. 译文段落用『翻译：』开头\n"
+                  "保持原文的所有段落和格式不变，逐段交替输出。")
         if title:
             prompt = f"文章标题：{title}\n\n{prompt}"
         messages = [
             {"role": "system",
-             "content": "你是一个专业的翻译助手。请准确翻译文章内容，保持专业术语的准确性。"},
+             "content": "你是一个专业的翻译助手。请逐段翻译文章，保持每段原文后紧跟中文译文。"},
             {"role": "user",
              "content": f"{prompt}\n\n文章内容：\n{article_text[:4000]}"},
         ]
