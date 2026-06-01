@@ -662,6 +662,9 @@ def _send_daily_summaries():
     now = _dt.datetime.now()
     now_hhmm = now.strftime("%H:%M")
     today_str = now.strftime("%Y-%m-%d")
+    now_minutes = now.hour * 60 + now.minute  # minutes since midnight for window matching
+
+    print(f"[scheduler] Checking at {now_hhmm} ({today_str})...")
 
     resend_api_key = os.environ.get("RESEND_API_KEY", "")
     if not resend_api_key:
@@ -678,6 +681,8 @@ def _send_daily_summaries():
         print(f"[scheduler] DB error: {e}")
         return
 
+    print(f"[scheduler] Found {len(rows)} user(s) with daily_summary_enabled=1")
+
     for row in rows:
         settings = dict(row)
         nc = settings.get("notification_config", "{}")
@@ -691,15 +696,29 @@ def _send_daily_summaries():
         scheduled_time = resend_cfg.get("daily_summary_time", "08:00")
 
         if not to_email:
+            print(f"[scheduler] User {settings['user_id']}: no to_email, skipping")
             continue
-        if scheduled_time != now_hhmm:
+
+        # Use a 10-minute window: trigger if current time is within 10 min of scheduled time
+        try:
+            sh, sm = map(int, scheduled_time.split(":"))
+            scheduled_minutes = sh * 60 + sm
+        except (ValueError, AttributeError):
+            print(f"[scheduler] User {settings['user_id']}: invalid time '{scheduled_time}', skipping")
+            continue
+
+        diff = now_minutes - scheduled_minutes
+        if diff < 0 or diff >= 10:
+            print(f"[scheduler] User {settings['user_id']}: scheduled={scheduled_time} now={now_hhmm} (diff={diff}m), out of window, skipping")
             continue
 
         uid = settings["user_id"]
         dedup_key = (uid, today_str)
         if dedup_key in _daily_summary_sent:
+            print(f"[scheduler] User {uid}: already sent today, skipping")
             continue
 
+        print(f"[scheduler] User {uid}: time matched ({scheduled_time}), fetching articles...")
         articles = _fetch_articles_by_date(today_str)
         if not articles:
             print(f"[scheduler] User {uid}: no articles for {today_str}")
@@ -707,7 +726,6 @@ def _send_daily_summaries():
 
         from ai_service import AIService
         ai_config = _get_ai_config_for_user(uid)
-        # Fall back to admin AI config if user has none
         if not ai_config or not ai_config.get("enabled") or not ai_config.get("api_key"):
             ai_config = _get_ai_config_for_user(1)
             if not ai_config or not ai_config.get("enabled") or not ai_config.get("api_key"):
@@ -1018,6 +1036,20 @@ def protected_refresh():
 @app.route("/auth/health", methods=["GET"])
 def health():
     return jsonify({"ok": True})
+
+
+@app.route("/scheduler/status", methods=["GET"])
+def scheduler_status():
+    """Return scheduler status for debugging."""
+    import datetime as _dt
+    now = _dt.datetime.now()
+    return jsonify({
+        "running": True,
+        "server_time": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "today": now.strftime("%Y-%m-%d"),
+        "timezone_hint": str(_dt.datetime.now().astimezone().tzinfo),
+        "sent_today": list(_daily_summary_sent),
+    })
 
 
 # ─── Main ─────────────────────────────────────────────────────

@@ -380,7 +380,7 @@ body.body-scroll-lock{overflow:hidden!important}
 </div>
 
 <div class="overlay" id="overlay">
-  <header class="overlay-header"><div class="overlay-header-inner"><button class="back-btn" id="backBtn"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 12L6 8l4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>返回</button><div style="display:flex;align-items:center;gap:4px;margin-left:auto"><button class="fav-btn" id="favBtn" onclick="toggleFavorite()" style="display:none" title="收藏"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></button><button class="share-btn" id="shareBtn" onclick="shareArticle()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>分享</button></div></div></header>
+  <header class="overlay-header"><div class="overlay-header-inner"><button class="back-btn" id="backBtn"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 12L6 8l4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>返回</button><div style="display:flex;align-items:center;gap:4px;margin-left:auto"><button class="share-btn" id="shareBtn" onclick="shareArticle()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>分享</button></div></div></header>
   <div class="article-wrap" id="articleWrap"></div>
 </div>
 
@@ -1677,7 +1677,9 @@ async function toggleFavorite() {
     const data = await resp.json();
     if (data.ok) {
       btn.classList.toggle('on');
+      const label = btn.querySelector('span');
       btn.title = isOn ? '收藏' : '取消收藏';
+      if (label) label.textContent = isOn ? '收藏' : '取消收藏';
       showToast(isOn ? '已取消收藏' : '✅ 已收藏');
     } else if (data.error) {
       showToast('❌ ' + data.error);
@@ -1692,8 +1694,11 @@ async function checkFavoriteStatus(articleId) {
   try {
     const data = await apiFetch('/favorites/' + articleId + '/status');
     if (data && data.favorited) {
-      document.getElementById('favBtn').classList.add('on');
-      document.getElementById('favBtn').title = '取消收藏';
+      const btn = document.getElementById('favBtn');
+      btn.classList.add('on');
+      btn.title = '取消收藏';
+      const label = btn.querySelector('span');
+      if (label) label.textContent = '取消收藏';
     }
   } catch (e) {}
 }
@@ -2178,6 +2183,7 @@ function openArticle(id) {
           <span class="badge" style="${badgeStyle(data.source || '')}">${esc(data.source || '')}</span>
           <span>${formatTime(data.date || '', data.time || '')}</span>
           <span style="margin-left:auto;display:flex;gap:8px;align-items:center" id="aiActions" data-article-id="${id}">
+            <button id="favBtn" onclick="toggleFavorite()" style="display:none;background:#161a2a;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:3px 10px;border-radius:100px;font-family:var(--font)" title="收藏"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin-right:3px"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg><span>收藏</span></button>
             <button class="ai-summarize-btn" onclick="aiSummarize(${id})" style="background:#161a2a;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:3px 10px;border-radius:100px;font-family:var(--font)">摘要</button>
             <button class="ai-translate-btn" onclick="aiTranslate(${id})" style="background:#161a2a;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:3px 10px;border-radius:100px;font-family:var(--font)">翻译</button>
           </span>
@@ -2220,6 +2226,7 @@ function openArticle(id) {
       <span class="badge" style="${badgeStyle(n.source)}">${esc(n.source)}</span>
       <span>${formatTime(n.date, n.time)}</span>
       <span style="margin-left:auto;display:flex;gap:8px;align-items:center" id="aiActions" data-article-id="${id}">
+        <button id="favBtn" onclick="toggleFavorite()" style="display:none;background:#161a2a;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:3px 10px;border-radius:100px;font-family:var(--font)" title="收藏"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin-right:3px"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg><span>收藏</span></button>
         <button class="ai-summarize-btn" onclick="aiSummarize(${id})" style="background:#161a2a;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:3px 10px;border-radius:100px;font-family:var(--font)">摘要</button>
         <button class="ai-translate-btn" onclick="aiTranslate(${id})" style="background:#161a2a;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:3px 10px;border-radius:100px;font-family:var(--font)">翻译</button>
       </span>
@@ -2268,7 +2275,13 @@ function renderArticleBody(wrap, data, id) {
   const bodyEl = document.getElementById('articleBody');
   if (!bodyEl) return;
   if (data.body_html) {
-    bodyEl.innerHTML = proxyImages(data.body_html);
+    let html = proxyImages(data.body_html);
+    // Strip the first <img> from body_html when cover image is shown separately,
+    // to prevent duplicate cover images (the URL may differ due to CDN/proxy)
+    if (data.thumb) {
+      html = html.replace(/<img\s[^>]*>/i, '');
+    }
+    bodyEl.innerHTML = html;
   } else if (data.summary) {
     bodyEl.innerHTML = `<p style="color:var(--text-2);padding:20px 0;text-align:center">暂无全文内容<br><span style="font-size:13px;color:var(--text-3)">${esc(data.summary || '')}</span></p>`;
   } else {
