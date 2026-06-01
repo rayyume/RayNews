@@ -1122,7 +1122,9 @@ async function saveGeneralSettings() {
 async function triggerDailySummary() {
   showSettingsStatus('📊 正在生成每日摘要...');
   try {
-    const data = await apiFetch('/ai/daily-summary', { method: 'POST' });
+    const resp = await fetch('/ai/daily-summary', { method: 'POST', headers: { 'Authorization': 'Bearer ' + authToken } });
+    if (resp.status === 401) { logout(); showSettingsStatus('❌ 登录已过期，请重新登录', 'err'); return; }
+    const data = await resp.json();
     if (!data) { showSettingsStatus('❌ 请求失败', 'err'); return; }
     if (data.error) { showSettingsStatus('❌ ' + data.error, 'err'); return; }
     // Show result in a scrollable area
@@ -1147,7 +1149,9 @@ async function generateDailySummary() {
   const body = document.getElementById('dailySummaryBody');
   body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)">⏳ 正在生成每日摘要...</div>';
   try {
-    const data = await apiFetch('/ai/daily-summary', { method: 'POST' });
+    const resp = await fetch('/ai/daily-summary', { method: 'POST', headers: { 'Authorization': 'Bearer ' + authToken } });
+    if (resp.status === 401) { logout(); body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)">❌ 登录已过期，请重新登录</div>'; return; }
+    const data = await resp.json();
     if (!data) { body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)">❌ 请求失败</div>'; return; }
     if (data.error) { body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)">❌ ' + esc(data.error) + '</div>'; return; }
     body.innerHTML = '<div style="max-height:400px;overflow-y:auto;white-space:pre-wrap;font-size:13px;line-height:1.7;padding:12px;background:var(--bg);border-radius:8px">' + esc(data.summary) + '</div><p style="font-size:11px;color:var(--text-3);margin-top:8px">基于 ' + data.article_count + ' 篇文章生成</p>';
