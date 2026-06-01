@@ -1273,9 +1273,11 @@ async function aiTranslate(articleId) {
     if (data.error) { showToast('❌ ' + data.error); bodyEl.querySelectorAll('.ai-translation-inline').forEach(el => el.remove()); if (btn) btn.disabled = false; return; }
 
     // Render each translation by ID
+    let rendered = 0;
     data.translations.forEach(t => {
       const seg = segments.find(s => s.id === t.id);
       if (!seg || !t.text) return;
+      rendered++;
       // Remove loading placeholder
       const ld = document.getElementById('aiTransLoading-' + seg.id);
       if (ld) ld.remove();
@@ -1287,7 +1289,12 @@ async function aiTranslate(articleId) {
       seg.el.parentNode.insertBefore(td, seg.el.nextSibling);
     });
 
-    showToast('✅ 翻译完成');
+    if (rendered === 0) {
+      // All translations had empty text — AI response parsing likely failed
+      showToast('❌ 翻译失败：AI 返回格式异常，请重试');
+    } else {
+      showToast('✅ ' + rendered + '/' + segments.length + ' 段翻译完成');
+    }
   } catch (e) {
     bodyEl.querySelectorAll('.ai-translation-inline').forEach(el => el.remove());
     showToast('❌ 网络错误: ' + (e.message || ''));
@@ -1298,24 +1305,37 @@ async function aiTranslate(articleId) {
 /**
  * Scan article body for translatable text segments.
  * Supports: p, li, blockquote, h2-h6, dd, figcaption
+ * Fallback: split by <br> if no block elements found.
  * Preserves inline HTML (b, i, a) for the AI.
  */
 function scanArticleSegments(bodyEl) {
   const selector = 'p, li, blockquote, h2, h3, h4, h5, h6, dd, figcaption';
-  const elements = bodyEl.querySelectorAll(selector);
+  let elements = bodyEl.querySelectorAll(selector);
+
+  // Fallback: if no standard block elements, restructure <br>-based content
+  if (elements.length === 0) {
+    const html = bodyEl.innerHTML;
+    // Split by <br> — each part becomes a paragraph
+    const parts = html.split(/<br\s*\/?>/i).map(s => s.trim()).filter(s => s);
+    if (parts.length > 1) {
+      // Rebuild body with proper <p> tags so standard scanning works
+      bodyEl.innerHTML = parts.map(p => '<p>' + p + '</p>').join('');
+      elements = bodyEl.querySelectorAll('p');
+    } else {
+      return [];
+    }
+  }
+
   const segments = [];
   let id = 0;
 
   elements.forEach(el => {
     let html = el.innerHTML.trim();
     if (!html) return;
-    // Skip elements that contain only images or are empty
     if (el.querySelector('img') && !el.textContent.trim()) return;
-    // Strip existing translation placeholders inside
     html = html.replace(/<div\s+class="ai-translation-inline"[^>]*>.*?<\/div>/gi, '');
     html = html.trim();
     if (!html) return;
-
     segments.push({ id: id++, el: el, text: html });
   });
 
