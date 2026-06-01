@@ -1570,12 +1570,18 @@ async function autoDisplaySummary(articleId) {
   } catch (e) {
     // Silent fail — cache check is optional
   }
-  // Auto-trigger translation if setting enabled and no cached translation was displayed
+  // Auto-trigger translation if setting enabled and title is all English
   if (userAutoSettings?.auto_translate_content && authToken) {
     // Check if a translation was already displayed (dataset would be set)
     const bodyEl = document.getElementById('articleBody');
     if (bodyEl && !bodyEl.dataset.showingTranslation) {
-      aiTranslate(articleId);
+      // Only auto-translate if title contains no Chinese characters
+      const article = news.find(n => n.id === articleId);
+      const title = article?.title || document.querySelector('#articleWrap h1')?.textContent || '';
+      const hasChinese = /[\u4e00-\u9fff\u3400-\u4dbf]/.test(title);
+      if (!hasChinese) {
+        aiTranslate(articleId);
+      }
     }
   }
 }
