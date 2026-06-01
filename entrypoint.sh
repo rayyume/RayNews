@@ -1,12 +1,8 @@
 #!/bin/bash
-set -e
 
-# ─── Crontab: write dynamically with runtime env vars ────
-# (Removed — refresh_server handles periodic fetching via internal timer)
-
-# ─── Initial fetch ──────────────────────────────────────
+# ─── Initial fetch (non-fatal — don't let this block startup) ──
 echo "=== Running initial fetch ==="
-cd /app && python fetcher.py
+cd /app && python fetcher.py || echo "[entrypoint] Initial fetch failed (non-fatal), continuing..."
 
 # ─── Start services ────────────────────────────────────
 echo "=== Starting refresh server ==="
