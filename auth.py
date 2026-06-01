@@ -38,7 +38,7 @@ def decode_token(token: str) -> dict | None:
 # ─── Decorators ───────────────────────────────────────────────
 
 def require_auth(f):
-    """Require a valid JWT token. Sets g.user_id and g.user_role."""
+    """Require a valid JWT token. Sets g.user_id and g.user_role from DB."""
 
     @functools.wraps(f)
     def wrapper(*args, **kwargs):
@@ -49,7 +49,12 @@ def require_auth(f):
         if payload is None:
             return jsonify({"error": "invalid or expired token"}), 401
         g.user_id = payload["user_id"]
-        g.user_role = payload["role"]
+        # Verify current role from database (don't trust stale JWT role)
+        from models import get_user
+        user = get_user(g.user_id)
+        if not user:
+            return jsonify({"error": "user not found"}), 401
+        g.user_role = user["role"]
         return f(*args, **kwargs)
 
     return wrapper

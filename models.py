@@ -133,6 +133,13 @@ def update_user(user_id: int, **kwargs) -> dict | None:
     updates = {k: v for k, v in kwargs.items() if k in allowed}
     if not updates:
         return get_user(user_id)
+    # Check nickname uniqueness if updating nickname
+    if "nickname" in updates:
+        nickname = updates["nickname"]
+        if nickname:
+            existing = get_user_by_username(nickname)
+            if existing and existing["id"] != user_id:
+                return None  # nickname taken by another user
     sets = ", ".join(f"{k} = ?" for k in updates)
     vals = list(updates.values()) + [user_id]
     db = get_db()

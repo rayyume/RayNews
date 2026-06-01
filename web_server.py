@@ -48,8 +48,8 @@ def register():
     if len(password) < 6:
         return jsonify({"error": "password must be at least 6 characters"}), 400
 
-    # First user is admin, rest are user
-    role = "admin" if count_users() == 0 else data.get("role", "user")
+    # First user is admin, rest are preview (never trust client-provided role)
+    role = "admin" if count_users() == 0 else "preview"
 
     user = create_user(email, password, nickname, role)
     if user is None:
@@ -320,13 +320,12 @@ def get_ai_config_route():
             "model": "gpt-4o-mini",
             "provider_type": "openai",
             "enabled": False,
-            "api_key": "",
+            "has_api_key": False,
         })
-    # Mask API key for security
     safe = dict(config)
-    if safe.get("api_key"):
-        k = safe["api_key"]
-        safe["api_key"] = k[:6] + "****" + k[-4:] if len(k) > 10 else "****"
+    has_key = bool(safe.get("api_key"))
+    safe["has_api_key"] = has_key
+    safe.pop("api_key", None)  # never expose the key to frontend
     return jsonify(safe)
 
 
@@ -335,12 +334,19 @@ def get_ai_config_route():
 def set_ai_config_route():
     try:
         data = request.get_json(silent=True) or {}
+        # If api_key contains "****", it's the masked placeholder — preserve existing
+        api_key = data.get("api_key", "")
+        if "****" in api_key:
+            existing = get_ai_config(g.user_id)
+            if existing and existing.get("api_key"):
+                data["api_key"] = existing["api_key"]
+            else:
+                data.pop("api_key", None)
         config = set_ai_config(g.user_id, **data)
-        # Mask API key in response
         safe = dict(config) if config else {}
-        if safe.get("api_key"):
-            k = safe["api_key"]
-            safe["api_key"] = k[:6] + "****" + k[-4:] if len(k) > 10 else "****"
+        has_key = bool(safe.get("api_key"))
+        safe["has_api_key"] = has_key
+        safe.pop("api_key", None)
         return jsonify(safe)
     except Exception as e:
         import traceback
@@ -436,6 +442,8 @@ def ai_test_connection():
             provider_type=config.get("provider_type", "openai"),
         )
         response = svc.test_connection()
+        if not response or not response.strip():
+            return jsonify({"error": "Connection test returned empty response"}), 502
         return jsonify({"ok": True, "response": response})
     except Exception as e:
         return jsonify({"error": f"Connection test failed: {str(e)}"}), 502
@@ -580,6 +588,17 @@ def _save_ai_result(article_id: int, summary: str | None = None,
         conn.close()
     except Exception:
         pass
+
+
+# ─── AI Result Cache (read-only) ──────────────────────────
+
+
+@app.route("/ai/result/<int:article_id>", methods=["GET"])
+@require_auth
+def ai_get_result(article_id):
+    """Return cached AI result (summary/translation) without generating."""
+    cached = _get_ai_result(article_id)
+    return jsonify(cached or {})
 
 
 # ─── Settings Routes ────────────────────────────────────────

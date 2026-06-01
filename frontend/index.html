@@ -911,10 +911,18 @@ async function loadAIConfig() {
     if (!data) return;
     document.getElementById('aiProviderType').value = data.provider_type || 'openai';
     document.getElementById('aiEndpoint').value = data.endpoint || '';
-    document.getElementById('aiApiKey').value = data.api_key || '';
     document.getElementById('aiModel').value = data.model || '';
     document.getElementById('aiProvider').value = data.provider || '';
     document.getElementById('aiEnabled').checked = !!data.enabled;
+    // Show "已配置" if API key exists, empty field if not
+    const keyInput = document.getElementById('aiApiKey');
+    if (data.has_api_key) {
+      keyInput.value = '';
+      keyInput.placeholder = '✅ 已配置，留空保持不变';
+    } else {
+      keyInput.value = '';
+      keyInput.placeholder = '输入 API Key';
+    }
   } catch (e) {}
 }
 
@@ -923,17 +931,22 @@ async function saveAIConfig() {
   statusEl.className = 'ai-status ok';
   statusEl.textContent = '⏳ 保存中...';
   try {
+    const payload = {
+      provider: document.getElementById('aiProvider').value,
+      endpoint: document.getElementById('aiEndpoint').value,
+      model: document.getElementById('aiModel').value,
+      provider_type: document.getElementById('aiProviderType').value,
+      enabled: document.getElementById('aiEnabled').checked ? 1 : 0,
+    };
+    // Only include api_key if user typed something new
+    const keyVal = document.getElementById('aiApiKey').value;
+    if (keyVal) {
+      payload.api_key = keyVal;
+    }
     const resp = await fetch('/ai/config', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
-      body: JSON.stringify({
-        provider: document.getElementById('aiProvider').value,
-        api_key: document.getElementById('aiApiKey').value,
-        endpoint: document.getElementById('aiEndpoint').value,
-        model: document.getElementById('aiModel').value,
-        provider_type: document.getElementById('aiProviderType').value,
-        enabled: document.getElementById('aiEnabled').checked ? 1 : 0,
-      }),
+      body: JSON.stringify(payload),
     });
     let data;
     try {
@@ -957,13 +970,16 @@ async function testAIConnection() {
   // Temporarily save current form values and test
   const payload = {
     provider: document.getElementById('aiProvider').value,
-    api_key: document.getElementById('aiApiKey').value,
     endpoint: document.getElementById('aiEndpoint').value,
     model: document.getElementById('aiModel').value,
     provider_type: document.getElementById('aiProviderType').value,
     enabled: 1,
   };
-  if (!payload.api_key) { showSettingsStatus('❌ 请先填写 API Key', 'err'); return; }
+  const keyVal = document.getElementById('aiApiKey').value;
+  if (keyVal) {
+    payload.api_key = keyVal;
+  }
+  if (!payload.api_key && !document.getElementById('aiApiKey').placeholder.includes('已配置')) { showSettingsStatus('❌ 请先填写 API Key', 'err'); return; }
   if (!payload.endpoint) { showSettingsStatus('❌ 请先填写 API Endpoint', 'err'); return; }
   try {
     // Test by calling a light summary on a placeholder
@@ -1251,6 +1267,40 @@ async function aiTranslate(articleId) {
   if (btn) btn.disabled = false;
 }
 
+/**
+ * Auto-display cached AI summary when opening an article (no click needed).
+ * Called after renderArticleBody completes.
+ */
+async function autoDisplaySummary(articleId) {
+  if (!authToken) return;
+  try {
+    const resp = await fetch('/ai/result/' + articleId, {
+      headers: { 'Authorization': 'Bearer ' + authToken },
+    });
+    const data = await resp.json();
+    if (!data || !data.summary) return;
+    const articleWrap = document.getElementById('articleWrap');
+    if (!articleWrap) return;
+    const existingSummary = document.getElementById('aiSummaryTop');
+    if (existingSummary) existingSummary.remove();
+    const summaryDiv = document.createElement('div');
+    summaryDiv.id = 'aiSummaryTop';
+    summaryDiv.style.cssText = 'background:rgba(110,142,251,0.08);border:1px solid var(--accent);border-radius:var(--radius);padding:14px 16px;margin-bottom:16px;font-size:13px;line-height:1.7;color:var(--text)';
+    summaryDiv.innerHTML = '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;font-size:11px;font-weight:700;color:var(--accent)">📝 AI 摘要</div>' + esc(data.summary);
+    const h1 = articleWrap.querySelector('h1');
+    const meta = articleWrap.querySelector('.article-meta');
+    if (meta && meta.nextSibling) {
+      articleWrap.insertBefore(summaryDiv, meta.nextSibling);
+    } else if (h1 && h1.nextSibling) {
+      articleWrap.insertBefore(summaryDiv, h1.nextSibling);
+    } else {
+      articleWrap.prepend(summaryDiv);
+    }
+  } catch (e) {
+    // Silent fail — cache check is optional
+  }
+}
+
 function showAIActions(articleId) {
   const aiSection = document.getElementById('aiActions');
   if (!aiSection) return;
@@ -1426,6 +1476,7 @@ async function changeUserRole(userId, newRole) {
     const resp = await fetch('/auth/users/' + userId + '/role', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
+      body: JSON.stringify({ role: newRole }),
     });
     const data = await resp.json();
     if (data.error) { showToast('❌ ' + data.error); return; }
@@ -1462,6 +1513,12 @@ function getCategory(source) {
 }
 
 async function triggerRefresh() {
+  // Unauthenticated users cannot refresh
+  if (!authToken) {
+    showToast('🔒 请先登录');
+    resetPullIndicator();
+    return;
+  }
   // Preview users cannot refresh
   if (authUser && authUser.role === 'preview') {
     showToast('🔒 预览用户无此权限');
@@ -1783,8 +1840,8 @@ function scrollToCurrentTop() {
 }
 
 async function goHome() {
-  if (authUser && authUser.role === 'preview') {
-    showToast('🔒 预览用户无此权限');
+  if (!authToken || (authUser && authUser.role === 'preview')) {
+    showToast('🔒 请先登录后使用');
     return;
   }
   currentPage = 1;
@@ -1896,6 +1953,7 @@ function openArticle(id) {
   // Fetch full article body from API
   if (articleBodyCache[id]) {
     renderArticleBody(wrap, articleBodyCache[id], id);
+    autoDisplaySummary(id);
   } else {
     const ac2 = new AbortController();
     const t2 = setTimeout(() => ac2.abort(), 8000);
@@ -1905,6 +1963,7 @@ function openArticle(id) {
         clearTimeout(t2);
         articleBodyCache[id] = data;
         renderArticleBody(wrap, data, id);
+        autoDisplaySummary(id);
       })
       .catch(() => {
         clearTimeout(t2);
