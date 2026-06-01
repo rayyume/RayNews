@@ -1167,10 +1167,20 @@ async function saveGeneralSettings() {
   } catch (e) { showSettingsStatus('❌ 保存失败', 'err'); }
 }
 
+function countTodayArticles() {
+  const today = new Date();
+  const y = today.getFullYear();
+  const m = String(today.getMonth() + 1).padStart(2, '0');
+  const d = String(today.getDate()).padStart(2, '0');
+  const todayStr = `${y}-${m}-${d}`;
+  return news.filter(n => n.date === todayStr).length;
+}
+
 // ─── Daily Summary ───────────────────────────────────────
 
 async function triggerDailySummary() {
-  showSettingsStatus('📊 正在生成每日摘要...');
+  const count = countTodayArticles();
+  showSettingsStatus(`📊 正在汇集今日共 ${count} 条新闻生成摘要，请耐心等待。`);
   try {
     const resp = await fetch('/ai/daily-summary', { method: 'POST', headers: { 'Authorization': 'Bearer ' + authToken } });
     if (resp.status === 401) { logout(); showSettingsStatus('❌ 登录已过期，请重新登录', 'err'); return; }
@@ -1197,7 +1207,8 @@ function closeDailySummary() {
 
 async function generateDailySummary() {
   const body = document.getElementById('dailySummaryBody');
-  body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)">⏳ 正在生成每日摘要...</div>';
+  const count = countTodayArticles();
+  body.innerHTML = `<div style="text-align:center;padding:40px;color:var(--text-3)">⏳ 正在汇集今日共 ${count} 条新闻生成摘要，请耐心等待。</div>`;
   try {
     const resp = await fetch('/ai/daily-summary', { method: 'POST', headers: { 'Authorization': 'Bearer ' + authToken } });
     if (resp.status === 401) { logout(); body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)">❌ 登录已过期，请重新登录</div>'; return; }
