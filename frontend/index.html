@@ -706,6 +706,7 @@ document.getElementById('avatarInput').addEventListener('change', async function
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
         body: JSON.stringify({ image: dataUrl }),
       });
+      if (resp.status === 401) { logout(); showToast('❌ 登录已过期'); return; }
       const data = await resp.json();
       if (data.error) { showToast('❌ ' + data.error); return; }
       authUser.avatar_url = data.avatar_url;
@@ -1215,7 +1216,7 @@ async function saveGeneralSettings() {
       auto_translate_title: !!document.getElementById('autoTranslateTitle').checked,
       auto_translate_content: !!document.getElementById('autoTranslateContent').checked,
     };
-    showSettingsStatus('✅ 通用设置已保存');
+    showSettingsStatus('✅ 翻译设置已保存');
   } catch (e) { showSettingsStatus('❌ 保存失败', 'err'); }
 }
 
