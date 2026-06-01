@@ -485,6 +485,49 @@ def ai_translate(article_id):
         return jsonify({"error": f"AI request failed: {str(e)}"}), 502
 
 
+@app.route("/ai/translate-full/<int:article_id>", methods=["POST"])
+@require_auth
+def ai_translate_full(article_id):
+    """Translate the full article HTML — replaces old segment-based approach.
+
+    Frontend sends {html: "...", target_lang: "zh-CN"}.
+    Backend caches the result by article_id for reuse.
+    """
+    config = get_ai_config(g.user_id)
+    if not config or not config.get("enabled"):
+        return jsonify({"error": "AI not configured. Go to Settings → AI to set up."}), 400
+    if not config.get("api_key"):
+        return jsonify({"error": "API key not configured"}), 400
+
+    data = request.get_json(silent=True) or {}
+    html = data.get("html", "")
+    target_lang = data.get("target_lang", "zh-CN")
+    if not html:
+        return jsonify({"error": "html required"}), 400
+
+    # Check cache first
+    cached = _get_ai_result(article_id)
+    if cached and cached.get("translation"):
+        # New format stores plain HTML (starts with '<'), old format was JSON array (starts with '[')
+        t = cached["translation"]
+        if t and t.strip().startswith("<"):
+            return jsonify({"translated_html": t, "cached": True})
+
+    try:
+        svc = AIService(
+            api_key=config["api_key"],
+            endpoint=config["endpoint"],
+            model=config["model"],
+            provider_type=config.get("provider_type", "openai"),
+        )
+        translated = svc.translate_full(html, target_lang)
+        # Save to cache as plain HTML
+        _save_ai_result(article_id, translation=translated)
+        return jsonify({"translated_html": translated})
+    except Exception as e:
+        return jsonify({"error": f"AI request failed: {str(e)}"}), 502
+
+
 @app.route("/ai/translate-batch/<int:article_id>", methods=["POST"])
 @require_auth
 def ai_translate_batch(article_id):

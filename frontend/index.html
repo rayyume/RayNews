@@ -256,6 +256,7 @@ a:hover{text-decoration:underline}
 .fav-btn.on{color:var(--accent)}
 .fav-btn.on svg{fill:var(--accent)}
 .fav-btn.loading{opacity:0.4;pointer-events:none}
+.fav-btn-text.on{color:#f59e0b}
 
 /* ═══ Favorites Panel ════════════════════════════════════ */
 .fav-overlay{position:fixed;inset:0;z-index:400;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity 0.2s}
@@ -378,7 +379,7 @@ a:hover{text-decoration:underline}
 </div>
 
 <div class="overlay" id="overlay">
-  <header class="overlay-header"><div class="overlay-header-inner"><button class="back-btn" id="backBtn"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 12L6 8l4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>返回</button><div style="display:flex;align-items:center;gap:4px;margin-left:auto"><button class="fav-btn" id="favBtn" onclick="toggleFavorite()" style="display:none" title="收藏"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></button><button class="share-btn" id="shareBtn" onclick="shareArticle()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>分享</button></div></div></header>
+  <header class="overlay-header"><div class="overlay-header-inner"><button class="back-btn" id="backBtn"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 12L6 8l4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>返回</button><div style="display:flex;align-items:center;gap:4px;margin-left:auto"><button class="share-btn" id="shareBtn" onclick="shareArticle()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>分享</button></div></div></header>
   <div class="article-wrap" id="articleWrap"></div>
 </div>
 
@@ -1240,63 +1241,36 @@ async function aiTranslate(articleId) {
   const bodyEl = document.getElementById('articleBody');
   if (!bodyEl) { showToast('❌ 未找到文章内容'); if (btn) btn.disabled = false; return; }
 
-  // Remove existing translations
-  bodyEl.querySelectorAll('.ai-translation-inline').forEach(el => el.remove());
+  // Save original HTML for potential restore
+  const originalHtml = bodyEl.innerHTML;
 
-  // Scan article for translatable segments (multiple element types)
-  const segments = scanArticleSegments(bodyEl);
-  if (segments.length === 0) {
-    showToast('❌ 文章没有可翻译的段落');
-    if (btn) btn.disabled = false;
-    return;
-  }
-
-  // Insert loading placeholder after each segment
-  segments.forEach((seg, idx) => {
-    const ld = document.createElement('div');
-    ld.className = 'ai-translation-inline';
-    ld.id = 'aiTransLoading-' + idx;
-    ld.style.cssText = 'font-size:inherit;line-height:1.7;color:var(--text-3);margin:0 0 0.25em 0';
-    ld.textContent = '⏳ 翻译中...';
-    seg.el.parentNode.insertBefore(ld, seg.el.nextSibling);
-  });
+  // Show loading
+  bodyEl.innerHTML = '<p style="color:var(--text-2);text-align:center;padding:40px 0">⏳ 翻译中...</p>';
 
   try {
-    const resp = await fetch('/ai/translate-batch/' + articleId, {
+    const resp = await fetch('/ai/translate-full/' + articleId, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
-      body: JSON.stringify({ segments: segments.map(s => ({ id: s.id, text: s.text })) }),
+      body: JSON.stringify({ html: originalHtml, target_lang: 'zh-CN' }),
     });
-    if (resp.status === 401) { logout(); showToast('❌ 登录已过期，请重新登录'); bodyEl.querySelectorAll('.ai-translation-inline').forEach(el => el.remove()); if (btn) btn.disabled = false; return; }
+    if (resp.status === 401) { logout(); showToast('❌ 登录已过期，请重新登录'); bodyEl.innerHTML = originalHtml; if (btn) btn.disabled = false; return; }
     const data = await resp.json();
-    if (!data) { showToast('❌ 请求失败'); bodyEl.querySelectorAll('.ai-translation-inline').forEach(el => el.remove()); if (btn) btn.disabled = false; return; }
-    if (data.error) { showToast('❌ ' + data.error); bodyEl.querySelectorAll('.ai-translation-inline').forEach(el => el.remove()); if (btn) btn.disabled = false; return; }
+    if (!data) { showToast('❌ 请求失败'); bodyEl.innerHTML = originalHtml; if (btn) btn.disabled = false; return; }
+    if (data.error) { showToast('❌ ' + data.error); bodyEl.innerHTML = originalHtml; if (btn) btn.disabled = false; return; }
 
-    // Render each translation by ID
-    let rendered = 0;
-    data.translations.forEach(t => {
-      const seg = segments.find(s => s.id === t.id);
-      if (!seg || !t.text) return;
-      rendered++;
-      // Remove loading placeholder
-      const ld = document.getElementById('aiTransLoading-' + seg.id);
-      if (ld) ld.remove();
-      // Insert translation after the original element
-      const td = document.createElement('div');
-      td.className = 'ai-translation-inline';
-      td.style.cssText = 'font-size:inherit;line-height:1.7;color:var(--text-2);margin:0 0 1em 0;padding-left:0;font-weight:400';
-      td.innerHTML = t.text;  // trusted — restored from markdown-safe format
-      seg.el.parentNode.insertBefore(td, seg.el.nextSibling);
+    // Replace body with translated HTML
+    bodyEl.innerHTML = proxyImages(data.translated_html);
+    // Re-attach lightbox
+    bodyEl.querySelectorAll('img').forEach(img => {
+      img.addEventListener('click', e => {
+        e.stopPropagation();
+        document.getElementById('lbImg').src = img.src;
+        document.getElementById('lb').classList.add('open');
+      });
     });
-
-    if (rendered === 0) {
-      // All translations had empty text — AI response parsing likely failed
-      showToast('❌ 翻译失败：AI 返回格式异常，请重试');
-    } else {
-      showToast('✅ ' + rendered + '/' + segments.length + ' 段翻译完成');
-    }
+    showToast('✅ 翻译完成');
   } catch (e) {
-    bodyEl.querySelectorAll('.ai-translation-inline').forEach(el => el.remove());
+    bodyEl.innerHTML = originalHtml;
     showToast('❌ 网络错误: ' + (e.message || ''));
   }
   if (btn) btn.disabled = false;
@@ -1376,13 +1350,28 @@ async function autoDisplaySummary(articleId) {
       }
     }
 
-    // Auto-display cached translations (from batch format)
+    // Auto-display cached translations
     if (data.translation) {
-      let translations;
-      try { translations = JSON.parse(data.translation); } catch { return; }
-      if (!Array.isArray(translations) || translations.length === 0) return;
       const bodyEl = document.getElementById('articleBody');
       if (!bodyEl) return;
+      const t = data.translation.trim();
+      // New format: full HTML (starts with '<')
+      if (t.startsWith('<')) {
+        bodyEl.innerHTML = proxyImages(t);
+        // Re-attach lightbox
+        bodyEl.querySelectorAll('img').forEach(img => {
+          img.addEventListener('click', e => {
+            e.stopPropagation();
+            document.getElementById('lbImg').src = img.src;
+            document.getElementById('lb').classList.add('open');
+          });
+        });
+        return;
+      }
+      // Old format: JSON array (backward compat)
+      let translations;
+      try { translations = JSON.parse(t); } catch { return; }
+      if (!Array.isArray(translations) || translations.length === 0) return;
       const segments = scanArticleSegments(bodyEl);
       translations.forEach(t => {
         const seg = segments.find(s => s.id === t.id);
@@ -1488,7 +1477,13 @@ async function toggleFavorite() {
     const data = await resp.json();
     if (data.ok) {
       btn.classList.toggle('on');
-      btn.title = isOn ? '收藏' : '取消收藏';
+      if (btn.classList.contains('on')) {
+        btn.textContent = '★ 已收藏';
+        btn.title = '取消收藏';
+      } else {
+        btn.textContent = '☆ 收藏';
+        btn.title = '收藏';
+      }
       showToast(isOn ? '已取消收藏' : '✅ 已收藏');
     } else if (data.error) {
       showToast('❌ ' + data.error);
@@ -1503,6 +1498,7 @@ async function checkFavoriteStatus(articleId) {
   try {
     const data = await apiFetch('/favorites/' + articleId + '/status');
     if (data && data.favorited) {
+      document.getElementById('favBtn').textContent = '★ 已收藏';
       document.getElementById('favBtn').classList.add('on');
       document.getElementById('favBtn').title = '取消收藏';
     }
@@ -1953,14 +1949,6 @@ function openArticle(id) {
   const n = news.find(x => x.id === id);
   const wrap = document.getElementById('articleWrap');
 
-  // Reset favorite button
-  const favBtn = document.getElementById('favBtn');
-  if (favBtn) {
-    favBtn.classList.remove('on');
-    favBtn.title = '收藏';
-    favBtn.style.display = authToken ? '' : 'none';
-  }
-
   // If article not in memory, fetch metadata from API
   if (!n) {
     document.getElementById('overlay').classList.add('open');
@@ -1984,7 +1972,8 @@ function openArticle(id) {
         <div class="article-meta" style="position:relative">
           <span class="badge" style="${badgeStyle(data.source || '')}">${esc(data.source || '')}</span>
           <span>${formatTime(data.date || '', data.time || '')}</span>
-          <span style="margin-left:auto;display:flex;gap:8px" id="aiActions" data-article-id="${id}">
+          <span style="margin-left:auto;display:flex;gap:8px;align-items:center" id="aiActions" data-article-id="${id}">
+            <button class="fav-btn-text" id="favBtn" onclick="toggleFavorite()" style="${authToken ? '' : 'display:none;'}background:none;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:0;font-family:var(--font)" title="收藏">☆ 收藏</button>
             <button class="ai-summarize-btn" onclick="aiSummarize(${id})" style="background:none;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:0;font-family:var(--font)">摘要</button>
             <button class="ai-translate-btn" onclick="aiTranslate(${id})" style="background:none;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:0;font-family:var(--font)">翻译</button>
           </span>
@@ -2081,25 +2070,42 @@ function renderArticleBody(wrap, data, id) {
   } else {
     bodyEl.innerHTML = `<p style="color:var(--text-2);padding:40px 0;text-align:center">暂无全文内容</p>`;
   }
-  // Dedup cover image: walk up siblings to find the cover div (may have ai result divs in between)
+  // Dedup cover image: if the body HTML already contains the same image,
+  // remove the cover image div that's before article-body.
+  // Also handles case where thumb URL differs from body image URL (e.g. different sizes).
   if (data.thumb) {
     const thumbProxy = proxyImgSrc(data.thumb);
+    // Normalize both URLs for comparison
+    const normalizeUrl = (url) => {
+      if (url.startsWith('/img-proxy?url=')) {
+        return decodeURIComponent(url.replace('/img-proxy?url=', '')).replace(/\/+$/, '').split('?')[0];
+      }
+      return url.replace(/\/+$/, '').split('?')[0];
+    };
+    const normalizedThumb = normalizeUrl(thumbProxy);
+    // Extract the last path segment (filename) for fuzzy matching
+    const thumbFilename = normalizedThumb.split('/').pop() || '';
     const hasDup = Array.from(bodyEl.querySelectorAll('img')).some(img => {
-      // Extract underlying URL from proxy wrappers
       const imgSrc = img.getAttribute('src') || '';
-      const unwrapped = imgSrc.startsWith('/img-proxy?url=')
-        ? decodeURIComponent(imgSrc.replace('/img-proxy?url=', ''))
-        : imgSrc;
-      return unwrapped === data.thumb || unwrapped === thumbProxy
-          || imgSrc === thumbProxy || imgSrc === data.thumb;
+      const normalized = normalizeUrl(imgSrc);
+      // Check exact URL match
+      if (normalized === normalizedThumb) return true;
+      // Check filename match (handles different URL paths with same image)
+      if (thumbFilename && thumbFilename.length > 8) {
+        const imgFilename = normalized.split('/').pop() || '';
+        if (imgFilename === thumbFilename) return true;
+      }
+      return false;
     });
     if (hasDup) {
       // Walk up previous siblings to find the cover image div
-      let el = bodyEl.previousElementSibling;
+      // (may have ai result divs or other elements in between)
+      let el = (typeof bodyEl === 'object' ? bodyEl : document.getElementById('articleBody')).previousElementSibling;
       while (el) {
         if (el.tagName === 'DIV' && el.querySelector('img')) {
-          const elImg = el.querySelector('img').getAttribute('src') || '';
-          if (elImg === thumbProxy || elImg === data.thumb || elImg.endsWith(encodeURIComponent(data.thumb))) {
+          const elImgSrc = el.querySelector('img').getAttribute('src') || '';
+          const normalizedEl = normalizeUrl(elImgSrc);
+          if (normalizedEl === normalizedThumb || elImgSrc === thumbProxy || elImgSrc.endsWith(encodeURIComponent(data.thumb))) {
             el.remove();
             break;
           }
