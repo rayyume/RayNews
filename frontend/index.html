@@ -397,6 +397,10 @@ a:hover{text-decoration:underline}
         <input type="text" id="authLogin" class="auth-input" placeholder="邮箱 / 用户名" autocomplete="username">
         <input type="password" id="authPassword" class="auth-input" placeholder="密码" autocomplete="current-password">
         <input type="text" id="authNickname" class="auth-input" placeholder="昵称（可选）" style="display:none">
+        <input type="text" id="authInviteCode" class="auth-input" placeholder="邀请码（注册时必填）" style="display:none" autocomplete="off">
+        <p id="authInviteRequest" style="display:none;font-size:12px;color:var(--text-3);margin-top:4px;text-align:center">
+          还没有邀请码？<a href="#" onclick="requestInvite()">点击申请</a>
+        </p>
         <p id="authError" class="auth-error"></p>
         <button class="auth-btn" id="authSubmitBtn" onclick="submitAuth()">登录</button>
         <p class="auth-switch" id="authSwitch">没有账号？<a href="#" onclick="toggleAuthMode()">注册</a></p>
@@ -757,10 +761,43 @@ function toggleAuthMode() {
   document.getElementById('authTitle').textContent = isReg ? '注册' : '登录';
   document.getElementById('authSubmitBtn').textContent = isReg ? '注册' : '登录';
   document.getElementById('authNickname').style.display = isReg ? '' : 'none';
+  document.getElementById('authInviteCode').style.display = isReg ? '' : 'none';
+  document.getElementById('authInviteRequest').style.display = isReg ? '' : 'none';
   document.getElementById('authSwitch').innerHTML = isReg
     ? '已有账号？<a href="#" onclick="toggleAuthMode()">登录</a>'
     : '没有账号？<a href="#" onclick="toggleAuthMode()">注册</a>';
   document.getElementById('authError').textContent = '';
+}
+
+async function requestInvite() {
+  const email = document.getElementById('authLogin').value.trim();
+  if (!email) {
+    document.getElementById('authError').textContent = '请先输入邮箱地址';
+    return;
+  }
+  const btn = document.getElementById('authSubmitBtn');
+  btn.disabled = true;
+  btn.textContent = '申请中...';
+  const errEl = document.getElementById('authError');
+  errEl.textContent = '';
+  try {
+    const resp = await fetch('/auth/request-invite', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email }),
+    });
+    const data = await resp.json();
+    if (data.error) { errEl.textContent = data.error; btn.disabled = false; btn.textContent = '重试'; return; }
+    errEl.textContent = '';
+    showToast('✅ 邀请码已发送至管理员邮箱，请等待审核');
+    // Hide request link, show a waiting message
+    document.getElementById('authInviteRequest').innerHTML =
+      '已申请，请等待管理员审核后获取邀请码';
+  } catch (e) {
+    errEl.textContent = '网络错误: ' + e.message;
+  }
+  btn.disabled = false;
+  btn.textContent = '注册';
 }
 
 async function submitAuth() {
@@ -780,7 +817,12 @@ async function submitAuth() {
     const endpoint = authMode === 'login' ? '/auth/login' : '/auth/register';
     const body = authMode === 'login'
       ? JSON.stringify({ login: loginVal, password })
-      : JSON.stringify({ email: loginVal, password, nickname });
+      : JSON.stringify({
+          email: loginVal,
+          password,
+          nickname,
+          invite_code: document.getElementById('authInviteCode').value.trim(),
+        });
     const resp = await fetch(endpoint, {
       method: 'POST',
       body,

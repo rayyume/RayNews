@@ -50,7 +50,14 @@ CREATE TABLE IF NOT EXISTS user_settings (
     daily_summary_enabled   INTEGER NOT NULL DEFAULT 0,
     notification_config     TEXT    NOT NULL DEFAULT '{}'
 );
-"""
+
+CREATE TABLE IF NOT EXISTS invitation_codes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    code        TEXT    NOT NULL UNIQUE,
+    email       TEXT    NOT NULL,
+    used        INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+);"""
 
 # ─── Connection ───────────────────────────────────────────────
 
@@ -290,3 +297,46 @@ def set_user_settings(user_id: int, **kwargs) -> dict:
         )
     db.commit()
     return get_user_settings(user_id)
+
+
+# ─── Invitation Codes ──────────────────────────────────────
+
+import secrets
+
+
+def create_invitation_code(email: str) -> str:
+    """Generate an 8-char alphanumeric code and store it."""
+    db = get_db()
+    for attempt in range(10):
+        code = secrets.token_hex(4).upper()  # 8 hex chars
+        try:
+            db.execute(
+                "INSERT INTO invitation_codes (code, email) VALUES (?, ?)",
+                (code, email),
+            )
+            db.commit()
+            return code
+        except sqlite3.IntegrityError:
+            continue  # code collision, retry
+    raise Exception("failed to generate unique invitation code")
+
+
+def validate_invitation_code(code: str, email: str) -> bool:
+    """Check if code is valid and tied to this email, not yet used."""
+    db = get_db()
+    row = db.execute(
+        "SELECT 1 FROM invitation_codes WHERE code = ? AND email = ? AND used = 0",
+        (code, email),
+    ).fetchone()
+    return row is not None
+
+
+def use_invitation_code(code: str) -> bool:
+    """Mark code as used. Returns True if successful."""
+    db = get_db()
+    cur = db.execute(
+        "UPDATE invitation_codes SET used = 1 WHERE code = ? AND used = 0",
+        (code,),
+    )
+    db.commit()
+    return cur.rowcount > 0

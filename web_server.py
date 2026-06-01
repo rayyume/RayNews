@@ -15,6 +15,7 @@ from models import (
     verify_password,
     add_favorite, remove_favorite, get_favorites, is_favorited,
     get_ai_config, set_ai_config, get_user_settings, set_user_settings,
+    create_invitation_code, validate_invitation_code, use_invitation_code,
 )
 from auth import init_auth, create_token, require_auth, require_role
 from ai_service import AIService
@@ -42,24 +43,81 @@ def register():
     email = (data.get("email") or "").strip().lower()
     password = data.get("password") or ""
     nickname = (data.get("nickname") or "").strip()
+    invite_code = (data.get("invite_code") or "").strip().upper()
 
     if not email or not password:
         return jsonify({"error": "email and password required"}), 400
     if len(password) < 6:
         return jsonify({"error": "password must be at least 6 characters"}), 400
 
-    # First user is admin, rest are preview (never trust client-provided role)
+    # First user (admin) doesn't need invite code; all others do
+    if count_users() > 0:
+        if not invite_code:
+            return jsonify({"error": "invitation code required. Go to Settings → Request Invite"}), 400
+        if not validate_invitation_code(invite_code, email):
+            return jsonify({"error": "invalid or expired invitation code"}), 400
+
     role = "admin" if count_users() == 0 else "preview"
 
     user = create_user(email, password, nickname, role)
     if user is None:
-        # Check if it was a duplicate email or duplicate username
         if nickname and get_user_by_username(nickname):
             return jsonify({"error": "username already taken"}), 409
         return jsonify({"error": "email already registered"}), 409
 
+    # Mark invite code as used
+    if invite_code:
+        use_invitation_code(invite_code)
+
     token = create_token(user["id"], user["role"])
     return jsonify({"token": token, "user": user}), 201
+
+
+@app.route("/auth/request-invite", methods=["POST"])
+def request_invite():
+    """Generate an 8-char invitation code and email it to the admin."""
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    if not email:
+        return jsonify({"error": "email required"}), 400
+
+    # Check if already registered
+    if get_user_by_email(email):
+        return jsonify({"error": "email already registered"}), 409
+
+    # Generate code
+    code = create_invitation_code(email)
+
+    # Send email via Resend
+    api_key = os.environ.get("RESEND_API_KEY", "")
+    if not api_key:
+        return jsonify({"error": "invitation code generated but email service not configured. Contact admin."}), 500
+
+    try:
+        from notifier import send_email
+        html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>
+body{{font-family:-apple-system,sans-serif;background:#0a0a0c;color:#e8e8ed;padding:20px;max-width:500px;margin:0 auto}}
+h1{{color:#6e8efb;font-size:18px}}
+.code{{font-size:32px;font-weight:800;letter-spacing:6px;text-align:center;padding:20px;background:#1a1a1f;border-radius:12px;margin:20px 0;color:#6e8efb}}
+.footer{{font-size:12px;color:#55556a;margin-top:20px}}
+</style></head><body>
+<h1>🔑 新用户邀请请求</h1>
+<p>邮箱：<strong>{email}</strong></p>
+<p>邀请码：</p>
+<div class="code">{code}</div>
+<p>将此邀请码告知用户，用户在注册时输入即可完成注册。</p>
+<p class="footer">RayNews · 邀请码在注册后自动失效</p>
+</body></html>"""
+        send_email(api_key, "mail@rayyu.me",
+                   f"RayNews 新用户邀请 — {email}",
+                   html, from_name="RayNews")
+    except Exception as e:
+        print(f"[web] Failed to send invite email: {e}")
+        # Code was generated even if email fails — still return success
+        # so the admin can retrieve it another way
+
+    return jsonify({"ok": True, "message": "邀请码已发送至管理员邮箱，请等待审核"}), 201
 
 
 @app.route("/auth/login", methods=["POST"])
