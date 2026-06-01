@@ -38,8 +38,6 @@ def get_db() -> sqlite3.Connection:
 
 # In-memory cache for article detail responses — invalidated on fetcher run
 _article_cache: dict[int, bytes] = {}
-# Track last daily summary send date per user (avoid double-send)
-_last_summary_date: dict[int, str] = {}
 
 
 def clear_article_cache():
@@ -100,124 +98,6 @@ def periodic_refresh():
     """Run fetcher periodically in the background."""
     body, _ = run_fetcher()
     threading.Timer(REFRESH_INTERVAL, periodic_refresh).start()
-
-
-def check_daily_summary():
-    """Check every 60s if any user has a daily summary due at this hour:minute.
-
-    Runs in background, fires a separate thread per matched user to avoid
-    blocking the check loop on slow AI calls.
-    """
-    import json as _json
-    import datetime as _dt
-
-    now = _dt.datetime.now()
-    now_hhmm = now.strftime("%H:%M")
-    today_str = now.strftime("%Y-%m-%d")
-
-    try:
-        conn = get_db()
-        rows = conn.execute(
-            "SELECT user_id, notification_config, daily_summary_enabled "
-            "FROM user_settings WHERE daily_summary_enabled = 1"
-        ).fetchall()
-    except Exception:
-        threading.Timer(60, check_daily_summary).start()
-        return
-
-    resend_api_key = os.environ.get("RESEND_API_KEY", "")
-    if not resend_api_key:
-        threading.Timer(60, check_daily_summary).start()
-        return
-
-    for row in rows:
-        settings = dict(row)
-        uid = settings["user_id"]
-        nc_raw = settings.get("notification_config", "{}")
-        if isinstance(nc_raw, str):
-            try:
-                nc = _json.loads(nc_raw)
-            except (_json.JSONDecodeError, TypeError):
-                nc = {}
-        else:
-            nc = nc_raw
-
-        resend_cfg = nc.get("resend", {})
-        to_email = resend_cfg.get("to_email", "")
-        scheduled_time = resend_cfg.get("daily_summary_time", "08:00")
-
-        if not to_email:
-            continue
-        if scheduled_time != now_hhmm:
-            continue
-        # Already sent today?
-        if _last_summary_date.get(uid) == today_str:
-            continue
-
-        _last_summary_date[uid] = today_str
-        # Fire summary generation in a separate thread so the 60s loop is not blocked
-        threading.Thread(
-            target=_send_daily_summary_for_user,
-            args=(uid, to_email, resend_api_key),
-            daemon=True,
-        ).start()
-
-    threading.Timer(60, check_daily_summary).start()
-
-
-def _send_daily_summary_for_user(uid: int, to_email: str, resend_api_key: str):
-    """Generate and email a daily summary for a single user."""
-    import json as _json
-
-    log.info(f"Generating daily summary for user {uid} → {to_email}")
-
-    # Load articles
-    try:
-        conn = get_db()
-        articles = conn.execute(
-            "SELECT id, title, source, date, time FROM articles "
-            "ORDER BY timestamp DESC LIMIT 20"
-        ).fetchall()
-        if not articles:
-            log.warning(f"Daily summary for user {uid}: no articles")
-            return
-        article_list = [dict(r) for r in articles]
-    except Exception as e:
-        log.error(f"Daily summary for user {uid}: db error {e}")
-        return
-
-    # Load user's AI config
-    try:
-        conn = get_db()
-        ai_row = conn.execute(
-            "SELECT endpoint, model, api_key, provider_type, enabled "
-            "FROM ai_config WHERE user_id = ?", (uid,)
-        ).fetchone()
-        if not ai_row or not ai_row["enabled"] or not ai_row["api_key"]:
-            log.warning(f"Daily summary for user {uid}: no AI config")
-            return
-        ai_config = dict(ai_row)
-    except Exception as e:
-        log.error(f"Daily summary for user {uid}: ai config error {e}")
-        return
-
-    try:
-        from ai_service import AIService
-        svc = AIService(
-            api_key=ai_config["api_key"],
-            endpoint=ai_config["endpoint"],
-            model=ai_config["model"],
-            provider_type=ai_config.get("provider_type", "openai"),
-        )
-        summary = svc.daily_summary(article_list)
-
-        from notifier import send_daily_summary_email
-        result = send_daily_summary_email(
-            resend_api_key, to_email, summary, len(article_list)
-        )
-        log.info(f"Daily summary sent to {to_email} — id={result.get('id', '?')}")
-    except Exception as e:
-        log.error(f"Daily summary for user {uid}: send failed {e}")
 
 
 # ─── API Handlers ─────────────────────────────────────────
@@ -391,8 +271,6 @@ if __name__ == "__main__":
     port = 8081
     # Start periodic refresh in background
     threading.Timer(REFRESH_INTERVAL, periodic_refresh).start()
-    # Start daily summary checker (runs every 60s)
-    threading.Timer(60, check_daily_summary).start()
     server = http.server.HTTPServer(("127.0.0.1", port), Handler)
     log.info(f"Refresh + API server listening on {port} (auto-refresh every {REFRESH_INTERVAL}s)")
     server.serve_forever()
