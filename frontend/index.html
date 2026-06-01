@@ -1235,13 +1235,38 @@ async function aiSummarize(articleId) {
 }
 
 async function aiTranslate(articleId) {
+  const bodyEl = document.getElementById('articleBody');
+  if (!bodyEl) { showToast('❌ 未找到文章内容'); return; }
+
   const btn = document.querySelector('.ai-translate-btn');
+
+  // Toggle mode: if we already have both versions stored locally
+  if (bodyEl.dataset.originalHtml && bodyEl.dataset.translatedHtml) {
+    if (bodyEl.dataset.showingTranslation === 'true') {
+      // Restore original
+      bodyEl.innerHTML = bodyEl.dataset.originalHtml;
+      bodyEl.dataset.showingTranslation = 'false';
+      // Re-attach lightbox
+      bodyEl.querySelectorAll('img').forEach(img => {
+        img.addEventListener('click', e => {
+          e.stopPropagation();
+          document.getElementById('lbImg').src = img.src;
+          document.getElementById('lb').classList.add('open');
+        });
+      });
+      if (btn) btn.textContent = '翻译';
+    } else {
+      // Show translation
+      bodyEl.innerHTML = bodyEl.dataset.translatedHtml;
+      bodyEl.dataset.showingTranslation = 'true';
+      if (btn) btn.textContent = '原文';
+    }
+    return;
+  }
+
+  // First-time translate — call API
   if (btn) btn.disabled = true;
 
-  const bodyEl = document.getElementById('articleBody');
-  if (!bodyEl) { showToast('❌ 未找到文章内容'); if (btn) btn.disabled = false; return; }
-
-  // Save original HTML for potential restore
   const originalHtml = bodyEl.innerHTML;
 
   // Show loading
@@ -1258,8 +1283,15 @@ async function aiTranslate(articleId) {
     if (!data) { showToast('❌ 请求失败'); bodyEl.innerHTML = originalHtml; if (btn) btn.disabled = false; return; }
     if (data.error) { showToast('❌ ' + data.error); bodyEl.innerHTML = originalHtml; if (btn) btn.disabled = false; return; }
 
+    const translatedHtml = proxyImages(data.translated_html);
+
+    // Store both versions in dataset for toggle
+    bodyEl.dataset.originalHtml = originalHtml;
+    bodyEl.dataset.translatedHtml = translatedHtml;
+    bodyEl.dataset.showingTranslation = 'true';
+
     // Replace body with translated HTML
-    bodyEl.innerHTML = proxyImages(data.translated_html);
+    bodyEl.innerHTML = translatedHtml;
     // Re-attach lightbox
     bodyEl.querySelectorAll('img').forEach(img => {
       img.addEventListener('click', e => {
@@ -1268,12 +1300,16 @@ async function aiTranslate(articleId) {
         document.getElementById('lb').classList.add('open');
       });
     });
+    if (btn) {
+      btn.textContent = '原文';
+      btn.disabled = false;
+    }
     showToast('✅ 翻译完成');
   } catch (e) {
     bodyEl.innerHTML = originalHtml;
     showToast('❌ 网络错误: ' + (e.message || ''));
+    if (btn) btn.disabled = false;
   }
-  if (btn) btn.disabled = false;
 }
 
 /**
@@ -1357,7 +1393,11 @@ async function autoDisplaySummary(articleId) {
       const t = data.translation.trim();
       // New format: full HTML (starts with '<')
       if (t.startsWith('<')) {
-        bodyEl.innerHTML = proxyImages(t);
+        // Save original before replacing for toggle support
+        bodyEl.dataset.originalHtml = bodyEl.innerHTML;
+        bodyEl.dataset.translatedHtml = proxyImages(t);
+        bodyEl.dataset.showingTranslation = 'true';
+        bodyEl.innerHTML = bodyEl.dataset.translatedHtml;
         // Re-attach lightbox
         bodyEl.querySelectorAll('img').forEach(img => {
           img.addEventListener('click', e => {
@@ -1366,6 +1406,8 @@ async function autoDisplaySummary(articleId) {
             document.getElementById('lb').classList.add('open');
           });
         });
+        const btn = document.querySelector('.ai-translate-btn');
+        if (btn) btn.textContent = '原文';
         return;
       }
       // Old format: JSON array (backward compat)
