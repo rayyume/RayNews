@@ -1404,6 +1404,14 @@ async function aiTranslate(articleId) {
       btn.disabled = false;
     }
     showToast('✅ 翻译完成');
+
+    // Update title in home page news list
+    const newsItem = news.find(n => n.id === articleId);
+    if (newsItem && translatedTitle) {
+      newsItem.title = translatedTitle;
+      const titleEl = document.querySelector(`.item[data-id="${articleId}"] .item-title`);
+      if (titleEl) titleEl.textContent = translatedTitle;
+    }
   } catch (e) {
     bodyEl.innerHTML = originalHtml;
     showToast('❌ 网络错误: ' + (e.message || ''));
@@ -1505,6 +1513,13 @@ async function autoDisplaySummary(articleId) {
         bodyEl.dataset.showingTranslation = 'true';
         bodyEl.innerHTML = bodyEl.dataset.translatedHtml;
         if (h1El && cachedData.title) h1El.textContent = cachedData.title;
+        // Also sync title back to news list
+        const ni = news.find(n => n.id === articleId);
+        if (ni && cachedData.title) {
+          ni.title = cachedData.title;
+          const te = document.querySelector(`.item[data-id="${articleId}"] .item-title`);
+          if (te) te.textContent = cachedData.title;
+        }
         // Re-attach lightbox
         bodyEl.querySelectorAll('img').forEach(img => {
           img.addEventListener('click', e => {

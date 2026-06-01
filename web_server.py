@@ -539,6 +539,14 @@ def ai_translate_full(article_id):
         # Save to cache as JSON
         cache_data = json.dumps({"title": translated_title, "html": translated_html})
         _save_ai_result(article_id, translation=cache_data)
+        # Also update article title in news.db so home page shows translated title
+        if translated_title:
+            try:
+                _ndb = _get_news_db()
+                _ndb.execute("UPDATE articles SET title = ? WHERE id = ?", (translated_title, article_id))
+                _ndb.commit()
+            except Exception:
+                pass  # non-fatal if title update fails
         return jsonify({"translated_html": translated_html, "translated_title": translated_title})
     except Exception as e:
         return jsonify({"error": f"AI request failed: {str(e)}"}), 502
@@ -641,29 +649,24 @@ def ai_daily_summary():
         return jsonify({"error": f"AI request failed: {str(e)}"}), 502
 
 
-@app.route("/ai/daily-summary/send", methods=["POST"])
-def ai_daily_summary_send():
-    """Scheduled daily summary delivery. Called by cron with CRON_SECRET.
+_daily_summary_sent = set()  # {(user_id, date), ...}
 
-    Reads all users' settings, finds those with daily_summary_enabled
-    and whose daily_summary_time matches current HH:MM,
-    generates a summary, and sends it as email.
-    """
-    # Verify cron secret
-    cron_secret = os.environ.get("CRON_SECRET", "")
-    if cron_secret:
-        provided = request.headers.get("X-Cron-Secret", "")
-        if provided != cron_secret:
-            return jsonify({"error": "unauthorized"}), 401
 
+def _send_daily_summaries():
+    """Check all users' settings and send daily summary emails where due."""
     import json as _json
     from notifier import send_daily_summary_email
     from models import get_db as _get_settings_db
+    import datetime as _dt
 
-    now_hhmm = __import__("datetime").datetime.now().strftime("%H:%M")
-    results = []
+    now = _dt.datetime.now()
+    now_hhmm = now.strftime("%H:%M")
+    today_str = now.strftime("%Y-%m-%d")
 
-    # Query user_settings directly
+    resend_api_key = os.environ.get("RESEND_API_KEY", "")
+    if not resend_api_key:
+        return
+
     try:
         db = _get_settings_db()
         rows = db.execute(
@@ -671,11 +674,7 @@ def ai_daily_summary_send():
             "FROM user_settings WHERE daily_summary_enabled = 1"
         ).fetchall()
     except Exception:
-        return jsonify({"error": "settings db not available"}), 500
-
-    resend_api_key = os.environ.get("RESEND_API_KEY", "")
-    if not resend_api_key:
-        return jsonify({"error": "RESEND_API_KEY not configured"}), 500
+        return
 
     for row in rows:
         settings = dict(row)
@@ -689,24 +688,21 @@ def ai_daily_summary_send():
         to_email = resend_cfg.get("to_email", "")
         scheduled_time = resend_cfg.get("daily_summary_time", "08:00")
 
-        if not to_email:
-            continue
-        if scheduled_time != now_hhmm:
+        if not to_email or scheduled_time != now_hhmm:
             continue
 
-        # Fetch ALL articles from today
-        import datetime as _dt
-        today_str = _dt.datetime.now().strftime("%Y-%m-%d")
+        uid = settings["user_id"]
+        dedup_key = (uid, today_str)
+        if dedup_key in _daily_summary_sent:
+            continue
+
         articles = _fetch_articles_by_date(today_str)
         if not articles:
-            results.append({"user_id": settings["user_id"], "status": "no articles today"})
             continue
 
-        # Use the user's own AI config, or fall back to first available admin AI config
         from ai_service import AIService
-        ai_config = _get_ai_config_for_user(settings["user_id"])
+        ai_config = _get_ai_config_for_user(uid)
         if not ai_config or not ai_config.get("enabled") or not ai_config.get("api_key"):
-            results.append({"user_id": settings["user_id"], "status": "no ai config"})
             continue
 
         try:
@@ -718,11 +714,36 @@ def ai_daily_summary_send():
             )
             summary = svc.daily_summary(articles)
             send_daily_summary_email(resend_api_key, to_email, summary, len(articles))
-            results.append({"user_id": settings["user_id"], "status": "sent", "to": to_email})
+            _daily_summary_sent.add(dedup_key)
+            print(f"[scheduler] Daily summary sent to {to_email} for {today_str}")
         except Exception as e:
-            results.append({"user_id": settings["user_id"], "status": f"error: {e}"})
+            print(f"[scheduler] Daily summary failed for user {uid}: {e}")
 
-    return jsonify({"results": results, "checked_at": now_hhmm})
+
+def _daily_summary_loop():
+    """Background loop: check every 60 seconds."""
+    import time as _time
+    _time.sleep(15)  # initial delay to let app start fully
+    while True:
+        try:
+            _send_daily_summaries()
+        except Exception as e:
+            print(f"[scheduler] Error in loop: {e}")
+        _time.sleep(60)
+
+
+@app.route("/ai/daily-summary/send", methods=["POST"])
+def ai_daily_summary_send():
+    """Scheduled daily summary delivery. Also triggered by internal scheduler."""
+    # Verify cron secret if set (optional — scheduler bypasses this)
+    cron_secret = os.environ.get("CRON_SECRET", "")
+    if cron_secret:
+        provided = request.headers.get("X-Cron-Secret", "")
+        if provided != cron_secret:
+            return jsonify({"error": "unauthorized"}), 401
+
+    _send_daily_summaries()
+    return jsonify({"status": "ok", "checked_at": __import__("datetime").datetime.now().strftime("%H:%M")})
 
 
 def _get_ai_config_for_user(user_id: int) -> dict | None:
@@ -994,6 +1015,9 @@ def health():
 
 if __name__ == "__main__":
     _init_ai_results_table()
+    import threading as _th
+    _th.Thread(target=_daily_summary_loop, daemon=True).start()
+    print("[scheduler] Daily summary background thread started")
     port = int(os.environ.get("WEB_PORT", 8082))
     print(f"[web] RayNews Web Server listening on {port}")
     app.run(host="127.0.0.1", port=port, debug=False)
