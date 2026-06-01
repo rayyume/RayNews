@@ -450,7 +450,8 @@ a:hover{text-decoration:underline}
       <div style="display:flex;gap:4px;margin-bottom:16px;border-bottom:1px solid var(--border);padding-bottom:0">
         <button class="settings-tab active" data-tab="ai" onclick="switchSettingsTab('ai')">🤖 AI</button>
         <button class="settings-tab" data-tab="notify" onclick="switchSettingsTab('notify')">🔔 通知</button>
-        <button class="settings-tab" data-tab="general" onclick="switchSettingsTab('general')">📋 通用</button>
+        <button class="settings-tab" data-tab="translate" onclick="switchSettingsTab('translate')">🌐 翻译</button>
+        <button class="settings-tab" data-tab="account" onclick="switchSettingsTab('account')">👤 账号</button>
       </div>
 
       <!-- AI Tab -->
@@ -505,8 +506,8 @@ a:hover{text-decoration:underline}
         <button class="ai-save-btn" onclick="testNotification()" style="margin-top:8px;background:var(--bg-card);color:var(--text);border:1px solid var(--border)">📧 发送测试邮件</button>
       </div>
 
-      <!-- General Tab -->
-      <div id="settingsTabGeneral" style="display:none">
+      <!-- Translate Tab -->
+      <div id="settingsTabTranslate" style="display:none">
         <div class="ai-toggle" onclick="document.getElementById('autoTranslateTitle').click()">
           <input type="checkbox" id="autoTranslateTitle" onclick="event.stopPropagation()">
           <span>🌐 自动翻译标题</span>
@@ -518,8 +519,20 @@ a:hover{text-decoration:underline}
         </div>
         <p class="ai-hint" style="margin-top:8px">开启后，打开文章时自动调用 AI 翻译</p>
 
-        <button class="ai-save-btn" onclick="saveGeneralSettings()" style="margin-top:16px">保存通用设置</button>
-        <button class="ai-save-btn" onclick="triggerDailySummary()" style="margin-top:8px;background:var(--bg-card);color:var(--text);border:1px solid var(--border)">📊 生成每日摘要</button>
+        <button class="ai-save-btn" onclick="saveGeneralSettings()" style="margin-top:16px">保存翻译设置</button>
+      </div>
+
+      <!-- Account Tab -->
+      <div id="settingsTabAccount" style="display:none">
+        <label class="ai-label">头像</label>
+        <div style="display:flex;align-items:center;gap:16px;margin-bottom:16px">
+          <div class="user-avatar" style="width:64px;height:64px;cursor:default">
+            <img src="" id="settingsAvatarImg" alt="">
+            <span id="settingsAvatarLetter" style="font-size:24px"></span>
+          </div>
+          <button class="ai-save-btn" onclick="uploadAvatar()" style="margin:0">🖼️ 更换头像</button>
+        </div>
+        <p class="ai-hint">支持 JPG/PNG/GIF/WebP，最大 500KB</p>
       </div>
 
       <div id="settingsStatus"></div>
@@ -964,9 +977,28 @@ function closeAISettings() {
 function switchSettingsTab(tab) {
   document.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
   document.querySelector('.settings-tab[data-tab="' + tab + '"]').classList.add('active');
-  ['ai','notify','general'].forEach(t => {
+  ['ai','notify','translate','account'].forEach(t => {
     document.getElementById('settingsTab' + t.charAt(0).toUpperCase() + t.slice(1)).style.display = t === tab ? '' : 'none';
   });
+  // Load avatar preview when switching to account tab
+  if (tab === 'account') loadAccountTab();
+}
+
+function loadAccountTab() {
+  const img = document.getElementById('settingsAvatarImg');
+  const letter = document.getElementById('settingsAvatarLetter');
+  if (authUser) {
+    const avatarUrl = getAvatarUrl(authUser);
+    if (avatarUrl && !avatarUrl.startsWith('https://www.gravatar.com/')) {
+      img.src = avatarUrl;
+      img.style.display = '';
+      letter.style.display = 'none';
+    } else {
+      img.style.display = 'none';
+      letter.style.display = '';
+      letter.textContent = (authUser.nickname || authUser.email || '?')[0].toUpperCase();
+    }
+  }
 }
 
 function showSettingsStatus(msg, type) {
@@ -1185,7 +1217,7 @@ async function triggerDailySummary() {
     // Show result in a scrollable area
     const el = document.getElementById('settingsStatus');
     el.className = 'ai-status ok';
-    el.innerHTML = '✅ 基于 ' + data.article_count + ' 篇文章生成：<br><br><div style="max-height:300px;overflow-y:auto;white-space:pre-wrap;font-size:12px;line-height:1.6;padding:8px;background:var(--bg);border-radius:6px;margin-top:4px">' + esc(data.summary) + '</div>';
+    el.innerHTML = '✅ 基于 ' + data.article_count + ' 篇文章生成：<br><br><div style="max-height:300px;overflow-y:auto;font-size:12px;line-height:1.6;padding:8px;background:var(--bg);border-radius:6px;margin-top:4px">' + renderMarkdown(data.summary) + '</div>';
   } catch (e) { showSettingsStatus('❌ 生成失败', 'err'); }
 }
 
@@ -1210,7 +1242,7 @@ async function generateDailySummary() {
     const data = await resp.json();
     if (!data) { body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)">❌ 请求失败</div>'; return; }
     if (data.error) { body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)">❌ ' + esc(data.error) + '</div>'; return; }
-    body.innerHTML = '<div style="max-height:400px;overflow-y:auto;white-space:pre-wrap;font-size:13px;line-height:1.7;padding:12px;background:var(--bg);border-radius:8px">' + esc(data.summary) + '</div><p style="font-size:11px;color:var(--text-3);margin-top:8px">基于 ' + data.article_count + ' 篇文章生成</p>';
+    body.innerHTML = '<div style="max-height:400px;overflow-y:auto;font-size:13px;line-height:1.7;padding:12px;background:var(--bg);border-radius:8px">' + renderMarkdown(data.summary) + '</div><p style="font-size:11px;color:var(--text-3);margin-top:8px">基于 ' + data.article_count + ' 篇文章生成</p>';
   } catch (e) {
     body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)">❌ 生成失败: ' + esc(e.message) + '</div>';
   }
@@ -2332,12 +2364,47 @@ document.addEventListener('keydown', e => {
     }
   }
 });
-
-function esc(s) {
-  if (!s) return '';
+function esc(str) {
+  if (str === null || str === undefined) return '';
+  if (typeof str !== 'string') str = String(str);
   const d = document.createElement('div');
-  d.textContent = s;
+  d.textContent = str;
   return d.innerHTML;
+}
+
+// Simple markdown to HTML renderer (subset: headers, bold, italic, code, links, lists, line breaks)
+function renderMarkdown(text) {
+  if (!text) return '';
+  let html = esc(text);
+  // Headers: ### text / ## text / # text
+  html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+  html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+  html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+  // Inline code
+  html = html.replace(/`([^`]+)`/g, '<code style="background:var(--bg-surface);padding:1px 5px;border-radius:3px;font-size:0.9em">$1</code>');
+  // Bold and italic
+  html = html.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+  html = html.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<i>$1</i>');
+  // Links [text](url)
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  // Unordered lists: lines starting with - or *
+  html = html.replace(/^[\s]*[-*]\s+(.+)$/gm, '<li>$1</li>');
+  html = html.replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>');
+  // Ordered lists: lines starting with 1. etc
+  html = html.replace(/^[\s]*\d+\.\s+(.+)$/gm, '<li>$1</li>');
+  // Wrap consecutive <li> not already in <ul> into <ol>
+  html = html.replace(/(<li>.*<\/li>\n?)+(?!<\/ul>)/g, (m) => {
+    if (m.includes('<ul>')) return m;
+    return '<ol>' + m + '</ol>';
+  });
+  // Line breaks (double newline = paragraph, single newline = br)
+  html = html.replace(/\n\n/g, '</p><p>');
+  html = html.replace(/\n/g, '<br>');
+  // Wrap in paragraph if not already wrapped
+  if (!html.startsWith('<h') && !html.startsWith('<p') && !html.startsWith('<ul') && !html.startsWith('<ol')) {
+    html = '<p>' + html + '</p>';
+  }
+  return html;
 }
 
 const HOTLINK_DOMAINS = ['cdnfile.sspai.com'];
