@@ -184,6 +184,11 @@ a:hover{text-decoration:underline}
   .item-arrow{display:none}
   .article-wrap h1{font-size:20px}
   .hide-m{display:none}
+  .header-right{gap:8px}
+  .header-right .refresh-btn{padding:3px 8px;font-size:10px}
+  .header-right .status-text{display:none}
+  .header-right a svg{width:15px;height:15px}
+  .header-right .header-avatar .user-avatar{width:26px!important;height:26px!important}
 }
 
 /* ═══ Auth Modal ════════════════════════════════════ */
@@ -328,7 +333,7 @@ a:hover{text-decoration:underline}
       </div>
       <div class="header-right">
         <button class="refresh-btn" onclick="showDailySummary()" title="每日总结" style="background:none;border:none;color:var(--text-2);font-size:16px;cursor:pointer;padding:2px 6px;border-radius:6px;transition:all 0.15s;font-family:var(--font)" onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--text-2)'">✨</button>
-        <span><span class="status-dot"></span>实时更新</span>
+        <span class="status-text"><span class="status-dot"></span>实时更新</span>
         <span class="hide-m" id="count"></span>
         <button class="refresh-btn" onclick="triggerRefresh()">刷新</button>
       </div>
