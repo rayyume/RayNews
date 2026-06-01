@@ -665,6 +665,7 @@ def _send_daily_summaries():
 
     resend_api_key = os.environ.get("RESEND_API_KEY", "")
     if not resend_api_key:
+        print("[scheduler] RESEND_API_KEY not set, skipping")
         return
 
     try:
@@ -673,7 +674,8 @@ def _send_daily_summaries():
             "SELECT user_id, notification_config, daily_summary_enabled "
             "FROM user_settings WHERE daily_summary_enabled = 1"
         ).fetchall()
-    except Exception:
+    except Exception as e:
+        print(f"[scheduler] DB error: {e}")
         return
 
     for row in rows:
@@ -688,7 +690,9 @@ def _send_daily_summaries():
         to_email = resend_cfg.get("to_email", "")
         scheduled_time = resend_cfg.get("daily_summary_time", "08:00")
 
-        if not to_email or scheduled_time != now_hhmm:
+        if not to_email:
+            continue
+        if scheduled_time != now_hhmm:
             continue
 
         uid = settings["user_id"]
@@ -698,12 +702,17 @@ def _send_daily_summaries():
 
         articles = _fetch_articles_by_date(today_str)
         if not articles:
+            print(f"[scheduler] User {uid}: no articles for {today_str}")
             continue
 
         from ai_service import AIService
         ai_config = _get_ai_config_for_user(uid)
+        # Fall back to admin AI config if user has none
         if not ai_config or not ai_config.get("enabled") or not ai_config.get("api_key"):
-            continue
+            ai_config = _get_ai_config_for_user(1)
+            if not ai_config or not ai_config.get("enabled") or not ai_config.get("api_key"):
+                print(f"[scheduler] User {uid}: no AI config available (user or admin)")
+                continue
 
         try:
             svc = AIService(
