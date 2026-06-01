@@ -621,10 +621,12 @@ def ai_daily_summary():
     if not config.get("api_key"):
         return jsonify({"error": "API key not configured"}), 400
 
-    # Fetch top 20 articles from news.db
-    articles = _fetch_recent_articles(20)
+    # Fetch ALL articles from today
+    import datetime as _dt
+    today_str = _dt.datetime.now().strftime("%Y-%m-%d")
+    articles = _fetch_articles_by_date(today_str)
     if not articles:
-        return jsonify({"error": "no articles available"}), 404
+        return jsonify({"error": "no articles today"}), 404
 
     try:
         svc = AIService(
@@ -692,10 +694,12 @@ def ai_daily_summary_send():
         if scheduled_time != now_hhmm:
             continue
 
-        # Fetch articles and generate summary
-        articles = _fetch_recent_articles(20)
+        # Fetch ALL articles from today
+        import datetime as _dt
+        today_str = _dt.datetime.now().strftime("%Y-%m-%d")
+        articles = _fetch_articles_by_date(today_str)
         if not articles:
-            results.append({"user_id": settings["user_id"], "status": "no articles"})
+            results.append({"user_id": settings["user_id"], "status": "no articles today"})
             continue
 
         # Use the user's own AI config, or fall back to first available admin AI config
@@ -746,6 +750,24 @@ def _fetch_recent_articles(limit: int = 20) -> list[dict]:
         rows = conn.execute(
             "SELECT id, title, source, date, time FROM articles ORDER BY timestamp DESC LIMIT ?",
             (limit,),
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def _fetch_articles_by_date(date_str: str) -> list[dict]:
+    """Fetch all articles for a given date string (YYYY-MM-DD)."""
+    import sqlite3
+    if not os.path.exists(NEWS_DB):
+        return []
+    try:
+        conn = sqlite3.connect(NEWS_DB)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT id, title, source, date, time FROM articles WHERE date = ? ORDER BY timestamp ASC",
+            (date_str,),
         ).fetchall()
         conn.close()
         return [dict(r) for r in rows]
