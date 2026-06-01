@@ -639,6 +639,102 @@ def ai_daily_summary():
         return jsonify({"error": f"AI request failed: {str(e)}"}), 502
 
 
+@app.route("/ai/daily-summary/send", methods=["POST"])
+def ai_daily_summary_send():
+    """Scheduled daily summary delivery. Called by cron with CRON_SECRET.
+
+    Reads all users' settings, finds those with daily_summary_enabled
+    and whose daily_summary_time matches current HH:MM,
+    generates a summary, and sends it as email.
+    """
+    # Verify cron secret
+    cron_secret = os.environ.get("CRON_SECRET", "")
+    if cron_secret:
+        provided = request.headers.get("X-Cron-Secret", "")
+        if provided != cron_secret:
+            return jsonify({"error": "unauthorized"}), 401
+
+    import json as _json
+    from notifier import send_daily_summary_email
+    from models import get_db as _get_settings_db
+
+    now_hhmm = __import__("datetime").datetime.now().strftime("%H:%M")
+    results = []
+
+    # Query user_settings directly
+    try:
+        db = _get_settings_db()
+        rows = db.execute(
+            "SELECT user_id, notification_config, daily_summary_enabled "
+            "FROM user_settings WHERE daily_summary_enabled = 1"
+        ).fetchall()
+    except Exception:
+        return jsonify({"error": "settings db not available"}), 500
+
+    resend_api_key = os.environ.get("RESEND_API_KEY", "")
+    if not resend_api_key:
+        return jsonify({"error": "RESEND_API_KEY not configured"}), 500
+
+    for row in rows:
+        settings = dict(row)
+        nc = settings.get("notification_config", "{}")
+        if isinstance(nc, str):
+            try:
+                nc = _json.loads(nc)
+            except (_json.JSONDecodeError, TypeError):
+                nc = {}
+        resend_cfg = nc.get("resend", {})
+        to_email = resend_cfg.get("to_email", "")
+        scheduled_time = resend_cfg.get("daily_summary_time", "08:00")
+
+        if not to_email:
+            continue
+        if scheduled_time != now_hhmm:
+            continue
+
+        # Fetch articles and generate summary
+        articles = _fetch_recent_articles(20)
+        if not articles:
+            results.append({"user_id": settings["user_id"], "status": "no articles"})
+            continue
+
+        # Use the user's own AI config, or fall back to first available admin AI config
+        from ai_service import AIService
+        ai_config = _get_ai_config_for_user(settings["user_id"])
+        if not ai_config or not ai_config.get("enabled") or not ai_config.get("api_key"):
+            results.append({"user_id": settings["user_id"], "status": "no ai config"})
+            continue
+
+        try:
+            svc = AIService(
+                api_key=ai_config["api_key"],
+                endpoint=ai_config["endpoint"],
+                model=ai_config["model"],
+                provider_type=ai_config.get("provider_type", "openai"),
+            )
+            summary = svc.daily_summary(articles)
+            send_daily_summary_email(resend_api_key, to_email, summary, len(articles))
+            results.append({"user_id": settings["user_id"], "status": "sent", "to": to_email})
+        except Exception as e:
+            results.append({"user_id": settings["user_id"], "status": f"error: {e}"})
+
+    return jsonify({"results": results, "checked_at": now_hhmm})
+
+
+def _get_ai_config_for_user(user_id: int) -> dict | None:
+    """Fetch a user's AI config for programmatic use."""
+    from models import get_db as _db
+    try:
+        db = _db()
+        row = db.execute(
+            "SELECT endpoint, model, api_key, provider_type, enabled "
+            "FROM ai_config WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        return dict(row) if row else None
+    except Exception:
+        return None
+
+
 def _fetch_recent_articles(limit: int = 20) -> list[dict]:
     """Fetch most recent articles from news.db."""
     import sqlite3

@@ -500,6 +500,11 @@ a:hover{text-decoration:underline}
           <input type="checkbox" id="dailySummaryToggle" onclick="event.stopPropagation()">
           <span>📅 每日摘要推送</span>
         </div>
+        <div style="margin-top:10px;display:flex;align-items:center;gap:10px">
+          <label class="ai-label" style="margin:0;flex-shrink:0">推送时间</label>
+          <input class="ai-input" id="dailySummaryTime" type="time" value="08:00" style="width:140px;flex-shrink:0">
+        </div>
+        <p class="ai-hint" style="margin-top:4px">每天指定时间自动生成摘要并发送邮件</p>
 
         <button class="ai-save-btn" onclick="saveNotifyConfig()" style="margin-top:14px">保存通知配置</button>
         <button class="ai-save-btn" onclick="testNotification()" style="margin-top:8px;background:var(--bg-card);color:var(--text);border:1px solid var(--border)">📧 发送测试邮件</button>
@@ -1083,6 +1088,7 @@ async function loadNotifyConfig() {
     const resend = nc.resend || {};
     document.getElementById('notifyToEmail').value = resend.to_email || '';
     document.getElementById('dailySummaryToggle').checked = !!data.daily_summary_enabled;
+    document.getElementById('dailySummaryTime').value = resend.daily_summary_time || '08:00';
   } catch (e) {}
 }
 
@@ -1092,6 +1098,7 @@ async function saveNotifyConfig() {
   const nc = (existing.notification_config || {});
   nc.resend = {
     to_email: document.getElementById('notifyToEmail').value,
+    daily_summary_time: document.getElementById('dailySummaryTime').value,
   };
   try {
     const resp = await fetch('/settings', {
