@@ -488,10 +488,11 @@ def ai_translate(article_id):
 @app.route("/ai/translate-full/<int:article_id>", methods=["POST"])
 @require_auth
 def ai_translate_full(article_id):
-    """Translate the full article HTML — replaces old segment-based approach.
+    """Translate the full article HTML (including title) — replaces old segment-based approach.
 
-    Frontend sends {html: "...", target_lang: "zh-CN"}.
+    Frontend sends {html: "...", title: "...", target_lang: "zh-CN"}.
     Backend caches the result by article_id for reuse.
+    Returns {translated_html, translated_title} both with and without title.
     """
     config = get_ai_config(g.user_id)
     if not config or not config.get("enabled"):
@@ -501,6 +502,7 @@ def ai_translate_full(article_id):
 
     data = request.get_json(silent=True) or {}
     html = data.get("html", "")
+    title = data.get("title", "")
     target_lang = data.get("target_lang", "zh-CN")
     if not html:
         return jsonify({"error": "html required"}), 400
@@ -508,10 +510,21 @@ def ai_translate_full(article_id):
     # Check cache first
     cached = _get_ai_result(article_id)
     if cached and cached.get("translation"):
-        # New format stores plain HTML (starts with '<'), old format was JSON array (starts with '[')
         t = cached["translation"]
-        if t and t.strip().startswith("<"):
-            return jsonify({"translated_html": t, "cached": True})
+        # New format with title: JSON {"title": "...", "html": "..."}
+        if t and t.strip().startswith("{"):
+            try:
+                cached_data = json.loads(t)
+                return jsonify({
+                    "translated_html": cached_data.get("html", ""),
+                    "translated_title": cached_data.get("title", ""),
+                    "cached": True,
+                })
+            except (json.JSONDecodeError, TypeError):
+                pass  # stale cache, re-translate
+        # Legacy format: plain HTML (starts with '<') — no title
+        elif t and t.strip().startswith("<"):
+            return jsonify({"translated_html": t, "translated_title": "", "cached": True})
 
     try:
         svc = AIService(
@@ -520,10 +533,13 @@ def ai_translate_full(article_id):
             model=config["model"],
             provider_type=config.get("provider_type", "openai"),
         )
-        translated = svc.translate_full(html, target_lang)
-        # Save to cache as plain HTML
-        _save_ai_result(article_id, translation=translated)
-        return jsonify({"translated_html": translated})
+        result = svc.translate_full(html, target_lang, title=title)
+        translated_html = result["html"]
+        translated_title = result["title"]
+        # Save to cache as JSON
+        cache_data = json.dumps({"title": translated_title, "html": translated_html})
+        _save_ai_result(article_id, translation=cache_data)
+        return jsonify({"translated_html": translated_html, "translated_title": translated_title})
     except Exception as e:
         return jsonify({"error": f"AI request failed: {str(e)}"}), 502
 

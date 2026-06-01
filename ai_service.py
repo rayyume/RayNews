@@ -158,31 +158,47 @@ class AIService:
 
     # ─── Full HTML translation ────────────────────────────────
 
-    def translate_full(self, html: str, target_lang: str = "zh-CN") -> str:
-        """Translate full article HTML, preserving all tags and structure.
+    def translate_full(self, html: str, target_lang: str = "zh-CN",
+                       title: str = "") -> dict:
+        """Translate full article HTML (and optionally title), preserving all tags.
 
-        The AI receives the raw HTML and returns translated HTML with same
-        tag structure — only text content inside tags is translated.
-        Markdown-style formatting (**bold**, etc.) in article references and
-        source links are preserved as-is since they're not user-facing content.
+        Returns {"title": translated_title, "html": translated_html}.
+        If title is empty, translated_title will also be empty.
         """
         lang_name = "中文" if "zh" in target_lang else target_lang
-        prompt = (
-            f"请将以下 HTML 文章内容翻译为{lang_name}。\n\n"
-            "要求：\n"
-            "1. 只翻译标签内的文本内容，保持所有 HTML 标签不变\n"
-            "2. 保持原文的段落、换行、超链接（<a>标签）、加粗（<b>）、斜体（<i>）等所有格式\n"
-            "3. 不要添加、删除或修改任何 HTML 标签和属性\n"
-            "4. 直接输出翻译后的完整 HTML，不要包含 ```html 代码块标记或任何额外说明文字\n\n"
-            "HTML 内容：\n"
-        )
+        parts = []
+        if title:
+            parts.append(f"文章标题（请翻译并保持格式）：{title}")
+        parts.append(f"文章正文 HTML（请翻译标签内文本，保持所有 HTML 结构不变）：\n{html}")
+        user_content = "\n\n".join(parts)
+
+        prompt = f"请将以下文章翻译为{lang_name}。\n\n"
+        prompt += "要求：\n"
+        if title:
+            prompt += "0. 第一行输出翻译后的标题，不要任何标记或引号\n"
+        prompt += "1. 只翻译标签内的文本内容，保持所有 HTML 标签不变\n"
+        prompt += "2. 保持原文的段落、换行、超链接（<a>标签）、加粗（<b>）、斜体（<i>）等所有格式\n"
+        prompt += "3. 不要添加、删除或修改任何 HTML 标签和属性\n"
+        prompt += "4. 直接输出翻译后的 HTML，不要包含 ```html 代码块标记或任何额外说明文字\n\n"
+        if title:
+            prompt += "输出格式：\n第一行：翻译后的标题\n之后：翻译后的完整 HTML\n\n"
+
         messages = [
             {"role": "system",
-             "content": "你是一个专业的翻译助手。将 HTML 中的文本内容翻译为目标语言，保持全部 HTML 标签和结构不变。只输出 HTML 代码，不要代码块标记。"},
+             "content": f"你是一个专业的翻译助手。将文章翻译为{lang_name}，保持全部 HTML 标签和结构不变。"},
             {"role": "user",
-             "content": prompt + html},
+             "content": prompt + user_content},
         ]
-        return self.chat(messages, max_tokens=8000, temperature=0.3)
+        result = self.chat(messages, max_tokens=8000, temperature=0.3)
+
+        translated_title = ""
+        translated_html = result
+        if title:
+            lines = result.split("\n", 1)
+            translated_title = lines[0].strip()
+            translated_html = lines[1] if len(lines) > 1 else ""
+
+        return {"title": translated_title, "html": translated_html}
 
     # ─── Batch translation ────────────────────────────────────
 

@@ -1238,12 +1238,15 @@ async function aiTranslate(articleId) {
   if (!bodyEl) { showToast('❌ 未找到文章内容'); return; }
 
   const btn = document.querySelector('.ai-translate-btn');
+  const articleWrap = document.getElementById('articleWrap');
+  const h1 = articleWrap ? articleWrap.querySelector('h1') : null;
 
   // Toggle mode: if we already have both versions stored locally
   if (bodyEl.dataset.originalHtml && bodyEl.dataset.translatedHtml) {
     if (bodyEl.dataset.showingTranslation === 'true') {
       // Restore original
       bodyEl.innerHTML = bodyEl.dataset.originalHtml;
+      if (h1 && bodyEl.dataset.originalTitle) h1.textContent = bodyEl.dataset.originalTitle;
       bodyEl.dataset.showingTranslation = 'false';
       // Re-attach lightbox
       bodyEl.querySelectorAll('img').forEach(img => {
@@ -1257,6 +1260,7 @@ async function aiTranslate(articleId) {
     } else {
       // Show translation
       bodyEl.innerHTML = bodyEl.dataset.translatedHtml;
+      if (h1 && bodyEl.dataset.translatedTitle) h1.textContent = bodyEl.dataset.translatedTitle;
       bodyEl.dataset.showingTranslation = 'true';
       if (btn) btn.textContent = '原文';
     }
@@ -1267,6 +1271,7 @@ async function aiTranslate(articleId) {
   if (btn) btn.disabled = true;
 
   const originalHtml = bodyEl.innerHTML;
+  const originalTitle = h1 ? h1.textContent : '';
 
   // Show loading
   bodyEl.innerHTML = '<p style="color:var(--text-2);text-align:center;padding:40px 0">⏳ 翻译中...</p>';
@@ -1275,7 +1280,7 @@ async function aiTranslate(articleId) {
     const resp = await fetch('/ai/translate-full/' + articleId, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
-      body: JSON.stringify({ html: originalHtml, target_lang: 'zh-CN' }),
+      body: JSON.stringify({ html: originalHtml, title: originalTitle, target_lang: 'zh-CN' }),
     });
     if (resp.status === 401) { logout(); showToast('❌ 登录已过期，请重新登录'); bodyEl.innerHTML = originalHtml; if (btn) btn.disabled = false; return; }
     const data = await resp.json();
@@ -1283,14 +1288,18 @@ async function aiTranslate(articleId) {
     if (data.error) { showToast('❌ ' + data.error); bodyEl.innerHTML = originalHtml; if (btn) btn.disabled = false; return; }
 
     const translatedHtml = proxyImages(data.translated_html);
+    const translatedTitle = data.translated_title || '';
 
-    // Store both versions in dataset for toggle
+    // Store both versions in dataset for toggle (including title)
     bodyEl.dataset.originalHtml = originalHtml;
+    bodyEl.dataset.originalTitle = originalTitle;
     bodyEl.dataset.translatedHtml = translatedHtml;
+    bodyEl.dataset.translatedTitle = translatedTitle;
     bodyEl.dataset.showingTranslation = 'true';
 
-    // Replace body with translated HTML
+    // Replace body and title with translated content
     bodyEl.innerHTML = translatedHtml;
+    if (h1 && translatedTitle) h1.textContent = translatedTitle;
     // Re-attach lightbox
     bodyEl.querySelectorAll('img').forEach(img => {
       img.addEventListener('click', e => {
@@ -1390,7 +1399,34 @@ async function autoDisplaySummary(articleId) {
       const bodyEl = document.getElementById('articleBody');
       if (!bodyEl) return;
       const t = data.translation.trim();
-      // New format: full HTML (starts with '<')
+      // New format with title: JSON {"title": "...", "html": "..."}
+      if (t.startsWith('{')) {
+        let cachedData;
+        try { cachedData = JSON.parse(t); } catch { return; }
+        if (!cachedData.html) return;
+        const articleWrap = document.getElementById('articleWrap');
+        const h1El = articleWrap ? articleWrap.querySelector('h1') : null;
+        // Save original before replacing for toggle support
+        bodyEl.dataset.originalHtml = bodyEl.innerHTML;
+        bodyEl.dataset.originalTitle = h1El ? h1El.textContent : '';
+        bodyEl.dataset.translatedHtml = proxyImages(cachedData.html);
+        bodyEl.dataset.translatedTitle = cachedData.title || '';
+        bodyEl.dataset.showingTranslation = 'true';
+        bodyEl.innerHTML = bodyEl.dataset.translatedHtml;
+        if (h1El && cachedData.title) h1El.textContent = cachedData.title;
+        // Re-attach lightbox
+        bodyEl.querySelectorAll('img').forEach(img => {
+          img.addEventListener('click', e => {
+            e.stopPropagation();
+            document.getElementById('lbImg').src = img.src;
+            document.getElementById('lb').classList.add('open');
+          });
+        });
+        const btn = document.querySelector('.ai-translate-btn');
+        if (btn) btn.textContent = '原文';
+        return;
+      }
+      // Legacy format: plain HTML (starts with '<') — no title
       if (t.startsWith('<')) {
         // Save original before replacing for toggle support
         bodyEl.dataset.originalHtml = bodyEl.innerHTML;
