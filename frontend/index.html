@@ -2015,9 +2015,9 @@ function openArticle(id) {
           <span class="badge" style="${badgeStyle(data.source || '')}">${esc(data.source || '')}</span>
           <span>${formatTime(data.date || '', data.time || '')}</span>
           <span style="margin-left:auto;display:flex;gap:8px;align-items:center" id="aiActions" data-article-id="${id}">
-            <button class="fav-btn-text" id="favBtn" onclick="toggleFavorite()" style="${authToken ? '' : 'display:none;'}background:none;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:0;font-family:var(--font)" title="收藏">☆ 收藏</button>
-            <button class="ai-summarize-btn" onclick="aiSummarize(${id})" style="background:none;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:0;font-family:var(--font)">摘要</button>
-            <button class="ai-translate-btn" onclick="aiTranslate(${id})" style="background:none;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:0;font-family:var(--font)">翻译</button>
+            <button class="fav-btn-text" id="favBtn" onclick="toggleFavorite()" style="${authToken ? '' : 'display:none;'}background:#161a2a;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:3px 10px;border-radius:100px;font-family:var(--font)" title="收藏">☆ 收藏</button>
+            <button class="ai-summarize-btn" onclick="aiSummarize(${id})" style="background:#161a2a;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:3px 10px;border-radius:100px;font-family:var(--font)">摘要</button>
+            <button class="ai-translate-btn" onclick="aiTranslate(${id})" style="background:#161a2a;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:3px 10px;border-radius:100px;font-family:var(--font)">翻译</button>
           </span>
         </div>
         ${coverImg}
@@ -2057,9 +2057,10 @@ function openArticle(id) {
     <div class="article-meta" style="position:relative">
       <span class="badge" style="${badgeStyle(n.source)}">${esc(n.source)}</span>
       <span>${formatTime(n.date, n.time)}</span>
-      <span style="margin-left:auto;display:flex;gap:8px" id="aiActions" data-article-id="${id}">
-        <button class="ai-summarize-btn" onclick="aiSummarize(${id})" style="background:none;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:0;font-family:var(--font)">摘要</button>
-        <button class="ai-translate-btn" onclick="aiTranslate(${id})" style="background:none;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:0;font-family:var(--font)">翻译</button>
+      <span style="margin-left:auto;display:flex;gap:8px;align-items:center" id="aiActions" data-article-id="${id}">
+        <button class="fav-btn-text" id="favBtn" onclick="toggleFavorite()" style="${authToken ? '' : 'display:none;'}background:#161a2a;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:3px 10px;border-radius:100px;font-family:var(--font)" title="收藏">☆ 收藏</button>
+        <button class="ai-summarize-btn" onclick="aiSummarize(${id})" style="background:#161a2a;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:3px 10px;border-radius:100px;font-family:var(--font)">摘要</button>
+        <button class="ai-translate-btn" onclick="aiTranslate(${id})" style="background:#161a2a;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:3px 10px;border-radius:100px;font-family:var(--font)">翻译</button>
       </span>
     </div>
     ${coverImg}
