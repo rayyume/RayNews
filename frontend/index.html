@@ -2100,6 +2100,8 @@ function renderPagination(totalPages) {
 }
 
 function goToPage(page) {
+  // Preview users: no pagination
+  if (authUser && authUser.role === 'preview') return;
   let filtered;
   if (filter === 'all') {
     filtered = news;
