@@ -2008,7 +2008,7 @@ function renderArticleBody(wrap, data, id) {
   } else {
     bodyEl.innerHTML = `<p style="color:var(--text-2);padding:40px 0;text-align:center">暂无全文内容</p>`;
   }
-  // Dedup cover image: robust comparison — extract underlying URL from proxy wrappers
+  // Dedup cover image: walk up siblings to find the cover div (may have ai result divs in between)
   if (data.thumb) {
     const thumbProxy = proxyImgSrc(data.thumb);
     const hasDup = Array.from(bodyEl.querySelectorAll('img')).some(img => {
@@ -2021,8 +2021,18 @@ function renderArticleBody(wrap, data, id) {
           || imgSrc === thumbProxy || imgSrc === data.thumb;
     });
     if (hasDup) {
-      const prev = bodyEl.previousElementSibling;
-      if (prev && prev.tagName === 'DIV' && prev.querySelector('img')) prev.remove();
+      // Walk up previous siblings to find the cover image div
+      let el = bodyEl.previousElementSibling;
+      while (el) {
+        if (el.tagName === 'DIV' && el.querySelector('img')) {
+          const elImg = el.querySelector('img').getAttribute('src') || '';
+          if (elImg === thumbProxy || elImg === data.thumb || elImg.endsWith(encodeURIComponent(data.thumb))) {
+            el.remove();
+            break;
+          }
+        }
+        el = el.previousElementSibling;
+      }
     }
   }
   // Attach lightbox
