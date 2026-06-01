@@ -565,6 +565,8 @@ let currentPage = 1;
 let _pendingUpdate = false;
 // In-memory cache for article bodies — avoids re-fetching on re-open
 let articleBodyCache = {};
+// User settings cache for auto-translate decisions
+let userAutoSettings = null;
 
 // ═══ Auth State ══════════════════════════════════════════
 let authToken = null;
@@ -595,6 +597,8 @@ async function verifyToken() {
         localStorage.setItem('raynews_user', JSON.stringify(authUser));
         updateUserUI();
       }
+      // Load user settings for auto-translate decisions
+      loadUserSettings();
     }
   } catch (e) {
     // Network error — keep existing auth state, user can re-try later
@@ -860,6 +864,7 @@ async function submitAuth() {
       saveAuth(data.token, data.user);
       closeAuth();
       showToast(authMode === 'login' ? '✅ 登录成功' : '✅ 注册成功');
+      loadUserSettings();
     }
   } catch (e) {
     errEl.textContent = '网络错误: ' + (e.message || '未知错误');
@@ -1114,15 +1119,24 @@ async function testNotification() {
   } catch (e) { showSettingsStatus('❌ 发送失败', 'err'); }
 }
 
-// ─── General Settings ────────────────────────────────────
-
-async function loadGeneralSettings() {
+async function loadUserSettings() {
   try {
     const data = await apiFetch('/settings');
     if (!data) return;
-    document.getElementById('autoTranslateTitle').checked = !!data.auto_translate_title;
-    document.getElementById('autoTranslateContent').checked = !!data.auto_translate_content;
+    userAutoSettings = {
+      auto_translate_title: !!data.auto_translate_title,
+      auto_translate_content: !!data.auto_translate_content,
+    };
   } catch (e) {}
+}
+
+// ─── General Settings ────────────────────────────────────
+
+async function loadGeneralSettings() {
+  await loadUserSettings();
+  // Apply to UI
+  document.getElementById('autoTranslateTitle').checked = !!userAutoSettings?.auto_translate_title;
+  document.getElementById('autoTranslateContent').checked = !!userAutoSettings?.auto_translate_content;
 }
 
 async function saveGeneralSettings() {
@@ -1137,6 +1151,11 @@ async function saveGeneralSettings() {
     });
     const data = await resp.json();
     if (data.error) { showSettingsStatus('❌ ' + data.error, 'err'); return; }
+    // Update cache after save
+    userAutoSettings = {
+      auto_translate_title: !!document.getElementById('autoTranslateTitle').checked,
+      auto_translate_content: !!document.getElementById('autoTranslateContent').checked,
+    };
     showSettingsStatus('✅ 通用设置已保存');
   } catch (e) { showSettingsStatus('❌ 保存失败', 'err'); }
 }
@@ -1462,6 +1481,14 @@ async function autoDisplaySummary(articleId) {
     }
   } catch (e) {
     // Silent fail — cache check is optional
+  }
+  // Auto-trigger translation if setting enabled and no cached translation was displayed
+  if (userAutoSettings?.auto_translate_content && authToken) {
+    // Check if a translation was already displayed (dataset would be set)
+    const bodyEl = document.getElementById('articleBody');
+    if (bodyEl && !bodyEl.dataset.showingTranslation) {
+      aiTranslate(articleId);
+    }
   }
 }
 
