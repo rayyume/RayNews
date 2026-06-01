@@ -159,41 +159,29 @@ class AIService:
     # ─── Test connection ──────────────────────────────────────
 
     def test_connection(self) -> str:
-        """Send a minimal prompt to verify API connectivity (15s timeout)."""
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "Reply with exactly one word: ok"},
-        ]
-        # Use a shorter timeout (15s) so failures don't hang the whole chain
+        """Verify API connectivity with a lightweight models/list request (5s timeout).
+        
+        Instead of sending a chat completion (which is slow through proxy chains),
+        we just list models — much faster and sufficient to verify API key + endpoint.
+        """
         import requests as http_req
+        base = self.endpoint.rstrip("/")
+        if "/v1" not in base:
+            base = f"{base}/v1"
+        
+        headers = {"Content-Type": "application/json"}
         if self.provider_type == "claude":
-            url = f"{self.endpoint}/messages"
-            if "/v1" not in url and "/v1" not in self.endpoint:
-                url = f"{self.endpoint}/v1/messages"
-            resp = http_req.post(url, headers={
-                "x-api-key": self.api_key,
-                "anthropic-version": "2023-06-01",
-                "Content-Type": "application/json",
-            }, json={
-                "model": self.model,
-                "max_tokens": 10,
-                "system": messages[0]["content"],
-                "messages": [{"role": "user", "content": messages[1]["content"]}],
-            }, timeout=15)
-            resp.raise_for_status()
-            return resp.json()["content"][0]["text"]
+            headers["x-api-key"] = self.api_key
+            headers["anthropic-version"] = "2023-06-01"
         else:
-            url = f"{self.endpoint}/chat/completions"
-            if "/v1" not in url and "/v1" not in self.endpoint:
-                url = f"{self.endpoint}/v1/chat/completions"
-            resp = http_req.post(url, headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            }, json={
-                "model": self.model,
-                "messages": messages,
-                "max_tokens": 10,
-                "temperature": 0,
-            }, timeout=15)
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"]
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        
+        resp = http_req.get(f"{base}/models", headers=headers, timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        # Return first model name as confirmation
+        models = data.get("data", []) if isinstance(data, dict) else data
+        if models and isinstance(models, list) and len(models) > 0:
+            name = models[0].get("id", models[0].get("name", "connected"))
+            return f"✅ 连接成功 — 可用模型: {name}"
+        return "✅ 连接成功 — 已获取模型列表"
