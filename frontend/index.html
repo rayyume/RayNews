@@ -280,12 +280,12 @@ a:hover{text-decoration:underline}
 /* ═══ AI Settings Panel ═══════════════════════════════════ */
 .ai-overlay{position:fixed;inset:0;z-index:400;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity 0.2s}
 .ai-overlay.open{opacity:1;pointer-events:auto}
-.ai-panel{position:relative;z-index:1;background:var(--bg-card);border:1px solid var(--border);border-radius:16px;width:480px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.4)}
+.ai-panel{position:relative;z-index:1;background:var(--bg-card);border:1px solid var(--border);border-radius:16px;width:480px;max-width:92vw;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.4)}
 .ai-header{display:flex;align-items:center;justify-content:space-between;padding:20px 24px;border-bottom:1px solid var(--border);flex-shrink:0}
 .ai-header h2{margin:0;font-size:18px;font-weight:700}
 .ai-close{background:none;border:none;color:var(--text-3);font-size:18px;cursor:pointer;padding:4px 8px;border-radius:6px;transition:all 0.15s}
 .ai-close:hover{background:var(--bg-card-hover);color:var(--text)}
-.ai-body{overflow-y:auto;padding:20px 24px;flex:1}
+.ai-body{overflow-y:auto;padding:20px 24px;flex:1;max-height:80vh}
 .ai-label{display:block;font-size:12px;font-weight:700;color:var(--text-3);margin-bottom:4px;margin-top:14px}
 .ai-label:first-child{margin-top:0}
 .ai-input{width:100%;padding:9px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:13px;font-family:var(--font);outline:none;transition:border-color 0.15s;box-sizing:border-box}
@@ -485,8 +485,9 @@ a:hover{text-decoration:underline}
           <span>启用 AI 功能</span>
         </div>
 
-        <button class="ai-save-btn" onclick="saveAIConfig()">保存 AI 配置</button>
-        <button class="ai-save-btn" onclick="testAIConnection()" style="margin-top:8px;background:var(--bg-card);color:var(--text);border:1px solid var(--border)">🔌 测试 API 连接</button>
+        <button class="ai-save-btn" onclick="saveAIConfig()">💾 保存 AI 配置</button>
+        <p class="ai-hint" style="margin:6px 0 0;text-align:center;font-size:11px;color:var(--text-3)">💡 修改配置后请先保存，再点击下方测试</p>
+        <button class="ai-save-btn" onclick="testAIConnection()" style="margin-top:10px;background:var(--bg-card);color:var(--text);border:1px solid var(--border)" id="testAiBtn">🔌 测试 API 连接</button>
       </div>
 
       <!-- Notification Tab -->
@@ -943,6 +944,11 @@ function showSettingsStatus(msg, type) {
   const el = document.getElementById('settingsStatus');
   el.className = 'ai-status ' + (type || 'ok');
   el.textContent = msg;
+  // Auto-scroll panel body to show the status
+  setTimeout(() => {
+    const body = document.querySelector('.ai-body');
+    if (body) body.scrollTop = body.scrollHeight;
+  }, 50);
 }
 
 // ─── AI Config ───────────────────────────────────────────
@@ -990,11 +996,11 @@ async function saveAIConfig() {
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
       body: JSON.stringify(payload),
     });
+    const text = await resp.text();
     let data;
     try {
-      data = await resp.json();
+      data = JSON.parse(text);
     } catch (parseErr) {
-      const text = await resp.text();
       console.error('saveAIConfig: JSON parse failed, got text:', text);
       showSettingsStatus('❌ 服务器返回异常: ' + text.substring(0, 200), 'err');
       return;
@@ -1009,49 +1015,19 @@ async function testAIConnection() {
   const statusEl = document.getElementById('settingsStatus');
   statusEl.className = 'ai-status ok';
   statusEl.textContent = '⏳ 测试中...';
-  // Temporarily save current form values and test
-  const payload = {
-    provider: document.getElementById('aiProvider').value,
-    endpoint: document.getElementById('aiEndpoint').value,
-    model: document.getElementById('aiModel').value,
-    provider_type: document.getElementById('aiProviderType').value,
-    enabled: 1,
-  };
-  const keyVal = document.getElementById('aiApiKey').value;
-  if (keyVal) {
-    payload.api_key = keyVal;
-  }
-  if (!payload.api_key && !document.getElementById('aiApiKey').placeholder.includes('已配置')) { showSettingsStatus('❌ 请先填写 API Key', 'err'); return; }
-  if (!payload.endpoint) { showSettingsStatus('❌ 请先填写 API Endpoint', 'err'); return; }
   try {
-    // Test by calling a light summary on a placeholder
-    const resp = await fetch('/ai/config', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
-      body: JSON.stringify(payload),
-    });
-    let cfgData;
-    try {
-      cfgData = await resp.json();
-    } catch (parseErr) {
-      const text = await resp.text();
-      console.error('testAIConnection: config save JSON parse failed, got text:', text);
-      showSettingsStatus('❌ 服务器返回异常: ' + text.substring(0, 200), 'err');
-      return;
-    }
-    if (cfgData.error) { showSettingsStatus('❌ ' + cfgData.error, 'err'); return; }
-    // Now trigger a quick test call
+    // Trigger a quick test call (expects saved config on server)
     const testResp = await fetch('/ai/test-connection', {
       method: 'POST',
       headers: { 'Authorization': 'Bearer ' + authToken },
     });
+    const testText = await testResp.text();
     let testData;
     try {
-      testData = await testResp.json();
+      testData = JSON.parse(testText);
     } catch (parseErr) {
-      const text = await testResp.text();
-      console.error('testAIConnection: test JSON parse failed, got text:', text);
-      showSettingsStatus('❌ 服务器返回异常: ' + text.substring(0, 200), 'err');
+      console.error('testAIConnection: JSON parse failed, got text:', testText);
+      showSettingsStatus('❌ 服务器返回异常: ' + testText.substring(0, 200), 'err');
       return;
     }
     if (testData.error) { showSettingsStatus('❌ ' + testData.error, 'err'); return; }
