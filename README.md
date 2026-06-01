@@ -2,22 +2,30 @@
   <b>🇨🇳 中文</b> | <a href="README.en.md">🇺🇸 English</a>
 </p>
 
-# RayNews 📡
+# RayNews 📡 🤖
 
 新闻聚合阅读器——从 Telegram 频道抓取新闻消息（通过 RSS-to-Telegram-Bot 推送），自动提取 Telegraph 全文，生成暗色模式新闻站。
 
 ![screenshot](assets/screenshot.jpg)
+
+## 🤖 AI 功能
+
+- **📝 文章摘要** — 一键 AI 生成文章摘要，结果缓存至数据库，不重复消耗 API
+- **🌐 全文翻译** — 英译中全文翻译，保留原文排版，支持原文/译文一键切换
+- **⚡ 自动翻译** — 打开英文文章自动显示中文，无需手动点击
+- **📬 每日摘要** — 定时汇总当日新闻，AI 生成分类摘要，Markdown 邮件推送
+- **🔌 自定义 AI API** — 支持 OpenAI / Claude / 任意兼容接口，使用你自己的 Key
 
 ## 架构
 
 ```
 新闻源 (RSS/网页/API)
        ↓
- RSS-to-Telegram-Bot ──推送──→ Telegram 频道 (t.me/s/your_channel)
+ RSS-to-Telegram-Bot ──推送──→ Telegram 频道
                                       ↓
-                        RayNews Fetcher ──定时抓取──→ news.json
+                        RayNews Fetcher ──定时抓取──→ SQLite
                                       ↓
-                                Nginx + 前端 Vue SPA
+                          Flask API + Nginx ──→ 前端 SPA
 ```
 
 **数据流说明：**
@@ -25,7 +33,8 @@
 1. **[RSS-to-Telegram-Bot](https://github.com/Rongronggg9/RSS-to-Telegram-Bot)** —— 订阅 RSS 源，将新文章推送到你的 Telegram 频道
 2. **Telegram 频道** —— 作为中间存储，RayNews 从此频道的公开页面（`t.me/s/频道名`）抓取消息
 3. **RayNews Fetcher** —— Python 脚本，每 15 分钟增量抓取新消息，自动识别来源、提取 Telegraph 全文
-4. **前端** —— 纯 Vue 3 SPA，暗色风格，支持来源筛选、文章详情、分享
+4. **后端** —— Flask API，提供文章列表、详情、AI 摘要/翻译、收藏、用户管理等接口
+5. **前端** —— 纯原生 JS SPA，暗色风格，支持来源筛选、文章详情、AI 阅读、PWA
 
 > **注意：** RayNews 只负责**读取** Telegram 频道的数据，不做消息推送。推送需要用其他工具（如 [RSS-to-Telegram-Bot](https://github.com/Rongronggg9/RSS-to-Telegram-Bot)）或者手动在频道里发消息。
 
@@ -64,7 +73,7 @@ docker compose up -d
 
 - 前端: `http://<your-ip>:8090`
 - 手动刷新 API: `http://<your-ip>:8090/refresh`
-- 数据 API: `http://<your-ip>:8090/news.json`
+- 调度器状态: `http://<your-ip>:8090/scheduler/status`
 
 ## 环境变量
 
@@ -72,7 +81,8 @@ docker compose up -d
 |------|--------|------|
 | `TELEGRAM_CHANNEL` | `your_channel` | Telegram 频道名称（必填） |
 | `TZ` | `Asia/Shanghai` | 容器时区，影响日志时间戳 |
-| `DATA_DIR` | `/app/data` | 数据输出目录（容器内路径） |
+| `RAYNEWS_SECRET` | (自动生成) | JWT 签名密钥（固定可避免重启后 token 失效） |
+| `RESEND_API_KEY` | (空) | Resend 邮件 API Key（用于每日摘要/测试邮件） |
 | `HTTP_PROXY` | (空) | HTTP 代理（如需翻墙） |
 | `HTTPS_PROXY` | (空) | HTTPS 代理 |
 | `NO_PROXY` | `localhost,127.0.0.1` | 直连白名单 |
@@ -93,24 +103,24 @@ docker compose pull
 
 - [x] **订阅源分类** — 按来源/标签对文章进行分组和筛选
 - [x] **微信公众号文章抓取** — 识别并提取微信公众号文章全文
-- [ ] **新闻收藏夹** — 文章详情页增加收藏功能，并新增收藏夹界面
-- [ ] **英文标题及文章自动翻译** — 自动将英文内容翻译为中文
+- [x] **新闻收藏夹** — 文章详情页增加收藏功能，并新增收藏夹界面
+- [x] **英文标题及文章自动翻译** — 自动将英文内容翻译为中文
+- [x] **自定义 AI API** — 接入自定义 AI API，支持文章摘要和每日综述
 - [ ] **关键词过滤** — 增加文章关键词过滤功能，不显示含有特定关键词的文章
 
 ### 长期
 
-- [ ] **集成[RSStT](https://github.com/Rongronggg9/RSS-to-Telegram-Bot)** — 用户无需额外部署RSStT项目，支持开箱即用
-- [ ] **自定义 AI API** — 接入自定义 AI API，支持文章摘要和每日综述
+- [ ] **集成 [RSStT](https://github.com/Rongronggg9/RSS-to-Telegram-Bot)** — 用户无需额外部署 RSStT 项目，支持开箱即用
 - [ ] **TTS 新闻阅读** — 文字转语音，听新闻
 - [ ] **iOS 客户端** — 原生 iOS 应用
 
 ## 技术栈
 
-- Python 3.12 (fetcher + refresh server)
-- Nginx (静态服务)
-- Vue 3 (前端，纯静态 SPA)
+- Python 3.12 (fetcher + refresh server + Flask API)
+- Nginx (静态服务 + API 反代)
+- 原生 HTML/CSS/JS (前端 SPA)
+- SQLite (数据存储)
 - BeautifulSoup (HTML 解析)
-- Supervisor (进程管理)
 
 ## License
 

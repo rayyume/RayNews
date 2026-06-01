@@ -2,22 +2,30 @@
   <a href="README.md">🇨🇳 中文</a> | <b>🇺🇸 English</b>
 </p>
 
-# RayNews 📡
+# RayNews 📡 🤖
 
 A news aggregator that fetches messages from a Telegram channel (powered by [RSS-to-Telegram-Bot](https://github.com/Rongronggg9/RSS-to-Telegram-Bot)), automatically extracts Telegraph full articles, and serves a dark-mode news site.
 
 ![screenshot](assets/screenshot.jpg)
+
+## 🤖 AI Features
+
+- **📝 Summarization** — One-click AI summary, cached in DB, no repeated API calls
+- **🌐 Translation** — Full article English-to-Chinese translation with original formatting preserved, toggle between original/translated
+- **⚡ Auto-Translate** — English articles auto-translate on open
+- **📬 Daily Digest** — Scheduled AI-generated daily summary via Markdown email
+- **🔌 Custom AI API** — OpenAI / Claude / any compatible API, your own key
 
 ## Architecture
 
 ```
 News Sources (RSS/Web/API)
           ↓
- RSS-to-Telegram-Bot ──push──→ Telegram Channel (t.me/s/your_channel)
+ RSS-to-Telegram-Bot ──push──→ Telegram Channel
                                       ↓
-                        RayNews Fetcher ──poll──→ news.json
+                        RayNews Fetcher ──poll──→ SQLite
                                       ↓
-                              Nginx + Vue 3 SPA Frontend
+                          Flask API + Nginx ──→ Frontend SPA
 ```
 
 **Data flow:**
@@ -25,7 +33,8 @@ News Sources (RSS/Web/API)
 1. **[RSS-to-Telegram-Bot](https://github.com/Rongronggg9/RSS-to-Telegram-Bot)** — subscribes to RSS feeds and pushes new articles to your Telegram channel
 2. **Telegram Channel** — acts as intermediate storage; RayNews fetches messages from the channel's public page (`t.me/s/channel_name`)
 3. **RayNews Fetcher** — Python script, incrementally fetches new messages every 15 minutes, auto-detects sources, extracts Telegraph full text
-4. **Frontend** — Pure Vue 3 SPA, dark theme, source filtering, article details, sharing
+4. **Backend** — Flask API for articles, AI, favorites, user management
+5. **Frontend** — Vanilla JS SPA, dark theme, PWA, source filtering, AI-assisted reading
 
 > **Note:** RayNews only **reads** from Telegram. You'll need another tool (like [RSS-to-Telegram-Bot](https://github.com/Rongronggg9/RSS-to-Telegram-Bot)) or manual posting to push content into the channel.
 
@@ -64,15 +73,16 @@ The fetcher runs once on startup, then every 15 minutes.
 
 - Frontend: `http://<your-ip>:8090`
 - Manual refresh: `http://<your-ip>:8090/refresh`
-- Data API: `http://<your-ip>:8090/news.json`
+- Scheduler status: `http://<your-ip>:8090/scheduler/status`
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `TELEGRAM_CHANNEL` | `your_channel` | Telegram channel name (required) |
-| `TZ` | `Asia/Shanghai` | Container timezone, affects log timestamps |
-| `DATA_DIR` | `/app/data` | Data output directory (container path) |
+| `TZ` | `Asia/Shanghai` | Container timezone |
+| `RAYNEWS_SECRET` | (auto-generated) | JWT signing key (set to persist tokens across restarts) |
+| `RESEND_API_KEY` | (empty) | Resend email API key (for daily digest / test email) |
 | `HTTP_PROXY` | (empty) | HTTP proxy |
 | `HTTPS_PROXY` | (empty) | HTTPS proxy |
 | `NO_PROXY` | `localhost,127.0.0.1` | Direct connection whitelist |
@@ -93,24 +103,24 @@ docker compose pull
 
 - [x] **Source Categorization** — Group and filter articles by source/tags
 - [x] **WeChat Official Account Articles** — Identify and extract full-text content from WeChat public accounts
-- [ ] **Collection** — Add News Collection Button on Article Page and Collection Page
-- [ ] **Auto-translate English Content** — Automatically translate English titles and articles (e.g. into Chinese)
-- [ ] **Key-words filter** — Hide articles containing specific words
+- [x] **Favorites** — Article bookmarking with dedicated panel
+- [x] **Auto-translate** — Automatically translate English titles and articles
+- [x] **Custom AI API** — Bring your own AI API for summaries and daily digest
+- [ ] **Keyword Filter** — Hide articles containing specific words
 
 ### Long-term
 
-- [ ] **Integrate [RSStT](https://github.com/Rongronggg9/RSS-to-Telegram-Bot)** — No extra deployment for RSStT, OOTB support
-- [ ] **Custom AI API** — Bring your own AI API for article summaries and daily digests
+- [ ] **Integrate [RSStT](https://github.com/Rongronggg9/RSS-to-Telegram-Bot)** — No extra deployment needed, OOTB support
 - [ ] **TTS News Reading** — Text-to-speech for listening to news
 - [ ] **iOS App** — Native iOS client
 
 ## Tech Stack
 
-- Python 3.12 (fetcher + refresh server)
-- Nginx (static file serving)
-- Vue 3 (frontend, pure static SPA)
+- Python 3.12 (fetcher + refresh server + Flask API)
+- Nginx (static serving + API reverse proxy)
+- Vanilla HTML/CSS/JS (frontend SPA)
+- SQLite (data storage)
 - BeautifulSoup (HTML parsing)
-- Supervisor (process management)
 
 ## License
 
