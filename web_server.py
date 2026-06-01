@@ -357,6 +357,11 @@ def ai_summarize(article_id):
     if not config.get("api_key"):
         return jsonify({"error": "API key not configured"}), 400
 
+    # Check cache first
+    cached = _get_ai_result(article_id)
+    if cached and cached.get("summary"):
+        return jsonify({"summary": cached["summary"], "cached": True})
+
     # Fetch article content from news.db
     article = _fetch_article_body(article_id)
     if not article:
@@ -373,6 +378,8 @@ def ai_summarize(article_id):
             article_text=article.get("body_html") or article.get("summary") or "",
             title=article.get("title", ""),
         )
+        # Save to cache
+        _save_ai_result(article_id, summary=summary)
         return jsonify({"summary": summary})
     except Exception as e:
         return jsonify({"error": f"AI request failed: {str(e)}"}), 502
@@ -386,6 +393,11 @@ def ai_translate(article_id):
         return jsonify({"error": "AI not configured. Go to Settings → AI to set up."}), 400
     if not config.get("api_key"):
         return jsonify({"error": "API key not configured"}), 400
+
+    # Check cache first
+    cached = _get_ai_result(article_id)
+    if cached and cached.get("translation"):
+        return jsonify({"translation": cached["translation"], "cached": True})
 
     article = _fetch_article_body(article_id)
     if not article:
@@ -402,6 +414,8 @@ def ai_translate(article_id):
             article_text=article.get("body_html") or article.get("summary") or "",
             title=article.get("title", ""),
         )
+        # Save to cache
+        _save_ai_result(article_id, translation=translation)
         return jsonify({"translation": translation})
     except Exception as e:
         return jsonify({"error": f"AI request failed: {str(e)}"}), 502
@@ -488,6 +502,84 @@ def _fetch_article_body(article_id: int) -> dict | None:
         return dict(row) if row else None
     except Exception:
         return None
+
+
+# ─── AI Results Cache (prevent duplicate generation) ────────
+
+
+def _init_ai_results_table():
+    """Create ai_results table in news.db if not exists."""
+    import sqlite3
+    if not os.path.exists(NEWS_DB):
+        return
+    try:
+        conn = sqlite3.connect(NEWS_DB)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS ai_results (
+                article_id   INTEGER PRIMARY KEY,
+                summary      TEXT,
+                translation  TEXT,
+                updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def _get_ai_result(article_id: int) -> dict | None:
+    """Get cached AI result (summary/translation) for an article."""
+    import sqlite3
+    if not os.path.exists(NEWS_DB):
+        return None
+    try:
+        conn = sqlite3.connect(NEWS_DB)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT summary, translation FROM ai_results WHERE article_id = ?",
+            (article_id,),
+        ).fetchone()
+        conn.close()
+        return dict(row) if row else None
+    except Exception:
+        return None
+
+
+def _save_ai_result(article_id: int, summary: str | None = None,
+                    translation: str | None = None):
+    """Save or update AI result for an article."""
+    import sqlite3
+    if not os.path.exists(NEWS_DB):
+        return
+    try:
+        conn = sqlite3.connect(NEWS_DB)
+        existing = _get_ai_result(article_id)
+        if existing:
+            sets = []
+            vals = []
+            if summary is not None:
+                sets.append("summary = ?")
+                vals.append(summary)
+            if translation is not None:
+                sets.append("translation = ?")
+                vals.append(translation)
+            if sets:
+                sets.append("updated_at = datetime('now')")
+                vals.append(article_id)
+                conn.execute(
+                    f"UPDATE ai_results SET {', '.join(sets)} WHERE article_id = ?",
+                    vals,
+                )
+        else:
+            conn.execute(
+                "INSERT INTO ai_results (article_id, summary, translation) VALUES (?, ?, ?)",
+                (article_id, summary, translation),
+            )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
 
 
 # ─── Settings Routes ────────────────────────────────────────
@@ -601,6 +693,7 @@ def health():
 # ─── Main ─────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    _init_ai_results_table()
     port = int(os.environ.get("WEB_PORT", 8082))
     print(f"[web] RayNews Web Server listening on {port}")
     app.run(host="127.0.0.1", port=port, debug=False)

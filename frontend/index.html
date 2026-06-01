@@ -251,7 +251,7 @@ a:hover{text-decoration:underline}
 .admin-loading{text-align:center;padding:40px;color:var(--text-3);font-size:13px}
 
 /* ═══ Favorite Button ═══════════════════════════════════ */
-.fav-btn{display:flex;align-items:center;gap:6px;background:none;border:none;color:var(--text-3);font-size:13px;font-weight:600;cursor:pointer;font-family:var(--font);padding:4px 8px;margin-left:auto;border-radius:6px;transition:all 0.15s}
+.fav-btn{display:flex;align-items:center;gap:6px;background:none;border:none;color:var(--text-2);font-size:13px;font-weight:600;cursor:pointer;font-family:var(--font);padding:4px 8px;border-radius:6px;transition:all 0.15s}
 .fav-btn:hover{background:var(--bg-card);color:var(--accent)}
 .fav-btn.on{color:var(--accent)}
 .fav-btn.on svg{fill:var(--accent)}
@@ -378,7 +378,7 @@ a:hover{text-decoration:underline}
 </div>
 
 <div class="overlay" id="overlay">
-  <header class="overlay-header"><div class="overlay-header-inner"><button class="back-btn" id="backBtn"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 12L6 8l4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>返回</button><button class="fav-btn" id="favBtn" onclick="toggleFavorite()" style="display:none" title="收藏"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></button><button class="share-btn" id="shareBtn" onclick="shareArticle()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>分享</button></div></header>
+  <header class="overlay-header"><div class="overlay-header-inner"><button class="back-btn" id="backBtn"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 12L6 8l4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>返回</button><button class="fav-btn" id="favBtn" onclick="toggleFavorite()" style="display:none" title="收藏"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></button><button class="share-btn" id="shareBtn" onclick="shareArticle()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>分享</button></div></header>
   <div class="article-wrap" id="articleWrap"></div>
 </div>
 
@@ -1325,7 +1325,7 @@ async function unfavorite(articleId) {
 
 async function toggleFavorite() {
   const btn = document.getElementById('favBtn');
-  if (btn.classList.contains('loading')) return;
+  if (!btn || btn.classList.contains('loading')) return;
   const articleId = parseInt(document.getElementById('overlay').dataset.articleId);
   if (!articleId) return;
   btn.classList.add('loading');
@@ -1800,9 +1800,11 @@ function openArticle(id) {
 
   // Reset favorite button
   const favBtn = document.getElementById('favBtn');
-  favBtn.classList.remove('on');
-  favBtn.title = '收藏';
-  favBtn.style.display = authToken ? '' : 'none';
+  if (favBtn) {
+    favBtn.classList.remove('on');
+    favBtn.title = '收藏';
+    favBtn.style.display = authToken ? '' : 'none';
+  }
 
   // If article not in memory, fetch metadata from API
   if (!n) {
@@ -1922,10 +1924,18 @@ function renderArticleBody(wrap, data, id) {
   } else {
     bodyEl.innerHTML = `<p style="color:var(--text-2);padding:40px 0;text-align:center">暂无全文内容</p>`;
   }
-  // Dedup cover image: if any img in the body matches the thumb, remove prepended cover
+  // Dedup cover image: robust comparison — extract underlying URL from proxy wrappers
   if (data.thumb) {
     const thumbProxy = proxyImgSrc(data.thumb);
-    const hasDup = Array.from(bodyEl.querySelectorAll('img')).some(img => img.src === thumbProxy || img.src === data.thumb);
+    const hasDup = Array.from(bodyEl.querySelectorAll('img')).some(img => {
+      // Extract underlying URL from proxy wrappers
+      const imgSrc = img.getAttribute('src') || '';
+      const unwrapped = imgSrc.startsWith('/img-proxy?url=')
+        ? decodeURIComponent(imgSrc.replace('/img-proxy?url=', ''))
+        : imgSrc;
+      return unwrapped === data.thumb || unwrapped === thumbProxy
+          || imgSrc === thumbProxy || imgSrc === data.thumb;
+    });
     if (hasDup) {
       const prev = bodyEl.previousElementSibling;
       if (prev && prev.tagName === 'DIV' && prev.querySelector('img')) prev.remove();
