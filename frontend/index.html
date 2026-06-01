@@ -191,6 +191,9 @@ a:hover{text-decoration:underline}
   .header-right .header-avatar .user-avatar{width:26px!important;height:26px!important}
 }
 
+/* ═══ Body Scroll Lock ══════════════════════════ */
+body.body-scroll-lock{overflow:hidden!important}
+
 /* ═══ Auth Modal ════════════════════════════════════ */
 .auth-modal{position:fixed;inset:0;z-index:400;display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity 0.2s}
 .auth-modal.open{opacity:1;pointer-events:auto}
@@ -353,7 +356,6 @@ a:hover{text-decoration:underline}
         <div class="user-menu-items">
           <button class="user-menu-item" onclick="openFavorites()">⭐ 我的收藏</button>
           <button class="user-menu-item" onclick="openSettings()">⚙️ 设置</button>
-          <button class="user-menu-item" onclick="uploadAvatar()">🖼️ 更换头像</button>
           <button class="user-menu-item" onclick="openAdminPanel()" id="adminPanelBtn" style="display:none">👤 用户管理</button>
           <button class="user-menu-item" onclick="logout()">🚪 退出登录</button>
         </div>
@@ -447,16 +449,16 @@ a:hover{text-decoration:underline}
   <div class="ai-backdrop" onclick="closeAISettings()" style="position:absolute;inset:0"></div>
   <div class="ai-panel">
     <div class="ai-header">
-      <h2>⚙️ 设置</h2>
+      <h2>设置</h2>
       <button class="ai-close" onclick="closeAISettings()">✕</button>
     </div>
     <div class="ai-body" id="settingsBody">
       <!-- Tabs -->
       <div style="display:flex;gap:4px;margin-bottom:16px;border-bottom:1px solid var(--border);padding-bottom:0">
-        <button class="settings-tab active" data-tab="ai" onclick="switchSettingsTab('ai')">🤖 AI</button>
-        <button class="settings-tab" data-tab="notify" onclick="switchSettingsTab('notify')">🔔 通知</button>
-        <button class="settings-tab" data-tab="translate" onclick="switchSettingsTab('translate')">🌐 翻译</button>
-        <button class="settings-tab" data-tab="account" onclick="switchSettingsTab('account')">👤 账号</button>
+        <button class="settings-tab active" data-tab="account" onclick="switchSettingsTab('account')">账号</button>
+        <button class="settings-tab" data-tab="ai" onclick="switchSettingsTab('ai')">AI</button>
+        <button class="settings-tab" data-tab="translate" onclick="switchSettingsTab('translate')">翻译</button>
+        <button class="settings-tab" data-tab="notify" onclick="switchSettingsTab('notify')">通知</button>
       </div>
 
       <!-- AI Tab -->
@@ -709,6 +711,7 @@ document.getElementById('avatarInput').addEventListener('change', async function
       authUser.avatar_url = data.avatar_url;
       localStorage.setItem('raynews_user', JSON.stringify(authUser));
       updateUserUI();
+      loadAccountTab();
       showToast('✅ 头像已更新');
     } catch (e) {
       showToast('❌ 上传失败: ' + e.message);
@@ -787,9 +790,21 @@ async function apiFetch(url, options = {}) {
   return resp.json();
 }
 
+// ═══ Body Scroll Lock ════════════════════════════════════
+let _scrollLockCount = 0;
+function lockBodyScroll() {
+  _scrollLockCount++;
+  document.body.style.overflow = 'hidden';
+}
+function unlockBodyScroll() {
+  _scrollLockCount = Math.max(0, _scrollLockCount - 1);
+  if (_scrollLockCount === 0) document.body.style.overflow = '';
+}
+
 // ═══ Auth Modal ══════════════════════════════════════════
 function showAuth() {
   document.getElementById('authModal').classList.add('open');
+  lockBodyScroll();
   document.getElementById('authLogin').value = '';
   document.getElementById('authPassword').value = '';
   document.getElementById('authNickname').value = '';
@@ -800,6 +815,7 @@ function showAuth() {
 
 function closeAuth() {
   document.getElementById('authModal').classList.remove('open');
+  unlockBodyScroll();
 }
 
 function toggleAuthMode() {
@@ -968,21 +984,25 @@ document.addEventListener('mousedown', e => {
 function openSettings() {
   closeUserMenu();
   document.getElementById('aiOverlay').classList.add('open');
+  lockBodyScroll();
+  switchSettingsTab('account');
   loadAIConfig();
   loadNotifyConfig();
   loadGeneralSettings();
+  loadAccountTab();
   document.getElementById('settingsStatus').className = '';
   document.getElementById('settingsStatus').textContent = '';
 }
 
 function closeAISettings() {
   document.getElementById('aiOverlay').classList.remove('open');
+  unlockBodyScroll();
 }
 
 function switchSettingsTab(tab) {
   document.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
   document.querySelector('.settings-tab[data-tab="' + tab + '"]').classList.add('active');
-  ['ai','notify','translate','account'].forEach(t => {
+  ['account','ai','translate','notify'].forEach(t => {
     document.getElementById('settingsTab' + t.charAt(0).toUpperCase() + t.slice(1)).style.display = t === tab ? '' : 'none';
   });
   // Load avatar preview when switching to account tab
@@ -1230,11 +1250,13 @@ async function triggerDailySummary() {
 
 function showDailySummary() {
   document.getElementById('dailySummaryOverlay').classList.add('open');
+  lockBodyScroll();
   closeSidebar();
 }
 
 function closeDailySummary() {
   document.getElementById('dailySummaryOverlay').classList.remove('open');
+  unlockBodyScroll();
 }
 
 async function generateDailySummary() {
@@ -1322,7 +1344,7 @@ async function aiTranslate(articleId) {
         img.addEventListener('click', e => {
           e.stopPropagation();
           document.getElementById('lbImg').src = img.src;
-          document.getElementById('lb').classList.add('open');
+          document.getElementById('lb').classList.add('open'); lockBodyScroll();
         });
       });
       if (btn) btn.textContent = '翻译';
@@ -1553,12 +1575,14 @@ function showAIActions(articleId) {
 function openFavorites() {
   closeUserMenu();
   document.getElementById('favOverlay').classList.add('open');
+  lockBodyScroll();
   document.getElementById('favBody').innerHTML = '<div class="fav-empty">加载中...</div>';
   loadFavorites();
 }
 
 function closeFavorites() {
   document.getElementById('favOverlay').classList.remove('open');
+  unlockBodyScroll();
 }
 
 async function loadFavorites() {
@@ -1657,12 +1681,14 @@ async function openAdminPanel() {
   closeUserMenu();
   const overlay = document.getElementById('adminOverlay');
   overlay.classList.add('open');
+  lockBodyScroll();
   document.getElementById('adminBody').innerHTML = '<div class="admin-loading">加载中...</div>';
   await loadAdminUsers();
 }
 
 function closeAdminPanel() {
   document.getElementById('adminOverlay').classList.remove('open');
+  unlockBodyScroll();
 }
 
 async function loadAdminUsers() {
@@ -2108,7 +2134,7 @@ function openArticle(id) {
   if (!n) {
     document.getElementById('overlay').classList.add('open');
     document.getElementById('overlay').scrollTop = 0;
-    document.body.style.overflow = 'hidden';
+    lockBodyScroll();
     document.getElementById('overlay').dataset.articleId = id;
     // Check favorite status
     if (authToken) checkFavoriteStatus(id);
@@ -2184,7 +2210,7 @@ function openArticle(id) {
 
   document.getElementById('overlay').classList.add('open');
   document.getElementById('overlay').scrollTop = 0;
-  document.body.style.overflow = 'hidden';
+  lockBodyScroll();
   document.getElementById('overlay').dataset.articleId = id;
   // Check favorite status
   if (authToken) checkFavoriteStatus(id);
@@ -2273,7 +2299,7 @@ function renderArticleBody(wrap, data, id) {
     img.addEventListener('click', e => {
       e.stopPropagation();
       document.getElementById('lbImg').src = img.src;
-      document.getElementById('lb').classList.add('open');
+      document.getElementById('lb').classList.add('open'); lockBodyScroll();
       // Allow zoom on lightbox
       const vp = document.querySelector('meta[name=viewport]');
       if (vp) vp.content = 'width=device-width, initial-scale=1.0, viewport-fit=cover';
@@ -2303,6 +2329,7 @@ function showToast(msg) {
 
 function closeLightbox() {
   document.getElementById('lb').classList.remove('open');
+  unlockBodyScroll();
   // Lock zoom back when lightbox closes
   const vp = document.querySelector('meta[name=viewport]');
   if (vp) {
@@ -2317,7 +2344,7 @@ function shareArticle() {
 
 function closeArticle() {
   document.getElementById('overlay').classList.remove('open');
-  document.body.style.overflow = '';
+  unlockBodyScroll();
   history.replaceState(null, '', window.location.pathname + window.location.search);
   // If new articles arrived while reading, refresh the list now
   if (_pendingUpdate) {
