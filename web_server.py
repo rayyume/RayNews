@@ -727,10 +727,8 @@ def _send_daily_summaries():
         from ai_service import AIService
         ai_config = _get_ai_config_for_user(uid)
         if not ai_config or not ai_config.get("enabled") or not ai_config.get("api_key"):
-            ai_config = _get_ai_config_for_user(1)
-            if not ai_config or not ai_config.get("enabled") or not ai_config.get("api_key"):
-                print(f"[scheduler] User {uid}: no AI config available (user or admin)")
-                continue
+            print(f"[scheduler] User {uid}: AI not configured, skipping daily summary")
+            continue
 
         try:
             svc = AIService(
