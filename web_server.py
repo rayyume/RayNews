@@ -114,8 +114,7 @@ h1{{color:#6e8efb;font-size:18px}}
                    html, from_name="RayNews")
     except Exception as e:
         print(f"[web] Failed to send invite email: {e}")
-        # Code was generated even if email fails — still return success
-        # so the admin can retrieve it another way
+        return jsonify({"error": f"邀请码已生成，但邮件发送失败：{e}"}), 500
 
     return jsonify({"ok": True, "message": "邀请码已发送至管理员邮箱，请等待审核"}), 201
 
