@@ -485,6 +485,46 @@ def ai_translate(article_id):
         return jsonify({"error": f"AI request failed: {str(e)}"}), 502
 
 
+@app.route("/ai/translate-batch/<int:article_id>", methods=["POST"])
+@require_auth
+def ai_translate_batch(article_id):
+    """Translate article paragraphs in batch — frontend provides segments, we cache by article_id."""
+    config = get_ai_config(g.user_id)
+    if not config or not config.get("enabled"):
+        return jsonify({"error": "AI not configured. Go to Settings → AI to set up."}), 400
+    if not config.get("api_key"):
+        return jsonify({"error": "API key not configured"}), 400
+
+    data = request.get_json(silent=True) or {}
+    segments = data.get("segments", [])
+    if not segments or not isinstance(segments, list):
+        return jsonify({"error": "segments array required"}), 400
+
+    # Check cache first
+    cached = _get_ai_result(article_id)
+    if cached and cached.get("translation"):
+        try:
+            import json
+            return jsonify({"translations": json.loads(cached["translation"]), "cached": True})
+        except (json.JSONDecodeError, TypeError):
+            pass  # stale cache, re-translate
+
+    try:
+        svc = AIService(
+            api_key=config["api_key"],
+            endpoint=config["endpoint"],
+            model=config["model"],
+            provider_type=config.get("provider_type", "openai"),
+        )
+        translations = svc.translate_batch(segments)
+        # Cache as JSON string in the translation field
+        import json
+        _save_ai_result(article_id, translation=json.dumps(translations))
+        return jsonify({"translations": translations})
+    except Exception as e:
+        return jsonify({"error": f"AI request failed: {str(e)}"}), 502
+
+
 @app.route("/ai/test-connection", methods=["POST"])
 @require_auth
 def ai_test_connection():

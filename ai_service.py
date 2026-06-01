@@ -156,6 +156,73 @@ class AIService:
         ]
         return self.chat(messages, max_tokens=2000)
 
+    # ─── Batch translation ────────────────────────────────────
+
+    def translate_batch(self, segments: list[dict]) -> list[dict]:
+        """Translate multiple text segments at once.
+        
+        segments: [{"id": 0, "text": "..."}, {"id": 1, "text": "..."}, ...]
+        Returns: [{"id": 0, "text": "译文..."}, {"id": 1, "text": "译文..."}, ...]
+        
+        Inline HTML tags (<b>, <i>, <a>) are preserved using markdown equivalents
+        so the AI can keep them in the translation.
+        """
+        import re
+
+        # Build numbered prompt
+        lines = []
+        for seg in segments:
+            text = seg["text"]
+            # Convert inline HTML to markdown markers for AI preservation
+            text = text.replace("<b>", "**").replace("</b>", "**")
+            text = text.replace("<strong>", "**").replace("</strong>", "**")
+            text = text.replace("<i>", "*").replace("</i>", "*")
+            text = text.replace("<em>", "*").replace("</em>", "*")
+            # Convert <a href="url">text</a> → [text](url)
+            text = re.sub(r'<a\s+[^>]*href="([^"]+)"[^>]*>(.*?)</a>', r'[\2](\1)', text)
+            # Strip other tags (images, spans with no semantic value)
+            text = re.sub(r'<[^>]+>', '', text)
+            lines.append(f"[{seg['id']}] {text}")
+
+        prompt = (
+            "请将以下各段逐段翻译为中文。\n\n"
+            "格式要求（非常重要）：\n"
+            "1. 每段输出一行：原文编号 || 译文\n"
+            "2. 保持原文中的 **加粗**、*斜体* 和 [链接文字](链接地址) 标记不变\n"
+            "3. 不要添加任何额外说明文字\n\n"
+            "示例：\n"
+            "[0] This is **important** news. || 这是**重要**新闻。\n"
+            "[1] Click [here](https://x.com) to visit. || 点击[这里](https://x.com)访问。\n\n"
+            "待翻译段落：\n"
+        )
+
+        messages = [
+            {"role": "system",
+             "content": "你是一个专业的翻译助手。按编号逐段翻译，保留 **加粗** *斜体* 和 [链接文字](URL) 标记。"},
+            {"role": "user",
+             "content": prompt + "\n".join(lines)},
+        ]
+        result = self.chat(messages, max_tokens=4000)
+
+        # Parse response: each line "[id] || translation"
+        parsed = {}
+        for line in result.split("\n"):
+            line = line.strip()
+            m = re.match(r'^\[(\d+)\]\s*\|\|\s*(.*)', line)
+            if m:
+                parsed[int(m.group(1))] = m.group(2).strip()
+
+        # Build return array preserving original order
+        output = []
+        for seg in segments:
+            trans = parsed.get(seg["id"], "")
+            # Convert markdown markers back to HTML
+            trans = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', trans)
+            trans = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'<i>\1</i>', trans)
+            trans = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', trans)
+            output.append({"id": seg["id"], "text": trans})
+        return output
+
     # ─── Test connection ──────────────────────────────────────
 
     def test_connection(self) -> str:

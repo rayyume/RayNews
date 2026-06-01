@@ -1237,82 +1237,55 @@ async function aiTranslate(articleId) {
   const btn = document.querySelector('.ai-translate-btn');
   if (btn) btn.disabled = true;
 
-  // ⏳ Show loading inline after each paragraph
   const bodyEl = document.getElementById('articleBody');
   if (!bodyEl) { showToast('❌ 未找到文章内容'); if (btn) btn.disabled = false; return; }
 
   // Remove existing translations
   bodyEl.querySelectorAll('.ai-translation-inline').forEach(el => el.remove());
 
-  // Insert loading placeholder after each <p>
-  const paragraphs = bodyEl.querySelectorAll('p');
-  if (paragraphs.length === 0) {
+  // Scan article for translatable segments (multiple element types)
+  const segments = scanArticleSegments(bodyEl);
+  if (segments.length === 0) {
     showToast('❌ 文章没有可翻译的段落');
     if (btn) btn.disabled = false;
     return;
   }
-  paragraphs.forEach((p, idx) => {
-    const loadingDiv = document.createElement('div');
-    loadingDiv.className = 'ai-translation-inline';
-    loadingDiv.style.cssText = 'font-size:inherit;line-height:1.7;color:var(--text-3);margin:0 0 0.25em 0';
-    loadingDiv.textContent = '⏳ 翻译中...';
-    p.parentNode.insertBefore(loadingDiv, p.nextSibling);
+
+  // Insert loading placeholder after each segment
+  segments.forEach((seg, idx) => {
+    const ld = document.createElement('div');
+    ld.className = 'ai-translation-inline';
+    ld.id = 'aiTransLoading-' + idx;
+    ld.style.cssText = 'font-size:inherit;line-height:1.7;color:var(--text-3);margin:0 0 0.25em 0';
+    ld.textContent = '⏳ 翻译中...';
+    seg.el.parentNode.insertBefore(ld, seg.el.nextSibling);
   });
 
   try {
-    const resp = await fetch('/ai/translate/' + articleId, { method: 'POST', headers: { 'Authorization': 'Bearer ' + authToken } });
+    const resp = await fetch('/ai/translate-batch/' + articleId, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
+      body: JSON.stringify({ segments: segments.map(s => ({ id: s.id, text: s.text })) }),
+    });
+    if (resp.status === 401) { logout(); showToast('❌ 登录已过期，请重新登录'); bodyEl.querySelectorAll('.ai-translation-inline').forEach(el => el.remove()); if (btn) btn.disabled = false; return; }
     const data = await resp.json();
     if (!data) { showToast('❌ 请求失败'); bodyEl.querySelectorAll('.ai-translation-inline').forEach(el => el.remove()); if (btn) btn.disabled = false; return; }
     if (data.error) { showToast('❌ ' + data.error); bodyEl.querySelectorAll('.ai-translation-inline').forEach(el => el.remove()); if (btn) btn.disabled = false; return; }
 
-    // Parse AI response: each line is "原文||译文" format
-    const pairs = data.translation.split(/\n\n/).filter(p => p.trim());
-    const currentPs = bodyEl.querySelectorAll('p');
-
-    // Remove loading placeholders
-    bodyEl.querySelectorAll('.ai-translation-inline').forEach(el => el.remove());
-
-    // Immersive: insert translation right after each original <p>
-    currentPs.forEach((p, idx) => {
-      let transText = '';
-      // Try to find matching pair by structure (paragraph order)
-      if (idx < pairs.length) {
-        const pair = pairs[idx].trim();
-        const sepIdx = pair.indexOf('||');
-        if (sepIdx > -1) {
-          transText = pair.substring(sepIdx + 2).trim();
-        } else {
-          // Fallback: whole pair might be translation if no separator
-          transText = pair;
-        }
-      } else if (idx < pairs.length + 2) {
-        // Try matching by content similarity - skip for now
-      }
-
-      if (transText) {
-        const transDiv = document.createElement('div');
-        transDiv.className = 'ai-translation-inline';
-        transDiv.style.cssText = 'font-size:inherit;line-height:1.7;color:var(--text-2);margin:0 0 1em 0;padding-left:0;font-weight:400';
-        transDiv.textContent = transText;
-        p.parentNode.insertBefore(transDiv, p.nextSibling);
-      }
+    // Render each translation by ID
+    data.translations.forEach(t => {
+      const seg = segments.find(s => s.id === t.id);
+      if (!seg || !t.text) return;
+      // Remove loading placeholder
+      const ld = document.getElementById('aiTransLoading-' + seg.id);
+      if (ld) ld.remove();
+      // Insert translation after the original element
+      const td = document.createElement('div');
+      td.className = 'ai-translation-inline';
+      td.style.cssText = 'font-size:inherit;line-height:1.7;color:var(--text-2);margin:0 0 1em 0;padding-left:0;font-weight:400';
+      td.innerHTML = t.text;  // trusted — restored from markdown-safe format
+      seg.el.parentNode.insertBefore(td, seg.el.nextSibling);
     });
-
-    // If more translations than paragraphs, append remaining
-    if (pairs.length > currentPs.length) {
-      for (let i = currentPs.length; i < pairs.length; i++) {
-        const pair = pairs[i].trim();
-        const sepIdx = pair.indexOf('||');
-        const transText = sepIdx > -1 ? pair.substring(sepIdx + 2).trim() : pair;
-        if (transText) {
-          const transDiv = document.createElement('div');
-          transDiv.className = 'ai-translation-inline';
-          transDiv.style.cssText = 'font-size:inherit;line-height:1.7;color:var(--text-2);margin:0 0 1em 0;padding-left:0;font-weight:400';
-          transDiv.textContent = transText;
-          bodyEl.appendChild(transDiv);
-        }
-      }
-    }
 
     showToast('✅ 翻译完成');
   } catch (e) {
@@ -1320,6 +1293,33 @@ async function aiTranslate(articleId) {
     showToast('❌ 网络错误: ' + (e.message || ''));
   }
   if (btn) btn.disabled = false;
+}
+
+/**
+ * Scan article body for translatable text segments.
+ * Supports: p, li, blockquote, h2-h6, dd, figcaption
+ * Preserves inline HTML (b, i, a) for the AI.
+ */
+function scanArticleSegments(bodyEl) {
+  const selector = 'p, li, blockquote, h2, h3, h4, h5, h6, dd, figcaption';
+  const elements = bodyEl.querySelectorAll(selector);
+  const segments = [];
+  let id = 0;
+
+  elements.forEach(el => {
+    let html = el.innerHTML.trim();
+    if (!html) return;
+    // Skip elements that contain only images or are empty
+    if (el.querySelector('img') && !el.textContent.trim()) return;
+    // Strip existing translation placeholders inside
+    html = html.replace(/<div\s+class="ai-translation-inline"[^>]*>.*?<\/div>/gi, '');
+    html = html.trim();
+    if (!html) return;
+
+    segments.push({ id: id++, el: el, text: html });
+  });
+
+  return segments;
 }
 
 /**
@@ -1333,23 +1333,46 @@ async function autoDisplaySummary(articleId) {
       headers: { 'Authorization': 'Bearer ' + authToken },
     });
     const data = await resp.json();
-    if (!data || !data.summary) return;
+    if (!data) return;
     const articleWrap = document.getElementById('articleWrap');
     if (!articleWrap) return;
-    const existingSummary = document.getElementById('aiSummaryTop');
-    if (existingSummary) existingSummary.remove();
-    const summaryDiv = document.createElement('div');
-    summaryDiv.id = 'aiSummaryTop';
-    summaryDiv.style.cssText = 'background:rgba(110,142,251,0.08);border:1px solid var(--accent);border-radius:var(--radius);padding:14px 16px;margin-bottom:16px;font-size:13px;line-height:1.7;color:var(--text)';
-    summaryDiv.innerHTML = '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;font-size:11px;font-weight:700;color:var(--accent)">📝 AI 摘要</div>' + esc(data.summary);
-    const h1 = articleWrap.querySelector('h1');
-    const meta = articleWrap.querySelector('.article-meta');
-    if (meta && meta.nextSibling) {
-      articleWrap.insertBefore(summaryDiv, meta.nextSibling);
-    } else if (h1 && h1.nextSibling) {
-      articleWrap.insertBefore(summaryDiv, h1.nextSibling);
-    } else {
-      articleWrap.prepend(summaryDiv);
+    
+    // Auto-display cached summary
+    if (data.summary) {
+      const existingSummary = document.getElementById('aiSummaryTop');
+      if (existingSummary) existingSummary.remove();
+      const summaryDiv = document.createElement('div');
+      summaryDiv.id = 'aiSummaryTop';
+      summaryDiv.style.cssText = 'background:rgba(110,142,251,0.08);border:1px solid var(--accent);border-radius:var(--radius);padding:14px 16px;margin-bottom:16px;font-size:13px;line-height:1.7;color:var(--text)';
+      summaryDiv.innerHTML = '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;font-size:11px;font-weight:700;color:var(--accent)">📝 AI 摘要</div>' + esc(data.summary);
+      const h1 = articleWrap.querySelector('h1');
+      const meta = articleWrap.querySelector('.article-meta');
+      if (meta && meta.nextSibling) {
+        articleWrap.insertBefore(summaryDiv, meta.nextSibling);
+      } else if (h1 && h1.nextSibling) {
+        articleWrap.insertBefore(summaryDiv, h1.nextSibling);
+      } else {
+        articleWrap.prepend(summaryDiv);
+      }
+    }
+
+    // Auto-display cached translations (from batch format)
+    if (data.translation) {
+      let translations;
+      try { translations = JSON.parse(data.translation); } catch { return; }
+      if (!Array.isArray(translations) || translations.length === 0) return;
+      const bodyEl = document.getElementById('articleBody');
+      if (!bodyEl) return;
+      const segments = scanArticleSegments(bodyEl);
+      translations.forEach(t => {
+        const seg = segments.find(s => s.id === t.id);
+        if (!seg || !t.text) return;
+        const td = document.createElement('div');
+        td.className = 'ai-translation-inline';
+        td.style.cssText = 'font-size:inherit;line-height:1.7;color:var(--text-2);margin:0 0 1em 0;padding-left:0;font-weight:400';
+        td.innerHTML = t.text;
+        seg.el.parentNode.insertBefore(td, seg.el.nextSibling);
+      });
     }
   } catch (e) {
     // Silent fail — cache check is optional
