@@ -1027,7 +1027,14 @@ async function testAIConnection() {
       testData = JSON.parse(testText);
     } catch (parseErr) {
       console.error('testAIConnection: JSON parse failed, got text:', testText);
-      showSettingsStatus('❌ 服务器返回异常: ' + testText.substring(0, 200), 'err');
+      // Detect common HTML error pages and show a more useful message
+      if (testText.includes('cloudflare') || testText.includes('Bad gateway') || testText.includes('502')) {
+        showSettingsStatus('❌ 服务器无法连接 AI 服务（Cloudflare 502）。可能是代理链路问题，请检查 Docker 容器的 HTTP_PROXY 环境变量配置', 'err');
+      } else if (testText.includes('504') || testText.includes('Gateway Timeout')) {
+        showSettingsStatus('❌ AI 服务请求超时。请检查 API 地址是否正确，或网络代理配置', 'err');
+      } else {
+        showSettingsStatus('❌ 服务器返回异常（非 JSON）。可在浏览器控制台查看详情', 'err');
+      }
       return;
     }
     if (testData.error) { showSettingsStatus('❌ ' + testData.error, 'err'); return; }

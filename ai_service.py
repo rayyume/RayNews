@@ -159,9 +159,41 @@ class AIService:
     # ─── Test connection ──────────────────────────────────────
 
     def test_connection(self) -> str:
-        """Send a minimal prompt to verify API connectivity."""
+        """Send a minimal prompt to verify API connectivity (15s timeout)."""
         messages = [
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": "Reply with exactly one word: ok"},
         ]
-        return self.chat(messages, max_tokens=10, temperature=0)
+        # Use a shorter timeout (15s) so failures don't hang the whole chain
+        import requests as http_req
+        if self.provider_type == "claude":
+            url = f"{self.endpoint}/messages"
+            if "/v1" not in url and "/v1" not in self.endpoint:
+                url = f"{self.endpoint}/v1/messages"
+            resp = http_req.post(url, headers={
+                "x-api-key": self.api_key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            }, json={
+                "model": self.model,
+                "max_tokens": 10,
+                "system": messages[0]["content"],
+                "messages": [{"role": "user", "content": messages[1]["content"]}],
+            }, timeout=15)
+            resp.raise_for_status()
+            return resp.json()["content"][0]["text"]
+        else:
+            url = f"{self.endpoint}/chat/completions"
+            if "/v1" not in url and "/v1" not in self.endpoint:
+                url = f"{self.endpoint}/v1/chat/completions"
+            resp = http_req.post(url, headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            }, json={
+                "model": self.model,
+                "messages": messages,
+                "max_tokens": 10,
+                "temperature": 0,
+            }, timeout=15)
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"]

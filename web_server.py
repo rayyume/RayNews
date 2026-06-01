@@ -2,6 +2,7 @@
 
 import os
 import sys
+import requests
 
 from flask import Flask, request, jsonify, g
 from flask_cors import CORS
@@ -502,6 +503,12 @@ def ai_test_connection():
         if not response or not response.strip():
             return jsonify({"error": "Connection test returned empty response"}), 502
         return jsonify({"ok": True, "response": response})
+    except requests.exceptions.ConnectTimeout as e:
+        return jsonify({"error": "连接 AI 服务超时。请检查 API 地址是否正确，或 Docker 容器是否配置了 HTTP_PROXY 环境变量"}), 502
+    except requests.exceptions.ConnectionError as e:
+        return jsonify({"error": f"无法连接 AI 服务（{type(e).__name__}）。请检查网络代理配置：Docker 容器需要设置 HTTP_PROXY/HTTPS_PROXY 环境变量"}), 502
+    except requests.exceptions.Timeout as e:
+        return jsonify({"error": f"AI 服务响应超时: {e}"}), 502
     except Exception as e:
         return jsonify({"error": f"Connection test failed: {str(e)}"}), 502
 
