@@ -575,6 +575,30 @@ function loadAuth() {
   authToken = localStorage.getItem('raynews_token');
   try { const u = localStorage.getItem('raynews_user'); authUser = u ? JSON.parse(u) : null; } catch {}
   updateUserUI();
+  // Verify token is still valid — if server rejects it, show logged-out immediately
+  verifyToken();
+}
+
+async function verifyToken() {
+  if (!authToken) return;
+  try {
+    const resp = await fetch('/auth/me', {
+      headers: { 'Authorization': 'Bearer ' + authToken },
+    });
+    if (resp.status === 401) {
+      logout();
+    } else if (resp.ok) {
+      // Update cached user data with fresh info from server
+      const data = await resp.json();
+      if (data && data.user) {
+        authUser = data.user;
+        localStorage.setItem('raynews_user', JSON.stringify(authUser));
+        updateUserUI();
+      }
+    }
+  } catch (e) {
+    // Network error — keep existing auth state, user can re-try later
+  }
 }
 
 function getAvatarUrl(user) {
