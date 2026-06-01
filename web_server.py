@@ -780,7 +780,7 @@ def _get_ai_config_for_user(user_id: int) -> dict | None:
         db = _db()
         row = db.execute(
             "SELECT endpoint, model, api_key, provider_type, enabled "
-            "FROM ai_config WHERE user_id = ?", (user_id,)
+            "FROM ai_configs WHERE user_id = ?", (user_id,)
         ).fetchone()
         return dict(row) if row else None
     except Exception:
