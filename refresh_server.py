@@ -116,8 +116,8 @@ def api_news_list(params: dict) -> bytes:
     """GET /api/news — paginated or incremental list (no body_html)."""
     try:
         page = int(params.get("page", ["1"])[0])
-        size = int(params.get("size", ["30"])[0])
-        size = min(max(size, 1), 2000)
+        size = int(params.get("size", ["99999"])[0])
+        size = min(max(size, 1), 99999)
         since = params.get("since", [None])[0]
     except (ValueError, IndexError):
         return json.dumps({"error": "invalid params"}).encode()
