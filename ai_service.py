@@ -99,6 +99,12 @@ class AIService:
     # ─── Summarize ───────────────────────────────────────────
 
     def summarize(self, article_text: str, title: str = "") -> str:
+        # Strip HTML tags for clean input — same as translate()
+        import re
+        plain_text = re.sub(r'<[^>]+>', '', article_text)
+        plain_text = re.sub(r'\s*\n\s*', '\n', plain_text)
+        plain_text = plain_text.strip()
+
         prompt = "请为以下文章生成一个简洁的中文摘要，200字以内。"
         if title:
             prompt = f"文章标题：{title}\n\n{prompt}"
@@ -106,7 +112,7 @@ class AIService:
             {"role": "system",
              "content": "你是一个专业的新闻摘要助手。请用简洁的语言概括文章核心内容。"},
             {"role": "user",
-             "content": f"{prompt}\n\n文章内容：\n{article_text[:4000]}"},
+             "content": f"{prompt}\n\n文章内容：\n{plain_text[:4000]}"},
         ]
         return self.chat(messages)
 
