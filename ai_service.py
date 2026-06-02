@@ -243,13 +243,10 @@ class AIService:
         MAX_ARTICLES_PER_SOURCE = 100  # cap per source to avoid one dominating
         MAX_BATCH_INPUT = 20_000  # chars per batch call to stay within context
         def article_link(article: dict) -> str:
-            url = article.get("telegraph_url", "") or article.get("url", "") or ""
-            if url:
-                return url
             date = article.get("date", "") or ""
             art_id = article.get("id", 0)
             if date and art_id:
-                return f"https://rayyu.me/#/article/{date[2:].replace('-', '-')}-{art_id}"
+                return f"https://news.rayyu.me/#/article/{date[2:]}-{art_id}"
             return ""
 
         def format_article_entry(article: dict, index: int) -> str:
