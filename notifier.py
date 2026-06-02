@@ -33,15 +33,22 @@ def send_email(api_key: str, to_email: str, subject: str,
 
 
 def send_daily_summary_email(api_key: str, to_email: str,
-                             summary_text: str, article_count: int) -> dict:
+                             summary_text: str, stats: dict) -> dict:
     """Send a formatted daily summary email via Resend.
     Converts Markdown summary_text to HTML before embedding.
+    stats is a dict with keys: total_articles, articles_after_dedup, total_batches,
+    articles_with_summary, articles_without_summary.
     """
     # Convert markdown to HTML with fenced code blocks and tables
     summary_html = markdown.markdown(
         summary_text,
         extensions=["fenced_code", "tables"],
     )
+    total = stats.get("total_articles", 0)
+    deduped = stats.get("articles_after_dedup", 0)
+    batches = stats.get("total_batches", 0)
+    with_summary = stats.get("articles_with_summary", 0)
+    subtitle = f"{total} 篇原始 → {deduped} 篇去重 · {batches} 批次 · {with_summary} 篇已有摘要"
     html = f"""<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><style>
@@ -63,7 +70,7 @@ hr{{border:none;border-top:1px solid rgba(255,255,255,0.08);margin:16px 0}}
 </style></head>
 <body>
 <h1>📰 RayNews 每日摘要</h1>
-<p class="date">{article_count} 条新闻摘要</p>
+<p class="date">{subtitle}</p>
 <div class="summary">
 {summary_html}
 </div>

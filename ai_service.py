@@ -1,6 +1,97 @@
 """RayNews AI Service — unified interface for OpenAI-compatible and Claude-compatible APIs."""
 
 import requests
+import re
+from collections import defaultdict
+from typing import Optional
+
+
+# ─── Token-aware text truncation ─────────────────────────────
+# Conservative char→token estimate: 1 token ≈ 4 ASCII chars or ≈ 2 CJK chars
+# We use 3 chars/token as a safe midpoint for mixed content.
+_CHARS_PER_TOKEN = 3
+_MAX_INPUT_CHARS = 12_000  # ≈ 4000 tokens — fits most models' input comfortably
+
+
+def _token_aware_truncate(text: str, max_chars: int = _MAX_INPUT_CHARS) -> str:
+    """Strip HTML and build a prioritized excerpt: title → opening → key paragraphs → ending.
+
+    Preserves the most informative parts of an article within a token-aware budget.
+    Returns clean plain text (no HTML).
+    """
+    # Strip HTML tags
+    plain = re.sub(r'<[^>]+>', '\n', text)
+    plain = re.sub(r'\s*\n\s*', '\n', plain)
+    plain = plain.strip()
+
+    if not plain:
+        return ""
+
+    # If already within budget, return as-is
+    if len(plain) <= max_chars:
+        return plain
+
+    # Split into paragraphs (non-empty lines)
+    paragraphs = [p.strip() for p in plain.split('\n') if p.strip()]
+    if not paragraphs:
+        return plain[:max_chars]
+
+    budget = max_chars
+    parts = []
+
+    # 1) First paragraph (usually the lede / most important) — keep fully
+    first = paragraphs[0]
+    if len(first) < budget * 0.6:  # don't let a single paragraph eat >60%
+        parts.append(first)
+        budget -= len(first)
+        para_start = 1
+    else:
+        # First paragraph is huge — take its truncated form
+        parts.append(first[:budget // 2])
+        budget -= len(parts[0])
+        para_start = 1
+
+    # 2) Last paragraph (conclusion) — keep if budget allows
+    last = paragraphs[-1]
+    if len(paragraphs) > 2 and len(last) + 100 <= budget:
+        parts.append(last)
+        budget -= len(last) + 2  # +2 for separator
+        para_end = len(paragraphs) - 1
+    else:
+        para_end = len(paragraphs)
+
+    # 3) Middle — scan for key paragraphs (bold indicators, caps-start, lists)
+    for p in paragraphs[para_start:para_end]:
+        if budget <= 100:
+            break
+        is_key = (
+            p.startswith('**') or  # bold/highlighted
+            p.startswith('•') or p.startswith('-') or p.startswith('* ') or  # lists
+            p.startswith('#') or  # markdown headers
+            (len(p) > 15 and p[0].isupper() and p[1].isalpha())  # likely a heading
+        )
+        if is_key and len(p) + 100 <= budget:
+            parts.append(p)
+            budget -= len(p) + 2
+        elif not is_key and budget > 300:
+            # Non-key paragraphs get a condensed allocation
+            max_p = min(len(p), budget // 2)
+            if max_p > 60:
+                parts.append(p[:max_p] + ('…' if max_p < len(p) else ''))
+                budget -= max_p + 2
+
+    # 4) If we still have budget, add more middle content from top
+    if budget > 200:
+        for p in paragraphs[para_start:para_end]:
+            if budget <= 50:
+                break
+            if p not in parts and len(p) + 50 <= budget:
+                # Shorten aggressively
+                take = min(len(p), budget)
+                parts.append(p[:take] + ('…' if take < len(p) else ''))
+                budget -= take + 2
+
+    return '\n\n'.join(parts)
 
 
 class AIService:
@@ -99,6 +190,7 @@ class AIService:
     # ─── Summarize ───────────────────────────────────────────
 
     def summarize(self, article_text: str, title: str = "") -> str:
+        truncated = _token_aware_truncate(article_text)
         prompt = "请为以下文章生成一个简洁的中文摘要，200字以内。"
         if title:
             prompt = f"文章标题：{title}\n\n{prompt}"
@@ -106,19 +198,14 @@ class AIService:
             {"role": "system",
              "content": "你是一个专业的新闻摘要助手。请用简洁的语言概括文章核心内容。"},
             {"role": "user",
-             "content": f"{prompt}\n\n文章内容：\n{article_text[:4000]}"},
+             "content": f"{prompt}\n\n文章内容：\n{truncated}"},
         ]
         return self.chat(messages)
 
     # ─── Translate (bilingual) ───────────────────────────────
 
     def translate(self, article_text: str, title: str = "") -> str:
-        # Strip HTML tags for clean translation input
-        import re
-        plain_text = re.sub(r'<[^>]+>', '', article_text)
-        plain_text = re.sub(r'\s*\n\s*', '\n', plain_text)
-        plain_text = plain_text.strip()
-
+        truncated = _token_aware_truncate(article_text)
         prompt = ("请将以下文章逐段翻译为中文。\n\n"
                   "格式要求（非常重要）：\n"
                   "1. 将文章按段落拆分，每段原文后面紧跟该段的中文翻译\n"
@@ -136,25 +223,206 @@ class AIService:
             {"role": "system",
              "content": "你是一个专业的翻译助手。逐段翻译，每段原文后紧跟该段译文，用『||』分隔。只输出纯文本，不要 HTML 标签。"},
             {"role": "user",
-             "content": f"{prompt}\n\n文章内容：\n{plain_text[:4000]}"},
+             "content": f"{prompt}\n\n文章内容：\n{truncated}"},
         ]
         return self.chat(messages, max_tokens=4000)
 
-    # ─── Daily summary ───────────────────────────────────────
+    # ─── Daily summary (layered) ──────────────────────────────
+    #
+    # Strategy:
+    #   1. For each article, use existing AI summary if available,
+    #      otherwise take first ~500 chars of body content.
+    #   2. Group articles by source → batch per source.
+    #   3. Generate a per-source mini-summary (or pass rich list for final combiner).
+    #   4. Final combiner: merge all source summaries into one daily summary.
+    #
+    # Returns {"summary": str, "stats": {...}}
 
-    def daily_summary(self, articles: list[dict]) -> str:
-        articles_text = "\n\n".join([
-            f"{i+1}. [{a.get('source', '?')}] {a.get('title', '?')}"
-            for i, a in enumerate(articles[:20])
-        ])
-        messages = [
-            {"role": "system",
-             "content": "你是一个新闻编辑助手。请为以下今日新闻生成一份简洁的每日摘要，"
-                        "按主题分类，每条新闻用一句话概括。"},
-            {"role": "user",
-             "content": f"以下是今日新闻列表，请生成摘要：\n\n{articles_text}"},
-        ]
-        return self.chat(messages, max_tokens=2000)
+    def daily_summary(self, articles: list[dict]) -> dict:
+        MAX_CHARS_PER_ARTICLE = 800  # approx 200-400 tokens per article
+        MAX_ARTICLES_PER_SOURCE = 100  # cap per source to avoid one dominating
+        MAX_BATCH_INPUT = 20_000  # chars per batch call to stay within context
+        def article_link(article: dict) -> str:
+            url = article.get("telegraph_url", "") or article.get("url", "") or ""
+            if url:
+                return url
+            date = article.get("date", "") or ""
+            art_id = article.get("id", 0)
+            if date and art_id:
+                return f"https://rayyu.me/#/article/{date[2:].replace('-', '-')}-{art_id}"
+            return ""
+
+        def format_article_entry(article: dict, index: int) -> str:
+            link = article.get("url", "")
+            parts = [
+                f"{index}. 来源：{article['source']}",
+                f"标题：{article['title']}",
+                f"内容摘要：{article['text']}",
+            ]
+            if link:
+                parts.append(f"链接：{link}")
+            return "\n".join(parts)
+
+        final_format_rules = (
+            "请严格按以下四个大分类输出，标题必须完全一致：\n"
+            "## 政经新闻\n"
+            "## 科技动态\n"
+            "## 商业聚焦\n"
+            "## 其他信息\n\n"
+            "每个分类下尽量至少输出 10 条；如果某分类素材不足，可以少于 10 条，但不要省略该分类。\n"
+            "每条必须使用如下格式：\n"
+            "- **单条摘要总结:** 120-220 字的详细摘要，必须包含关键主体、事件、数字/时间/影响等信息。"
+            " 末尾必须附文章链接，格式为 [🔗](URL)。\n"
+            "不要输出总述、寒暄或额外说明；不要把链接集中放到末尾。"
+        )
+
+        # ── Build per-article excerpts ──
+        excerpts = []
+        for a in articles:
+            art_id = a.get("id", 0)
+            source = a.get("source", "?")
+            title = a.get("title", "?")
+            url = article_link(a)
+            summary = a.get("summary", "") or ""
+            body_html = a.get("body_html", "") or ""
+
+            # Layer 1: existing AI summary
+            text = ""
+            if summary:
+                text = summary
+            # Layer 2: first 500 chars of body
+            elif body_html:
+                plain = re.sub(r'<[^>]+>', ' ', body_html)
+                plain = " ".join(plain.split()).strip()
+                text = plain[:MAX_CHARS_PER_ARTICLE]
+                if len(plain) > MAX_CHARS_PER_ARTICLE:
+                    text += "…"
+
+            if not text:
+                text = "(no content)"
+
+            excerpts.append({
+                "id": art_id,
+                "source": source,
+                "title": title,
+                "url": url,
+                "text": text,
+                "has_summary": bool(summary),
+            })
+
+        # ── Group by source, cap per source ──
+        by_source = defaultdict(list)
+        for ex in excerpts:
+            by_source[ex["source"]].append(ex)
+
+        # Cap per source to avoid one source dominating
+        capped = []
+        for src, items in by_source.items():
+            capped.extend(items[:MAX_ARTICLES_PER_SOURCE])
+
+        # ── Split into batches if needed ──
+        batches = []
+        current_batch = []
+        current_chars = 0
+        total_articles_with_summary = sum(1 for e in capped if e["has_summary"])
+        total_articles_without_summary = len(capped) - total_articles_with_summary
+
+        for ex in capped:
+            entry = format_article_entry(ex, 1)
+            entry_len = len(entry) + 10  # overhead
+            if current_chars + entry_len > MAX_BATCH_INPUT and current_batch:
+                batches.append(current_batch)
+                current_batch = [ex]
+                current_chars = entry_len
+            else:
+                current_batch.append(ex)
+                current_chars += entry_len
+
+        if current_batch:
+            batches.append(current_batch)
+
+        # ── Generate per-batch summaries if multiple batches ──
+        if len(batches) <= 1:
+            # Single batch: go straight to final summary
+            batch_summaries = None
+            final_input = batches[0] if batches else []
+        else:
+            batch_summaries = []
+            for i, batch in enumerate(batches):
+                batch_text = "\n\n".join(
+                    format_article_entry(e, j + 1)
+                    for j, e in enumerate(batch)
+                )
+                bm = [
+                    {"role": "system",
+                     "content": "你是一个新闻编辑助手。请把这批新闻整理成日报候选条目。"
+                                "必须保留每条新闻的原始链接，链接格式使用 [🔗](URL)。"
+                                "按政经新闻、科技动态、商业聚焦、其他信息四类归类；"
+                                "每条候选摘要保留关键事实，不要过度压缩。"},
+                    {"role": "user",
+                     "content": f"以下是一组新闻（批次 {i+1}/{len(batches)}），请生成分类候选条目：\n\n{batch_text}"},
+                ]
+                result = self.chat(bm, max_tokens=2500)
+                batch_summaries.append({
+                    "batch_index": i,
+                    "summary": result,
+                    "article_count": len(batch),
+                })
+
+            final_input = batch_summaries
+
+        # ── Final summary ──
+        if not final_input:
+            return {"summary": "今日无新闻。", "stats": {
+                "total_articles": len(articles),
+                "total_batches": 0,
+                "articles_with_summary": 0,
+                "articles_without_summary": 0,
+            }}
+
+        if batch_summaries is None:
+            # Single batch: build final prompt directly from articles
+            articles_text = "\n\n".join(
+                format_article_entry(e, i + 1)
+                for i, e in enumerate(final_input)
+            )
+            sys_msg = (
+                "你是一个资深新闻编辑。请基于每篇文章的标题、来源、内容摘要和链接生成详细每日摘要。\n"
+                + final_format_rules
+            )
+            user_msg = f"以下是今日新闻列表，请生成每日摘要：\n\n{articles_text}"
+            final_prompt = [
+                {"role": "system", "content": sys_msg},
+                {"role": "user", "content": user_msg},
+            ]
+        else:
+            # Multi-batch: merge batch summaries
+            batch_texts = "\n\n".join(
+                f"【批次 {b['batch_index']+1} — {b['article_count']} 条】\n{b['summary']}"
+                for b in batch_summaries
+            )
+            sys_msg = (
+                "你是一个资深新闻编辑。请将以下各批次候选条目合并为完整每日摘要，去重但不要过度压缩。\n"
+                + final_format_rules
+            )
+            user_msg = f"以下是各批次候选摘要，请合并为完整每日摘要：\n\n{batch_texts}"
+            final_prompt = [
+                {"role": "system", "content": sys_msg},
+                {"role": "user", "content": user_msg},
+            ]
+
+        final_summary = self.chat(final_prompt, max_tokens=5000)
+
+        return {
+            "summary": final_summary,
+            "stats": {
+                "total_articles": len(articles),
+                "articles_after_dedup": len(capped),
+                "total_batches": len(batches),
+                "articles_with_summary": total_articles_with_summary,
+                "articles_without_summary": total_articles_without_summary,
+            },
+        }
 
     # ─── Full HTML translation ────────────────────────────────
 

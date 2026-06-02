@@ -1,7 +1,9 @@
 """RayNews Web Server — auth, favorites, AI, settings via Flask."""
 
 import os
+import re
 import sys
+import threading
 import requests
 
 from flask import Flask, request, jsonify, g
@@ -21,10 +23,15 @@ from models import (
 from auth import init_auth, create_token, require_auth, require_role
 from ai_service import AIService
 
+AUTO_SUMMARY_BATCH_LIMIT = int(os.environ.get("AUTO_SUMMARY_BATCH_LIMIT", "20"))
+AUTO_SUMMARY_INTERVAL_SECONDS = int(os.environ.get("AUTO_SUMMARY_INTERVAL_SECONDS", "30"))
+
 # ─── App Setup ────────────────────────────────────────────────
 
 app = Flask(__name__)
 CORS(app)
+
+DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
 
 # Secret key: from env or generate on first run
 SECRET_KEY = os.environ.get("RAYNEWS_SECRET")
@@ -160,7 +167,7 @@ def update_me():
 
 # ─── Avatar Upload ─────────────────────────────────────────
 
-AVATARS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "avatars")
+AVATARS_DIR = os.path.join(DATA_DIR, "avatars")
 AVATAR_MAX_SIZE = 500 * 1024  # 500KB
 ALLOWED_AVATAR_TYPES = {
     "image/jpeg": "jpg",
@@ -216,7 +223,8 @@ def upload_avatar():
         with open(new_path, "wb") as f:
             f.write(raw_bytes)
 
-        avatar_url = f"/avatars/{g.user_id}.{ext}"
+        import time
+        avatar_url = f"/avatars/{g.user_id}.{ext}?v={int(time.time())}"
         update_user(g.user_id, avatar_url=avatar_url)
 
         return jsonify({"avatar_url": avatar_url}), 200
@@ -260,7 +268,7 @@ def admin_set_role(user_id):
 
 # ─── Favorites API ─────────────────────────────────────────
 
-NEWS_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "news.db")
+NEWS_DB = os.path.join(DATA_DIR, "news.db")
 
 
 def _get_article_meta(article_id: int) -> dict | None:
@@ -421,32 +429,57 @@ def ai_summarize(article_id):
     if not config.get("api_key"):
         return jsonify({"error": "API key not configured"}), 400
 
+    can_use_shared_summary = _user_auto_summary_enabled(g.user_id)
+
     # Check cache first
-    cached = _get_ai_result(article_id)
+    cached = _get_ai_result(article_id) if can_use_shared_summary else None
     if cached and cached.get("summary"):
         return jsonify({"summary": cached["summary"], "cached": True})
 
-    # Fetch article content from news.db
-    article = _fetch_article_body(article_id)
-    if not article:
-        return jsonify({"error": "article not found"}), 404
-
     try:
-        svc = AIService(
-            api_key=config["api_key"],
-            endpoint=config["endpoint"],
-            model=config["model"],
-            provider_type=config.get("provider_type", "openai"),
+        summary, cached = _generate_article_summary(
+            article_id,
+            config,
+            use_shared_cache=can_use_shared_summary,
+            save_shared_cache=can_use_shared_summary,
         )
-        summary = svc.summarize(
-            article_text=article.get("body_html") or article.get("summary") or "",
-            title=article.get("title", ""),
-        )
-        # Save to cache
-        _save_ai_result(article_id, summary=summary)
-        return jsonify({"summary": summary})
+        return jsonify({"summary": summary, "cached": cached})
+    except KeyError as e:
+        return jsonify({"error": str(e)}), 404
     except Exception as e:
         return jsonify({"error": f"AI request failed: {str(e)}"}), 502
+
+
+def _user_auto_summary_enabled(user_id: int) -> bool:
+    settings = get_user_settings(user_id) or {}
+    return bool(settings.get("auto_summary_enabled"))
+
+
+def _generate_article_summary(article_id: int, config: dict,
+                              use_shared_cache: bool = True,
+                              save_shared_cache: bool = True) -> tuple[str, bool]:
+    """Generate and cache a single-article AI summary."""
+    cached = _get_ai_result(article_id) if use_shared_cache else None
+    if cached and cached.get("summary"):
+        return cached["summary"], True
+
+    article = _fetch_article_body(article_id)
+    if not article:
+        raise KeyError("article not found")
+
+    svc = AIService(
+        api_key=config["api_key"],
+        endpoint=config["endpoint"],
+        model=config["model"],
+        provider_type=config.get("provider_type", "openai"),
+    )
+    summary = svc.summarize(
+        article_text=article.get("body_html") or article.get("summary") or "",
+        title=article.get("title", ""),
+    )
+    if save_shared_cache:
+        _save_ai_result(article_id, summary=summary)
+    return summary, False
 
 
 @app.route("/ai/translate/<int:article_id>", methods=["POST"])
@@ -629,12 +662,17 @@ def ai_daily_summary():
     if not config.get("api_key"):
         return jsonify({"error": "API key not configured"}), 400
 
-    # Fetch ALL articles from today
+    # Fetch ALL articles from today, then dedup
     import datetime as _dt
     today_str = _dt.datetime.now().strftime("%Y-%m-%d")
-    articles = _fetch_articles_by_date(today_str)
+    articles = _fetch_articles_by_date(
+        today_str,
+        include_shared_summary=_user_auto_summary_enabled(g.user_id),
+    )
     if not articles:
         return jsonify({"error": "no articles today"}), 404
+
+    articles = _dedup_articles(articles)
 
     try:
         svc = AIService(
@@ -643,13 +681,18 @@ def ai_daily_summary():
             model=config["model"],
             provider_type=config.get("provider_type", "openai"),
         )
-        summary = svc.daily_summary(articles)
-        return jsonify({"summary": summary, "article_count": len(articles)})
+        result = svc.daily_summary(articles)
+        return jsonify({
+            "summary": result["summary"],
+            "article_count": len(articles),
+            "stats": result["stats"],
+        })
     except Exception as e:
         return jsonify({"error": f"AI request failed: {str(e)}"}), 502
 
 
 _daily_summary_sent = set()  # {(user_id, date), ...}
+_auto_summary_lock = threading.Lock()
 
 
 def _send_daily_summaries():
@@ -674,7 +717,7 @@ def _send_daily_summaries():
     try:
         db = _get_settings_db()
         rows = db.execute(
-            "SELECT user_id, notification_config, daily_summary_enabled "
+            "SELECT user_id, notification_config, daily_summary_enabled, auto_summary_enabled "
             "FROM user_settings WHERE daily_summary_enabled = 1"
         ).fetchall()
     except Exception as e:
@@ -719,7 +762,10 @@ def _send_daily_summaries():
             continue
 
         print(f"[scheduler] User {uid}: time matched ({scheduled_time}), fetching articles...")
-        articles = _fetch_articles_by_date(today_str)
+        articles = _fetch_articles_by_date(
+            today_str,
+            include_shared_summary=bool(settings.get("auto_summary_enabled")),
+        )
         if not articles:
             print(f"[scheduler] User {uid}: no articles for {today_str}")
             continue
@@ -737,10 +783,14 @@ def _send_daily_summaries():
                 model=ai_config["model"],
                 provider_type=ai_config.get("provider_type", "openai"),
             )
-            summary = svc.daily_summary(articles)
-            send_daily_summary_email(resend_api_key, to_email, summary, len(articles))
+            articles = _dedup_articles(articles)
+            result = svc.daily_summary(articles)
+            summary = result["summary"]
+            stats = result["stats"]
+            send_daily_summary_email(resend_api_key, to_email, summary, stats)
             _daily_summary_sent.add(dedup_key)
-            print(f"[scheduler] Daily summary sent to {to_email} for {today_str}")
+            print(f"[scheduler] Daily summary sent to {to_email} for {today_str}. "
+                  f"Stats: {stats}")
         except Exception as e:
             print(f"[scheduler] Daily summary failed for user {uid}: {e}")
 
@@ -755,6 +805,61 @@ def _daily_summary_loop():
         except Exception as e:
             print(f"[scheduler] Error in loop: {e}")
         _time.sleep(60)
+
+
+def _get_auto_summary_users() -> list[dict]:
+    """Users who opted in to background article summaries and have usable AI config."""
+    try:
+        db = get_db()
+        rows = db.execute(
+            "SELECT s.user_id, c.endpoint, c.model, c.api_key, c.provider_type, c.enabled "
+            "FROM user_settings s "
+            "JOIN ai_configs c ON c.user_id = s.user_id "
+            "WHERE s.auto_summary_enabled = 1 "
+            "AND c.enabled = 1 "
+            "AND c.api_key != ''"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        print(f"[auto-summary] settings DB error: {e}")
+        return []
+
+
+def _run_auto_summary_once():
+    """Fill cached summaries in small batches so daily summaries can reuse them."""
+    if not _auto_summary_lock.acquire(blocking=False):
+        return
+    try:
+        users = _get_auto_summary_users()
+        if not users:
+            return
+
+        for config in users:
+            articles = _fetch_unsummarized_articles(AUTO_SUMMARY_BATCH_LIMIT)
+            if not articles:
+                continue
+            print(f"[auto-summary] User {config['user_id']}: summarizing {len(articles)} article(s)")
+            for article in articles:
+                try:
+                    summary, cached = _generate_article_summary(article["id"], config)
+                    if not cached:
+                        print(f"[auto-summary] Cached summary for article {article['id']}: {article.get('title', '')[:50]}")
+                except Exception as e:
+                    print(f"[auto-summary] Article {article.get('id')}: failed: {e}")
+    finally:
+        _auto_summary_lock.release()
+
+
+def _auto_summary_loop():
+    """Background loop for opt-in automatic article summaries."""
+    import time as _time
+    _time.sleep(45)
+    while True:
+        try:
+            _run_auto_summary_once()
+        except Exception as e:
+            print(f"[auto-summary] Error in loop: {e}")
+        _time.sleep(AUTO_SUMMARY_INTERVAL_SECONDS)
 
 
 @app.route("/ai/daily-summary/send", methods=["POST"])
@@ -803,17 +908,77 @@ def _fetch_recent_articles(limit: int = 20) -> list[dict]:
         return []
 
 
-def _fetch_articles_by_date(date_str: str) -> list[dict]:
-    """Fetch all articles for a given date string (YYYY-MM-DD)."""
+# ─── Dedup helper ──────────────────────────────────────────
+
+
+def _dedup_articles(articles: list[dict]) -> list[dict]:
+    """Remove duplicate/similar articles. Prefers articles with body content.
+
+    Heuristic: same normalized title → same event → keep first with body.
+    """
+    best_by_title = {}
+    untitled = []
+    for a in articles:
+        title = (a.get("title") or "").strip().lower()
+        # Normalize whitespace and common quote characters.
+        normalized = re.sub("[\\s\"'“”‘’「」『』]+", " ", title).strip()
+        if not normalized:
+            untitled.append(a)
+            continue
+        existing = best_by_title.get(normalized)
+        if existing is None or (a.get("body_html") and not existing.get("body_html")):
+            best_by_title[normalized] = a
+    return untitled + list(best_by_title.values())
+
+
+def _fetch_articles_by_date(date_str: str, include_shared_summary: bool = True) -> list[dict]:
+    """Fetch articles for a date, preferring cached AI summaries when available."""
     import sqlite3
     if not os.path.exists(NEWS_DB):
         return []
     try:
+        _init_ai_results_table()
+        conn = sqlite3.connect(NEWS_DB)
+        conn.row_factory = sqlite3.Row
+        summary_expr = (
+            "COALESCE(NULLIF(r.summary, ''), a.summary)"
+            if include_shared_summary else "a.summary"
+        )
+        rows = conn.execute(
+            "SELECT a.id, a.title, a.source, a.date, a.time, a.body_html, "
+            f"{summary_expr} AS summary, "
+            "a.telegraph_url "
+            "FROM articles a "
+            "LEFT JOIN ai_results r ON r.article_id = a.id "
+            "WHERE a.date = ? ORDER BY a.timestamp ASC",
+            (date_str,),
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def _fetch_unsummarized_articles(limit: int = AUTO_SUMMARY_BATCH_LIMIT) -> list[dict]:
+    """Fetch recent today articles without cached AI summaries."""
+    import datetime as _dt
+    import sqlite3
+    if not os.path.exists(NEWS_DB):
+        return []
+    try:
+        _init_ai_results_table()
+        today_str = _dt.datetime.now().strftime("%Y-%m-%d")
         conn = sqlite3.connect(NEWS_DB)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT id, title, source, date, time FROM articles WHERE date = ? ORDER BY timestamp ASC",
-            (date_str,),
+            "SELECT a.id, a.title, a.source, a.summary, a.body_html "
+            "FROM articles a "
+            "LEFT JOIN ai_results r ON r.article_id = a.id "
+            "WHERE a.date = ? "
+            "AND (r.summary IS NULL OR r.summary = '') "
+            "AND (a.body_html != '' OR a.summary != '') "
+            "ORDER BY a.timestamp ASC LIMIT ?",
+            (today_str, limit),
         ).fetchall()
         conn.close()
         return [dict(r) for r in rows]
@@ -925,6 +1090,9 @@ def _save_ai_result(article_id: int, summary: str | None = None,
 def ai_get_result(article_id):
     """Return cached AI result (summary/translation) without generating."""
     cached = _get_ai_result(article_id)
+    if cached and not _user_auto_summary_enabled(g.user_id):
+        cached = dict(cached)
+        cached.pop("summary", None)
     return jsonify(cached or {})
 
 
@@ -938,6 +1106,7 @@ def get_settings():
         return jsonify({
             "auto_translate_title": False,
             "auto_translate_content": False,
+            "auto_summary_enabled": False,
             "daily_summary_enabled": False,
             "notification_config": {},
         })
@@ -961,6 +1130,12 @@ def update_settings():
     if "notification_config" in data:
         nc = data["notification_config"]
         data["notification_config"] = json.dumps(nc) if isinstance(nc, dict) else nc
+    if _is_enabled_value(data.get("auto_summary_enabled")):
+        config = get_ai_config(g.user_id)
+        if not config or not config.get("enabled") or not config.get("api_key"):
+            return jsonify({
+                "error": "请先在AI菜单中设置API"
+            }), 400
     settings = set_user_settings(g.user_id, **data)
     if not settings:
         return jsonify({"error": "update failed"}), 400
@@ -973,7 +1148,13 @@ def update_settings():
         except (json.JSONDecodeError, TypeError):
             nc = {}
     safe["notification_config"] = nc
+    if _is_enabled_value(data.get("auto_summary_enabled")):
+        threading.Thread(target=_run_auto_summary_once, daemon=True).start()
     return jsonify(safe)
+
+
+def _is_enabled_value(value) -> bool:
+    return value is True or value == 1 or str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 import json
@@ -1056,7 +1237,9 @@ if __name__ == "__main__":
     _init_ai_results_table()
     import threading as _th
     _th.Thread(target=_daily_summary_loop, daemon=True).start()
+    _th.Thread(target=_auto_summary_loop, daemon=True).start()
     print("[scheduler] Daily summary background thread started")
+    print("[auto-summary] Background summary thread started")
     port = int(os.environ.get("WEB_PORT", 8082))
     print(f"[web] RayNews Web Server listening on {port}")
     app.run(host="127.0.0.1", port=port, debug=False)
