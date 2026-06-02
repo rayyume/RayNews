@@ -2296,7 +2296,7 @@ function openArticle(id) {
   const shortDate = n.date ? n.date.slice(2) : '';
   const articleHash = '#/article/' + shortDate + '-' + n.id;
   if (location.hash !== articleHash) {
-    history.pushState({ articleId: n.id }, '', articleHash);
+    history.replaceState(null, '', articleHash);
   }
 
   // Fetch full article body from API
