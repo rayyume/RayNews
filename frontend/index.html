@@ -2294,7 +2294,10 @@ function openArticle(id) {
   // Check favorite status
   if (authToken) checkFavoriteStatus(id);
   const shortDate = n.date ? n.date.slice(2) : '';
-  history.replaceState(null, '', '#/article/' + shortDate + '-' + n.id);
+  const articleHash = '#/article/' + shortDate + '-' + n.id;
+  if (location.hash !== articleHash) {
+    history.pushState({ articleId: n.id }, '', articleHash);
+  }
 
   // Fetch full article body from API
   if (articleBodyCache[id]) {
@@ -2613,7 +2616,7 @@ setInterval(function() {
     sx = e.touches[0].clientX;
     sy = e.touches[0].clientY;
     swiping = false;
-  }, { passive: true });
+  }, { passive: false });
 
   overlay.addEventListener('touchmove', e => {
     if (!overlay.classList.contains('open')) return;
@@ -2627,7 +2630,7 @@ setInterval(function() {
       overlay.style.transform = `translateX(${dx * 0.5}px)`;
       overlay.style.opacity = 1 - t * 0.4;
     }
-  }, { passive: true });
+  }, { passive: false });
 
   overlay.addEventListener('touchend', () => {
     if (swiping) {
