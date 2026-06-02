@@ -2634,9 +2634,12 @@ setInterval(function() {
 
   overlay.addEventListener('touchend', () => {
     if (swiping) {
-      overlay.style.transition = '';
+      // Kill transition first to prevent snap-back animation (拖影修复)
+      overlay.style.transition = 'none';
       overlay.style.transform = '';
       overlay.style.opacity = '';
+      void overlay.getBoundingClientRect(); // flush style changes
+      overlay.style.transition = ''; // restore CSS transition for close animation
       closeArticle();
       swiping = false;
     }
