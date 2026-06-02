@@ -726,8 +726,10 @@ document.getElementById('avatarInput').addEventListener('change', async function
       updateUserUI();
       loadAccountTab();
       showToast('✅ 头像已更新');
+      document.getElementById('avatarInput').value = '';
     } catch (e) {
       showToast('❌ 上传失败: ' + e.message);
+      document.getElementById('avatarInput').value = '';
     }
   };
   if (finalBlob !== file) {

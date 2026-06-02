@@ -221,7 +221,8 @@ def upload_avatar():
         with open(new_path, "wb") as f:
             f.write(raw_bytes)
 
-        avatar_url = f"/avatars/{g.user_id}.{ext}"
+        import time
+        avatar_url = f"/avatars/{g.user_id}.{ext}?v={int(time.time())}"
         update_user(g.user_id, avatar_url=avatar_url)
 
         return jsonify({"avatar_url": avatar_url}), 200
