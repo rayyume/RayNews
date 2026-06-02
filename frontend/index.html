@@ -2430,7 +2430,11 @@ function shareArticle() {
   navigator.clipboard.writeText(url).then(() => showToast('✅ 链接已复制')).catch(() => showToast('✅ 链接已复制'));
 }
 
+let _closingOverlay = false;
+
 function closeArticle() {
+  if (_closingOverlay) return;
+  _closingOverlay = true;
   document.getElementById('overlay').classList.remove('open');
   unlockBodyScroll();
   history.replaceState(null, '', window.location.pathname + window.location.search);
@@ -2441,6 +2445,7 @@ function closeArticle() {
     renderFilters();
     renderList();
   }
+  _closingOverlay = false;
 }
 
 // Handle hash-based article links
