@@ -31,6 +31,8 @@ AUTO_SUMMARY_INTERVAL_SECONDS = int(os.environ.get("AUTO_SUMMARY_INTERVAL_SECOND
 app = Flask(__name__)
 CORS(app)
 
+DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
+
 # Secret key: from env or generate on first run
 SECRET_KEY = os.environ.get("RAYNEWS_SECRET")
 if not SECRET_KEY:
@@ -165,7 +167,7 @@ def update_me():
 
 # ─── Avatar Upload ─────────────────────────────────────────
 
-AVATARS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "avatars")
+AVATARS_DIR = os.path.join(DATA_DIR, "avatars")
 AVATAR_MAX_SIZE = 500 * 1024  # 500KB
 ALLOWED_AVATAR_TYPES = {
     "image/jpeg": "jpg",
@@ -266,7 +268,7 @@ def admin_set_role(user_id):
 
 # ─── Favorites API ─────────────────────────────────────────
 
-NEWS_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "news.db")
+NEWS_DB = os.path.join(DATA_DIR, "news.db")
 
 
 def _get_article_meta(article_id: int) -> dict | None:

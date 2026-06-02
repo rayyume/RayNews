@@ -13,6 +13,7 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - TZ=Asia/Shanghai
+      - DATA_DIR=/app/data
       # Telegram 频道（需配合 BroadcastChannel 使用）
       - TELEGRAM_CHANNEL=${TELEGRAM_CHANNEL:-your_channel}
       # 代理配置（通过 .env 注入，按需）
