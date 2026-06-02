@@ -1,6 +1,7 @@
 """RayNews Web Server — auth, favorites, AI, settings via Flask."""
 
 import os
+import re
 import sys
 import requests
 
@@ -629,12 +630,14 @@ def ai_daily_summary():
     if not config.get("api_key"):
         return jsonify({"error": "API key not configured"}), 400
 
-    # Fetch ALL articles from today
+    # Fetch ALL articles from today, then dedup
     import datetime as _dt
     today_str = _dt.datetime.now().strftime("%Y-%m-%d")
     articles = _fetch_articles_by_date(today_str)
     if not articles:
         return jsonify({"error": "no articles today"}), 404
+
+    articles = _dedup_articles(articles)
 
     try:
         svc = AIService(
@@ -643,8 +646,12 @@ def ai_daily_summary():
             model=config["model"],
             provider_type=config.get("provider_type", "openai"),
         )
-        summary = svc.daily_summary(articles)
-        return jsonify({"summary": summary, "article_count": len(articles)})
+        result = svc.daily_summary(articles)
+        return jsonify({
+            "summary": result["summary"],
+            "article_count": len(articles),
+            "stats": result["stats"],
+        })
     except Exception as e:
         return jsonify({"error": f"AI request failed: {str(e)}"}), 502
 
@@ -737,10 +744,14 @@ def _send_daily_summaries():
                 model=ai_config["model"],
                 provider_type=ai_config.get("provider_type", "openai"),
             )
-            summary = svc.daily_summary(articles)
-            send_daily_summary_email(resend_api_key, to_email, summary, len(articles))
+            articles = _dedup_articles(articles)
+            result = svc.daily_summary(articles)
+            summary = result["summary"]
+            stats = result["stats"]
+            send_daily_summary_email(resend_api_key, to_email, summary, stats)
             _daily_summary_sent.add(dedup_key)
-            print(f"[scheduler] Daily summary sent to {to_email} for {today_str}")
+            print(f"[scheduler] Daily summary sent to {to_email} for {today_str}. "
+                  f"Stats: {stats}")
         except Exception as e:
             print(f"[scheduler] Daily summary failed for user {uid}: {e}")
 
@@ -803,8 +814,40 @@ def _fetch_recent_articles(limit: int = 20) -> list[dict]:
         return []
 
 
+# ─── Dedup helper ──────────────────────────────────────────
+
+
+def _dedup_articles(articles: list[dict]) -> list[dict]:
+    """Remove duplicate/similar articles. Prefers articles with body content.
+
+    Heuristic: same normalized title → same event → keep first with body.
+    """
+    seen_titles = {}
+    deduped = []
+    for a in articles:
+        title = (a.get("title") or "").strip().lower()
+        # Normalize: strip whitespace, unify quotes
+        normalized = re.sub(r'[「」『』""''\s]+', ' ', title).strip()
+        if not normalized:
+            deduped.append(a)
+            continue
+        if normalized in seen_titles:
+            existing = seen_titles[normalized]
+            # Keep the one that has body_html
+            if a.get("body_html") and not existing.get("body_html"):
+                # Replace existing with this one (more complete)
+                deduped.remove(existing)
+                deduped.append(a)
+                seen_titles[normalized] = a
+            # Otherwise keep existing (already has body or both have/don't have)
+            continue
+        seen_titles[normalized] = a
+        deduped.append(a)
+    return deduped
+
+
 def _fetch_articles_by_date(date_str: str) -> list[dict]:
-    """Fetch all articles for a given date string (YYYY-MM-DD)."""
+    """Fetch all articles for a given date string (YYYY-MM-DD) with body and summary."""
     import sqlite3
     if not os.path.exists(NEWS_DB):
         return []
@@ -812,7 +855,8 @@ def _fetch_articles_by_date(date_str: str) -> list[dict]:
         conn = sqlite3.connect(NEWS_DB)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT id, title, source, date, time FROM articles WHERE date = ? ORDER BY timestamp ASC",
+            "SELECT id, title, source, date, time, body_html, summary, telegraph_url "
+            "FROM articles WHERE date = ? ORDER BY timestamp ASC",
             (date_str,),
         ).fetchall()
         conn.close()
