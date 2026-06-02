@@ -429,13 +429,20 @@ def ai_summarize(article_id):
     if not config.get("api_key"):
         return jsonify({"error": "API key not configured"}), 400
 
+    can_use_shared_summary = _user_auto_summary_enabled(g.user_id)
+
     # Check cache first
-    cached = _get_ai_result(article_id)
+    cached = _get_ai_result(article_id) if can_use_shared_summary else None
     if cached and cached.get("summary"):
         return jsonify({"summary": cached["summary"], "cached": True})
 
     try:
-        summary, cached = _generate_article_summary(article_id, config)
+        summary, cached = _generate_article_summary(
+            article_id,
+            config,
+            use_shared_cache=can_use_shared_summary,
+            save_shared_cache=can_use_shared_summary,
+        )
         return jsonify({"summary": summary, "cached": cached})
     except KeyError as e:
         return jsonify({"error": str(e)}), 404
@@ -443,9 +450,16 @@ def ai_summarize(article_id):
         return jsonify({"error": f"AI request failed: {str(e)}"}), 502
 
 
-def _generate_article_summary(article_id: int, config: dict) -> tuple[str, bool]:
+def _user_auto_summary_enabled(user_id: int) -> bool:
+    settings = get_user_settings(user_id) or {}
+    return bool(settings.get("auto_summary_enabled"))
+
+
+def _generate_article_summary(article_id: int, config: dict,
+                              use_shared_cache: bool = True,
+                              save_shared_cache: bool = True) -> tuple[str, bool]:
     """Generate and cache a single-article AI summary."""
-    cached = _get_ai_result(article_id)
+    cached = _get_ai_result(article_id) if use_shared_cache else None
     if cached and cached.get("summary"):
         return cached["summary"], True
 
@@ -463,7 +477,8 @@ def _generate_article_summary(article_id: int, config: dict) -> tuple[str, bool]
         article_text=article.get("body_html") or article.get("summary") or "",
         title=article.get("title", ""),
     )
-    _save_ai_result(article_id, summary=summary)
+    if save_shared_cache:
+        _save_ai_result(article_id, summary=summary)
     return summary, False
 
 
@@ -650,7 +665,10 @@ def ai_daily_summary():
     # Fetch ALL articles from today, then dedup
     import datetime as _dt
     today_str = _dt.datetime.now().strftime("%Y-%m-%d")
-    articles = _fetch_articles_by_date(today_str)
+    articles = _fetch_articles_by_date(
+        today_str,
+        include_shared_summary=_user_auto_summary_enabled(g.user_id),
+    )
     if not articles:
         return jsonify({"error": "no articles today"}), 404
 
@@ -699,7 +717,7 @@ def _send_daily_summaries():
     try:
         db = _get_settings_db()
         rows = db.execute(
-            "SELECT user_id, notification_config, daily_summary_enabled "
+            "SELECT user_id, notification_config, daily_summary_enabled, auto_summary_enabled "
             "FROM user_settings WHERE daily_summary_enabled = 1"
         ).fetchall()
     except Exception as e:
@@ -744,7 +762,10 @@ def _send_daily_summaries():
             continue
 
         print(f"[scheduler] User {uid}: time matched ({scheduled_time}), fetching articles...")
-        articles = _fetch_articles_by_date(today_str)
+        articles = _fetch_articles_by_date(
+            today_str,
+            include_shared_summary=bool(settings.get("auto_summary_enabled")),
+        )
         if not articles:
             print(f"[scheduler] User {uid}: no articles for {today_str}")
             continue
@@ -910,7 +931,7 @@ def _dedup_articles(articles: list[dict]) -> list[dict]:
     return untitled + list(best_by_title.values())
 
 
-def _fetch_articles_by_date(date_str: str) -> list[dict]:
+def _fetch_articles_by_date(date_str: str, include_shared_summary: bool = True) -> list[dict]:
     """Fetch articles for a date, preferring cached AI summaries when available."""
     import sqlite3
     if not os.path.exists(NEWS_DB):
@@ -919,9 +940,13 @@ def _fetch_articles_by_date(date_str: str) -> list[dict]:
         _init_ai_results_table()
         conn = sqlite3.connect(NEWS_DB)
         conn.row_factory = sqlite3.Row
+        summary_expr = (
+            "COALESCE(NULLIF(r.summary, ''), a.summary)"
+            if include_shared_summary else "a.summary"
+        )
         rows = conn.execute(
             "SELECT a.id, a.title, a.source, a.date, a.time, a.body_html, "
-            "COALESCE(NULLIF(r.summary, ''), a.summary) AS summary, "
+            f"{summary_expr} AS summary, "
             "a.telegraph_url "
             "FROM articles a "
             "LEFT JOIN ai_results r ON r.article_id = a.id "
@@ -1065,6 +1090,9 @@ def _save_ai_result(article_id: int, summary: str | None = None,
 def ai_get_result(article_id):
     """Return cached AI result (summary/translation) without generating."""
     cached = _get_ai_result(article_id)
+    if cached and not _user_auto_summary_enabled(g.user_id):
+        cached = dict(cached)
+        cached.pop("summary", None)
     return jsonify(cached or {})
 
 
