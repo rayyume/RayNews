@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS user_settings (
     user_id                 INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
     auto_translate_title    INTEGER NOT NULL DEFAULT 0,
     auto_translate_content  INTEGER NOT NULL DEFAULT 0,
+    auto_summary_enabled    INTEGER NOT NULL DEFAULT 0,
     daily_summary_enabled   INTEGER NOT NULL DEFAULT 0,
     notification_config     TEXT    NOT NULL DEFAULT '{}'
 );
@@ -78,6 +79,11 @@ def get_db() -> sqlite3.Connection:
             _db.execute("ALTER TABLE ai_configs ADD COLUMN provider_type TEXT NOT NULL DEFAULT 'openai'")
         except sqlite3.OperationalError:
             pass  # column already exists
+        try:
+            _db.execute("ALTER TABLE user_settings ADD COLUMN auto_summary_enabled INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        _db.commit()
     return _db
 
 
@@ -267,7 +273,7 @@ def get_user_settings(user_id: int) -> dict | None:
     db = get_db()
     row = db.execute(
         "SELECT id, auto_translate_title, auto_translate_content, "
-        "daily_summary_enabled, notification_config "
+        "auto_summary_enabled, daily_summary_enabled, notification_config "
         "FROM user_settings WHERE user_id = ?",
         (user_id,),
     ).fetchone()
@@ -277,7 +283,8 @@ def get_user_settings(user_id: int) -> dict | None:
 def set_user_settings(user_id: int, **kwargs) -> dict:
     """Upsert settings."""
     allowed = {"auto_translate_title", "auto_translate_content",
-               "daily_summary_enabled", "notification_config"}
+               "auto_summary_enabled", "daily_summary_enabled",
+               "notification_config"}
     updates = {k: v for k, v in kwargs.items() if k in allowed}
     if not updates:
         return get_user_settings(user_id) or {}

@@ -454,9 +454,10 @@ body.body-scroll-lock{overflow:hidden!important}
     </div>
     <div class="ai-body" id="settingsBody">
       <!-- Tabs -->
-      <div style="display:flex;gap:4px;margin-bottom:16px;border-bottom:1px solid var(--border);padding-bottom:0">
+      <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:16px;border-bottom:1px solid var(--border);padding-bottom:0">
         <button class="settings-tab active" data-tab="account" onclick="switchSettingsTab('account')">账号</button>
         <button class="settings-tab" data-tab="ai" onclick="switchSettingsTab('ai')">AI</button>
+        <button class="settings-tab" data-tab="summary" onclick="switchSettingsTab('summary')">摘要</button>
         <button class="settings-tab" data-tab="translate" onclick="switchSettingsTab('translate')">翻译</button>
         <button class="settings-tab" data-tab="notify" onclick="switchSettingsTab('notify')">通知</button>
       </div>
@@ -491,6 +492,17 @@ body.body-scroll-lock{overflow:hidden!important}
         <button class="ai-save-btn" onclick="saveAIConfig()">💾 保存 AI 配置</button>
         <p class="ai-hint" style="margin:6px 0 0;text-align:center;font-size:11px;color:var(--text-3)">💡 修改配置后请先保存，再点击下方测试</p>
         <button class="ai-save-btn" onclick="testAIConnection()" style="margin-top:10px;background:var(--bg-card);color:var(--text);border:1px solid var(--border)" id="testAiBtn">🔌 测试 API 连接</button>
+      </div>
+
+      <!-- Summary Tab -->
+      <div id="settingsTabSummary" style="display:none">
+        <div class="ai-toggle" onclick="document.getElementById('autoSummaryEnabled').click()">
+          <input type="checkbox" id="autoSummaryEnabled" onclick="event.stopPropagation()">
+          <span>📝 自动生成文章摘要</span>
+        </div>
+        <p class="ai-hint" style="margin-top:8px">开启后，系统会在后台小批量为新文章生成摘要，供文章页和每日摘要复用。</p>
+
+        <button class="ai-save-btn" onclick="saveSummarySettings()" style="margin-top:16px">保存摘要设置</button>
       </div>
 
       <!-- Notification Tab -->
@@ -988,6 +1000,7 @@ function openSettings() {
   lockBodyScroll();
   switchSettingsTab('account');
   loadAIConfig();
+  loadSummarySettings();
   loadNotifyConfig();
   loadGeneralSettings();
   loadAccountTab();
@@ -1003,7 +1016,7 @@ function closeAISettings() {
 function switchSettingsTab(tab) {
   document.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
   document.querySelector('.settings-tab[data-tab="' + tab + '"]').classList.add('active');
-  ['account','ai','translate','notify'].forEach(t => {
+  ['account','ai','summary','translate','notify'].forEach(t => {
     document.getElementById('settingsTab' + t.charAt(0).toUpperCase() + t.slice(1)).style.display = t === tab ? '' : 'none';
   });
   // Load avatar preview when switching to account tab
@@ -1133,6 +1146,33 @@ async function testAIConnection() {
 
 // ─── Notification Config ─────────────────────────────────
 
+async function loadSummarySettings() {
+  try {
+    const data = await apiFetch('/settings');
+    if (!data) return;
+    document.getElementById('autoSummaryEnabled').checked = !!data.auto_summary_enabled;
+  } catch (e) {}
+}
+
+async function saveSummarySettings() {
+  try {
+    const resp = await fetch('/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
+      body: JSON.stringify({
+        auto_summary_enabled: document.getElementById('autoSummaryEnabled').checked ? 1 : 0,
+      }),
+    });
+    const data = await resp.json();
+    if (data.error) { showSettingsStatus('❌ ' + data.error, 'err'); return; }
+    userAutoSettings = {
+      ...(userAutoSettings || {}),
+      auto_summary_enabled: !!document.getElementById('autoSummaryEnabled').checked,
+    };
+    showSettingsStatus('✅ 摘要设置已保存');
+  } catch (e) { showSettingsStatus('❌ 保存失败', 'err'); }
+}
+
 async function loadNotifyConfig() {
   try {
     const data = await apiFetch('/settings');
@@ -1186,6 +1226,7 @@ async function loadUserSettings() {
     userAutoSettings = {
       auto_translate_title: !!data.auto_translate_title,
       auto_translate_content: !!data.auto_translate_content,
+      auto_summary_enabled: !!data.auto_summary_enabled,
     };
   } catch (e) {}
 }
@@ -1213,6 +1254,7 @@ async function saveGeneralSettings() {
     if (data.error) { showSettingsStatus('❌ ' + data.error, 'err'); return; }
     // Update cache after save
     userAutoSettings = {
+      ...(userAutoSettings || {}),
       auto_translate_title: !!document.getElementById('autoTranslateTitle').checked,
       auto_translate_content: !!document.getElementById('autoTranslateContent').checked,
     };
