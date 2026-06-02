@@ -43,6 +43,11 @@ self.addEventListener('activate', event => {
 self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
 
+  // ── AI endpoints: bypass SW to avoid timeout issues with long-running AI calls ──
+  if (url.pathname.startsWith('/ai/')) {
+    return;
+  }
+
   // ── API list: network-first + background cache (no cold-start delay) ──
   if (url.pathname.startsWith('/api/')) {
     // Article detail: stale-while-revalidate (fast re-opens via SW cache)
