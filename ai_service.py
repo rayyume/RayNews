@@ -242,6 +242,39 @@ class AIService:
         MAX_CHARS_PER_ARTICLE = 800  # approx 200-400 tokens per article
         MAX_ARTICLES_PER_SOURCE = 100  # cap per source to avoid one dominating
         MAX_BATCH_INPUT = 20_000  # chars per batch call to stay within context
+        def article_link(article: dict) -> str:
+            url = article.get("telegraph_url", "") or article.get("url", "") or ""
+            if url:
+                return url
+            date = article.get("date", "") or ""
+            art_id = article.get("id", 0)
+            if date and art_id:
+                return f"https://rayyu.me/#/article/{date[2:].replace('-', '-')}-{art_id}"
+            return ""
+
+        def format_article_entry(article: dict, index: int) -> str:
+            link = article.get("url", "")
+            parts = [
+                f"{index}. 来源：{article['source']}",
+                f"标题：{article['title']}",
+                f"内容摘要：{article['text']}",
+            ]
+            if link:
+                parts.append(f"链接：{link}")
+            return "\n".join(parts)
+
+        final_format_rules = (
+            "请严格按以下四个大分类输出，标题必须完全一致：\n"
+            "## 政经新闻\n"
+            "## 科技动态\n"
+            "## 商业聚焦\n"
+            "## 其他信息\n\n"
+            "每个分类下尽量至少输出 10 条；如果某分类素材不足，可以少于 10 条，但不要省略该分类。\n"
+            "每条必须使用如下格式：\n"
+            "- **单条摘要总结:** 120-220 字的详细摘要，必须包含关键主体、事件、数字/时间/影响等信息。"
+            " 末尾必须附文章链接，格式为 [🔗](URL)。\n"
+            "不要输出总述、寒暄或额外说明；不要把链接集中放到末尾。"
+        )
 
         # ── Build per-article excerpts ──
         excerpts = []
@@ -249,7 +282,7 @@ class AIService:
             art_id = a.get("id", 0)
             source = a.get("source", "?")
             title = a.get("title", "?")
-            url = a.get("telegraph_url", "") or ""
+            url = article_link(a)
             summary = a.get("summary", "") or ""
             body_html = a.get("body_html", "") or ""
 
@@ -295,9 +328,7 @@ class AIService:
         total_articles_without_summary = len(capped) - total_articles_with_summary
 
         for ex in capped:
-            entry = f"[{ex['source']}] {ex['title']}"
-            if ex["text"] and not ex["has_summary"]:
-                entry += f"\n{ex['text']}"
+            entry = format_article_entry(ex, 1)
             entry_len = len(entry) + 10  # overhead
             if current_chars + entry_len > MAX_BATCH_INPUT and current_batch:
                 batches.append(current_batch)
@@ -319,19 +350,19 @@ class AIService:
             batch_summaries = []
             for i, batch in enumerate(batches):
                 batch_text = "\n\n".join(
-                    f"{j+1}. [{e['source']}] {e['title']}"
-                    + (f"\n{e['text']}" if e['text'] and not e['has_summary'] else "")
-                    + (f"\n   ↗: {e['url']}" if e['url'] else "")
+                    format_article_entry(e, j + 1)
                     for j, e in enumerate(batch)
                 )
                 bm = [
                     {"role": "system",
-                     "content": "你是一个新闻编辑助手。请为以下这组新闻生成一段简洁的中文摘要（200字以内），"
-                                "按主题/重要性归类。如有来源链接请在摘要中用 [↗](url) 格式引用。"},
+                     "content": "你是一个新闻编辑助手。请把这批新闻整理成日报候选条目。"
+                                "必须保留每条新闻的原始链接，链接格式使用 [🔗](URL)。"
+                                "按政经新闻、科技动态、商业聚焦、其他信息四类归类；"
+                                "每条候选摘要保留关键事实，不要过度压缩。"},
                     {"role": "user",
-                     "content": f"以下是一组新闻（批次 {i+1}/{len(batches)}），请生成摘要：\n\n{batch_text}"},
+                     "content": f"以下是一组新闻（批次 {i+1}/{len(batches)}），请生成分类候选条目：\n\n{batch_text}"},
                 ]
-                result = self.chat(bm, max_tokens=1000)
+                result = self.chat(bm, max_tokens=2500)
                 batch_summaries.append({
                     "batch_index": i,
                     "summary": result,
@@ -352,15 +383,14 @@ class AIService:
         if batch_summaries is None:
             # Single batch: build final prompt directly from articles
             articles_text = "\n\n".join(
-                f"{i+1}. [{e['source']}] {e['title']}"
-                + (f"\n{e['text']}" if e['text'] and not e['has_summary'] else "")
-                + (f"\n   ↗: {e['url']}" if e['url'] else "")
+                format_article_entry(e, i + 1)
                 for i, e in enumerate(final_input)
             )
-            sys_msg = ("你是一个新闻编辑助手。请为以下今日新闻生成一份简洁的每日摘要，"
-                       "按主题分类，每条新闻用一句话概括。"
-                       "如有来源链接请在摘要中用 [↗](url) 格式引用。")
-            user_msg = f"以下是今日新闻列表，请生成摘要：\n\n{articles_text}"
+            sys_msg = (
+                "你是一个资深新闻编辑。请基于每篇文章的标题、来源、内容摘要和链接生成详细每日摘要。\n"
+                + final_format_rules
+            )
+            user_msg = f"以下是今日新闻列表，请生成每日摘要：\n\n{articles_text}"
             final_prompt = [
                 {"role": "system", "content": sys_msg},
                 {"role": "user", "content": user_msg},
@@ -371,15 +401,17 @@ class AIService:
                 f"【批次 {b['batch_index']+1} — {b['article_count']} 条】\n{b['summary']}"
                 for b in batch_summaries
             )
-            sys_msg = ("你是一个新闻编辑。请将以下各批次的新闻摘要合并成一份完整、通顺的每日摘要。"
-                       "按主题分类，避免重复。语言保持简洁中文。")
-            user_msg = f"以下是各批次摘要，请合并为完整每日摘要：\n\n{batch_texts}"
+            sys_msg = (
+                "你是一个资深新闻编辑。请将以下各批次候选条目合并为完整每日摘要，去重但不要过度压缩。\n"
+                + final_format_rules
+            )
+            user_msg = f"以下是各批次候选摘要，请合并为完整每日摘要：\n\n{batch_texts}"
             final_prompt = [
                 {"role": "system", "content": sys_msg},
                 {"role": "user", "content": user_msg},
             ]
 
-        final_summary = self.chat(final_prompt, max_tokens=2000)
+        final_summary = self.chat(final_prompt, max_tokens=5000)
 
         return {
             "summary": final_summary,

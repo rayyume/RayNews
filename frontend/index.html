@@ -1164,7 +1164,11 @@ async function saveSummarySettings() {
       }),
     });
     const data = await resp.json();
-    if (data.error) { showSettingsStatus('❌ ' + data.error, 'err'); return; }
+    if (data.error) {
+      showSettingsStatus('❌ ' + data.error, 'err');
+      loadSummarySettings();
+      return;
+    }
     userAutoSettings = {
       ...(userAutoSettings || {}),
       auto_summary_enabled: !!document.getElementById('autoSummaryEnabled').checked,

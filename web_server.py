@@ -1099,6 +1099,12 @@ def update_settings():
     if "notification_config" in data:
         nc = data["notification_config"]
         data["notification_config"] = json.dumps(nc) if isinstance(nc, dict) else nc
+    if _is_enabled_value(data.get("auto_summary_enabled")):
+        config = get_ai_config(g.user_id)
+        if not config or not config.get("enabled") or not config.get("api_key"):
+            return jsonify({
+                "error": "请先在AI菜单中设置API"
+            }), 400
     settings = set_user_settings(g.user_id, **data)
     if not settings:
         return jsonify({"error": "update failed"}), 400
@@ -1111,9 +1117,13 @@ def update_settings():
         except (json.JSONDecodeError, TypeError):
             nc = {}
     safe["notification_config"] = nc
-    if data.get("auto_summary_enabled"):
+    if _is_enabled_value(data.get("auto_summary_enabled")):
         threading.Thread(target=_run_auto_summary_once, daemon=True).start()
     return jsonify(safe)
+
+
+def _is_enabled_value(value) -> bool:
+    return value is True or value == 1 or str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 import json
