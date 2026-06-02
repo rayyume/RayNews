@@ -23,8 +23,8 @@ from models import (
 from auth import init_auth, create_token, require_auth, require_role
 from ai_service import AIService
 
-AUTO_SUMMARY_BATCH_LIMIT = int(os.environ.get("AUTO_SUMMARY_BATCH_LIMIT", "4"))
-AUTO_SUMMARY_INTERVAL_SECONDS = int(os.environ.get("AUTO_SUMMARY_INTERVAL_SECONDS", "120"))
+AUTO_SUMMARY_BATCH_LIMIT = int(os.environ.get("AUTO_SUMMARY_BATCH_LIMIT", "20"))
+AUTO_SUMMARY_INTERVAL_SECONDS = int(os.environ.get("AUTO_SUMMARY_INTERVAL_SECONDS", "30"))
 
 # ─── App Setup ────────────────────────────────────────────────
 
@@ -892,28 +892,19 @@ def _dedup_articles(articles: list[dict]) -> list[dict]:
 
     Heuristic: same normalized title → same event → keep first with body.
     """
-    seen_titles = {}
-    deduped = []
+    best_by_title = {}
+    untitled = []
     for a in articles:
         title = (a.get("title") or "").strip().lower()
         # Normalize whitespace and common quote characters.
         normalized = re.sub("[\\s\"'“”‘’「」『』]+", " ", title).strip()
         if not normalized:
-            deduped.append(a)
+            untitled.append(a)
             continue
-        if normalized in seen_titles:
-            existing = seen_titles[normalized]
-            # Keep the one that has body_html
-            if a.get("body_html") and not existing.get("body_html"):
-                # Replace existing with this one (more complete)
-                deduped.remove(existing)
-                deduped.append(a)
-                seen_titles[normalized] = a
-            # Otherwise keep existing (already has body or both have/don't have)
-            continue
-        seen_titles[normalized] = a
-        deduped.append(a)
-    return deduped
+        existing = best_by_title.get(normalized)
+        if existing is None or (a.get("body_html") and not existing.get("body_html")):
+            best_by_title[normalized] = a
+    return untitled + list(best_by_title.values())
 
 
 def _fetch_articles_by_date(date_str: str) -> list[dict]:

@@ -240,8 +240,8 @@ class AIService:
 
     def daily_summary(self, articles: list[dict]) -> dict:
         MAX_CHARS_PER_ARTICLE = 800  # approx 200-400 tokens per article
-        MAX_ARTICLES_PER_SOURCE = 30  # cap per source to avoid one dominating
-        MAX_BATCH_INPUT = 10_000  # chars per batch call to stay within context
+        MAX_ARTICLES_PER_SOURCE = 100  # cap per source to avoid one dominating
+        MAX_BATCH_INPUT = 20_000  # chars per batch call to stay within context
 
         # ── Build per-article excerpts ──
         excerpts = []
