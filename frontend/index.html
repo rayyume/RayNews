@@ -340,6 +340,16 @@ body.body-scroll-lock{overflow:hidden!important}
 .settings-tab{padding:8px 16px;border:none;background:none;color:var(--text-3);font-size:13px;font-weight:600;cursor:pointer;font-family:var(--font);border-bottom:2px solid transparent;margin-bottom:-1px;transition:all 0.15s}
 .settings-tab:hover{color:var(--text)}
 .settings-tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+.source-manager{display:flex;flex-direction:column;gap:10px}
+.source-manager-head{display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin-bottom:8px}
+.source-row{display:grid;grid-template-columns:minmax(120px,1.2fr) minmax(110px,.8fr) 110px 72px;gap:8px;align-items:center;padding:10px 0;border-bottom:1px solid var(--border)}
+.source-name{font-size:12px;color:var(--text-2);line-height:1.35;word-break:break-word}
+.source-meta{font-size:11px;color:var(--text-3);margin-top:3px}
+.source-label-input,.source-cat-select{width:100%;padding:7px 9px;border:1px solid var(--border);border-radius:8px;background:var(--bg-card);color:var(--text);font-size:12px;font-family:var(--font)}
+.source-save-btn{padding:7px 10px;border-radius:8px;border:1px solid var(--accent);background:var(--accent-dim);color:var(--accent);font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font)}
+.source-label-main{display:block;font-weight:700;line-height:1.2}
+.source-label-sub{display:block;margin-top:2px;font-size:10px;color:var(--text-3);line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media(max-width:640px){.source-row{grid-template-columns:1fr}.source-save-btn{width:100%}}
 </style>
 </head>
 <body>
@@ -474,6 +484,7 @@ body.body-scroll-lock{overflow:hidden!important}
         <button class="settings-tab active" data-tab="account" onclick="switchSettingsTab('account')">账号</button>
         <button class="settings-tab" data-tab="ai" onclick="switchSettingsTab('ai')">AI</button>
         <button class="settings-tab" data-tab="summary" onclick="switchSettingsTab('summary')">摘要</button>
+        <button class="settings-tab" data-tab="sources" onclick="switchSettingsTab('sources')">订阅源</button>
         <button class="settings-tab" data-tab="translate" onclick="switchSettingsTab('translate')">翻译</button>
         <button class="settings-tab" data-tab="notify" onclick="switchSettingsTab('notify')">通知</button>
       </div>
@@ -519,6 +530,21 @@ body.body-scroll-lock{overflow:hidden!important}
         <p class="ai-hint" style="margin-top:8px">开启后，系统会在后台小批量为新文章生成摘要，供文章页和每日摘要复用。</p>
 
         <button class="ai-save-btn" onclick="saveSummarySettings()" style="margin-top:16px">保存摘要设置</button>
+      </div>
+
+      <!-- Sources Tab -->
+      <div id="settingsTabSources" style="display:none">
+        <div class="source-manager-head">
+          <div>
+            <div style="font-weight:700;font-size:14px">订阅源分类</div>
+            <p class="ai-hint" style="margin-top:4px">AI 会缩写来源名称并固定归入四个分类，手动保存后不会被 AI 覆盖。</p>
+          </div>
+          <button class="ai-save-btn" onclick="classifySources()" style="margin:0;width:auto;padding:8px 12px">AI处理待分类</button>
+        </div>
+        <div id="sourceManagerStatus" class="ai-hint" style="margin-bottom:8px"></div>
+        <div class="source-manager" id="sourceManagerList">
+          <div class="fav-empty">加载中...</div>
+        </div>
       </div>
 
       <!-- Notification Tab -->
@@ -598,14 +624,17 @@ body.body-scroll-lock{overflow:hidden!important}
 const PAGE_SIZE = 30;
 const INITIAL_LOAD_SIZE = 99999;  // Load all articles for client-side pagination
 
-// Source category mapping (using abbreviated source names from fetcher)
-const CATEGORY_MAP = {
+// Source category mapping. Seeded here as a fallback; normally loaded from /api/sources.
+let CATEGORY_MAP = {
   'News': ['竹新社', '风向旗参考快讯', '界面新闻', '即刻精选', '联合早报'],
   'Tech': ['凤凰网科技', 'cnBeta', '知识分子', '逛逛GitHub', '开源日记', '科技圈🎗在花频道📮', 'MacRumors', '少数派', '爱范儿', 'Chiphell', 'APPDO 数字生活指南', 'XP Digital Lab', 'RaysBlog', 'Yummy 😋', '阮一峰', '小声逼逼'],
   'Biz': ['金十数据', '格隆汇', '财经早餐', '凤凰网财经', '晚点', '投资界', '创业最前线', 'WBusiness商业', '包邮区', '理想生活实验室'],
   'Info': ['美卡指南', '蓝翼说', '酒店圈儿', '银探', '济南本地宝'],
 };
 const CATEGORY_ORDER = ['News', 'Tech', 'Biz', 'Info'];
+const CATEGORY_NAMES = { News: '政经新闻', Tech: '科技动态', Biz: '商业聚焦', Info: '其他信息' };
+let sourceMeta = {};
+let sourceRows = [];
 
 let news = [];
 let filter = 'all';
@@ -840,6 +869,47 @@ async function parseJsonResponse(resp) {
   return data;
 }
 
+function rebuildCategoryMap(rows) {
+  const next = { News: [], Tech: [], Biz: [], Info: [] };
+  sourceMeta = {};
+  sourceRows = rows || [];
+  for (const row of sourceRows) {
+    const source = row.source || '';
+    const cat = CATEGORY_ORDER.includes(row.category) ? row.category : 'Info';
+    if (!source) continue;
+    sourceMeta[source] = row;
+    if (!next[cat].includes(source)) next[cat].push(source);
+  }
+  CATEGORY_MAP = next;
+}
+
+async function loadSourceCategories() {
+  try {
+    const resp = await fetch('/api/sources?t=' + Date.now());
+    const data = await resp.json();
+    if (data && Array.isArray(data.sources)) {
+      rebuildCategoryMap(data.sources);
+    }
+  } catch (e) {
+    // Keep the built-in fallback CATEGORY_MAP.
+  }
+}
+
+function sourceLabel(source) {
+  const meta = sourceMeta[source];
+  return (meta && meta.label) ? meta.label : source;
+}
+
+function sourceCategory(source) {
+  const meta = sourceMeta[source];
+  if (meta && CATEGORY_ORDER.includes(meta.category)) return meta.category;
+  return getCategory(source) || 'Info';
+}
+
+function categoryDisplayName(cat) {
+  return cat;
+}
+
 // ═══ Body Scroll Lock ════════════════════════════════════
 let _scrollLockCount = 0;
 function lockBodyScroll() {
@@ -1042,6 +1112,7 @@ function openSettings() {
   loadNotifyConfig();
   loadGeneralSettings();
   loadAccountTab();
+  loadSourcesTab();
   document.getElementById('settingsStatus').className = '';
   document.getElementById('settingsStatus').textContent = '';
 }
@@ -1054,11 +1125,12 @@ function closeAISettings() {
 function switchSettingsTab(tab) {
   document.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
   document.querySelector('.settings-tab[data-tab="' + tab + '"]').classList.add('active');
-  ['account','ai','summary','translate','notify'].forEach(t => {
+  ['account','ai','summary','sources','translate','notify'].forEach(t => {
     document.getElementById('settingsTab' + t.charAt(0).toUpperCase() + t.slice(1)).style.display = t === tab ? '' : 'none';
   });
   // Load avatar preview when switching to account tab
   if (tab === 'account') loadAccountTab();
+  if (tab === 'sources') loadSourcesTab();
 }
 
 function loadAccountTab() {
@@ -1087,6 +1159,98 @@ function showSettingsStatus(msg, type) {
     const body = document.querySelector('.ai-body');
     if (body) body.scrollTop = body.scrollHeight;
   }, 50);
+}
+
+// ─── Source Manager ─────────────────────────────────────
+
+async function loadSourcesTab() {
+  const list = document.getElementById('sourceManagerList');
+  if (!list || !authToken) return;
+  try {
+    const data = await apiFetch('/sources');
+    if (!data || !Array.isArray(data.sources)) return;
+    rebuildCategoryMap(data.sources);
+    renderSourceManager(data.sources);
+    renderFilters();
+  } catch (e) {
+    list.innerHTML = '<div class="fav-empty">订阅源加载失败</div>';
+  }
+}
+
+function renderSourceManager(rows) {
+  const list = document.getElementById('sourceManagerList');
+  const status = document.getElementById('sourceManagerStatus');
+  if (!list) return;
+  const pending = rows.filter(r => r.status === 'pending' || r.status === 'failed').length;
+  if (status) status.textContent = pending ? `${pending} 个来源待 AI 处理` : '所有来源已处理';
+  if (!rows.length) {
+    list.innerHTML = '<div class="fav-empty">暂无订阅源</div>';
+    return;
+  }
+  list.innerHTML = rows.map((row, idx) => {
+    const options = CATEGORY_ORDER.map(cat =>
+      `<option value="${cat}" ${row.category === cat ? 'selected' : ''}>${categoryDisplayName(cat)}</option>`
+    ).join('');
+    const label = esc(row.label || row.source || '');
+    const source = esc(row.source || '');
+    const meta = `${row.article_count || 0} 篇 · ${row.status || 'pending'}`;
+    return `
+      <div class="source-row" data-source-idx="${idx}">
+        <div>
+          <div class="source-name">${source}</div>
+          <div class="source-meta">${esc(meta)}</div>
+        </div>
+        <input class="source-label-input" value="${label}" maxlength="20" aria-label="来源缩写">
+        <select class="source-cat-select" aria-label="来源分类">${options}</select>
+        <button class="source-save-btn" onclick="saveSourceRow(${idx})">保存</button>
+      </div>`;
+  }).join('');
+}
+
+async function saveSourceRow(idx) {
+  const row = sourceRows[idx];
+  const el = document.querySelector(`.source-row[data-source-idx="${idx}"]`);
+  if (!row || !el) return;
+  const label = el.querySelector('.source-label-input').value.trim();
+  const category = el.querySelector('.source-cat-select').value;
+  try {
+    const data = await apiFetch('/sources', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: row.source, label, category }),
+    });
+    if (data && data.error) throw new Error(data.error);
+    showSettingsStatus('订阅源已保存', 'ok');
+    await loadSourceCategories();
+    await loadSourcesTab();
+    renderFilters();
+    renderList();
+  } catch (e) {
+    showSettingsStatus('保存失败: ' + e.message, 'error');
+  }
+}
+
+async function classifySources() {
+  const status = document.getElementById('sourceManagerStatus');
+  if (status) status.textContent = 'AI 正在处理待分类来源...';
+  try {
+    const resp = await fetch('/sources/classify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
+      body: JSON.stringify({ limit: 20 }),
+    });
+    const data = await parseJsonResponse(resp);
+    const okCount = (data.processed || []).length;
+    const failCount = (data.failed || []).length;
+    showSettingsStatus(`AI 已处理 ${okCount} 个来源，失败 ${failCount} 个，剩余 ${data.remaining || 0} 个`, failCount ? 'warn' : 'ok');
+    await loadSourceCategories();
+    await loadSourcesTab();
+    renderFilters();
+    renderList();
+  } catch (e) {
+    showSettingsStatus('AI处理失败: ' + e.message, 'error');
+    if (status) status.textContent = '';
+  }
 }
 
 // ─── AI Config ───────────────────────────────────────────
@@ -1944,7 +2108,7 @@ function renderFavorites(data) {
       <div class="fav-item-body">
         <div class="fav-item-title">${esc(item.title)}</div>
         <div class="fav-item-meta">
-          <span class="badge" style="${badgeStyle(item.source)}">${esc(item.source)}</span>
+          <span class="badge" style="${badgeStyle(item.source)}" title="${esc(item.source)}">${esc(sourceLabel(item.source))}</span>
           <span>${formatTime(item.date, item.time)}</span>
         </div>
       </div>
@@ -2197,6 +2361,7 @@ async function loadData() {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 8000);
     const resp = await fetch('/api/news?size=' + INITIAL_LOAD_SIZE + '&t=' + Date.now(), { signal: controller.signal });
+    await loadSourceCategories();
     clearTimeout(timeout);
     const data = await resp.json();
     news = data.items || [];
@@ -2223,6 +2388,7 @@ async function loadSince(timestamp) {
     const existingIds = new Set(news.map(n => n.id));
     const fresh = newItems.filter(n => !existingIds.has(n.id));
     if (fresh.length === 0) return false;
+    await loadSourceCategories();
     news = fresh.concat(news);
     // Re-sort by timestamp descending
     news.sort((a, b) => b.timestamp - a.timestamp);
@@ -2254,6 +2420,7 @@ async function loadDataWithRetry(retries, delay) {
       const controller = new AbortController();
       const to = setTimeout(function() { controller.abort(); }, 8000);
       const resp = await fetch('/api/news?size=' + INITIAL_LOAD_SIZE + '&t=' + Date.now(), { signal: controller.signal });
+      await loadSourceCategories();
       clearTimeout(to);
       const data = await resp.json();
       news = data.items || [];
@@ -2278,13 +2445,19 @@ function renderFilters() {
   let html = '<div class="cat-header active" data-f="all" data-is-all="1">All<span class="arrow" style="opacity:0">▶</span></div>';
   // Category groups
   for (const cat of CATEGORY_ORDER) {
-    const catSources = CATEGORY_MAP[cat].filter(s => sources.includes(s));
+    const catSources = sources
+      .filter(s => sourceCategory(s) === cat)
+      .sort((a, b) => sourceLabel(a).localeCompare(sourceLabel(b), 'zh-CN'));
     if (catSources.length === 0) continue;
     const collapsedKey = 'raynews_cat_' + cat;
     const isCollapsed = localStorage.getItem(collapsedKey) !== '0';
-    html += `<div class="cat-header" data-cat="${cat}">${cat}<span class="arrow ${isCollapsed ? '' : 'open'}">▶</span></div>`;
+    html += `<div class="cat-header" data-cat="${cat}">${categoryDisplayName(cat)}<span class="arrow ${isCollapsed ? '' : 'open'}">▶</span></div>`;
     html += `<div class="cat-body ${isCollapsed ? 'collapsed' : ''}" data-cat="${cat}">`;
-    html += catSources.map(s => `<button class="fbtn" data-f="${esc(s)}">${esc(s)}</button>`).join('');
+    html += catSources.map(s => {
+      const label = sourceLabel(s);
+      const suffix = label && label !== s ? `<span class="source-label-sub">${esc(s)}</span>` : '';
+      return `<button class="fbtn" data-f="${esc(s)}" title="${esc(s)}"><span class="source-label-main">${esc(label)}</span>${suffix}</button>`;
+    }).join('');
     html += `</div>`;
   }
   el.innerHTML = html;
@@ -2328,7 +2501,7 @@ function selectFilter(value) {
     activeCat = value.replace('cat:', '');
   } else {
     // Find which category this source belongs to
-    activeCat = Object.entries(CATEGORY_MAP).find(([,sources]) => sources.includes(value))?.[0] || '';
+    activeCat = sourceCategory(value) || '';
   }
   for (const cat of CATEGORY_ORDER) {
     const shouldExpand = cat === activeCat;
@@ -2351,7 +2524,7 @@ function selectFilter(value) {
     const header = el.querySelector(`.cat-header[data-cat="${cat}"]`);
     if (header) header.classList.add('active');
   } else {
-    const btn = el.querySelector(`.fbtn[data-f="${esc(value)}"]`);
+    const btn = [...el.querySelectorAll('.fbtn')].find(b => b.dataset.f === value);
     if (btn) btn.classList.add('active');
   }
 }
@@ -2372,8 +2545,7 @@ function renderList() {
     filtered = news;
   } else if (filter.startsWith('cat:')) {
     const cat = filter.replace('cat:', '');
-    const sources = CATEGORY_MAP[cat] || [];
-    filtered = news.filter(n => sources.includes(n.source));
+    filtered = news.filter(n => sourceCategory(n.source) === cat);
   } else {
     filtered = news.filter(n => n.source === filter);
   }
@@ -2399,7 +2571,7 @@ function renderList() {
       <div class="item-body">
         <div class="item-title">${esc(n.title)}</div>
         <div class="item-meta">
-          <span class="badge" style="${badgeStyle(n.source)}">${esc(n.source)}</span>
+          <span class="badge" style="${badgeStyle(n.source)}" title="${esc(n.source)}">${esc(sourceLabel(n.source))}</span>
           <span>${formatTime(n.date, n.time)}</span>
           ${n.has_full_content ? '<span class="full-tag">● 全文</span>' : ''}
         </div>
@@ -2433,8 +2605,7 @@ function goToPage(page) {
     filtered = news;
   } else if (filter.startsWith('cat:')) {
     const cat = filter.replace('cat:', '');
-    const sources = CATEGORY_MAP[cat] || [];
-    filtered = news.filter(n => sources.includes(n.source));
+    filtered = news.filter(n => sourceCategory(n.source) === cat);
   } else {
     filtered = news.filter(n => n.source === filter);
   }
@@ -2494,7 +2665,7 @@ function openArticle(id) {
       wrap.innerHTML = `
         <h1>${esc(data.title || '')}</h1>
         <div class="article-meta" style="position:relative">
-          <span class="badge" style="${badgeStyle(data.source || '')}">${esc(data.source || '')}</span>
+          <span class="badge" style="${badgeStyle(data.source || '')}" title="${esc(data.source || '')}">${esc(sourceLabel(data.source || ''))}</span>
           <span>${formatTime(data.date || '', data.time || '')}</span>
           <span style="margin-left:auto;display:flex;gap:8px;align-items:center" id="aiActions" data-article-id="${id}">
             <button id="favBtn" onclick="toggleFavorite()" style="display:none;background:#161a2a;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:3px 10px;border-radius:100px;font-family:var(--font)" title="收藏"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin-right:3px"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg><span>收藏</span></button>
@@ -2537,7 +2708,7 @@ function openArticle(id) {
   wrap.innerHTML = `
     <h1>${esc(n.title)}</h1>
     <div class="article-meta" style="position:relative">
-      <span class="badge" style="${badgeStyle(n.source)}">${esc(n.source)}</span>
+      <span class="badge" style="${badgeStyle(n.source)}" title="${esc(n.source)}">${esc(sourceLabel(n.source))}</span>
       <span>${formatTime(n.date, n.time)}</span>
       <span style="margin-left:auto;display:flex;gap:8px;align-items:center" id="aiActions" data-article-id="${id}">
         <button id="favBtn" onclick="toggleFavorite()" style="display:none;background:#161a2a;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:3px 10px;border-radius:100px;font-family:var(--font)" title="收藏"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin-right:3px"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg><span>收藏</span></button>

@@ -14,6 +14,8 @@ from pathlib import Path
 
 import requests
 
+from source_categories import CATEGORY_NAMES, CATEGORY_ORDER, source_rows
+
 REFRESH_INTERVAL = 900  # 15 minutes
 LOCK_FILE = "/tmp/raynews-fetcher.lock"
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
@@ -174,6 +176,20 @@ def api_news_detail(article_id: int) -> bytes:
         return json.dumps({"error": str(e)}).encode()
 
 
+def api_sources() -> bytes:
+    """GET /api/sources — source category metadata."""
+    try:
+        conn = get_db()
+        rows = source_rows(conn)
+        return json.dumps({
+            "categories": CATEGORY_ORDER,
+            "category_names": CATEGORY_NAMES,
+            "sources": rows,
+        }, ensure_ascii=False).encode()
+    except Exception as e:
+        return json.dumps({"error": str(e)}).encode()
+
+
 def send_json(handler, data: bytes, status=200):
     """Send a JSON response."""
     try:
@@ -211,6 +227,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if path == "/api/news":
             send_json(self, api_news_list(params))
+            return
+
+        if path == "/api/sources":
+            send_json(self, api_sources())
             return
 
         # /api/news/<id>

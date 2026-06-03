@@ -1,10 +1,13 @@
 """RayNews AI Service — unified interface for OpenAI-compatible and Claude-compatible APIs."""
 
 import os
+import json
 import requests
 import re
 from collections import defaultdict
 from typing import Optional
+
+from source_categories import CATEGORY_NAMES, CATEGORY_ORDER, clamp_weighted, local_short_source_name
 
 
 # ─── Token-aware text truncation ─────────────────────────────
@@ -213,6 +216,55 @@ class AIService:
              "content": f"{prompt}\n\n文章内容：\n{truncated}"},
         ]
         return self.chat(messages)
+
+    def classify_source(self, source: str, titles: list[str] | None = None) -> dict:
+        """Classify a source and shorten its display name using the user's AI API."""
+        titles = [t for t in (titles or []) if t][:8]
+        category_lines = "\n".join(f"- {key}: {CATEGORY_NAMES[key]}" for key in CATEGORY_ORDER)
+        title_lines = "\n".join(f"{idx + 1}. {title}" for idx, title in enumerate(titles)) or "无"
+        fallback_label = local_short_source_name(source)
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是新闻来源整理助手。你的任务不是改写来源名，而是缩写来源名："
+                    "去掉 Telegram Channel、频道、表情符号、装饰性后缀等无效内容，"
+                    "只保留最具代表性的来源名称。分类只能从给定类别中选择。"
+                    "必须只输出 JSON，不要输出解释。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"来源原名：{source}\n\n"
+                    f"最近文章标题：\n{title_lines}\n\n"
+                    f"可选分类：\n{category_lines}\n\n"
+                    "输出 JSON 格式：\n"
+                    "{\"category\":\"News|Tech|Biz|Info\",\"label\":\"缩写后的来源名\",\"confidence\":0.0,\"reason\":\"简短原因\"}\n\n"
+                    "规则：\n"
+                    "1. category 必须是 News、Tech、Biz、Info 之一。\n"
+                    "2. label 是缩写，不是改写；如果原名已经简洁，保持原名。\n"
+                    "3. label 按 ASCII=1、中文和其他非 ASCII=2 计算，长度必须不超过 20。\n"
+                    "4. 示例：竹新社 - Telegram Channel -> 竹新社。\n"
+                    "5. 示例：科技圈🎗在花频道📮 - Telegram Channel -> 在花科技圈。"
+                ),
+            },
+        ]
+        raw = self.chat(messages, max_tokens=300, temperature=0.1).strip()
+        match = re.search(r"\{.*\}", raw, flags=re.S)
+        if not match:
+            raise ValueError("AI source classification did not return JSON")
+        data = json.loads(match.group(0))
+        category = data.get("category")
+        if category not in CATEGORY_ORDER:
+            category = "Info"
+        label = clamp_weighted(data.get("label") or fallback_label, 20)
+        return {
+            "category": category,
+            "label": label or fallback_label,
+            "confidence": data.get("confidence"),
+            "reason": data.get("reason") or "",
+        }
 
     # ─── Translate (bilingual) ───────────────────────────────
 

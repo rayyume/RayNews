@@ -25,6 +25,10 @@ from models import (
 )
 from auth import init_auth, create_token, require_auth, require_role
 from ai_service import AIService
+from source_categories import (
+    CATEGORY_NAMES, CATEGORY_ORDER, clamp_weighted, ensure_article_sources,
+    recent_titles_for_source, source_rows, update_source_category,
+)
 
 AUTO_SUMMARY_BATCH_LIMIT = int(os.environ.get("AUTO_SUMMARY_BATCH_LIMIT", "20"))
 AUTO_SUMMARY_INTERVAL_SECONDS = int(os.environ.get("AUTO_SUMMARY_INTERVAL_SECONDS", "30"))
@@ -1279,6 +1283,119 @@ def ai_get_result(article_id):
         cached = dict(cached)
         cached.pop("summary", None)
     return jsonify(cached or {})
+
+
+# ─── Source Categories ─────────────────────────────────────
+
+@app.route("/sources", methods=["GET"])
+@require_auth
+def list_sources():
+    conn = _get_news_db()
+    if not conn:
+        return jsonify({"error": "news db not found"}), 404
+    return jsonify({
+        "categories": CATEGORY_ORDER,
+        "category_names": CATEGORY_NAMES,
+        "sources": source_rows(conn),
+    })
+
+
+@app.route("/sources", methods=["PUT"])
+@require_auth
+def save_source():
+    conn = _get_news_db()
+    if not conn:
+        return jsonify({"error": "news db not found"}), 404
+    data = request.get_json(silent=True) or {}
+    source = (data.get("source") or "").strip()
+    category = (data.get("category") or "").strip()
+    label = (data.get("label") or "").strip()
+    if not source:
+        return jsonify({"error": "source required"}), 400
+    if category not in CATEGORY_ORDER:
+        return jsonify({"error": "invalid category"}), 400
+    if not label:
+        return jsonify({"error": "label required"}), 400
+    label = clamp_weighted(label, 20)
+    try:
+        row = update_source_category(
+            conn, source, category, label, status="manual", reason="user edited"
+        )
+        return jsonify(row)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/sources/classify", methods=["POST"])
+@require_auth
+def classify_sources():
+    conn = _get_news_db()
+    if not conn:
+        return jsonify({"error": "news db not found"}), 404
+    config = get_ai_config(g.user_id)
+    if not config or not config.get("enabled") or not config.get("api_key"):
+        return jsonify({"error": "请先在AI菜单中设置API"}), 400
+
+    data = request.get_json(silent=True) or {}
+    limit = min(max(int(data.get("limit", 20) or 20), 1), 50)
+    force = bool(data.get("force"))
+    ensure_article_sources(conn)
+    rows = source_rows(conn)
+    candidates = [
+        row for row in rows
+        if row.get("source")
+        and row.get("status") != "manual"
+        and (force or row.get("status") in ("pending", "failed"))
+    ][:limit]
+
+    svc = AIService(
+        api_key=config["api_key"],
+        endpoint=config["endpoint"],
+        model=config["model"],
+        provider_type=config.get("provider_type", "openai"),
+    )
+    processed = []
+    failed = []
+    for row in candidates:
+        source = row["source"]
+        titles = recent_titles_for_source(conn, source, limit=8)
+        try:
+            result = svc.classify_source(source, titles)
+            saved = update_source_category(
+                conn,
+                source,
+                result["category"],
+                result["label"],
+                status="classified",
+                confidence=result.get("confidence"),
+                reason=result.get("reason") or "ai classified",
+                sample_titles=titles,
+            )
+            processed.append(saved)
+        except Exception as e:
+            try:
+                update_source_category(
+                    conn,
+                    source,
+                    row.get("category") or "Info",
+                    row.get("label") or source,
+                    status="failed",
+                    reason=str(e)[:300],
+                    sample_titles=titles,
+                )
+            except Exception:
+                pass
+            failed.append({"source": source, "error": str(e)})
+
+    remaining = [
+        row for row in source_rows(conn)
+        if row.get("status") in ("pending", "failed") and row.get("status") != "manual"
+    ]
+    return jsonify({
+        "processed": processed,
+        "failed": failed,
+        "remaining": len(remaining),
+    })
 
 
 # ─── Settings Routes ────────────────────────────────────────

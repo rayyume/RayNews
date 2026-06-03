@@ -23,6 +23,8 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
+from source_categories import ensure_article_sources, init_source_categories
+
 # ─── Config (overridable via environment variables) ──────
 TELEGRAM_CHANNEL = os.environ.get("TELEGRAM_CHANNEL", "your_channel")
 TELEGRAM_LIST_URL = f"https://t.me/s/{TELEGRAM_CHANNEL}"
@@ -72,6 +74,7 @@ def init_db() -> sqlite3.Connection:
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON articles(timestamp DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_source ON articles(source)")
+    init_source_categories(conn)
     conn.commit()
     return conn
 
@@ -98,6 +101,7 @@ def upsert_articles(conn: sqlite3.Connection, entries: list[dict]):
             e.get("summary", ""),
         ))
     conn.executemany(sql, rows)
+    ensure_article_sources(conn)
     conn.commit()
     log.info(f"SQLite: upserted {len(rows)} articles"
              f" (total: {conn.execute('SELECT COUNT(*) FROM articles').fetchone()[0]})")
