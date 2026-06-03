@@ -1295,6 +1295,24 @@ function countTodayArticles() {
   return news.filter(n => n.date === todayStr).length;
 }
 
+async function waitDailySummaryJob(jobId, onProgress) {
+  for (let attempt = 0; attempt < 360; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, attempt === 0 ? 800 : 2000));
+    const resp = await fetch('/ai/daily-summary/' + encodeURIComponent(jobId), {
+      headers: { 'Authorization': 'Bearer ' + authToken },
+    });
+    if (resp.status === 401) {
+      logout();
+      throw new Error('登录已过期，请重新登录');
+    }
+    const data = await parseJsonResponse(resp);
+    if (data.status === 'completed') return data;
+    if (data.status === 'failed') throw new Error(data.error || '生成失败');
+    if (onProgress) onProgress(data, attempt + 1);
+  }
+  throw new Error('生成时间过长，请稍后重试');
+}
+
 // ─── Daily Summary ───────────────────────────────────────
 
 async function triggerDailySummary() {
@@ -1303,7 +1321,12 @@ async function triggerDailySummary() {
   try {
     const resp = await fetch('/ai/daily-summary', { method: 'POST', headers: { 'Authorization': 'Bearer ' + authToken } });
     if (resp.status === 401) { logout(); showSettingsStatus('❌ 登录已过期，请重新登录', 'err'); return; }
-    const data = await parseJsonResponse(resp);
+    let data = await parseJsonResponse(resp);
+    if (data.job_id) {
+      data = await waitDailySummaryJob(data.job_id, function(job, attempt) {
+        showSettingsStatus(`📊 摘要生成中，已等待 ${Math.ceil(attempt * 2)} 秒...`);
+      });
+    }
     if (!data) { showSettingsStatus('❌ 请求失败', 'err'); return; }
     if (data.error) { showSettingsStatus('❌ ' + data.error, 'err'); return; }
     // Show result in a scrollable area
@@ -1333,7 +1356,12 @@ async function generateDailySummary() {
   try {
     const resp = await fetch('/ai/daily-summary', { method: 'POST', headers: { 'Authorization': 'Bearer ' + authToken } });
     if (resp.status === 401) { logout(); body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)">❌ 登录已过期，请重新登录</div>'; return; }
-    const data = await parseJsonResponse(resp);
+    let data = await parseJsonResponse(resp);
+    if (data.job_id) {
+      data = await waitDailySummaryJob(data.job_id, function(job, attempt) {
+        body.innerHTML = `<div style="text-align:center;padding:40px;color:var(--text-3)">⏳ 摘要生成中，已等待 ${Math.ceil(attempt * 2)} 秒...</div>`;
+      });
+    }
     if (!data) { body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)">❌ 请求失败</div>'; return; }
     if (data.error) { body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)">❌ ' + esc(data.error) + '</div>'; return; }
     body.innerHTML = '<div style="max-height:400px;overflow-y:auto;font-size:13px;line-height:1.7;padding:12px;background:var(--bg);border-radius:8px">' + renderMarkdown(data.summary) + '</div><p style="font-size:11px;color:var(--text-3);margin-top:8px">基于 ' + data.article_count + ' 篇文章生成</p>';

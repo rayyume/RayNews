@@ -4,6 +4,8 @@ import os
 import re
 import sys
 import threading
+import time
+import uuid
 import requests
 
 from flask import Flask, request, jsonify, g
@@ -662,19 +664,81 @@ def ai_daily_summary():
     if not config.get("api_key"):
         return jsonify({"error": "API key not configured"}), 400
 
-    # Fetch ALL articles from today, then dedup
-    import datetime as _dt
-    today_str = _dt.datetime.now().strftime("%Y-%m-%d")
-    articles = _fetch_articles_by_date(
-        today_str,
-        include_shared_summary=_user_auto_summary_enabled(g.user_id),
-    )
-    if not articles:
-        return jsonify({"error": "no articles today"}), 404
+    _cleanup_daily_summary_jobs()
+    with _daily_summary_jobs_lock:
+        for job in _daily_summary_jobs.values():
+            if job.get("user_id") == g.user_id and job.get("status") in ("queued", "running"):
+                return jsonify({"job_id": job["job_id"], "status": job["status"]}), 202
 
-    articles = _dedup_articles(articles)
+        job_id = uuid.uuid4().hex
+        _daily_summary_jobs[job_id] = {
+            "job_id": job_id,
+            "user_id": g.user_id,
+            "status": "queued",
+            "created_at": time.time(),
+            "updated_at": time.time(),
+            "summary": "",
+            "article_count": 0,
+            "stats": {},
+            "error": "",
+        }
 
+    threading.Thread(
+        target=_run_daily_summary_job,
+        args=(job_id, g.user_id, config),
+        daemon=True,
+    ).start()
+    return jsonify({"job_id": job_id, "status": "queued"}), 202
+
+
+@app.route("/ai/daily-summary/<job_id>", methods=["GET"])
+@require_auth
+def ai_daily_summary_status(job_id):
+    with _daily_summary_jobs_lock:
+        job = _daily_summary_jobs.get(job_id)
+        if not job or job.get("user_id") != g.user_id:
+            return jsonify({"error": "job not found"}), 404
+        safe = {k: v for k, v in job.items() if k != "user_id"}
+    return jsonify(safe)
+
+
+_daily_summary_jobs = {}
+_daily_summary_jobs_lock = threading.Lock()
+
+
+def _cleanup_daily_summary_jobs():
+    cutoff = time.time() - 3600
+    with _daily_summary_jobs_lock:
+        old_ids = [
+            job_id
+            for job_id, job in _daily_summary_jobs.items()
+            if job.get("updated_at", job.get("created_at", 0)) < cutoff
+        ]
+        for job_id in old_ids:
+            _daily_summary_jobs.pop(job_id, None)
+
+
+def _update_daily_summary_job(job_id, **updates):
+    updates["updated_at"] = time.time()
+    with _daily_summary_jobs_lock:
+        if job_id in _daily_summary_jobs:
+            _daily_summary_jobs[job_id].update(updates)
+
+
+def _run_daily_summary_job(job_id, user_id, config):
+    _update_daily_summary_job(job_id, status="running")
     try:
+        import datetime as _dt
+        today_str = _dt.datetime.now().strftime("%Y-%m-%d")
+        articles = _fetch_articles_by_date(
+            today_str,
+            include_shared_summary=_user_auto_summary_enabled(user_id),
+        )
+        if not articles:
+            _update_daily_summary_job(job_id, status="failed", error="no articles today")
+            return
+
+        articles = _dedup_articles(articles)
         svc = AIService(
             api_key=config["api_key"],
             endpoint=config["endpoint"],
@@ -682,13 +746,15 @@ def ai_daily_summary():
             provider_type=config.get("provider_type", "openai"),
         )
         result = svc.daily_summary(articles)
-        return jsonify({
-            "summary": result["summary"],
-            "article_count": len(articles),
-            "stats": result["stats"],
-        })
+        _update_daily_summary_job(
+            job_id,
+            status="completed",
+            summary=result["summary"],
+            article_count=len(articles),
+            stats=result["stats"],
+        )
     except Exception as e:
-        return jsonify({"error": f"AI request failed: {str(e)}"}), 502
+        _update_daily_summary_job(job_id, status="failed", error=f"AI request failed: {str(e)}")
 
 
 _daily_summary_sent = set()  # {(user_id, date), ...}
