@@ -243,13 +243,10 @@ class AIService:
         MAX_ARTICLES_PER_SOURCE = 100  # cap per source to avoid one dominating
         MAX_BATCH_INPUT = 20_000  # chars per batch call to stay within context
         def article_link(article: dict) -> str:
-            url = article.get("telegraph_url", "") or article.get("url", "") or ""
-            if url:
-                return url
             date = article.get("date", "") or ""
             art_id = article.get("id", 0)
             if date and art_id:
-                return f"https://rayyu.me/#/article/{date[2:].replace('-', '-')}-{art_id}"
+                return f"https://news.rayyu.me/#/article/{date[2:]}-{art_id}"
             return ""
 
         def format_article_entry(article: dict, index: int) -> str:
@@ -271,8 +268,11 @@ class AIService:
             "## 其他信息\n\n"
             "每个分类下尽量至少输出 10 条；如果某分类素材不足，可以少于 10 条，但不要省略该分类。\n"
             "每条必须使用如下格式：\n"
-            "- **单条摘要总结:** 120-220 字的详细摘要，必须包含关键主体、事件、数字/时间/影响等信息。"
-            " 末尾必须附文章链接，格式为 [🔗](URL)。\n"
+            "- **总结性短标题：** 50字以内的摘要正文 [🔗](URL)\n"
+            "总结性短标题必须根据该条新闻内容生成，例如“全球多项财经数据与事件：”，"
+            "不要使用固定文案“单条摘要总结”。\n"
+            "短标题加摘要正文合计不超过 50 个中文字符；链接不计入字数。\n"
+            "每条末尾必须附文章链接，格式为 [🔗](URL)，且 URL 必须使用输入中的 https://news.rayyu.me/#/article/xxx 链接。\n"
             "不要输出总述、寒暄或额外说明；不要把链接集中放到末尾。"
         )
 
@@ -356,9 +356,10 @@ class AIService:
                 bm = [
                     {"role": "system",
                      "content": "你是一个新闻编辑助手。请把这批新闻整理成日报候选条目。"
-                                "必须保留每条新闻的原始链接，链接格式使用 [🔗](URL)。"
+                                "必须保留每条新闻的原始 RayNews 链接，链接格式使用 [🔗](URL)。"
                                 "按政经新闻、科技动态、商业聚焦、其他信息四类归类；"
-                                "每条候选摘要保留关键事实，不要过度压缩。"},
+                                "每条候选条目用内容相关的短标题开头，不要使用“单条摘要总结”；"
+                                "短标题加摘要正文合计不超过 50 个中文字符，链接不计入字数。"},
                     {"role": "user",
                      "content": f"以下是一组新闻（批次 {i+1}/{len(batches)}），请生成分类候选条目：\n\n{batch_text}"},
                 ]
