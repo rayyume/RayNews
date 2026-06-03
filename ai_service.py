@@ -310,13 +310,26 @@ class AIService:
                     lines.append(f"- **{title}：** {text} [🔗]({link})")
             return "\n".join(lines)
 
+        def summary_looks_truncated(text: str) -> bool:
+            stripped = (text or "").strip()
+            if not stripped:
+                return True
+            last_line = stripped.splitlines()[-1].strip()
+            if stripped.count("**") % 2 != 0:
+                return True
+            if last_line.startswith("-") and "[🔗](" not in last_line:
+                return True
+            if re.search(r"\*\*[^*\n]*$", stripped):
+                return True
+            return False
+
         final_format_rules = (
             "请严格按以下四个大分类输出，标题必须完全一致：\n"
             "## 政经新闻\n"
             "## 科技动态\n"
             "## 商业聚焦\n"
             "## 其他信息\n\n"
-            "每个分类下尽量至少输出 10 条；如果某分类素材不足，可以少于 10 条，但不要省略该分类。\n"
+            "每个分类输出 10-12 条；如果某分类素材不足，可以少于 10 条，但不要省略该分类。\n"
             "每条必须使用如下格式：\n"
             "- **总结性短标题：** 50字以内的摘要正文 [🔗](URL)\n"
             "总结性短标题必须根据该条新闻内容生成，例如“全球多项财经数据与事件：”，"
@@ -423,8 +436,16 @@ class AIService:
             {"role": "user", "content": user_msg},
         ]
 
-        final_summary = self.chat(final_prompt, max_tokens=3500)
+        final_summary = self.chat(final_prompt, max_tokens=7000)
+        if summary_looks_truncated(final_summary):
+            continuation_prompt = final_prompt + [
+                {"role": "assistant", "content": final_summary},
+                {"role": "user", "content": "你的输出被截断了。请只从最后一条未完成的位置继续输出，保持相同 Markdown 格式，不要重复已经完成的条目。"},
+            ]
+            final_summary = final_summary.rstrip() + "\n" + self.chat(continuation_prompt, max_tokens=2500)
         if "[🔗](" not in final_summary:
+            final_summary = fallback_daily_summary(capped)
+        elif summary_looks_truncated(final_summary):
             final_summary = fallback_daily_summary(capped)
 
         return {
