@@ -251,12 +251,11 @@ class AIService:
     # Returns {"summary": str, "stats": {...}}
 
     def daily_summary(self, articles: list[dict]) -> dict:
-        MAX_SUMMARY_CHARS = 220
+        MAX_SUMMARY_CHARS = 140
         TITLE_FALLBACK_CHARS = 80
         MAX_ARTICLES_PER_SOURCE = 100  # cap per source to avoid one dominating
-        MAX_DAILY_CANDIDATES = 160
-        MAX_CANDIDATES_PER_CATEGORY = 40
-        MAX_BATCH_INPUT = 8_000  # smaller calls are less likely to time out
+        MAX_DAILY_CANDIDATES = 120
+        MAX_CANDIDATES_PER_CATEGORY = 30
         def article_link(article: dict) -> str:
             date = article.get("date", "") or ""
             art_id = article.get("id", 0)
@@ -296,6 +295,21 @@ class AIService:
                 parts.append(f"链接：{link}")
             return "\n".join(parts)
 
+        def fallback_daily_summary(items: list[dict]) -> str:
+            lines = []
+            categories = ("政经新闻", "科技动态", "商业聚焦", "其他信息")
+            for category in categories:
+                lines.append(f"## {category}")
+                category_items = [e for e in items if e["category"] == category][:10]
+                if not category_items:
+                    category_items = [e for e in items if e["category"] != category][:3]
+                for e in category_items:
+                    title = compact_text(e.get("title", ""), 28)
+                    text = compact_text(e.get("text", ""), 32)
+                    link = e.get("url", "")
+                    lines.append(f"- **{title}：** {text} [🔗]({link})")
+            return "\n".join(lines)
+
         final_format_rules = (
             "请严格按以下四个大分类输出，标题必须完全一致：\n"
             "## 政经新闻\n"
@@ -309,6 +323,7 @@ class AIService:
             "不要使用固定文案“单条摘要总结”。\n"
             "短标题加摘要正文合计不超过 50 个中文字符；链接不计入字数。\n"
             "每条末尾必须附文章链接，格式为 [🔗](URL)，且 URL 必须使用输入中的 https://news.rayyu.me/#/article/xxx 链接。\n"
+            "不得输出“（无相关新闻）”；只要输入列表中有文章，就必须归入最接近的分类并输出条目。\n"
             "不要输出总述、寒暄或额外说明；不要把链接集中放到末尾。"
         )
 
@@ -381,61 +396,11 @@ class AIService:
         capped = selected[:MAX_DAILY_CANDIDATES]
         articles_selected_for_ai = len(capped)
 
-        # ── Split into batches if needed ──
-        batches = []
-        current_batch = []
-        current_chars = 0
         total_articles_with_summary = sum(1 for e in capped if e["has_summary"])
         total_articles_without_summary = len(capped) - total_articles_with_summary
 
-        for ex in capped:
-            entry = format_article_entry(ex, 1)
-            entry_len = len(entry) + 10  # overhead
-            if current_chars + entry_len > MAX_BATCH_INPUT and current_batch:
-                batches.append(current_batch)
-                current_batch = [ex]
-                current_chars = entry_len
-            else:
-                current_batch.append(ex)
-                current_chars += entry_len
-
-        if current_batch:
-            batches.append(current_batch)
-
-        # ── Generate per-batch summaries if multiple batches ──
-        if len(batches) <= 1:
-            # Single batch: go straight to final summary
-            batch_summaries = None
-            final_input = batches[0] if batches else []
-        else:
-            batch_summaries = []
-            for i, batch in enumerate(batches):
-                batch_text = "\n\n".join(
-                    format_article_entry(e, j + 1)
-                    for j, e in enumerate(batch)
-                )
-                bm = [
-                    {"role": "system",
-                     "content": "你是一个新闻编辑助手。请把这批新闻整理成日报候选条目。"
-                                "必须保留每条新闻的原始 RayNews 链接，链接格式使用 [🔗](URL)。"
-                                "按政经新闻、科技动态、商业聚焦、其他信息四类归类；"
-                                "每条候选条目用内容相关的短标题开头，不要使用“单条摘要总结”；"
-                                "短标题加摘要正文合计不超过 50 个中文字符，链接不计入字数；"
-                                "每个分类最多输出 8 条候选，优先保留有数字、时间、主体和影响的信息。"},
-                    {"role": "user",
-                     "content": f"以下是一组新闻（批次 {i+1}/{len(batches)}），请生成分类候选条目：\n\n{batch_text}"},
-                ]
-                result = self.chat(bm, max_tokens=1200)
-                batch_summaries.append({
-                    "batch_index": i,
-                    "summary": result,
-                    "article_count": len(batch),
-                })
-
-            final_input = batch_summaries
-
         # ── Final summary ──
-        if not final_input:
+        if not capped:
             return {"summary": "今日无新闻。", "stats": {
                 "total_articles": len(articles),
                 "total_batches": 0,
@@ -443,38 +408,24 @@ class AIService:
                 "articles_without_summary": 0,
             }}
 
-        if batch_summaries is None:
-            # Single batch: build final prompt directly from articles
-            articles_text = "\n\n".join(
-                format_article_entry(e, i + 1)
-                for i, e in enumerate(final_input)
-            )
-            sys_msg = (
-                "你是一个资深新闻编辑。请基于每篇文章的标题、来源、内容摘要和链接生成详细每日摘要。\n"
-                + final_format_rules
-            )
-            user_msg = f"以下是今日新闻列表，请生成每日摘要：\n\n{articles_text}"
-            final_prompt = [
-                {"role": "system", "content": sys_msg},
-                {"role": "user", "content": user_msg},
-            ]
-        else:
-            # Multi-batch: merge batch summaries
-            batch_texts = "\n\n".join(
-                f"【批次 {b['batch_index']+1} — {b['article_count']} 条】\n{b['summary']}"
-                for b in batch_summaries
-            )
-            sys_msg = (
-                "你是一个资深新闻编辑。请将以下各批次候选条目合并为完整每日摘要，去重但不要过度压缩。\n"
-                + final_format_rules
-            )
-            user_msg = f"以下是各批次候选摘要，请合并为完整每日摘要：\n\n{batch_texts}"
-            final_prompt = [
-                {"role": "system", "content": sys_msg},
-                {"role": "user", "content": user_msg},
-            ]
+        articles_text = "\n\n".join(
+            format_article_entry(e, i + 1)
+            for i, e in enumerate(capped)
+        )
+        sys_msg = (
+            "你是一个资深新闻编辑。请基于输入中的文章摘要或标题线索生成每日摘要。"
+            "没有内容摘要的文章，只能根据标题线索做保守概括，不要编造标题之外的事实。\n"
+            + final_format_rules
+        )
+        user_msg = f"以下是今日新闻候选列表，请生成每日摘要：\n\n{articles_text}"
+        final_prompt = [
+            {"role": "system", "content": sys_msg},
+            {"role": "user", "content": user_msg},
+        ]
 
         final_summary = self.chat(final_prompt, max_tokens=3500)
+        if "[🔗](" not in final_summary:
+            final_summary = fallback_daily_summary(capped)
 
         return {
             "summary": final_summary,
@@ -483,7 +434,7 @@ class AIService:
                 "articles_after_dedup": articles_after_source_cap,
                 "articles_after_source_cap": articles_after_source_cap,
                 "articles_selected_for_ai": articles_selected_for_ai,
-                "total_batches": len(batches),
+                "total_batches": 1,
                 "articles_with_summary": total_articles_with_summary,
                 "articles_without_summary": total_articles_without_summary,
             },
