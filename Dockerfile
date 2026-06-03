@@ -16,13 +16,14 @@ COPY frontend/ /usr/share/nginx/html/
 
 RUN mkdir -p /app/data /var/log/nginx /run/nginx
 
-# Inject VERSION into sw.js template. FULL_VERSION defaults to beta tag;
-# override with --build-arg FULL_VERSION_OVERRIDE="v{VERSION}" for production.
-ARG FULL_VERSION_OVERRIDE=""
 COPY VERSION BETA_REVISION /app/
 RUN VERSION=$(cat /app/VERSION) && \
     BETA_REV=$(cat /app/BETA_REVISION) && \
-    FULL_VERSION="${FULL_VERSION_OVERRIDE:-v${VERSION}-beta.${BETA_REV}}" && \
+    if [ "$BETA_REV" = "0" ]; then \
+      FULL_VERSION="v${VERSION}"; \
+    else \
+      FULL_VERSION="v${VERSION}-beta.${BETA_REV}"; \
+    fi && \
     sed -i "s/{{VERSION}}/$VERSION/g" /usr/share/nginx/html/sw.js && \
     sed -i "s/{{FULL_VERSION}}/$FULL_VERSION/g" /usr/share/nginx/html/index.html
 
