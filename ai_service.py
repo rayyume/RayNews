@@ -251,11 +251,11 @@ class AIService:
     # Returns {"summary": str, "stats": {...}}
 
     def daily_summary(self, articles: list[dict]) -> dict:
-        MAX_SUMMARY_CHARS = 140
-        TITLE_FALLBACK_CHARS = 80
+        MAX_SUMMARY_CHARS = 360
+        MAX_TITLE_CHARS = 160
         MAX_ARTICLES_PER_SOURCE = 100  # cap per source to avoid one dominating
-        MAX_DAILY_CANDIDATES = 120
-        MAX_CANDIDATES_PER_CATEGORY = 30
+        MAX_DAILY_CANDIDATES = 80
+        MAX_CANDIDATES_PER_CATEGORY = 20
         def article_link(article: dict) -> str:
             date = article.get("date", "") or ""
             art_id = article.get("id", 0)
@@ -269,14 +269,15 @@ class AIService:
             if len(text) <= limit:
                 return text
             clipped = text[:limit].rstrip(" ，,、；;：:")
-            punct_positions = [clipped.rfind(p) for p in "。！？.!?"]
+            # Prefer real sentence endings. Ignore "." because it often appears
+            # inside decimals, versions, and abbreviations.
+            punct_positions = [clipped.rfind(p) for p in "。！？!?"]
             best = max(punct_positions)
             if best >= max(12, limit // 2):
                 return clipped[:best + 1].strip()
-            space_pos = clipped.rfind(" ")
-            if space_pos >= max(12, limit // 2):
-                return clipped[:space_pos].strip()
-            return clipped.strip()
+            # If there is no safe sentence boundary, keep the full source text.
+            # A longer complete summary is better than a short broken fact.
+            return text
 
         def classify_article(title: str, text: str, source: str) -> str:
             haystack = f"{title} {text} {source}".lower()
@@ -312,8 +313,8 @@ class AIService:
                 if not category_items:
                     category_items = [e for e in items if e["category"] != category][:3]
                 for e in category_items:
-                    title = compact_text(e.get("title", ""), 28)
-                    text = compact_text(e.get("text", ""), 52)
+                    title = compact_text(e.get("title", ""), 42)
+                    text = compact_text(e.get("text", ""), 90)
                     if text and text[-1] not in "。！？.!?":
                         text = text.rstrip(" ，,、；;：:") + "。"
                     link = e.get("url", "")
@@ -335,6 +336,18 @@ class AIService:
                 return True
             return False
 
+        def cleanup_daily_summary_output(text: str) -> str:
+            bad_tail = re.compile(
+                r"(?:至|为|达|升至|跌至|占比|估值|募资|成为除|补选|报|涨|跌|第)[\dA-Za-z%.\-]*[。.]$"
+            )
+            cleaned = []
+            for line in (text or "").splitlines():
+                m = re.match(r"^(\s*\d+\.\s+)(.+)$", line)
+                if m and bad_tail.search(m.group(2).strip()):
+                    continue
+                cleaned.append(line)
+            return "\n".join(cleaned).strip()
+
         final_format_rules = (
             "请严格按以下四个大分类输出，标题必须完全一致：\n"
             "## 政经新闻\n"
@@ -347,8 +360,9 @@ class AIService:
             "每个分类下必须使用有序编号列表，不要使用 '-' 或 '*' 作为项目符号。\n"
             "总结性短标题必须根据该条新闻内容生成，例如“全球多项财经数据与事件：”，"
             "不要使用固定文案“单条摘要总结”。\n"
-            "短标题加摘要正文合计不超过 70 个中文字符；链接不计入字数。\n"
+            "短标题加摘要正文尽量控制在 90 个中文字符以内；链接不计入字数。\n"
             "每条摘要必须是完整句子，不能以省略号结尾，不能使用“…”或“...”截断内容。\n"
+            "如果输入信息不足以写完整数字、机构名、地点或事件结果，就省略该细节，不要输出半截事实。\n"
             "每条末尾必须附文章链接，格式为 [🔗](URL)，且 URL 必须使用输入中的 https://news.rayyu.me/#/article/xxx 链接。\n"
             "不得输出“（无相关新闻）”；只要输入列表中有文章，就必须归入最接近的分类并输出条目。\n"
             "不要输出总述、寒暄或额外说明；不要把链接集中放到末尾。"
@@ -370,7 +384,7 @@ class AIService:
                 text = compact_text(summary, MAX_SUMMARY_CHARS)
             # Layer 2: title only. Daily summary should not ingest article bodies.
             else:
-                text = compact_text(title, TITLE_FALLBACK_CHARS)
+                text = compact_text(title, MAX_TITLE_CHARS)
 
             if not text:
                 text = "(no content)"
@@ -457,6 +471,7 @@ class AIService:
                 {"role": "user", "content": "你的输出被截断了。请只从最后一条未完成的位置继续输出，保持相同 Markdown 格式，不要重复已经完成的条目。"},
             ]
             final_summary = final_summary.rstrip() + "\n" + self.chat(continuation_prompt, max_tokens=2500)
+        final_summary = cleanup_daily_summary_output(final_summary)
         if "[🔗](" not in final_summary:
             final_summary = fallback_daily_summary(capped)
         elif summary_looks_truncated(final_summary):
