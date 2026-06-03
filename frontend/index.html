@@ -1361,7 +1361,7 @@ function renderDailySummaryBody() {
     const generatedTime = formatDailySummaryTime(data.updated_at);
     body.innerHTML =
       '<div class="daily-summary-content">' +
-      renderMarkdown(data.summary) +
+      renderMarkdown(normalizeDailySummaryMarkdown(data.summary)) +
       '</div><div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:10px">' +
       '<p style="font-size:11px;color:var(--text-3);margin:0">于 ' + generatedTime + ' 基于 ' + data.article_count + ' 篇文章生成</p>' +
       '<button class="ai-save-btn" onclick="generateDailySummary()" style="width:auto;margin:0;padding:7px 12px;font-size:12px">重新生成</button>' +
@@ -1388,19 +1388,50 @@ function setDailySummaryState(next) {
   if (isDailySummaryOpen()) renderDailySummaryBody();
 }
 
+function normalizeDailySummaryMarkdown(text) {
+  let counter = 0;
+  return String(text || '').split('\n').map(line => {
+    if (/^#{1,3}\s+/.test(line.trim())) {
+      counter = 0;
+      return line;
+    }
+    const m = line.match(/^\s*(?:[-*]|\d+\.)\s+(.+)$/);
+    if (m) {
+      counter += 1;
+      return counter + '. ' + m[1].trim();
+    }
+    return line;
+  }).join('\n');
+}
+
 function formatDailySummaryTime(value) {
   if (!value) return '--:--';
+  const formatBeijing = d => {
+    try {
+      const parts = new Intl.DateTimeFormat('zh-CN', {
+        timeZone: 'Asia/Shanghai',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      }).formatToParts(d);
+      const hour = parts.find(p => p.type === 'hour')?.value || '--';
+      const minute = parts.find(p => p.type === 'minute')?.value || '--';
+      return hour + ':' + minute;
+    } catch (e) {
+      return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+    }
+  };
   if (typeof value === 'number') {
-    const d = new Date(value * 1000);
-    return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+    return formatBeijing(new Date(value * 1000));
   }
   const text = String(value);
+  const sqliteUtc = text.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})$/);
+  const d = sqliteUtc ? new Date(sqliteUtc[1] + 'T' + sqliteUtc[2] + 'Z') : new Date(text);
+  if (!Number.isNaN(d.getTime())) {
+    return formatBeijing(d);
+  }
   const m = text.match(/\b(\d{2}):(\d{2})(?::\d{2})?\b/);
   if (m) return m[1] + ':' + m[2];
-  const d = new Date(text);
-  if (!Number.isNaN(d.getTime())) {
-    return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
-  }
   return '--:--';
 }
 
