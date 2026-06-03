@@ -268,7 +268,15 @@ class AIService:
             text = " ".join(text.split()).strip()
             if len(text) <= limit:
                 return text
-            return text[:limit].rstrip() + "…"
+            clipped = text[:limit].rstrip(" ，,、；;：:")
+            punct_positions = [clipped.rfind(p) for p in "。！？.!?"]
+            best = max(punct_positions)
+            if best >= max(12, limit // 2):
+                return clipped[:best + 1].strip()
+            space_pos = clipped.rfind(" ")
+            if space_pos >= max(12, limit // 2):
+                return clipped[:space_pos].strip()
+            return clipped.strip()
 
         def classify_article(title: str, text: str, source: str) -> str:
             haystack = f"{title} {text} {source}".lower()
@@ -305,7 +313,9 @@ class AIService:
                     category_items = [e for e in items if e["category"] != category][:3]
                 for e in category_items:
                     title = compact_text(e.get("title", ""), 28)
-                    text = compact_text(e.get("text", ""), 32)
+                    text = compact_text(e.get("text", ""), 52)
+                    if text and text[-1] not in "。！？.!?":
+                        text = text.rstrip(" ，,、；;：:") + "。"
                     link = e.get("url", "")
                     lines.append(f"- **{title}：** {text} [🔗]({link})")
             return "\n".join(lines)
@@ -313,6 +323,8 @@ class AIService:
         def summary_looks_truncated(text: str) -> bool:
             stripped = (text or "").strip()
             if not stripped:
+                return True
+            if "…" in stripped or "..." in stripped:
                 return True
             last_line = stripped.splitlines()[-1].strip()
             if stripped.count("**") % 2 != 0:
@@ -331,10 +343,11 @@ class AIService:
             "## 其他信息\n\n"
             "每个分类输出 10-12 条；如果某分类素材不足，可以少于 10 条，但不要省略该分类。\n"
             "每条必须使用如下格式：\n"
-            "- **总结性短标题：** 50字以内的摘要正文 [🔗](URL)\n"
+            "- **总结性短标题：** 一句完整摘要 [🔗](URL)\n"
             "总结性短标题必须根据该条新闻内容生成，例如“全球多项财经数据与事件：”，"
             "不要使用固定文案“单条摘要总结”。\n"
-            "短标题加摘要正文合计不超过 50 个中文字符；链接不计入字数。\n"
+            "短标题加摘要正文合计不超过 70 个中文字符；链接不计入字数。\n"
+            "每条摘要必须是完整句子，不能以省略号结尾，不能使用“…”或“...”截断内容。\n"
             "每条末尾必须附文章链接，格式为 [🔗](URL)，且 URL 必须使用输入中的 https://news.rayyu.me/#/article/xxx 链接。\n"
             "不得输出“（无相关新闻）”；只要输入列表中有文章，就必须归入最接近的分类并输出条目。\n"
             "不要输出总述、寒暄或额外说明；不要把链接集中放到末尾。"

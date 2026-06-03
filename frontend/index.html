@@ -57,6 +57,12 @@ a:hover{text-decoration:underline}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
 .refresh-btn{background:none;border:1px solid var(--border);color:var(--text-2);padding:4px 12px;border-radius:100px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font);transition:all 0.15s}
 .refresh-btn:hover{border-color:var(--accent);color:var(--accent)}
+.daily-summary-btn{position:relative}
+.daily-summary-btn.running{color:var(--accent)!important;animation:summaryPulse 1.6s infinite}
+.daily-summary-btn.ready{color:#fbbf24!important;text-shadow:0 0 12px rgba(251,191,36,0.45)}
+.daily-summary-btn.ready::after,.daily-summary-btn.running::after{content:'';position:absolute;right:0;top:1px;width:7px;height:7px;border-radius:50%;background:#fbbf24;box-shadow:0 0 0 3px rgba(251,191,36,0.18)}
+.daily-summary-btn.running::after{background:var(--accent);box-shadow:0 0 0 3px rgba(110,142,251,0.18)}
+@keyframes summaryPulse{0%,100%{opacity:1}50%{opacity:0.55}}
 
 /* ═══ Filters ═════════════════════════════════════ */
 .filters{display:flex;gap:6px;padding:14px 0;overflow-x:auto;scrollbar-width:none}
@@ -336,7 +342,7 @@ body.body-scroll-lock{overflow:hidden!important}
         <span>RayNews</span>
       </div>
       <div class="header-right">
-        <button class="refresh-btn" onclick="showDailySummary()" title="每日总结" style="background:none;border:none;color:var(--text-2);font-size:16px;cursor:pointer;padding:2px 6px;border-radius:6px;transition:all 0.15s;font-family:var(--font)" onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--text-2)'">✨</button>
+        <button class="refresh-btn daily-summary-btn" id="dailySummaryBtn" onclick="showDailySummary()" title="每日总结" style="background:none;border:none;color:var(--text-2);font-size:16px;cursor:pointer;padding:2px 6px;border-radius:6px;transition:all 0.15s;font-family:var(--font)" onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--text-2)'">✨</button>
         <span class="status-text"><span class="status-dot"></span>实时更新</span>
         <span class="hide-m" id="count"></span>
         <button class="refresh-btn" onclick="triggerRefresh()">刷新</button>
@@ -1296,22 +1302,124 @@ function countTodayArticles() {
   return news.filter(n => n.date === todayStr).length;
 }
 
-async function waitDailySummaryJob(jobId, onProgress) {
-  for (let attempt = 0; attempt < 360; attempt++) {
-    await new Promise(resolve => setTimeout(resolve, attempt === 0 ? 800 : 2000));
+let dailySummaryState = {
+  jobId: '',
+  status: 'idle',
+  result: null,
+  error: '',
+  unread: false,
+  startedAt: 0,
+  pollTimer: null,
+};
+
+function isDailySummaryOpen() {
+  const overlay = document.getElementById('dailySummaryOverlay');
+  return !!(overlay && overlay.classList.contains('open'));
+}
+
+function updateDailySummaryButton() {
+  const btn = document.getElementById('dailySummaryBtn');
+  if (!btn) return;
+  btn.classList.toggle('running', dailySummaryState.status === 'running');
+  btn.classList.toggle('ready', dailySummaryState.status === 'completed' && dailySummaryState.unread);
+  if (dailySummaryState.status === 'running') {
+    btn.title = '每日摘要生成中';
+  } else if (dailySummaryState.status === 'completed' && dailySummaryState.unread) {
+    btn.title = '每日摘要已生成';
+  } else {
+    btn.title = '每日总结';
+  }
+}
+
+function renderDailySummaryBody() {
+  const body = document.getElementById('dailySummaryBody');
+  if (!body) return;
+  const count = countTodayArticles();
+  if (dailySummaryState.status === 'running') {
+    const elapsed = dailySummaryState.startedAt ? Math.max(1, Math.floor((Date.now() - dailySummaryState.startedAt) / 1000)) : 1;
+    body.innerHTML =
+      '<div style="text-align:center;padding:36px;color:var(--text-3)">' +
+      '<div style="font-size:20px;margin-bottom:10px">⏳</div>' +
+      '<p>每日摘要正在后台生成，已等待 ' + elapsed + ' 秒。</p>' +
+      '<p class="ai-hint" style="margin-top:8px">你可以关闭此窗口，生成完成后首页 ✨ 会高亮提示。</p>' +
+      '</div>';
+    return;
+  }
+  if (dailySummaryState.status === 'completed' && dailySummaryState.result) {
+    const data = dailySummaryState.result;
+    body.innerHTML =
+      '<div style="max-height:400px;overflow-y:auto;font-size:13px;line-height:1.7;padding:12px;background:var(--bg);border-radius:8px">' +
+      renderMarkdown(data.summary) +
+      '</div><p style="font-size:11px;color:var(--text-3);margin-top:8px">基于 ' + data.article_count + ' 篇文章生成</p>';
+    return;
+  }
+  if (dailySummaryState.status === 'failed') {
+    body.innerHTML =
+      '<div style="text-align:center;padding:36px;color:var(--text-3)">❌ 生成失败: ' +
+      esc(dailySummaryState.error || '未知错误') +
+      '<br><button class="ai-save-btn" onclick="generateDailySummary()" style="margin-top:14px">重新生成</button></div>';
+    return;
+  }
+  body.innerHTML =
+    '<div style="text-align:center;padding:20px;color:var(--text-3)">' +
+    '<button class="ai-save-btn" onclick="generateDailySummary()">📊 生成每日摘要</button>' +
+    '<p class="ai-hint" style="margin-top:8px">基于今日 ' + count + ' 条新闻由 AI 生成摘要</p>' +
+    '</div>';
+}
+
+function setDailySummaryState(next) {
+  dailySummaryState = { ...dailySummaryState, ...next };
+  updateDailySummaryButton();
+  if (isDailySummaryOpen()) renderDailySummaryBody();
+}
+
+async function pollDailySummaryJob(jobId) {
+  if (!jobId || dailySummaryState.jobId !== jobId) return;
+  try {
     const resp = await fetch('/ai/daily-summary/' + encodeURIComponent(jobId), {
       headers: { 'Authorization': 'Bearer ' + authToken },
     });
     if (resp.status === 401) {
       logout();
-      throw new Error('登录已过期，请重新登录');
+      setDailySummaryState({ status: 'failed', error: '登录已过期，请重新登录', pollTimer: null });
+      return;
     }
     const data = await parseJsonResponse(resp);
-    if (data.status === 'completed') return data;
-    if (data.status === 'failed') throw new Error(data.error || '生成失败');
-    if (onProgress) onProgress(data, attempt + 1);
+    if (data.status === 'completed') {
+      setDailySummaryState({
+        status: 'completed',
+        result: data,
+        error: '',
+        unread: !isDailySummaryOpen(),
+        pollTimer: null,
+      });
+      showToast('✅ 每日摘要已生成');
+      return;
+    }
+    if (data.status === 'failed') {
+      setDailySummaryState({ status: 'failed', error: data.error || '生成失败', pollTimer: null });
+      showToast('❌ 每日摘要生成失败');
+      return;
+    }
+    if (isDailySummaryOpen()) renderDailySummaryBody();
+    dailySummaryState.pollTimer = setTimeout(() => pollDailySummaryJob(jobId), 2000);
+  } catch (e) {
+    setDailySummaryState({ status: 'failed', error: e.message || '生成失败', pollTimer: null });
   }
-  throw new Error('生成时间过长，请稍后重试');
+}
+
+function startDailySummaryPolling(jobId) {
+  if (dailySummaryState.pollTimer) clearTimeout(dailySummaryState.pollTimer);
+  setDailySummaryState({
+    jobId,
+    status: 'running',
+    result: null,
+    error: '',
+    unread: false,
+    startedAt: Date.now(),
+    pollTimer: null,
+  });
+  dailySummaryState.pollTimer = setTimeout(() => pollDailySummaryJob(jobId), 800);
 }
 
 // ─── Daily Summary ───────────────────────────────────────
@@ -1324,9 +1432,9 @@ async function triggerDailySummary() {
     if (resp.status === 401) { logout(); showSettingsStatus('❌ 登录已过期，请重新登录', 'err'); return; }
     let data = await parseJsonResponse(resp);
     if (data.job_id) {
-      data = await waitDailySummaryJob(data.job_id, function(job, attempt) {
-        showSettingsStatus(`📊 摘要生成中，已等待 ${Math.ceil(attempt * 2)} 秒...`);
-      });
+      startDailySummaryPolling(data.job_id);
+      showSettingsStatus('📊 每日摘要已在后台生成，完成后首页 ✨ 会高亮提示。');
+      return;
     }
     if (!data) { showSettingsStatus('❌ 请求失败', 'err'); return; }
     if (data.error) { showSettingsStatus('❌ ' + data.error, 'err'); return; }
@@ -1340,9 +1448,14 @@ async function triggerDailySummary() {
 // ═══ Daily Summary (Sidebar) ════════════════════════════
 
 function showDailySummary() {
+  if (dailySummaryState.status === 'completed') {
+    dailySummaryState.unread = false;
+    updateDailySummaryButton();
+  }
   document.getElementById('dailySummaryOverlay').classList.add('open');
   lockBodyScroll();
   closeSidebar();
+  renderDailySummaryBody();
 }
 
 function closeDailySummary() {
@@ -1353,21 +1466,26 @@ function closeDailySummary() {
 async function generateDailySummary() {
   const body = document.getElementById('dailySummaryBody');
   const count = countTodayArticles();
-  body.innerHTML = `<div style="text-align:center;padding:40px;color:var(--text-3)">⏳ 正在汇集今日共 ${count} 条新闻生成摘要，请耐心等待。</div>`;
+  if (dailySummaryState.status === 'running') {
+    renderDailySummaryBody();
+    return;
+  }
+  body.innerHTML = `<div style="text-align:center;padding:40px;color:var(--text-3)">⏳ 已提交生成任务，系统将在后台处理今日 ${count} 条新闻。</div>`;
   try {
     const resp = await fetch('/ai/daily-summary', { method: 'POST', headers: { 'Authorization': 'Bearer ' + authToken } });
     if (resp.status === 401) { logout(); body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)">❌ 登录已过期，请重新登录</div>'; return; }
     let data = await parseJsonResponse(resp);
     if (data.job_id) {
-      data = await waitDailySummaryJob(data.job_id, function(job, attempt) {
-        body.innerHTML = `<div style="text-align:center;padding:40px;color:var(--text-3)">⏳ 摘要生成中，已等待 ${Math.ceil(attempt * 2)} 秒...</div>`;
-      });
+      startDailySummaryPolling(data.job_id);
+      showToast('📊 每日摘要正在后台生成');
+      renderDailySummaryBody();
+      return;
     }
     if (!data) { body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)">❌ 请求失败</div>'; return; }
     if (data.error) { body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)">❌ ' + esc(data.error) + '</div>'; return; }
-    body.innerHTML = '<div style="max-height:400px;overflow-y:auto;font-size:13px;line-height:1.7;padding:12px;background:var(--bg);border-radius:8px">' + renderMarkdown(data.summary) + '</div><p style="font-size:11px;color:var(--text-3);margin-top:8px">基于 ' + data.article_count + ' 篇文章生成</p>';
+    setDailySummaryState({ status: 'completed', result: data, unread: false, error: '' });
   } catch (e) {
-    body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)">❌ 生成失败: ' + esc(e.message) + '</div>';
+    setDailySummaryState({ status: 'failed', error: e.message || '生成失败' });
   }
 }
 
