@@ -805,6 +805,24 @@ async function apiFetch(url, options = {}) {
   return resp.json();
 }
 
+async function parseJsonResponse(resp) {
+  const text = await resp.text();
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch (e) {
+    const trimmed = text.trim();
+    if (trimmed.startsWith('<')) {
+      throw new Error('接口返回了 HTML 页面，请检查服务是否超时或 /ai/ 代理是否生效');
+    }
+    throw new Error('接口返回格式错误');
+  }
+  if (!resp.ok) {
+    throw new Error((data && data.error) || ('请求失败: HTTP ' + resp.status));
+  }
+  return data;
+}
+
 // ═══ Body Scroll Lock ════════════════════════════════════
 let _scrollLockCount = 0;
 function lockBodyScroll() {
@@ -1285,14 +1303,14 @@ async function triggerDailySummary() {
   try {
     const resp = await fetch('/ai/daily-summary', { method: 'POST', headers: { 'Authorization': 'Bearer ' + authToken } });
     if (resp.status === 401) { logout(); showSettingsStatus('❌ 登录已过期，请重新登录', 'err'); return; }
-    const data = await resp.json();
+    const data = await parseJsonResponse(resp);
     if (!data) { showSettingsStatus('❌ 请求失败', 'err'); return; }
     if (data.error) { showSettingsStatus('❌ ' + data.error, 'err'); return; }
     // Show result in a scrollable area
     const el = document.getElementById('settingsStatus');
     el.className = 'ai-status ok';
     el.innerHTML = '✅ 基于 ' + data.article_count + ' 篇文章生成：<br><br><div style="max-height:300px;overflow-y:auto;font-size:12px;line-height:1.6;padding:8px;background:var(--bg);border-radius:6px;margin-top:4px">' + renderMarkdown(data.summary) + '</div>';
-  } catch (e) { showSettingsStatus('❌ 生成失败', 'err'); }
+  } catch (e) { showSettingsStatus('❌ 生成失败: ' + (e.message || ''), 'err'); }
 }
 
 // ═══ Daily Summary (Sidebar) ════════════════════════════
@@ -1315,7 +1333,7 @@ async function generateDailySummary() {
   try {
     const resp = await fetch('/ai/daily-summary', { method: 'POST', headers: { 'Authorization': 'Bearer ' + authToken } });
     if (resp.status === 401) { logout(); body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)">❌ 登录已过期，请重新登录</div>'; return; }
-    const data = await resp.json();
+    const data = await parseJsonResponse(resp);
     if (!data) { body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)">❌ 请求失败</div>'; return; }
     if (data.error) { body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)">❌ ' + esc(data.error) + '</div>'; return; }
     body.innerHTML = '<div style="max-height:400px;overflow-y:auto;font-size:13px;line-height:1.7;padding:12px;background:var(--bg);border-radius:8px">' + renderMarkdown(data.summary) + '</div><p style="font-size:11px;color:var(--text-3);margin-top:8px">基于 ' + data.article_count + ' 篇文章生成</p>';
