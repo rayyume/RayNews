@@ -1,5 +1,6 @@
 """RayNews AI Service — unified interface for OpenAI-compatible and Claude-compatible APIs."""
 
+import os
 import requests
 import re
 from collections import defaultdict
@@ -107,6 +108,7 @@ class AIService:
         self.endpoint = endpoint.rstrip("/")
         self.model = model
         self.provider_type = provider_type  # 'openai' or 'claude'
+        self.request_timeout = int(os.environ.get("AI_REQUEST_TIMEOUT_SECONDS", "300"))
 
     # ─── OpenAI-compatible API call ──────────────────────────
 
@@ -117,20 +119,25 @@ class AIService:
         if "/v1" not in url and "/v1" not in self.endpoint:
             url = f"{self.endpoint}/v1/chat/completions"
 
-        resp = requests.post(
-            url,
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": self.model,
-                "messages": messages,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-            },
-            timeout=30,
-        )
+        try:
+            resp = requests.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": self.model,
+                    "messages": messages,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                },
+                timeout=(30, self.request_timeout),
+            )
+        except requests.exceptions.ReadTimeout as e:
+            raise TimeoutError(
+                f"AI 服务响应超时（超过 {self.request_timeout} 秒），请稍后重试或减少日报文章数量"
+            ) from e
         resp.raise_for_status()
         data = resp.json()
         return data["choices"][0]["message"]["content"]
@@ -165,16 +172,21 @@ class AIService:
         if system:
             body["system"] = system
 
-        resp = requests.post(
-            url,
-            headers={
-                "x-api-key": self.api_key,
-                "anthropic-version": "2023-06-01",
-                "Content-Type": "application/json",
-            },
-            json=body,
-            timeout=30,
-        )
+        try:
+            resp = requests.post(
+                url,
+                headers={
+                    "x-api-key": self.api_key,
+                    "anthropic-version": "2023-06-01",
+                    "Content-Type": "application/json",
+                },
+                json=body,
+                timeout=(30, self.request_timeout),
+            )
+        except requests.exceptions.ReadTimeout as e:
+            raise TimeoutError(
+                f"AI 服务响应超时（超过 {self.request_timeout} 秒），请稍后重试或减少日报文章数量"
+            ) from e
         resp.raise_for_status()
         data = resp.json()
         return data["content"][0]["text"]
@@ -239,9 +251,12 @@ class AIService:
     # Returns {"summary": str, "stats": {...}}
 
     def daily_summary(self, articles: list[dict]) -> dict:
-        MAX_CHARS_PER_ARTICLE = 800  # approx 200-400 tokens per article
+        MAX_SUMMARY_CHARS = 220
+        TITLE_FALLBACK_CHARS = 80
         MAX_ARTICLES_PER_SOURCE = 100  # cap per source to avoid one dominating
-        MAX_BATCH_INPUT = 20_000  # chars per batch call to stay within context
+        MAX_DAILY_CANDIDATES = 160
+        MAX_CANDIDATES_PER_CATEGORY = 40
+        MAX_BATCH_INPUT = 8_000  # smaller calls are less likely to time out
         def article_link(article: dict) -> str:
             date = article.get("date", "") or ""
             art_id = article.get("id", 0)
@@ -249,12 +264,33 @@ class AIService:
                 return f"https://news.rayyu.me/#/article/{date[2:]}-{art_id}"
             return ""
 
+        def compact_text(text: str, limit: int) -> str:
+            text = re.sub(r'<[^>]+>', ' ', text or "")
+            text = " ".join(text.split()).strip()
+            if len(text) <= limit:
+                return text
+            return text[:limit].rstrip() + "…"
+
+        def classify_article(title: str, text: str, source: str) -> str:
+            haystack = f"{title} {text} {source}".lower()
+            category_keywords = (
+                ("科技动态", ("ai", "openai", "deepseek", "芯片", "半导体", "模型", "科技", "人工智能", "机器人", "苹果", "英伟达", "算力")),
+                ("商业聚焦", ("公司", "财报", "营收", "利润", "融资", "上市", "并购", "裁员", "市场", "品牌", "电商", "商业", "投资")),
+                ("政经新闻", ("央行", "美联储", "利率", "通胀", "gdp", "pmi", "就业", "财政", "关税", "政府", "政策", "总统", "选举", "经济")),
+            )
+            for category, keywords in category_keywords:
+                if any(keyword in haystack for keyword in keywords):
+                    return category
+            return "其他信息"
+
         def format_article_entry(article: dict, index: int) -> str:
             link = article.get("url", "")
+            text_label = "内容摘要" if article.get("has_summary") else "标题线索"
             parts = [
                 f"{index}. 来源：{article['source']}",
+                f"建议分类：{article['category']}",
                 f"标题：{article['title']}",
-                f"内容摘要：{article['text']}",
+                f"{text_label}：{article['text']}",
             ]
             if link:
                 parts.append(f"链接：{link}")
@@ -289,17 +325,15 @@ class AIService:
             # Layer 1: existing AI summary
             text = ""
             if summary:
-                text = summary
-            # Layer 2: first 500 chars of body
-            elif body_html:
-                plain = re.sub(r'<[^>]+>', ' ', body_html)
-                plain = " ".join(plain.split()).strip()
-                text = plain[:MAX_CHARS_PER_ARTICLE]
-                if len(plain) > MAX_CHARS_PER_ARTICLE:
-                    text += "…"
+                text = compact_text(summary, MAX_SUMMARY_CHARS)
+            # Layer 2: title only. Daily summary should not ingest article bodies.
+            else:
+                text = compact_text(title, TITLE_FALLBACK_CHARS)
 
             if not text:
                 text = "(no content)"
+
+            category = classify_article(title, text, source)
 
             excerpts.append({
                 "id": art_id,
@@ -307,6 +341,7 @@ class AIService:
                 "title": title,
                 "url": url,
                 "text": text,
+                "category": category,
                 "has_summary": bool(summary),
             })
 
@@ -319,6 +354,32 @@ class AIService:
         capped = []
         for src, items in by_source.items():
             capped.extend(items[:MAX_ARTICLES_PER_SOURCE])
+        articles_after_source_cap = len(capped)
+
+        # Select a balanced candidate set for the AI. Processing every article in
+        # a 500-item day is expensive and slow; the final digest only needs about
+        # 40 high-signal items, so keep a wider but bounded candidate pool.
+        categories = ("政经新闻", "科技动态", "商业聚焦", "其他信息")
+        by_category = defaultdict(list)
+        for ex in capped:
+            by_category[ex["category"]].append(ex)
+        for items in by_category.values():
+            items.sort(key=lambda e: (not e["has_summary"]))
+
+        selected = []
+        selected_ids = set()
+        for category in categories:
+            for ex in by_category.get(category, [])[:MAX_CANDIDATES_PER_CATEGORY]:
+                selected.append(ex)
+                selected_ids.add(ex["id"])
+
+        if len(selected) < MAX_DAILY_CANDIDATES:
+            remaining = [ex for ex in capped if ex["id"] not in selected_ids]
+            remaining.sort(key=lambda e: (not e["has_summary"]))
+            selected.extend(remaining[:MAX_DAILY_CANDIDATES - len(selected)])
+
+        capped = selected[:MAX_DAILY_CANDIDATES]
+        articles_selected_for_ai = len(capped)
 
         # ── Split into batches if needed ──
         batches = []
@@ -359,11 +420,12 @@ class AIService:
                                 "必须保留每条新闻的原始 RayNews 链接，链接格式使用 [🔗](URL)。"
                                 "按政经新闻、科技动态、商业聚焦、其他信息四类归类；"
                                 "每条候选条目用内容相关的短标题开头，不要使用“单条摘要总结”；"
-                                "短标题加摘要正文合计不超过 50 个中文字符，链接不计入字数。"},
+                                "短标题加摘要正文合计不超过 50 个中文字符，链接不计入字数；"
+                                "每个分类最多输出 8 条候选，优先保留有数字、时间、主体和影响的信息。"},
                     {"role": "user",
                      "content": f"以下是一组新闻（批次 {i+1}/{len(batches)}），请生成分类候选条目：\n\n{batch_text}"},
                 ]
-                result = self.chat(bm, max_tokens=2500)
+                result = self.chat(bm, max_tokens=1200)
                 batch_summaries.append({
                     "batch_index": i,
                     "summary": result,
@@ -412,13 +474,15 @@ class AIService:
                 {"role": "user", "content": user_msg},
             ]
 
-        final_summary = self.chat(final_prompt, max_tokens=5000)
+        final_summary = self.chat(final_prompt, max_tokens=3500)
 
         return {
             "summary": final_summary,
             "stats": {
                 "total_articles": len(articles),
-                "articles_after_dedup": len(capped),
+                "articles_after_dedup": articles_after_source_cap,
+                "articles_after_source_cap": articles_after_source_cap,
+                "articles_selected_for_ai": articles_selected_for_ai,
                 "total_batches": len(batches),
                 "articles_with_summary": total_articles_with_summary,
                 "articles_without_summary": total_articles_without_summary,
