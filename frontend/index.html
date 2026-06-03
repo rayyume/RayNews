@@ -638,6 +638,7 @@ async function verifyToken() {
       }
       // Load user settings for auto-translate decisions
       loadUserSettings();
+      syncDailySummaryToday();
     }
   } catch (e) {
     // Network error — keep existing auth state, user can re-try later
@@ -939,6 +940,7 @@ async function submitAuth() {
       closeAuth();
       showToast(authMode === 'login' ? '✅ 登录成功' : '✅ 注册成功');
       loadUserSettings();
+      syncDailySummaryToday();
     }
   } catch (e) {
     errEl.textContent = '网络错误: ' + (e.message || '未知错误');
@@ -1350,7 +1352,10 @@ function renderDailySummaryBody() {
     body.innerHTML =
       '<div style="max-height:400px;overflow-y:auto;font-size:13px;line-height:1.7;padding:12px;background:var(--bg);border-radius:8px">' +
       renderMarkdown(data.summary) +
-      '</div><p style="font-size:11px;color:var(--text-3);margin-top:8px">基于 ' + data.article_count + ' 篇文章生成</p>';
+      '</div><div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:10px">' +
+      '<p style="font-size:11px;color:var(--text-3);margin:0">基于 ' + data.article_count + ' 篇文章生成</p>' +
+      '<button class="ai-save-btn" onclick="generateDailySummary()" style="width:auto;margin:0;padding:7px 12px;font-size:12px">重新生成</button>' +
+      '</div>';
     return;
   }
   if (dailySummaryState.status === 'failed') {
@@ -1422,6 +1427,43 @@ function startDailySummaryPolling(jobId) {
   dailySummaryState.pollTimer = setTimeout(() => pollDailySummaryJob(jobId), 800);
 }
 
+async function syncDailySummaryToday() {
+  if (!authToken) return;
+  try {
+    const resp = await fetch('/ai/daily-summary/today', {
+      headers: { 'Authorization': 'Bearer ' + authToken },
+    });
+    if (resp.status === 401) {
+      logout();
+      return;
+    }
+    const data = await parseJsonResponse(resp);
+    if (data.status === 'completed') {
+      setDailySummaryState({
+        jobId: '',
+        status: 'completed',
+        result: data,
+        error: '',
+        unread: true,
+        startedAt: 0,
+      });
+      return;
+    }
+    if ((data.status === 'queued' || data.status === 'running') && data.job_id) {
+      startDailySummaryPolling(data.job_id);
+      return;
+    }
+    setDailySummaryState({
+      jobId: '',
+      status: 'idle',
+      result: null,
+      error: '',
+      unread: false,
+      startedAt: 0,
+    });
+  } catch (e) {}
+}
+
 // ─── Daily Summary ───────────────────────────────────────
 
 async function triggerDailySummary() {
@@ -1447,14 +1489,16 @@ async function triggerDailySummary() {
 
 // ═══ Daily Summary (Sidebar) ════════════════════════════
 
-function showDailySummary() {
+async function showDailySummary() {
+  document.getElementById('dailySummaryOverlay').classList.add('open');
+  lockBodyScroll();
+  closeSidebar();
+  renderDailySummaryBody();
+  await syncDailySummaryToday();
   if (dailySummaryState.status === 'completed') {
     dailySummaryState.unread = false;
     updateDailySummaryButton();
   }
-  document.getElementById('dailySummaryOverlay').classList.add('open');
-  lockBodyScroll();
-  closeSidebar();
   renderDailySummaryBody();
 }
 

@@ -3,6 +3,7 @@
 import os
 import re
 import sys
+import json
 import threading
 import time
 import uuid
@@ -674,6 +675,7 @@ def ai_daily_summary():
         _daily_summary_jobs[job_id] = {
             "job_id": job_id,
             "user_id": g.user_id,
+            "date": _today_str(),
             "status": "queued",
             "created_at": time.time(),
             "updated_at": time.time(),
@@ -691,6 +693,39 @@ def ai_daily_summary():
     return jsonify({"job_id": job_id, "status": "queued"}), 202
 
 
+@app.route("/ai/daily-summary/today", methods=["GET"])
+@require_auth
+def ai_daily_summary_today():
+    today_str = _today_str()
+    _cleanup_daily_summary_jobs()
+    with _daily_summary_jobs_lock:
+        for job in _daily_summary_jobs.values():
+            if (
+                job.get("user_id") == g.user_id
+                and job.get("date") == today_str
+                and job.get("status") in ("queued", "running")
+            ):
+                return jsonify({
+                    "status": job["status"],
+                    "job_id": job["job_id"],
+                    "date": today_str,
+                    "created_at": job.get("created_at"),
+                    "updated_at": job.get("updated_at"),
+                })
+
+    cached = _get_daily_summary_cache(g.user_id, today_str)
+    if cached:
+        return jsonify({
+            "status": "completed",
+            "date": today_str,
+            "summary": cached["summary"],
+            "article_count": cached["article_count"],
+            "stats": cached["stats"],
+            "updated_at": cached["updated_at"],
+        })
+    return jsonify({"status": "idle", "date": today_str})
+
+
 @app.route("/ai/daily-summary/<job_id>", methods=["GET"])
 @require_auth
 def ai_daily_summary_status(job_id):
@@ -704,6 +739,83 @@ def ai_daily_summary_status(job_id):
 
 _daily_summary_jobs = {}
 _daily_summary_jobs_lock = threading.Lock()
+
+
+def _today_str() -> str:
+    import datetime as _dt
+    return _dt.datetime.now().strftime("%Y-%m-%d")
+
+
+def _init_daily_summary_cache_table():
+    if not os.path.exists(NEWS_DB):
+        return
+    try:
+        conn = sqlite3.connect(NEWS_DB)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS daily_summary_cache (
+                user_id       INTEGER NOT NULL,
+                date          TEXT NOT NULL,
+                summary       TEXT NOT NULL,
+                article_count INTEGER NOT NULL DEFAULT 0,
+                stats         TEXT NOT NULL DEFAULT '{}',
+                updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (user_id, date)
+            )
+        """)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[daily-summary] cache table init failed: {e}")
+
+
+def _get_daily_summary_cache(user_id: int, date_str: str) -> dict | None:
+    if not os.path.exists(NEWS_DB):
+        return None
+    try:
+        _init_daily_summary_cache_table()
+        conn = sqlite3.connect(NEWS_DB)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT summary, article_count, stats, updated_at "
+            "FROM daily_summary_cache WHERE user_id = ? AND date = ?",
+            (user_id, date_str),
+        ).fetchone()
+        conn.close()
+        if not row:
+            return None
+        data = dict(row)
+        try:
+            data["stats"] = json.loads(data.get("stats") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            data["stats"] = {}
+        return data
+    except Exception as e:
+        print(f"[daily-summary] cache read failed: {e}")
+        return None
+
+
+def _save_daily_summary_cache(user_id: int, date_str: str, summary: str,
+                              article_count: int, stats: dict):
+    if not os.path.exists(NEWS_DB):
+        return
+    try:
+        _init_daily_summary_cache_table()
+        conn = sqlite3.connect(NEWS_DB)
+        conn.execute(
+            "INSERT INTO daily_summary_cache "
+            "(user_id, date, summary, article_count, stats, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, datetime('now')) "
+            "ON CONFLICT(user_id, date) DO UPDATE SET "
+            "summary = excluded.summary, "
+            "article_count = excluded.article_count, "
+            "stats = excluded.stats, "
+            "updated_at = datetime('now')",
+            (user_id, date_str, summary, article_count, json.dumps(stats or {}, ensure_ascii=False)),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[daily-summary] cache write failed: {e}")
 
 
 def _cleanup_daily_summary_jobs():
@@ -728,8 +840,7 @@ def _update_daily_summary_job(job_id, **updates):
 def _run_daily_summary_job(job_id, user_id, config):
     _update_daily_summary_job(job_id, status="running")
     try:
-        import datetime as _dt
-        today_str = _dt.datetime.now().strftime("%Y-%m-%d")
+        today_str = _today_str()
         articles = _fetch_articles_by_date(
             today_str,
             include_shared_summary=_user_auto_summary_enabled(user_id),
@@ -746,6 +857,13 @@ def _run_daily_summary_job(job_id, user_id, config):
             provider_type=config.get("provider_type", "openai"),
         )
         result = svc.daily_summary(articles)
+        _save_daily_summary_cache(
+            user_id,
+            today_str,
+            result["summary"],
+            len(articles),
+            result["stats"],
+        )
         _update_daily_summary_job(
             job_id,
             status="completed",
@@ -853,6 +971,7 @@ def _send_daily_summaries():
             result = svc.daily_summary(articles)
             summary = result["summary"]
             stats = result["stats"]
+            _save_daily_summary_cache(uid, today_str, summary, len(articles), stats)
             send_daily_summary_email(resend_api_key, to_email, summary, stats)
             _daily_summary_sent.add(dedup_key)
             print(f"[scheduler] Daily summary sent to {to_email} for {today_str}. "
@@ -1223,9 +1342,6 @@ def _is_enabled_value(value) -> bool:
     return value is True or value == 1 or str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
-import json
-
-
 @app.route("/settings/test-notification", methods=["POST"])
 @require_auth
 def test_notification():
@@ -1301,6 +1417,7 @@ def scheduler_status():
 
 if __name__ == "__main__":
     _init_ai_results_table()
+    _init_daily_summary_cache_table()
     import threading as _th
     _th.Thread(target=_daily_summary_loop, daemon=True).start()
     _th.Thread(target=_auto_summary_loop, daemon=True).start()
