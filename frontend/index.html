@@ -99,6 +99,7 @@ a:hover{text-decoration:underline}
 
 /* ═══ Article Overlay ═════════════════════════════ */
 .overlay{position:fixed;inset:0;z-index:200;background:var(--bg);overflow-y:auto;transform:translateX(100%);transition:transform 0.35s cubic-bezier(0.4,0,0.2,1);touch-action:pan-y;overscroll-behavior-x:none}
+.overlay.from-source-history{z-index:560}
 .overlay.open{transform:translateX(0)}
 .overlay-header{position:sticky;top:0;z-index:10;background:rgba(10,10,12,0.85);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-bottom:1px solid var(--border);padding-top:env(safe-area-inset-top,0px)}
 .overlay-header-inner{max-width:720px;margin:0 auto;display:flex;align-items:center;min-height:48px;padding:0 20px}
@@ -280,6 +281,7 @@ body.body-scroll-lock{overflow:hidden!important}
 /* ═══ Favorites Panel ════════════════════════════════════ */
 .fav-overlay{position:fixed;inset:0;z-index:400;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity 0.2s}
 .fav-overlay.open{opacity:1;pointer-events:auto}
+#sourceArticlesOverlay{z-index:520}
 .fav-panel{position:relative;z-index:1;background:var(--bg-card);border:1px solid var(--border);border-radius:16px;width:520px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.4)}
 .fav-header{display:flex;align-items:center;justify-content:space-between;padding:20px 24px;border-bottom:1px solid var(--border);flex-shrink:0}
 .fav-header h2{margin:0;font-size:18px;font-weight:700}
@@ -942,7 +944,7 @@ function canonicalSource(source) {
 }
 
 function categoryDisplayName(cat) {
-  return cat;
+  return CATEGORY_NAMES[cat] || cat;
 }
 
 // ═══ Body Scroll Lock ════════════════════════════════════
@@ -1271,6 +1273,11 @@ function closeSourceArticles() {
   unlockBodyScroll();
 }
 
+function openSourceHistoryArticle(id) {
+  document.getElementById('overlay').classList.add('from-source-history');
+  openArticle(id);
+}
+
 function renderSourceArticles(items) {
   const body = document.getElementById('sourceArticlesBody');
   if (!items.length) {
@@ -1278,7 +1285,7 @@ function renderSourceArticles(items) {
     return;
   }
   body.innerHTML = items.map(item => `
-    <div class="fav-item" onclick="closeSourceArticles(); closeAISettings(); openArticle(${item.id})">
+    <div class="fav-item" onclick="openSourceHistoryArticle(${item.id})">
       ${item.thumb ? `<div class="fav-item-thumb"><img src="${proxyImgSrc(item.thumb)}" alt="" loading="lazy"></div>` : ''}
       <div class="fav-item-body">
         <div class="fav-item-title">${esc(item.title)}</div>
@@ -2584,8 +2591,7 @@ function renderFilters() {
     html += `<div class="cat-body ${isCollapsed ? 'collapsed' : ''}" data-cat="${cat}">`;
     html += catSources.map(s => {
       const label = sourceLabel(s);
-      const suffix = label && label !== s ? `<span class="source-label-sub">${esc(s)}</span>` : '';
-      return `<button class="fbtn" data-f="${esc(s)}" title="${esc(s)}"><span class="source-label-main">${esc(label)}</span>${suffix}</button>`;
+      return `<button class="fbtn" data-f="${esc(s)}" title="${esc(s)}"><span class="source-label-main">${esc(label)}</span></button>`;
     }).join('');
     html += `</div>`;
   }
@@ -3001,7 +3007,9 @@ let _closingOverlay = false;
 function closeArticle() {
   if (_closingOverlay) return;
   _closingOverlay = true;
-  document.getElementById('overlay').classList.remove('open');
+  const overlay = document.getElementById('overlay');
+  overlay.classList.remove('open');
+  overlay.classList.remove('from-source-history');
   unlockBodyScroll();
   history.replaceState(null, '', window.location.pathname + window.location.search);
   // If new articles arrived while reading, refresh the list now
