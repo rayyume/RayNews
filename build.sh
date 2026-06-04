@@ -98,7 +98,7 @@ print(payload)
 " | curl -sL -X POST \
     -H "Accept: application/vnd.github+json" \
     -H "Authorization: token $GITHUB_TOKEN" \
-    https://api.github.com/repos/rayyume/RayNews/releases \
+    https://api.github.com/repos/rayyume/RayNews-Reader/releases \
     -d @- > /dev/null
   echo "=== Release v${VERSION} created ==="
 

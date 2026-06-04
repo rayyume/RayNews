@@ -48,7 +48,7 @@ News Sources (RSS/Web/API)
 ### 1. Clone
 
 ```bash
-git clone https://github.com/rayyume/RayNews.git
+git clone https://github.com/rayyume/RayNews-Reader.git
 cd RayNews
 ```
 
