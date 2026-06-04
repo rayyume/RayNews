@@ -171,7 +171,7 @@ a:hover{text-decoration:underline}
 .sidebar .filters{display:flex;flex-direction:column;gap:4px;padding:0;overflow:visible}
 .cat-header{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;margin:2px 0;border-radius:6px;font-size:12px;font-weight:700;color:var(--text-3);cursor:pointer;transition:all 0.12s;user-select:none;letter-spacing:0.03em}
 .cat-header:hover{color:var(--text-2);background:var(--bg-card-hover)}
-.cat-header .arrow{font-size:10px;transition:transform 0.2s;color:var(--text-3);display:inline-block;width:10px;text-align:center}
+.cat-header .arrow{font-size:10px;transition:transform 0.2s;color:var(--text-3);display:inline-block;width:10px;text-align:center;cursor:pointer}
 .cat-header .arrow.open{transform:rotate(90deg)}
 .cat-body{display:flex;flex-direction:column;gap:2px}
 .cat-body.collapsed{display:none}
@@ -2920,13 +2920,26 @@ function renderFilters() {
       selectFilter('all');
       return;
     }
+    // Arrow click → toggle collapse (don't filter)
+    const arrow = e.target.closest('.arrow');
+    if (arrow) {
+      const header = arrow.closest('.cat-header');
+      const cat = header ? header.dataset.cat : '';
+      if (!cat) return;
+      const collapsedKey = 'raynews_cat_' + cat;
+      const body = el.querySelector(`.cat-body[data-cat="${cat}"]`);
+      const isCurrentlyOpen = body ? !body.classList.contains('collapsed') : true;
+      if (body) body.classList.toggle('collapsed', isCurrentlyOpen);
+      arrow.classList.toggle('open', !isCurrentlyOpen);
+      localStorage.setItem(collapsedKey, isCurrentlyOpen ? '1' : '0');
+      return;
+    }
     // Category header click → filter by this category, toggle if already active
     const header = e.target.closest('.cat-header');
     if (header) {
       const cat = header.dataset.cat;
       if (!cat) return;
       if (filter === 'cat:' + cat) {
-        // Already filtering by this category → clear filter (show all)
         selectFilter('all');
       } else {
         selectFilter('cat:' + cat);
