@@ -346,7 +346,31 @@ def detect_source(content: str, extra_html: str = "") -> str:
 def detect_source_from_attribution(content: str) -> str | None:
     """Extract source only from explicit bottom via attribution."""
     via_candidates = _extract_bottom_via_sources(content)
-    return via_candidates[0] if via_candidates else None
+    if via_candidates:
+        return via_candidates[0]
+
+    # Fallback: body-inline attribution patterns common in Chinese news articles.
+    # Examples: "—— 界面新闻", "▲ 财联社", "— BBC News"
+    body_attr = _extract_body_attribution(content)
+    return body_attr
+
+
+def _extract_body_attribution(content: str) -> str | None:
+    """Extract source from body-inline attribution like '—— SourceName' at article end."""
+    plain = clean_html(content)
+    if not plain:
+        return None
+
+    # Only look at the last 300 chars — in-body attributions are always at the end
+    tail = plain[-300:] if len(plain) > 300 else plain
+    # Match patterns: —— SourceName, ▲ SourceName, — SourceName, | Source
+    m = re.search(r"(?:——|▲|—\s|\|\s)([\w一-鿿㐀-䶿·]+(?:[一-鿿\w]|\b))(?:\s|$)", tail)
+    if not m:
+        return None
+    raw = _clean_source_name(m.group(1).strip())
+    if raw and 1 < len(raw) <= 20:
+        return raw
+    return None
 
 
 def _extract_bottom_via_sources(content: str) -> list[str]:
@@ -395,12 +419,16 @@ def _extract_bottom_via_sources(content: str) -> list[str]:
                 continue
 
         # No via-adjacent link found — fall back to plain text after "via".
-        # Take only the FIRST LINE: real via attribution is a single line;
-        # article titles / body text that follow are on subsequent lines.
-        raw = _text_after_last_via(line)
-        if raw:
-            raw = raw.split("\n")[0].strip()
-        # Cap at 80 chars before cleaning — anything longer is body text, not source
+        # Extract from RAW HTML (before clean_html, which collapses <br> → space).
+        # Split by <br> to isolate the via line from any article text that follows.
+        via_match = re.search(r"(?i)\bvia\b", chunk)
+        if via_match:
+            after_via_html = chunk[via_match.end():]
+            # Take only the first <br>-delimited segment after "via"
+            first_segment = re.split(r"<br\s*/?>", after_via_html, maxsplit=1, flags=re.IGNORECASE)[0]
+            raw = clean_html(first_segment).strip()
+        else:
+            raw = _text_after_last_via(line)
         if raw and len(raw) > 80:
             raw = raw[:80].rsplit(" ", 1)[0]
         raw = _clean_source_name(raw)
@@ -419,6 +447,8 @@ def _text_after_last_via(line: str) -> str:
 def _clean_source_name(name: str) -> str:
     """Strip verbose suffixes and extract meaningful source name."""
     name = name.strip("《》【】").strip()
+    # Strip emoji (U+1F000–U+1FFFF)
+    name = re.sub(r"[\U0001F000-\U0010FFFF]", "", name).strip()
 
     known_keywords = [
         "格隆汇", "联合早报", "cnBeta", "界面新闻", "少数派",
@@ -431,11 +461,18 @@ def _clean_source_name(name: str) -> str:
         if kw in name:
             return kw
 
+    # Special cases for commonly merged channel display names
+    if "科技圈" in name and "在花" in name:
+        return "在花科技圈"
+
     suffixes = [
         " - Telegram Channel", " - Channel",
+        " | Telegram Channel",
+        " (Telegram Channel",
         " - 日排行", " - 即时", " - 国际", " - 要闻",
         " (author:", "全文版",
         " - Telegram", "Telegram",
+        "频道",
     ]
     for s in suffixes:
         if s in name:
@@ -444,6 +481,7 @@ def _clean_source_name(name: str) -> str:
     name = name.strip().rstrip(".:：")
     name = re.sub(r"\s*[-–]\s*(Channel|Group|Bot|频道|群)$", "", name, flags=re.IGNORECASE)
     name = re.sub(r"^【.*?】\s*", "", name)
+    name = name.strip().rstrip(".:：")
 
     if " - " in name:
         segments = [s.strip() for s in name.split(" - ") if s.strip()]

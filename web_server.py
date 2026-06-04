@@ -2189,6 +2189,14 @@ def redetect_single_source():
         detected = detect_source_from_attribution(content)
         if not detected and not row["telegraph_url"]:
             detected = detect_source(content)
+        # If still no result, try fetching the original Telegram message
+        # (body_html may be Telegraph content without via lines)
+        if not detected:
+            tg_content = _fetch_telegram_message_content(row["id"])
+            if tg_content:
+                detected = detect_source_from_attribution(tg_content)
+                if not detected:
+                    detected = detect_source(tg_content)
         if not detected or detected == (row["source"] or "").strip():
             continue
         conn.execute("UPDATE articles SET source = ? WHERE id = ?", (detected, row["id"]))
