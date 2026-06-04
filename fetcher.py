@@ -279,12 +279,18 @@ def save_state(state: dict):
 # ─── Source Detection ─────────────────────────────────────
 def detect_source(content: str) -> str:
     """Extract and clean source name from content."""
-    via_match = re.search(r"via\s+(.+?)(?:\s*<|$)", content, re.DOTALL)
-    if via_match:
-        raw = clean_html(via_match.group(1))
+    via_candidates = []
+    via_pattern = re.compile(
+        r"via\s*(?:<a[^>]*>(.*?)</a>|([^<\r\n]+))",
+        re.IGNORECASE | re.DOTALL,
+    )
+    for via_match in via_pattern.finditer(content):
+        raw = clean_html(via_match.group(1) or via_match.group(2) or "")
         raw = _clean_source_name(raw)
         if raw and len(raw) < 60:
-            return raw
+            via_candidates.append(raw)
+    if via_candidates:
+        return via_candidates[-1]
 
     tg = re.search(r't\.me/([a-zA-Z0-9_]+)', content)
     if tg:
@@ -568,8 +574,8 @@ def process_message(msg: dict, orig_msg_id: int) -> dict:
             if wechat_result:
                 # Only append the "via <source>" link from the original content,
                 # not the full original message (which repeats the title)
-                via_match = re.search(r'via\s*<a[^>]*>.*?</a>', content, re.DOTALL | re.IGNORECASE)
-                via_suffix = via_match.group(0) if via_match else ""
+                via_matches = list(re.finditer(r'via\s*<a[^>]*>.*?</a>', content, re.DOTALL | re.IGNORECASE))
+                via_suffix = via_matches[-1].group(0) if via_matches else ""
                 entry["has_full_content"] = True
                 entry["body_html"] = wechat_result["body_html"] + "\n" + via_suffix
                 entry["thumb"] = wechat_result["images"][0] if wechat_result["images"] and not thumb else thumb
