@@ -1,6 +1,7 @@
 """RayNews Notifier — Send notifications via Resend API."""
 
 import json
+import os
 import markdown
 import requests
 
@@ -36,8 +37,8 @@ def send_daily_summary_email(api_key: str, to_email: str,
                              summary_text: str, stats: dict) -> dict:
     """Send a formatted daily summary email via Resend.
     Converts Markdown summary_text to HTML before embedding.
-    stats is a dict with keys: total_articles, articles_after_dedup, total_batches,
-    articles_with_summary, articles_without_summary.
+    stats is a dict with keys: total_articles, articles_after_dedup,
+    articles_selected_for_ai, selected_articles_with_summary.
     """
     # Convert markdown to HTML with fenced code blocks and tables
     summary_html = markdown.markdown(
@@ -46,9 +47,10 @@ def send_daily_summary_email(api_key: str, to_email: str,
     )
     total = stats.get("total_articles", 0)
     deduped = stats.get("articles_after_dedup", 0)
-    batches = stats.get("total_batches", 0)
-    with_summary = stats.get("articles_with_summary", 0)
-    subtitle = f"{total} 篇原始 → {deduped} 篇去重 · {batches} 批次 · {with_summary} 篇已有摘要"
+    selected = stats.get("articles_selected_for_ai", deduped)
+    with_summary = stats.get("selected_articles_with_summary", stats.get("articles_with_summary", 0))
+    public_url = os.environ.get("RAYNEWS_PUBLIC_URL", "https://news.rayyu.me").rstrip("/")
+    subtitle = f"{total} 篇原始 · {deduped} 篇去重 · 入选 {selected} 篇 · 入选中 {with_summary} 篇已有摘要"
     html = f"""<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><style>
@@ -74,7 +76,7 @@ hr{{border:none;border-top:1px solid rgba(255,255,255,0.08);margin:16px 0}}
 <div class="summary">
 {summary_html}
 </div>
-<p class="footer">由 RayNews 自动生成 · <a href="https://rayyu.me">打开 RayNews</a></p>
+<p class="footer">由 RayNews 自动生成 · <a href="{public_url}">打开 RayNews</a></p>
 </body>
 </html>"""
     return send_email(

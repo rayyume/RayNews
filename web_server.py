@@ -855,7 +855,9 @@ def _run_daily_summary_job(job_id, user_id, config):
             _update_daily_summary_job(job_id, status="failed", error="no articles today")
             return
 
+        raw_article_count = len(articles)
         articles = _dedup_articles(articles)
+        deduped_article_count = len(articles)
         svc = AIService(
             api_key=config["api_key"],
             endpoint=config["endpoint"],
@@ -863,18 +865,20 @@ def _run_daily_summary_job(job_id, user_id, config):
             provider_type=config.get("provider_type", "openai"),
         )
         result = svc.daily_summary(articles)
+        result["stats"]["total_articles"] = raw_article_count
+        result["stats"]["articles_after_dedup"] = deduped_article_count
         _save_daily_summary_cache(
             user_id,
             today_str,
             result["summary"],
-            len(articles),
+            raw_article_count,
             result["stats"],
         )
         _update_daily_summary_job(
             job_id,
             status="completed",
             summary=result["summary"],
-            article_count=len(articles),
+            article_count=raw_article_count,
             stats=result["stats"],
         )
     except Exception as e:
@@ -974,11 +978,15 @@ def _send_daily_summaries():
                 model=ai_config["model"],
                 provider_type=ai_config.get("provider_type", "openai"),
             )
+            raw_article_count = len(articles)
             articles = _dedup_articles(articles)
+            deduped_article_count = len(articles)
             result = svc.daily_summary(articles)
             summary = result["summary"]
             stats = result["stats"]
-            _save_daily_summary_cache(uid, today_str, summary, len(articles), stats)
+            stats["total_articles"] = raw_article_count
+            stats["articles_after_dedup"] = deduped_article_count
+            _save_daily_summary_cache(uid, today_str, summary, raw_article_count, stats)
             send_daily_summary_email(resend_api_key, to_email, summary, stats)
             _daily_summary_sent.add(dedup_key)
             print(f"[scheduler] Daily summary sent to {to_email} for {today_str}. "

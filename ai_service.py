@@ -517,9 +517,14 @@ class AIService:
         if not capped:
             return {"summary": "今日无新闻。", "stats": {
                 "total_articles": len(articles),
+                "articles_after_dedup": len(articles),
+                "articles_after_source_cap": 0,
+                "articles_selected_for_ai": 0,
                 "total_batches": 0,
                 "articles_with_summary": 0,
                 "articles_without_summary": 0,
+                "selected_articles_with_summary": 0,
+                "selected_articles_without_summary": 0,
             }}
 
         articles_text = "\n\n".join(
@@ -554,12 +559,14 @@ class AIService:
             "summary": final_summary,
             "stats": {
                 "total_articles": len(articles),
-                "articles_after_dedup": articles_after_source_cap,
+                "articles_after_dedup": len(articles),
                 "articles_after_source_cap": articles_after_source_cap,
                 "articles_selected_for_ai": articles_selected_for_ai,
                 "total_batches": 1,
                 "articles_with_summary": total_articles_with_summary,
                 "articles_without_summary": total_articles_without_summary,
+                "selected_articles_with_summary": total_articles_with_summary,
+                "selected_articles_without_summary": total_articles_without_summary,
             },
         }
 
