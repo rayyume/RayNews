@@ -353,13 +353,14 @@ body.body-scroll-lock{overflow:hidden!important}
 .source-step:first-child{padding-top:0}
 .source-step-title{font-size:13px;font-weight:800;color:var(--text);margin-bottom:4px}
 .source-step-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
-.source-row{display:grid;grid-template-columns:minmax(120px,1.2fr) minmax(110px,.8fr) 110px 72px;gap:8px;align-items:center;padding:10px 0;border-bottom:1px solid var(--border)}
+.source-row{display:grid;grid-template-columns:minmax(120px,1.2fr) minmax(110px,.8fr) 110px 72px 36px;gap:8px;align-items:center;padding:10px 0;border-bottom:1px solid var(--border)}
 .source-name{font-size:12px;color:var(--text-2);line-height:1.35;word-break:break-word}
 .source-name-btn{background:none;border:none;color:var(--accent);font:inherit;font-weight:700;text-align:left;cursor:pointer;padding:0}
 .source-name-btn:hover{text-decoration:underline}
 .source-meta{font-size:11px;color:var(--text-3);margin-top:3px}
 .source-label-input,.source-cat-select{width:100%;padding:7px 9px;border:1px solid var(--border);border-radius:8px;background:var(--bg-card);color:var(--text);font-size:12px;font-family:var(--font)}
 .source-save-btn{padding:7px 10px;border-radius:8px;border:1px solid var(--accent);background:var(--accent-dim);color:var(--accent);font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font)}
+.source-redetect-btn{padding:6px 8px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-2);font-size:14px;cursor:pointer;font-family:var(--font);transition:all 0.12s}.source-redetect-btn:hover{background:var(--accent-dim);border-color:var(--accent);color:var(--accent)}
 .source-label-main{display:block;font-weight:700;line-height:1.2}
 .source-label-sub{display:block;margin-top:2px;font-size:10px;color:var(--text-3);line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 @media(max-width:640px){.source-row{grid-template-columns:1fr}.source-save-btn{width:100%}}
@@ -887,7 +888,7 @@ async function apiFetch(url, options = {}) {
   if (authToken) headers['Authorization'] = 'Bearer ' + authToken;
   const resp = await fetch(url, { ...options, headers });
   if (resp.status === 401 && authToken) {
-    logout();
+    // Don't auto-logout on transient 401 — let caller handle the null
     return null;
   }
   return resp.json();
@@ -1386,6 +1387,7 @@ function renderSourceManager(rows) {
         <input class="source-label-input" value="${label}" maxlength="20" aria-label="来源缩写">
         <select class="source-cat-select" aria-label="来源分类">${options}</select>
         <button class="source-save-btn" onclick="saveSourceRow(${idx})">保存</button>
+        <button class="source-redetect-btn" onclick="redetectSourceArticles(${idx})" title="重新识别该来源下所有文章的来源标签">🔄</button>
       </div>`;
   }).join('');
 }
@@ -1412,6 +1414,37 @@ async function openSourceArticles(idx) {
     renderSourceArticles(data.items || []);
   } catch (e) {
     body.innerHTML = '<div class="fav-empty">加载失败</div>';
+  }
+}
+
+async function redetectSourceArticles(idx) {
+  const row = sourceRows[idx];
+  if (!row || !row.source) return;
+  const displayName = row.label || row.source;
+  if (!confirm(`将重新识别「${displayName}」下所有文章的来源标签，确定继续？`)) return;
+  const status = document.getElementById('sourceManagerStatus');
+  if (status) status.textContent = `正在重新识别「${displayName}」...`;
+  try {
+    const data = await apiFetch('/sources/redetect-single', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: row.alias_target || row.source }),
+    });
+    if (!data || data.error) {
+      showSettingsStatus('重新识别失败: ' + (data?.error || '请求失败'), 'error');
+      if (status) status.textContent = '';
+      return;
+    }
+    const msg = `「${displayName}」识别完成：检查 ${data.checked} 篇，修正 ${data.updated} 篇`;
+    showSettingsStatus(msg, 'ok');
+    if (status) status.textContent = '';
+    if (data.updated > 0) {
+      loadSourcesTab();
+      renderList();
+    }
+  } catch (e) {
+    showSettingsStatus('重新识别失败: ' + e.message, 'error');
+    if (status) status.textContent = '';
   }
 }
 
@@ -2957,7 +2990,7 @@ function selectFilter(value) {
 
   // Sync collapse state: expand active category, collapse others, save to localStorage
   for (const cat of CATEGORY_ORDER) {
-    const shouldExpand = activeCat ? cat === activeCat : true;
+    const shouldExpand = activeCat ? cat === activeCat : false;
     const body = el.querySelector(`.cat-body[data-cat="${cat}"]`);
     const header = el.querySelector(`.cat-header[data-cat="${cat}"]`);
     if (body) body.classList.toggle('collapsed', !shouldExpand);

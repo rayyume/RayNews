@@ -2147,6 +2147,45 @@ def source_redetect_status(job_id):
     return jsonify(safe)
 
 
+@app.route("/sources/redetect-single", methods=["POST"])
+@require_auth
+def redetect_single_source():
+    """Re-detect source for all articles matching a given source name."""
+    conn = _get_news_db()
+    if not conn:
+        return jsonify({"error": "news db not found"}), 404
+    data = request.get_json(silent=True) or {}
+    source = (data.get("source") or "").strip()
+    if not source:
+        return jsonify({"error": "source required"}), 400
+
+    from fetcher import detect_source, detect_source_from_attribution
+
+    rows = conn.execute(
+        "SELECT id, title, source, body_html, summary, telegraph_url FROM articles WHERE source = ? ORDER BY timestamp DESC",
+        (source,),
+    ).fetchall()
+
+    changed = []
+    for row in rows:
+        content = "\n".join([
+            row["body_html"] or "",
+            row["summary"] or "",
+            row["title"] or "",
+        ])
+        detected = detect_source_from_attribution(content)
+        if not detected and not row["telegraph_url"]:
+            detected = detect_source(content)
+        if not detected or detected == (row["source"] or "").strip():
+            continue
+        conn.execute("UPDATE articles SET source = ? WHERE id = ?", (detected, row["id"]))
+        changed.append({"id": row["id"], "title": row["title"], "from": row["source"], "to": detected})
+
+    ensure_article_sources(conn)
+    conn.commit()
+    return jsonify({"ok": True, "checked": len(rows), "updated": len(changed), "changes": changed[:50]})
+
+
 # ─── Settings Routes ────────────────────────────────────────
 
 @app.route("/settings", methods=["GET"])
