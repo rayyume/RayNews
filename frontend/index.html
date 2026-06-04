@@ -402,9 +402,9 @@ body.body-scroll-lock{overflow:hidden!important}
     </div>
   </header>
 
-  <button class="sidebar-toggle" id="sidebarToggle" onclick="toggleSidebar()" title="Source">☰</button>
+  <button class="sidebar-toggle" id="sidebarToggle" onclick="toggleSidebar()" title="分类与来源">☰</button>
   <div class="sidebar" id="sidebar">
-    <div class="sidebar-header">Source</div>
+    <div class="sidebar-header">分类与来源</div>
     <div class="filters" id="filters"></div>
   </div>
 
@@ -670,6 +670,7 @@ const CATEGORY_ORDER = ['News', 'Tech', 'Biz', 'Info'];
 const CATEGORY_NAMES = { News: '政经新闻', Tech: '科技动态', Biz: '商业聚焦', Info: '其他信息' };
 let sourceMeta = {};
 let sourceRows = [];
+let sourceFilterGroups = {};
 
 let news = [];
 let filter = 'all';
@@ -955,6 +956,10 @@ function canonicalSource(source) {
 
 function categoryDisplayName(cat) {
   return CATEGORY_NAMES[cat] || cat;
+}
+
+function sourceGroupKey(cat, label) {
+  return 'srcgrp:' + cat + ':' + encodeURIComponent(label || '');
 }
 
 // ═══ Body Scroll Lock ════════════════════════════════════
@@ -2676,21 +2681,40 @@ async function loadDataWithRetry(retries, delay) {
 function renderFilters() {
   const sources = [...new Set(news.map(n => canonicalSource(n.source)))];
   const el = document.getElementById('filters');
+  sourceFilterGroups = {};
+  for (const source of sources) {
+    const cat = sourceCategory(source);
+    const label = sourceLabel(source) || source;
+    const key = sourceGroupKey(cat, label);
+    if (!sourceFilterGroups[key]) {
+      sourceFilterGroups[key] = { key, category: cat, label, sources: [] };
+    }
+    sourceFilterGroups[key].sources.push(source);
+  }
+  const groups = Object.values(sourceFilterGroups);
+  const activeGroup = sourceFilterGroups[filter];
+  const activeCatForRender = filter.startsWith('cat:')
+    ? filter.replace('cat:', '')
+    : (activeGroup ? activeGroup.category : '');
   // "All" button at top (styled like cat-header for consistent look)
-  let html = '<div class="cat-header active" data-f="all" data-is-all="1">All<span class="arrow" style="opacity:0">▶</span></div>';
+  let html = `<div class="cat-header ${filter === 'all' ? 'active' : ''}" data-f="all" data-is-all="1">All<span class="arrow" style="opacity:0">▶</span></div>`;
   // Category groups
   for (const cat of CATEGORY_ORDER) {
-    const catSources = sources
-      .filter(s => sourceCategory(s) === cat)
-      .sort((a, b) => sourceLabel(a).localeCompare(sourceLabel(b), 'zh-CN'));
-    if (catSources.length === 0) continue;
+    const catGroups = groups
+      .filter(g => g.category === cat)
+      .sort((a, b) => a.label.localeCompare(b.label, 'zh-CN'));
+    if (catGroups.length === 0) continue;
     const collapsedKey = 'raynews_cat_' + cat;
-    const isCollapsed = localStorage.getItem(collapsedKey) !== '0';
-    html += `<div class="cat-header" data-cat="${cat}">${categoryDisplayName(cat)}<span class="arrow ${isCollapsed ? '' : 'open'}">▶</span></div>`;
+    const isCollapsed = activeCatForRender === cat ? false : localStorage.getItem(collapsedKey) !== '0';
+    const headerActive = filter === 'cat:' + cat ? 'active' : '';
+    html += `<div class="cat-header ${headerActive}" data-cat="${cat}">${categoryDisplayName(cat)}<span class="arrow ${isCollapsed ? '' : 'open'}">▶</span></div>`;
     html += `<div class="cat-body ${isCollapsed ? 'collapsed' : ''}" data-cat="${cat}">`;
-    html += catSources.map(s => {
-      const label = sourceLabel(s);
-      return `<button class="fbtn" data-f="${esc(s)}" title="${esc(s)}"><span class="source-label-main">${esc(label)}</span></button>`;
+    html += catGroups.map(group => {
+      const title = group.sources.length > 1
+        ? `${group.label} · 包含 ${group.sources.length} 个来源变体`
+        : group.sources[0];
+      const active = filter === group.key ? 'active' : '';
+      return `<button class="fbtn ${active}" data-f="${esc(group.key)}" title="${esc(title)}"><span class="source-label-main">${esc(group.label)}</span></button>`;
     }).join('');
     html += `</div>`;
   }
@@ -2733,6 +2757,8 @@ function selectFilter(value) {
     activeCat = '';  // collapse all
   } else if (value.startsWith('cat:')) {
     activeCat = value.replace('cat:', '');
+  } else if (sourceFilterGroups[value]) {
+    activeCat = sourceFilterGroups[value].category || '';
   } else {
     // Find which category this source belongs to
     activeCat = sourceCategory(value) || '';
@@ -2763,6 +2789,22 @@ function selectFilter(value) {
   }
 }
 
+function filteredNews() {
+  if (filter === 'all') {
+    return news;
+  }
+  if (filter.startsWith('cat:')) {
+    const cat = filter.replace('cat:', '');
+    return news.filter(n => sourceCategory(n.source) === cat);
+  }
+  const group = sourceFilterGroups[filter];
+  if (group) {
+    const sourceSet = new Set(group.sources);
+    return news.filter(n => sourceSet.has(canonicalSource(n.source)));
+  }
+  return news.filter(n => canonicalSource(n.source) === filter);
+}
+
 function toggleSidebar() {
   const sidebar = document.getElementById('sidebar');
   const toggle = document.getElementById('sidebarToggle');
@@ -2774,15 +2816,7 @@ function toggleSidebar() {
 }
 
 function renderList() {
-  let filtered;
-  if (filter === 'all') {
-    filtered = news;
-  } else if (filter.startsWith('cat:')) {
-    const cat = filter.replace('cat:', '');
-    filtered = news.filter(n => sourceCategory(n.source) === cat);
-  } else {
-    filtered = news.filter(n => canonicalSource(n.source) === filter);
-  }
+  const filtered = filteredNews();
   const el = document.getElementById('list');
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   if (currentPage > totalPages) currentPage = totalPages;
@@ -2834,15 +2868,7 @@ function renderPagination(totalPages) {
 function goToPage(page) {
   // Preview users: no pagination
   if (authUser && authUser.role === 'preview') return;
-  let filtered;
-  if (filter === 'all') {
-    filtered = news;
-  } else if (filter.startsWith('cat:')) {
-    const cat = filter.replace('cat:', '');
-    filtered = news.filter(n => sourceCategory(n.source) === cat);
-  } else {
-    filtered = news.filter(n => canonicalSource(n.source) === filter);
-  }
+  const filtered = filteredNews();
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   if (page < 1 || page > totalPages) return;
   currentPage = page;
