@@ -349,6 +349,8 @@ body.body-scroll-lock{overflow:hidden!important}
 .source-manager-head{display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin-bottom:8px}
 .source-row{display:grid;grid-template-columns:minmax(120px,1.2fr) minmax(110px,.8fr) 110px 72px;gap:8px;align-items:center;padding:10px 0;border-bottom:1px solid var(--border)}
 .source-name{font-size:12px;color:var(--text-2);line-height:1.35;word-break:break-word}
+.source-name-btn{background:none;border:none;color:var(--accent);font:inherit;font-weight:700;text-align:left;cursor:pointer;padding:0}
+.source-name-btn:hover{text-decoration:underline}
 .source-meta{font-size:11px;color:var(--text-3);margin-top:3px}
 .source-label-input,.source-cat-select{width:100%;padding:7px 9px;border:1px solid var(--border);border-radius:8px;background:var(--bg-card);color:var(--text);font-size:12px;font-family:var(--font)}
 .source-save-btn{padding:7px 10px;border-radius:8px;border:1px solid var(--accent);background:var(--accent-dim);color:var(--accent);font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font)}
@@ -468,6 +470,19 @@ body.body-scroll-lock{overflow:hidden!important}
       <button class="fav-close" onclick="closeFavorites()">✕</button>
     </div>
     <div class="fav-body" id="favBody">
+      <div class="fav-empty">加载中...</div>
+    </div>
+  </div>
+</div>
+
+<div class="fav-overlay" id="sourceArticlesOverlay">
+  <div class="fav-backdrop" onclick="closeSourceArticles()" style="position:absolute;inset:0"></div>
+  <div class="fav-panel">
+    <div class="fav-header">
+      <h2 id="sourceArticlesTitle">订阅源文章</h2>
+      <button class="fav-close" onclick="closeSourceArticles()">✕</button>
+    </div>
+    <div class="fav-body" id="sourceArticlesBody">
       <div class="fav-empty">加载中...</div>
     </div>
   </div>
@@ -1219,7 +1234,7 @@ function renderSourceManager(rows) {
     return `
       <div class="source-row" data-source-idx="${idx}">
         <div>
-          <div class="source-name">${source}</div>
+          <div class="source-name"><button class="source-name-btn" onclick="openSourceArticles(${idx})">${source}</button></div>
           <div class="source-meta">${esc(meta)}</div>
         </div>
         <input class="source-label-input" value="${label}" maxlength="20" aria-label="来源缩写">
@@ -1227,6 +1242,53 @@ function renderSourceManager(rows) {
         <button class="source-save-btn" onclick="saveSourceRow(${idx})">保存</button>
       </div>`;
   }).join('');
+}
+
+async function openSourceArticles(idx) {
+  const row = sourceRows[idx];
+  if (!row || !row.source) return;
+  const overlay = document.getElementById('sourceArticlesOverlay');
+  const title = document.getElementById('sourceArticlesTitle');
+  const body = document.getElementById('sourceArticlesBody');
+  title.textContent = (row.label || row.source) + ' · 历史文章';
+  body.innerHTML = '<div class="fav-empty">加载中...</div>';
+  overlay.classList.add('open');
+  lockBodyScroll();
+  try {
+    const data = await apiFetch('/sources/articles?source=' + encodeURIComponent(row.alias_target || row.source) + '&limit=100');
+    if (!data || data.error) {
+      body.innerHTML = '<div class="fav-empty">加载失败</div>';
+      return;
+    }
+    renderSourceArticles(data.items || []);
+  } catch (e) {
+    body.innerHTML = '<div class="fav-empty">加载失败</div>';
+  }
+}
+
+function closeSourceArticles() {
+  document.getElementById('sourceArticlesOverlay').classList.remove('open');
+  unlockBodyScroll();
+}
+
+function renderSourceArticles(items) {
+  const body = document.getElementById('sourceArticlesBody');
+  if (!items.length) {
+    body.innerHTML = '<div class="fav-empty">暂无历史文章</div>';
+    return;
+  }
+  body.innerHTML = items.map(item => `
+    <div class="fav-item" onclick="closeSourceArticles(); closeAISettings(); openArticle(${item.id})">
+      ${item.thumb ? `<div class="fav-item-thumb"><img src="${proxyImgSrc(item.thumb)}" alt="" loading="lazy"></div>` : ''}
+      <div class="fav-item-body">
+        <div class="fav-item-title">${esc(item.title)}</div>
+        <div class="fav-item-meta">
+          <span class="badge" style="${badgeStyle(item.source)}" title="${esc(item.source)}">${esc(sourceLabel(item.source))}</span>
+          <span>${formatTime(item.date, item.time)}</span>
+        </div>
+      </div>
+    </div>
+  `).join('');
 }
 
 async function saveSourceRow(idx) {

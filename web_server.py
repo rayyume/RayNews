@@ -28,7 +28,8 @@ from ai_service import AIService
 from source_categories import (
     CATEGORY_NAMES, CATEGORY_ORDER, clamp_weighted, ensure_article_sources,
     effective_source_rows, find_user_merge_target, merge_source,
-    recent_titles_for_source, source_rows, update_source_category,
+    recent_titles_for_source, source_aliases_for_target, source_rows,
+    update_source_category,
 )
 
 AUTO_SUMMARY_BATCH_LIMIT = int(os.environ.get("AUTO_SUMMARY_BATCH_LIMIT", "20"))
@@ -1649,6 +1650,35 @@ def list_sources():
         "categories": CATEGORY_ORDER,
         "category_names": CATEGORY_NAMES,
         "sources": effective_source_rows(conn, g.user_id),
+    })
+
+
+@app.route("/sources/articles", methods=["GET"])
+@require_auth
+def list_source_articles():
+    conn = _get_news_db()
+    if not conn:
+        return jsonify({"error": "news db not found"}), 404
+    source = (request.args.get("source") or "").strip()
+    if not source:
+        return jsonify({"error": "source required"}), 400
+    try:
+        limit = min(max(int(request.args.get("limit", "80")), 1), 200)
+    except ValueError:
+        limit = 80
+
+    sources = [source] + source_aliases_for_target(conn, g.user_id, source)
+    placeholders = ",".join("?" * len(sources))
+    rows = conn.execute(
+        "SELECT id, title, source, date, time, timestamp, thumb, has_full_content "
+        f"FROM articles WHERE source IN ({placeholders}) "
+        "ORDER BY timestamp DESC LIMIT ?",
+        (*sources, limit),
+    ).fetchall()
+    return jsonify({
+        "source": source,
+        "sources": sources,
+        "items": [dict(row) for row in rows],
     })
 
 

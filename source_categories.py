@@ -311,6 +311,14 @@ def effective_source_rows(conn: sqlite3.Connection, user_id: int | None = None) 
     return sorted(by_source.values(), key=lambda row: (-(row.get("article_count") or 0), row.get("source") or ""))
 
 
+def source_aliases_for_target(conn: sqlite3.Connection, user_id: int, target_source: str) -> list[str]:
+    rows = conn.execute(
+        "SELECT alias_source FROM user_source_aliases WHERE user_id = ? AND target_source = ?",
+        (user_id, target_source),
+    ).fetchall()
+    return [row["alias_source"] if isinstance(row, sqlite3.Row) else row[0] for row in rows]
+
+
 def recent_titles_for_source(conn: sqlite3.Connection, source: str, limit: int = 8) -> list[str]:
     rows = conn.execute(
         """
