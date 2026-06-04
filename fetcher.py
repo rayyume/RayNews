@@ -354,7 +354,18 @@ def _extract_bottom_via_sources(content: str) -> list[str]:
 
     Only examines links that appear AFTER the last "via" keyword in each chunk,
     so that reference/body links elsewhere in the article cannot interfere.
+
+    Two critical guards against misidentifying body text as source names:
+    1. The "via" keyword must be in the bottom 500 chars of the content.
+    2. The cleaned source name must be ≤ 40 chars (real source names are short).
     """
+    # Quick guard: the attribution "via" is always near the end.
+    # If the last "via" in the whole content is far from the bottom, it is body text.
+    plain_all = clean_html(content)
+    all_via = list(re.finditer(r"(?i)\bvia\b", plain_all))
+    if not all_via or (len(plain_all) - all_via[-1].start()) > 500:
+        return []
+
     chunks = re.split(r"<br\s*/?>", content, flags=re.IGNORECASE)
     candidates = []
     for chunk in reversed(chunks):
@@ -365,8 +376,8 @@ def _extract_bottom_via_sources(content: str) -> list[str]:
         # Find the last "via" in the raw HTML — attribution lines are at the end
         via_matches = list(re.finditer(r"(?i)\bvia\b", chunk))
         if via_matches:
-            # Only examine HTML after the last "via" (at most 200 chars)
-            after_via_html = chunk[via_matches[-1].end():][:200]
+            # Only examine HTML after the last "via" (at most 150 chars)
+            after_via_html = chunk[via_matches[-1].end():][:150]
             after_via_soup = BeautifulSoup(after_via_html, "html.parser")
             via_links = []
             for link in after_via_soup.find_all("a"):
@@ -379,19 +390,21 @@ def _extract_bottom_via_sources(content: str) -> list[str]:
                 via_links.append(text)
             if via_links:
                 raw = _clean_source_name(via_links[0])
-                if raw and len(raw) < 60:
+                if raw and len(raw) <= 30:
                     candidates.append(raw)
                 continue
 
-        # No via-adjacent link found — fall back to plain text after "via"
+        # No via-adjacent link found — fall back to plain text after "via".
+        # Take only the FIRST LINE: real via attribution is a single line;
+        # article titles / body text that follow are on subsequent lines.
         raw = _text_after_last_via(line)
-        # _text_after_last_via returns everything after the last "via" in the
-        # cleaned line, which may include body text when the chunk is the whole
-        # article.  Limit to the first plausible source segment.
-        if raw and len(raw) > 120:
-            raw = raw[:120].rsplit(" ", 1)[0]
+        if raw:
+            raw = raw.split("\n")[0].strip()
+        # Cap at 80 chars before cleaning — anything longer is body text, not source
+        if raw and len(raw) > 80:
+            raw = raw[:80].rsplit(" ", 1)[0]
         raw = _clean_source_name(raw)
-        if raw and len(raw) < 60:
+        if raw and len(raw) <= 30:
             candidates.append(raw)
     return candidates
 
