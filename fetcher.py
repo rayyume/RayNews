@@ -339,7 +339,8 @@ def _clean_source_name(name: str) -> str:
     known_keywords = [
         "格隆汇", "联合早报", "cnBeta", "界面新闻", "少数派",
         "爱范儿", "金十数据", "TechCrunch", "36氪", "阮一峰",
-        "MacRumors", "华尔街日报",
+        "MacRumors", "华尔街日报", "投资界", "包邮区",
+        "XP Digital Lab", "凤凰网财经", "凤凰网科技",
         "WBusiness商业",
     ]
     for kw in known_keywords:

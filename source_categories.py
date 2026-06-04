@@ -66,6 +66,14 @@ def local_short_source_name(source: str) -> str:
     text = re.sub(r"[\U0001F000-\U0010FFFF]", "", text).strip()
     text = re.sub(r"\s+", " ", text).strip()
 
+    known_sources = [
+        "包邮区", "金十数据", "投资界", "XP Digital Lab", "凤凰网财经",
+        "凤凰网科技", "财经早餐", "界面新闻", "联合早报", "MacRumors",
+    ]
+    for name in known_sources:
+        if name in text:
+            return name
+
     # Common Telegram display-name cleanup: keep the representative brand words.
     if "科技圈" in text and "在花" in text:
         return "在花科技圈"
