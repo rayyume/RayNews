@@ -23,7 +23,10 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
-from source_categories import ensure_article_sources, init_source_categories
+from source_categories import (
+    ensure_article_sources, init_source_categories,
+    extract_domains_from_html, lookup_source_by_domain,
+)
 
 # ─── Config (overridable via environment variables) ──────
 TELEGRAM_CHANNEL = os.environ.get("TELEGRAM_CHANNEL", "your_channel")
@@ -277,18 +280,66 @@ def save_state(state: dict):
 
 
 # ─── Source Detection ─────────────────────────────────────
-def detect_source(content: str) -> str:
-    """Extract source from the bottom-most standalone via line."""
+def _extract_bottom_html(html: str, ratio: float = 0.15) -> str:
+    """Return the bottom *ratio* portion of HTML content.
+
+    Splits on block-level boundaries (<br>, </p>, </div>, <hr>, \n\n)
+    and keeps only the last N chunks.  Source attribution links are
+    almost always at the very end of an article; links in the top/middle
+    are content references, not source indicators.
+    """
+    if not html:
+        return ""
+    # Split on common block boundaries
+    chunks = re.split(r'(?:<br\s*/?>\s*)+|</p>|</div>|<hr[^>]*>|\n\s*\n', html, flags=re.IGNORECASE)
+    chunks = [c.strip() for c in chunks if c.strip()]
+    if not chunks:
+        return html
+    keep = max(1, int(len(chunks) * ratio))
+    return "\n".join(chunks[-keep:])
+
+
+def detect_source(content: str, extra_html: str = "") -> str:
+    """Extract source from the bottom-most standalone via line.
+
+    Tries in priority order:
+      1. via attribution (link text or plain text after "via")
+      2. domain from link_preview_url (always trustworthy — IS the article URL)
+      3. domain from bottom ~15% of body links (source attributions are at the end)
+      4. t.me/channel reference in content
+      5. fallback: "Telegram"
+    """
+    # 1) via attribution — already bottom-biased internally
     via_source = detect_source_from_attribution(content)
     if via_source:
         return via_source
 
+    # 2) domain from link_preview_url — this IS the original article URL, no interference
+    if extra_html:
+        domains = extract_domains_from_html(extra_html)
+        domain_match = lookup_source_by_domain(domains)
+        if domain_match:
+            source_name, _category = domain_match
+            return source_name
+
+    # 3) domain from bottom portion of body only
+    #    Reference links in the middle of articles are excluded
+    bottom = _extract_bottom_html(content, ratio=0.15)
+    if bottom:
+        domains = extract_domains_from_html(bottom)
+        domain_match = lookup_source_by_domain(domains)
+        if domain_match:
+            source_name, _category = domain_match
+            return source_name
+
+    # 4) t.me/channel reference
     tg = re.search(r't\.me/([a-zA-Z0-9_]+)', content)
     if tg:
         name = _clean_source_name(tg.group(1))
         if name:
             return f"@{name}"
 
+    # 5) fallback
     return "Telegram"
 
 
@@ -421,6 +472,52 @@ def fetch_telegraph(url: str) -> dict | None:
         if not article:
             return None
 
+        # ── Extract source from Telegraph metadata BEFORE cleanup ──
+        telegraph_source = ""
+
+        # 1) <address> tag below title — often the original author/source name
+        address = article.find("address")
+        if address:
+            addr_text = address.get_text(" ", strip=True)
+            if addr_text and len(addr_text) < 60:
+                # Try domain lookup first on any links in address
+                addr_html = str(address)
+                addr_domains = extract_domains_from_html(addr_html)
+                domain_match = lookup_source_by_domain(addr_domains)
+                if domain_match:
+                    telegraph_source = domain_match[0]
+                else:
+                    telegraph_source = _clean_source_name(addr_text)
+                log.info(f"  Telegraph source from <address>: {telegraph_source}")
+
+        # 2) Attribution <a> links at the VERY BOTTOM of the article
+        #    Only scan the last 5 <p> tags — source attributions are always at the end,
+        #    links in the top/middle of articles are content references.
+        if not telegraph_source:
+            all_ps = article.find_all("p")
+            bottom_ps = all_ps[-5:] if len(all_ps) > 5 else all_ps
+            for p in bottom_ps:
+                a_tag = p.find("a", href=True)
+                if not a_tag:
+                    continue
+                href = a_tag.get("href", "")
+                link_text = a_tag.get_text(strip=True)
+                # Check if this looks like a source attribution link
+                domains = extract_domains_from_html(f'<a href="{href}">link</a>')
+                domain_match = lookup_source_by_domain(domains)
+                if domain_match:
+                    telegraph_source = domain_match[0]
+                    log.info(f"  Telegraph source from bottom attribution link ({href[:60]}): {telegraph_source}")
+                    break
+                # Also try the link text itself
+                if link_text and len(link_text) < 40:
+                    cleaned = _clean_source_name(link_text)
+                    if cleaned and len(cleaned) >= 2:
+                        telegraph_source = cleaned
+                        log.info(f"  Telegraph source from link text: {telegraph_source}")
+                        break
+
+        # ── Clean up non-content elements ──
         for p in article.find_all("p"):
             text = p.get_text(strip=True)
             if text.startswith("Generated by"):
@@ -448,11 +545,14 @@ def fetch_telegraph(url: str) -> dict | None:
         body_html = str(article)
         images = [img.get("src", "") for img in article.find_all("img") if img.get("src")]
 
-        return {
+        result = {
             "body_html": body_html,
             "images": images,
             "char_count": len(article.get_text()),
         }
+        if telegraph_source:
+            result["detected_source"] = telegraph_source
+        return result
     except Exception as e:
         log.error(f"  Telegraph fetch failed: {e}")
         return None
@@ -552,7 +652,9 @@ def process_message(msg: dict, orig_msg_id: int) -> dict:
     text = msg["text"]
     title = extract_title(text)
     telegraph_url = extract_telegraph_url(content)
-    source = detect_source(content)
+    # Pass link_preview_url as extra_html so domain detection can use the article URL
+    link_preview_url = msg.get("link_preview_url", "") or ""
+    source = detect_source(content, extra_html=link_preview_url)
     thumb = msg["images"][0] if msg["images"] else ""
     time_info = parse_datetime(msg["datetime"])
 
@@ -576,7 +678,16 @@ def process_message(msg: dict, orig_msg_id: int) -> dict:
             entry["has_full_content"] = True
             entry["body_html"] = result["body_html"]
             entry["thumb"] = result["images"][0] if result["images"] and not thumb else thumb
-            log.info(f"  ✓ {title[:40]}... ({result['char_count']} chars, from Telegraph)")
+            # Telegraph articles have no "via" line; use the source detected from
+            # Telegraph metadata (<address>, attribution links) when the initial
+            # detection is weak (plain "Telegram" or just an @channel name).
+            ts = result.get("detected_source", "")
+            if ts and (source == "Telegram" or source.startswith("@")):
+                source = ts
+                entry["source"] = source
+                log.info(f"  ✓ {title[:40]}... ({result['char_count']} chars, from Telegraph, source → {source})")
+            else:
+                log.info(f"  ✓ {title[:40]}... ({result['char_count']} chars, from Telegraph)")
         else:
             # Fallback to Telegram message content
             videos_html = "".join(msg.get("videos", []))

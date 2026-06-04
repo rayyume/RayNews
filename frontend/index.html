@@ -670,17 +670,6 @@ let CATEGORY_MAP = {
 };
 const CATEGORY_ORDER = ['News', 'Tech', 'Biz', 'Info'];
 const CATEGORY_NAMES = { News: '政经新闻', Tech: '科技动态', Biz: '商业聚焦', Info: '其他信息' };
-const FILTER_CATEGORY_ORDER = ['Focus', 'TechAI', 'FinanceBiz', 'Politics', 'Life', 'Local', 'LowValue', 'Other'];
-const FILTER_CATEGORY_NAMES = {
-  Focus: '今日重点',
-  TechAI: '科技/AI',
-  FinanceBiz: '财经商业',
-  Politics: '国际政经',
-  Life: '生活消费',
-  Local: '本地/服务',
-  LowValue: '闲聊/广告',
-  Other: '其他信息',
-};
 let sourceMeta = {};
 let sourceRows = [];
 let rawSourceRows = [];
@@ -926,11 +915,14 @@ function rebuildCategoryMap(rows) {
   const next = { News: [], Tech: [], Biz: [], Info: [] };
   sourceMeta = {};
   rawSourceRows = rows || [];
+  // build source rows for the Settings tab (groups by label, filters aliases)
   sourceRows = buildSourceGroups(rawSourceRows);
   for (const row of rawSourceRows) {
     const source = row.source || '';
     const cat = CATEGORY_ORDER.includes(row.category) ? row.category : 'Info';
     if (!source) continue;
+    // Skip alias rows — they are represented by their target in the UI
+    if (row.alias_target) continue;
     sourceMeta[source] = row;
     const visibleSource = row.alias_target || source;
     if (!next[cat].includes(visibleSource)) next[cat].push(visibleSource);
@@ -980,16 +972,33 @@ function chooseSourceGroupStatus(rows) {
 
 function buildSourceGroups(rows) {
   const byLabel = {};
+  // First pass: map alias sources to their targets for merging
+  const aliasTarget = {};
+  for (const row of rows || []) {
+    if (row.alias_target) aliasTarget[row.source] = row.alias_target;
+  }
   for (const row of rows || []) {
     const source = row.source || '';
     if (!source) continue;
-    const label = (row.label || row.alias_target || source).trim();
+    // Skip alias rows — they are merged into their target's group below
+    if (row.alias_target) continue;
+    const label = (row.label || source).trim();
     const key = sourceGroupKey(label);
     if (!byLabel[key]) {
       byLabel[key] = { key, source, label, rows: [], sources: [] };
     }
     byLabel[key].rows.push(row);
     byLabel[key].sources.push(source);
+  }
+  // Add alias sources to their target's group
+  for (const [alias, target] of Object.entries(aliasTarget)) {
+    // Find which group the target belongs to
+    for (const group of Object.values(byLabel)) {
+      if (group.sources.includes(target)) {
+        group.sources.push(alias);
+        break;
+      }
+    }
   }
   return Object.values(byLabel).map(group => {
     const category = chooseSourceGroupCategory(group.rows);
@@ -1037,10 +1046,6 @@ function sourceLabel(source) {
 }
 
 function sourceCategory(source) {
-  const canonical = canonicalSource(source);
-  const groupKey = sourceToFilterGroup[canonical];
-  const group = groupKey ? sourceFilterGroups[groupKey] : null;
-  if (group && group.baseCategory) return group.baseCategory;
   const meta = sourceMeta[source];
   if (meta && CATEGORY_ORDER.includes(meta.category)) return meta.category;
   return getCategory(source) || 'Info';
@@ -1053,27 +1058,6 @@ function canonicalSource(source) {
 
 function categoryDisplayName(cat) {
   return CATEGORY_NAMES[cat] || cat;
-}
-
-function filterCategoryDisplayName(cat) {
-  return FILTER_CATEGORY_NAMES[cat] || categoryDisplayName(cat);
-}
-
-function sourceFilterCategory(group) {
-  const text = `${group.label || ''} ${(group.sources || []).join(' ')}`.toLowerCase();
-  if (/广告|推广|赞助|投稿|备用|群组|闲聊|查看评论|测试|合作推广/i.test(text)) return 'LowValue';
-  if (/济南|本地|天气|社保|公积金|服务|本地宝/i.test(text)) return 'Local';
-  if (/美卡|酒店|消费|生活|包邮区|少数派|爱范儿|appdo|数字生活/i.test(text)) return 'Life';
-  if (/ai|openai|claude|anthropic|github|macrumors|cnbeta|科技|开发|芯片|xp digital lab|raysblog/i.test(text)) return 'TechAI';
-  if (/财经|金十|投资界|格隆汇|商业|创业|晚点|财报|金融|股|券商|银行|凤凰网财经|wbusiness/i.test(text)) return 'FinanceBiz';
-  if (group.baseCategory === 'Tech') return 'TechAI';
-  if (group.baseCategory === 'Biz') return 'FinanceBiz';
-  if (group.baseCategory === 'News') return 'Politics';
-  return 'Other';
-}
-
-function latestNewsDate() {
-  return news.reduce((latest, item) => item.date && item.date > latest ? item.date : latest, '');
 }
 
 // ═══ Body Scroll Lock ════════════════════════════════════
@@ -2893,35 +2877,27 @@ function renderFilters() {
     const label = (sourceLabel(source) || source || '').trim();
     const key = sourceGroupKey(label);
     if (!sourceFilterGroups[key]) {
-      sourceFilterGroups[key] = { key, baseCategory: 'Info', filterCategory: 'Other', label, sources: [], rows: [] };
+      sourceFilterGroups[key] = { key, label, sources: [], rows: [] };
     }
     sourceFilterGroups[key].sources.push(source);
     if (sourceMeta[source]) sourceFilterGroups[key].rows.push(sourceMeta[source]);
   }
   const groups = Object.values(sourceFilterGroups).map(group => {
     group.sources = [...new Set(group.sources)];
-    group.baseCategory = chooseSourceGroupCategory(group.rows);
-    group.filterCategory = sourceFilterCategory(group);
+    group.baseCategory = chooseSourceGroupCategory(group.rows) || sourceCategory(group.sources[0]) || 'Info';
     for (const source of group.sources) sourceToFilterGroup[source] = group.key;
     return group;
   });
-  const activeGroup = sourceFilterGroups[filter];
-  const activeCatForRender = filter.startsWith('cat:')
-    ? filter.replace('cat:', '')
-    : (activeGroup ? activeGroup.filterCategory : '');
-  // "All" button at top (styled like cat-header for consistent look)
+  // "All" button at top
   let html = `<div class="cat-header ${filter === 'all' ? 'active' : ''}" data-f="all" data-is-all="1">All<span class="arrow" style="opacity:0">▶</span></div>`;
-  // Category groups
-  for (const cat of FILTER_CATEGORY_ORDER) {
+  // Category groups — use original CATEGORY_ORDER
+  for (const cat of CATEGORY_ORDER) {
     const catGroups = groups
-      .filter(g => g.filterCategory === cat)
+      .filter(g => g.baseCategory === cat)
       .sort((a, b) => a.label.localeCompare(b.label, 'zh-CN'));
-    if (catGroups.length === 0 && cat !== 'Focus') continue;
     const collapsedKey = 'raynews_cat_' + cat;
-    const isCollapsed = activeCatForRender === cat ? false : localStorage.getItem(collapsedKey) !== '0';
-    const headerActive = filter === 'cat:' + cat ? 'active' : '';
-    html += `<div class="cat-header ${headerActive}" data-cat="${cat}">${filterCategoryDisplayName(cat)}<span class="arrow ${isCollapsed ? '' : 'open'}">▶</span></div>`;
-    if (cat === 'Focus') continue;
+    const isCollapsed = localStorage.getItem(collapsedKey) !== '0';
+    html += `<div class="cat-header" data-cat="${cat}">${categoryDisplayName(cat)}<span class="arrow ${isCollapsed ? '' : 'open'}">▶</span></div>`;
     html += `<div class="cat-body ${isCollapsed ? 'collapsed' : ''}" data-cat="${cat}">`;
     html += catGroups.map(group => {
       const title = group.sources.length > 1
@@ -2942,11 +2918,18 @@ function renderFilters() {
       selectFilter('all');
       return;
     }
-    // Category header click → filter by this category (collapse managed by selectFilter)
+    // Category header click → toggle collapse
     const header = e.target.closest('.cat-header');
     if (header) {
       const cat = header.dataset.cat;
-      selectFilter('cat:' + cat);
+      if (!cat) return;
+      const collapsedKey = 'raynews_cat_' + cat;
+      const body = el.querySelector(`.cat-body[data-cat="${cat}"]`);
+      const arrow = header.querySelector('.arrow');
+      const isCollapsed = body ? !body.classList.contains('collapsed') : false;
+      if (body) body.classList.toggle('collapsed', isCollapsed);
+      if (arrow) arrow.classList.toggle('open', !isCollapsed);
+      localStorage.setItem(collapsedKey, isCollapsed ? '1' : '0');
       return;
     }
     // Source button click
@@ -2965,39 +2948,10 @@ function selectFilter(value) {
   currentPage = 1;
   renderList();
 
-  // Sync category collapse state: only expand the active category
-  let activeCat = '';
-  if (value === 'all') {
-    activeCat = '';  // collapse all
-  } else if (value.startsWith('cat:')) {
-    activeCat = value.replace('cat:', '');
-  } else if (sourceFilterGroups[value]) {
-    activeCat = sourceFilterGroups[value].filterCategory || '';
-  } else {
-    // Find which category this source belongs to
-    const groupKey = sourceToFilterGroup[canonicalSource(value)];
-    activeCat = groupKey && sourceFilterGroups[groupKey] ? sourceFilterGroups[groupKey].filterCategory : '';
-  }
-  for (const cat of FILTER_CATEGORY_ORDER) {
-    const shouldExpand = cat === activeCat;
-    localStorage.setItem('raynews_cat_' + cat, shouldExpand ? '0' : '1');
-    const body = el.querySelector(`.cat-body[data-cat="${cat}"]`);
-    const header = el.querySelector(`.cat-header[data-cat="${cat}"]`);
-    if (body) body.classList.toggle('collapsed', !shouldExpand);
-    if (header) {
-      const arrow = header.querySelector('.arrow');
-      if (arrow) arrow.classList.toggle('open', shouldExpand);
-    }
-  }
-
   // Highlight active item
   if (value === 'all') {
     const allDiv = el.querySelector('[data-is-all]');
     if (allDiv) allDiv.classList.add('active');
-  } else if (value.startsWith('cat:')) {
-    const cat = value.replace('cat:', '');
-    const header = el.querySelector(`.cat-header[data-cat="${cat}"]`);
-    if (header) header.classList.add('active');
   } else {
     const btn = [...el.querySelectorAll('.fbtn')].find(b => b.dataset.f === value);
     if (btn) btn.classList.add('active');
@@ -3007,18 +2961,6 @@ function selectFilter(value) {
 function filteredNews() {
   if (filter === 'all') {
     return news;
-  }
-  if (filter.startsWith('cat:')) {
-    const cat = filter.replace('cat:', '');
-    if (cat === 'Focus') {
-      const latest = latestNewsDate();
-      return latest ? news.filter(n => n.date === latest) : news;
-    }
-    return news.filter(n => {
-      const groupKey = sourceToFilterGroup[canonicalSource(n.source)];
-      const group = groupKey ? sourceFilterGroups[groupKey] : null;
-      return group ? group.filterCategory === cat : false;
-    });
   }
   const group = sourceFilterGroups[filter];
   if (group) {

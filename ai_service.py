@@ -217,11 +217,19 @@ class AIService:
         ]
         return self.chat(messages)
 
-    def classify_source(self, source: str, titles: list[str] | None = None) -> dict:
-        """Classify a source and shorten its display name using the user's AI API."""
+    def classify_source(self, source: str, titles: list[str] | None = None,
+                        domains: list[str] | None = None) -> dict:
+        """Classify a source and shorten its display name using the user's AI API.
+
+        Args:
+            source: Raw source name from the database.
+            titles: Up to 8 recent article titles for context.
+            domains: Domain names extracted from article links for stronger signal.
+        """
         titles = [t for t in (titles or []) if t][:8]
         category_lines = "\n".join(f"- {key}: {CATEGORY_NAMES[key]}" for key in CATEGORY_ORDER)
         title_lines = "\n".join(f"{idx + 1}. {title}" for idx, title in enumerate(titles)) or "无"
+        domain_lines = ", ".join(domains[:10]) if domains else "无"
         fallback_label = local_short_source_name(source)
         messages = [
             {
@@ -230,6 +238,7 @@ class AIService:
                     "你是新闻来源整理助手。你的任务不是改写来源名，而是缩写来源名："
                     "去掉 Telegram Channel、频道、表情符号、装饰性后缀等无效内容，"
                     "只保留最具代表性的来源名称。分类只能从给定类别中选择。"
+                    "域名是判断来源性质的强信号，请优先根据域名确定分类。"
                     "必须只输出 JSON，不要输出解释。"
                 ),
             },
@@ -237,16 +246,18 @@ class AIService:
                 "role": "user",
                 "content": (
                     f"来源原名：{source}\n\n"
+                    f"相关域名：{domain_lines}\n\n"
                     f"最近文章标题：\n{title_lines}\n\n"
                     f"可选分类：\n{category_lines}\n\n"
                     "输出 JSON 格式：\n"
                     "{\"category\":\"News|Tech|Biz|Info\",\"label\":\"缩写后的来源名\",\"confidence\":0.0,\"reason\":\"简短原因\"}\n\n"
                     "规则：\n"
                     "1. category 必须是 News、Tech、Biz、Info 之一。\n"
-                    "2. label 是缩写，不是改写；如果原名已经简洁，保持原名。\n"
-                    "3. label 按 ASCII=1、中文和其他非 ASCII=2 计算，长度必须不超过 20。\n"
-                    "4. 示例：竹新社 - Telegram Channel -> 竹新社。\n"
-                    "5. 示例：科技圈🎗在花频道📮 - Telegram Channel -> 在花科技圈。"
+                    "2. 域名是判断分类的最强信号。例如 zaobao.com → News，github.com → Tech，gelonghui.com → Biz。\n"
+                    "3. label 是缩写，不是改写；如果原名已经简洁，保持原名。\n"
+                    "4. label 按 ASCII=1、中文和其他非 ASCII=2 计算，长度必须不超过 20。\n"
+                    "5. 示例：竹新社 - Telegram Channel -> 竹新社。\n"
+                    "6. 示例：科技圈🎗在花频道📮 - Telegram Channel -> 在花科技圈。"
                 ),
             },
         ]

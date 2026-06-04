@@ -38,6 +38,165 @@ INITIAL_SOURCES = {
     for source in sources
 }
 
+# ─── Domain → Source mapping (used by fetcher + AI classification) ──
+# Format: "domain" → ("source_display_name", "default_category")
+# When detect_source() finds a domain in article content, it uses this
+# mapping to assign a source name without waiting for AI classification.
+KNOWN_DOMAINS: dict[str, tuple[str, str]] = {
+    # ── News 政经新闻 ──
+    "zaobao.com": ("联合早报", "News"),
+    "jiemian.com": ("界面新闻", "News"),
+    "ifeng.com": ("凤凰网", "News"),
+    "thepaper.cn": ("澎湃新闻", "News"),
+    "bbc.com": ("BBC", "News"),
+    "bbc.co.uk": ("BBC", "News"),
+    "reuters.com": ("路透社", "News"),
+    "wsj.com": ("华尔街日报", "News"),
+    "ft.com": ("金融时报", "News"),
+    "nytimes.com": ("纽约时报", "News"),
+    "bloomberg.com": ("彭博社", "News"),
+    "cnn.com": ("CNN", "News"),
+    "theguardian.com": ("卫报", "News"),
+    "scmp.com": ("南华早报", "News"),
+    "dw.com": ("德国之声", "News"),
+    "rfi.fr": ("法国国际广播", "News"),
+    "nikkei.com": ("日经新闻", "News"),
+    "yicai.com": ("第一财经", "News"),
+    "apnews.com": ("美联社", "News"),
+    "aljazeera.com": ("半岛电视台", "News"),
+    "france24.com": ("France 24", "News"),
+    "huanqiu.com": ("环球网", "News"),
+    "guancha.cn": ("观察者网", "News"),
+    "cna.com.tw": ("中央社", "News"),
+    "ltn.com.tw": ("自由时报", "News"),
+    "udn.com": ("联合报", "News"),
+    "straitstimes.com": ("海峡时报", "News"),
+    "rthk.hk": ("香港电台", "News"),
+
+    # ── Tech 科技动态 ──
+    "cnbeta.com": ("cnBeta", "Tech"),
+    "cnbeta.com.tw": ("cnBeta", "Tech"),
+    "sspai.com": ("少数派", "Tech"),
+    "ifanr.com": ("爱范儿", "Tech"),
+    "36kr.com": ("36氪", "Tech"),
+    "chiphell.com": ("Chiphell", "Tech"),
+    "macrumors.com": ("MacRumors", "Tech"),
+    "techcrunch.com": ("TechCrunch", "Tech"),
+    "theverge.com": ("The Verge", "Tech"),
+    "arstechnica.com": ("Ars Technica", "Tech"),
+    "wired.com": ("Wired", "Tech"),
+    "github.com": ("GitHub", "Tech"),
+    "ruanyifeng.com": ("阮一峰", "Tech"),
+    "zhihu.com": ("知乎", "Tech"),
+    "ithome.com": ("IT之家", "Tech"),
+    "solidot.org": ("Solidot", "Tech"),
+    "producthunt.com": ("Product Hunt", "Tech"),
+    "xiaohongshu.com": ("小红书", "Tech"),
+    "huggingface.co": ("HuggingFace", "Tech"),
+    "openai.com": ("OpenAI", "Tech"),
+    "anthropic.com": ("Anthropic", "Tech"),
+    "9to5mac.com": ("9to5Mac", "Tech"),
+    "oschina.net": ("开源中国", "Tech"),
+    "v2ex.com": ("V2EX", "Tech"),
+    "nodeseek.com": ("NodeSeek", "Tech"),
+    "hackernews.com": ("Hacker News", "Tech"),
+    "infoq.cn": ("InfoQ", "Tech"),
+    "geekpark.net": ("极客公园", "Tech"),
+    "pingwest.com": ("品玩", "Tech"),
+    "sohu.com": ("搜狐", "Tech"),
+
+    # ── Biz 商业聚焦 ──
+    "gelonghui.com": ("格隆汇", "Biz"),
+    "jin10.com": ("金十数据", "Biz"),
+    "pedaily.cn": ("投资界", "Biz"),
+    "wallstreetcn.com": ("华尔街见闻", "Biz"),
+    "latepost.com": ("晚点", "Biz"),
+    "cls.cn": ("财联社", "Biz"),
+    "eastmoney.com": ("东方财富", "Biz"),
+    "sina.com.cn": ("新浪财经", "Biz"),
+    "fortunechina.com": ("财富中文网", "Biz"),
+    "hbr.org": ("哈佛商业评论", "Biz"),
+    "caixin.com": ("财新", "Biz"),
+    "fortune.com": ("财富", "Biz"),
+    "fastcompany.com": ("Fast Company", "Biz"),
+    "cnbc.com": ("CNBC", "Biz"),
+    "economist.com": ("经济学人", "Biz"),
+    "businessinsider.com": ("商业内幕", "Biz"),
+    "forbes.com": ("福布斯", "Biz"),
+    "barrons.com": ("巴伦周刊", "Biz"),
+    "stcn.com": ("证券时报", "Biz"),
+    "21jingji.com": ("21世纪经济报道", "Biz"),
+    "nbd.com.cn": ("每日经济新闻", "Biz"),
+    "10jqka.com.cn": ("同花顺", "Biz"),
+    "ce.cn": ("中国经济网", "Biz"),
+    "cnstock.com": ("上海证券报", "Biz"),
+    "cs.com.cn": ("中证网", "Biz"),
+
+    # ── Info 其他信息 ──
+    "uscreditcardguide.com": ("美卡指南", "Info"),
+    "travelafterwork.com": ("酒店圈儿", "Info"),
+
+    # ── 微信公众号 (域名为 mp.weixin.qq.com, 但会根据文章内容进一步识别) ──
+    # 不在 KNOWN_DOMAINS 中注册 weixin 域名，因为不同公众号是不同的来源
+}
+
+# Domains to exclude from extraction (platform/aggregator domains)
+_DOMAIN_EXCLUDE = {
+    "telegra.ph", "t.me", "telegram.me", "telegram.org",
+    "mp.weixin.qq.com", "weixin.qq.com",
+    "x.com", "twitter.com", "facebook.com", "fb.com",
+    "instagram.com", "youtube.com", "youtu.be",
+    "reddit.com", "redd.it",
+    "google.com", "bing.com", "baidu.com",
+    "amazon.com", "apple.com",
+    "news.rayyu.me", "localhost", "127.0.0.1",
+}
+
+
+def extract_domains_from_html(html: str) -> list[str]:
+    """Extract unique root domains from all href links in HTML.
+
+    Strips subdomains (www.zaobao.com → zaobao.com), excludes
+    platform/aggregator domains, and returns unique results in
+    discovery order.
+    """
+    if not html:
+        return []
+    urls = re.findall(r'href=["\']?https?://([^/"\'<>\s]+)', html or "")
+    seen = set()
+    domains = []
+    for host in urls:
+        host = host.lower().strip()
+        # Strip leading "www." or "wwwN." patterns
+        host = re.sub(r'^www\d*\.', '', host)
+        # Extract root domain (last two parts for known multi-part TLDs)
+        parts = host.split(".")
+        if len(parts) >= 2:
+            # Handle com.cn / co.uk / com.tw etc.
+            if parts[-2] in ("com", "co", "org", "net", "gov", "edu", "ac") and len(parts) >= 3:
+                root = ".".join(parts[-3:])
+            else:
+                root = ".".join(parts[-2:])
+        else:
+            root = host
+        if root in _DOMAIN_EXCLUDE:
+            continue
+        if root not in seen:
+            seen.add(root)
+            domains.append(root)
+    return domains
+
+
+def lookup_source_by_domain(domains: list[str]) -> tuple[str, str] | None:
+    """Look up (source_name, category) from a list of domains.
+
+    Returns the first match found, or None if no domain is known.
+    """
+    for domain in domains:
+        if domain in KNOWN_DOMAINS:
+            return KNOWN_DOMAINS[domain]
+    return None
+
 
 def weighted_len(text: str) -> int:
     """ASCII counts as 1, non-ASCII counts as 2."""

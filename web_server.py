@@ -31,21 +31,35 @@ from source_categories import (
     clamp_weighted, ensure_article_sources,
     effective_source_rows, find_user_merge_target, merge_source,
     recent_titles_for_source, source_aliases_for_target, source_rows,
-    update_source_category,
+    update_source_category, extract_domains_from_html,
 )
 
 AUTO_SUMMARY_BATCH_LIMIT = int(os.environ.get("AUTO_SUMMARY_BATCH_LIMIT", "20"))
 AUTO_SUMMARY_INTERVAL_SECONDS = int(os.environ.get("AUTO_SUMMARY_INTERVAL_SECONDS", "30"))
 AUTO_TRANSLATION_BATCH_LIMIT = int(os.environ.get("AUTO_TRANSLATION_BATCH_LIMIT", "5"))
 AUTO_TRANSLATION_INTERVAL_SECONDS = int(os.environ.get("AUTO_TRANSLATION_INTERVAL_SECONDS", "30"))
-AUTO_SOURCE_CLASSIFY_BATCH_LIMIT = int(os.environ.get("AUTO_SOURCE_CLASSIFY_BATCH_LIMIT", "20"))
-AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS = int(os.environ.get("AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS", "120"))
+AUTO_SOURCE_CLASSIFY_BATCH_LIMIT = int(os.environ.get("AUTO_SOURCE_CLASSIFY_BATCH_LIMIT", "50"))
+AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS = int(os.environ.get("AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS", "60"))
 TELEGRAM_EMBED_TIMEOUT_SECONDS = int(os.environ.get("TELEGRAM_EMBED_TIMEOUT_SECONDS", "12"))
 
 # ─── App Setup ────────────────────────────────────────────────
 
 app = Flask(__name__)
 CORS(app)
+
+
+# ─── JSON error handler — prevent HTML responses on errors ─────
+@app.errorhandler(Exception)
+def handle_exception(e):
+    """Return JSON for all unhandled exceptions instead of HTML."""
+    import traceback
+    traceback.print_exc()
+    # If it's already a Flask HTTPException with a JSON response, pass through
+    from flask import jsonify as _jsonify
+    from werkzeug.exceptions import HTTPException
+    if isinstance(e, HTTPException):
+        return _jsonify({"error": e.description or str(e)}), e.code or 500
+    return _jsonify({"error": f"server error: {str(e)}"}), 500
 
 DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
 
@@ -1293,7 +1307,14 @@ def _classify_source_batch(config: dict, limit: int = AUTO_SOURCE_CLASSIFY_BATCH
         and not row.get("alias_target")
         and not row.get("user_override")
         and row.get("status") != "manual"
-        and (force or row.get("status") in ("pending", "failed"))
+        and (
+            force
+            or row.get("status") in ("pending", "failed")
+            or (
+                row.get("status") == "classified"
+                and (row.get("confidence") or 0) < 0.6
+            )
+        )
     ][:limit]
 
     svc = AIService(
@@ -1307,8 +1328,10 @@ def _classify_source_batch(config: dict, limit: int = AUTO_SOURCE_CLASSIFY_BATCH
     for row in candidates:
         source = row["source"]
         titles = recent_titles_for_source(conn, source, limit=8)
+        # Extract domains from recent article bodies for stronger AI signal
+        domains = _extract_domains_for_source(conn, source)
         try:
-            result = svc.classify_source(source, titles)
+            result = svc.classify_source(source, titles, domains=domains)
             saved = update_source_category(
                 conn,
                 source,
@@ -1347,6 +1370,28 @@ def _classify_source_batch(config: dict, limit: int = AUTO_SOURCE_CLASSIFY_BATCH
         "failed": failed,
         "remaining": len(remaining),
     }
+
+
+def _extract_domains_for_source(conn, source: str) -> list[str]:
+    """Extract unique domain names from recent articles of a given source."""
+    try:
+        rows = conn.execute(
+            "SELECT body_html, telegraph_url FROM articles "
+            "WHERE source = ? AND (body_html != '' OR telegraph_url != '') "
+            "ORDER BY timestamp DESC LIMIT 5",
+            (source,),
+        ).fetchall()
+    except Exception:
+        return []
+    all_domains = []
+    seen = set()
+    for row in rows:
+        html = (row["body_html"] or "") + " " + (row["telegraph_url"] or "")
+        for domain in extract_domains_from_html(html):
+            if domain not in seen:
+                seen.add(domain)
+                all_domains.append(domain)
+    return all_domains[:10]
 
 
 _source_classify_jobs = {}
