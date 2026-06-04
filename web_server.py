@@ -1110,8 +1110,7 @@ def _fetch_untranslated_articles(config: dict, limit: int = AUTO_TRANSLATION_BAT
 
 def _save_article_translation(article_id: int, title: str | None = None,
                               body_html: str | None = None):
-    conn = _get_news_db()
-    if not conn:
+    if not os.path.exists(NEWS_DB):
         return
     sets = []
     vals = []
@@ -1124,8 +1123,13 @@ def _save_article_translation(article_id: int, title: str | None = None,
     if not sets:
         return
     vals.append(article_id)
-    conn.execute(f"UPDATE articles SET {', '.join(sets)} WHERE id = ?", vals)
-    conn.commit()
+    conn = sqlite3.connect(NEWS_DB, timeout=30)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(f"UPDATE articles SET {', '.join(sets)} WHERE id = ?", vals)
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _cached_full_translation(translation: str | None) -> tuple[str, str]:

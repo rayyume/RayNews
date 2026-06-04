@@ -57,12 +57,17 @@ a:hover{text-decoration:underline}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
 .refresh-btn{background:none;border:1px solid var(--border);color:var(--text-2);padding:4px 12px;border-radius:100px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font);transition:all 0.15s}
 .refresh-btn:hover{border-color:var(--accent);color:var(--accent)}
+.refresh-btn.refresh-running{position:relative;overflow:hidden;border-color:var(--accent);color:var(--accent);pointer-events:none}
+.refresh-btn.refresh-running::before{content:'';position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(110,142,251,0.28),transparent);animation:refreshSweep 1.2s infinite}
+.refresh-btn.refresh-running::after{content:'';position:absolute;right:7px;top:5px;width:6px;height:6px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 3px rgba(110,142,251,0.18)}
+.refresh-btn.refresh-running span{position:relative;z-index:1}
 .daily-summary-btn{position:relative}
 .daily-summary-btn.running{color:var(--accent)!important;animation:summaryPulse 1.6s infinite}
 .daily-summary-btn.ready{color:#fbbf24!important;text-shadow:0 0 12px rgba(251,191,36,0.45)}
 .daily-summary-btn.ready::after,.daily-summary-btn.running::after{content:'';position:absolute;right:0;top:1px;width:7px;height:7px;border-radius:50%;background:#fbbf24;box-shadow:0 0 0 3px rgba(251,191,36,0.18)}
 .daily-summary-btn.running::after{background:var(--accent);box-shadow:0 0 0 3px rgba(110,142,251,0.18)}
 @keyframes summaryPulse{0%,100%{opacity:1}50%{opacity:0.55}}
+@keyframes refreshSweep{0%{transform:translateX(-100%)}100%{transform:translateX(100%)}}
 
 /* ═══ Filters ═════════════════════════════════════ */
 .filters{display:flex;gap:6px;padding:14px 0;overflow-x:auto;scrollbar-width:none}
@@ -364,7 +369,7 @@ body.body-scroll-lock{overflow:hidden!important}
         <button class="refresh-btn daily-summary-btn" id="dailySummaryBtn" onclick="showDailySummary()" title="每日总结" style="background:none;border:none;color:var(--text-2);font-size:16px;cursor:pointer;padding:2px 6px;border-radius:6px;transition:all 0.15s;font-family:var(--font)" onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--text-2)'">✨</button>
         <span class="status-text"><span class="status-dot"></span>实时更新</span>
         <span class="hide-m" id="count"></span>
-        <button class="refresh-btn" onclick="triggerRefresh()">刷新</button>
+        <button class="refresh-btn" id="refreshBtn" onclick="triggerRefresh()"><span>刷新</span></button>
       </div>
     </div>
     <div class="user-menu" id="userMenu">
@@ -643,6 +648,7 @@ let news = [];
 let filter = 'all';
 let currentPage = 1;
 let _pendingUpdate = false;
+let refreshInProgress = false;
 // In-memory cache for article bodies — avoids re-fetching on re-open
 let articleBodyCache = {};
 // User settings cache for auto-translate decisions
@@ -1068,7 +1074,7 @@ function updateUserUI() {
     document.getElementById('adminPanelBtn').style.display = authUser.role === 'admin' ? '' : 'none';
 
     // Preview users: hide refresh button
-    const refreshBtn = document.querySelector('.refresh-btn');
+    const refreshBtn = document.getElementById('refreshBtn');
     if (refreshBtn) refreshBtn.style.display = authUser.role === 'preview' ? 'none' : '';
   } else {
     // Show login button in header
@@ -2288,6 +2294,10 @@ function getCategory(source) {
 }
 
 async function triggerRefresh() {
+  if (refreshInProgress) {
+    showToast('🔄 正在刷新，请稍候');
+    return;
+  }
   // Unauthenticated users cannot refresh
   if (!authToken) {
     showToast('🔒 请先登录');
@@ -2301,49 +2311,86 @@ async function triggerRefresh() {
     return;
   }
 
-  // Fire the refresh request in background
+  setRefreshRunning(true);
+
   let refreshUrl = '/refresh';
   let fetchOpts = { cache: 'no-store' };
   if (authToken) {
     refreshUrl = '/auth/refresh';
     fetchOpts = { method: 'POST', headers: { 'Authorization': 'Bearer ' + authToken } };
   }
-  fetch(refreshUrl, fetchOpts).catch(() => {});
-  showToast('🔄 正在后台抓取...');
 
   const beforeTs = news.length > 0 ? Math.max(...news.map(n => n.timestamp)) : 0;
+  const beforeCount = news.length;
+  let refreshDone = false;
+  let refreshError = '';
+  const refreshPromise = fetch(refreshUrl, fetchOpts)
+    .then(async resp => {
+      const text = await resp.text();
+      let data = {};
+      try { data = text ? JSON.parse(text) : {}; } catch {}
+      if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+      return data;
+    })
+    .catch(e => {
+      refreshError = e.message || '刷新失败';
+      return null;
+    })
+    .finally(() => { refreshDone = true; });
 
-  // First try once immediately
-  if (beforeTs > 0) {
-    const found = await loadSince(beforeTs);
-    if (found) {
-      showToast('✅ 已更新');
-      resetPullIndicator();
+  showToast('🔄 正在后台抓取...');
+
+  try {
+    if (beforeTs === 0) {
+      await refreshPromise;
+      await loadData();
+      const added = Math.max(0, news.length - beforeCount);
+      showToast(added > 0 ? '✅ 已更新 ' + added + ' 篇文章' : '✅ 刷新完成');
       return;
     }
-  } else {
-    await loadData();
+
+    const maxWait = 120000;
+    const pollInterval = 2000;
+    const startedAt = Date.now();
+
+    while (Date.now() - startedAt < maxWait) {
+      const added = await loadSince(beforeTs);
+      if (added > 0) {
+        showToast('✅ 已更新 ' + added + ' 篇文章');
+        return;
+      }
+      if (refreshDone) break;
+      await new Promise(r => setTimeout(r, pollInterval));
+    }
+
+    if (!refreshDone) {
+      showToast('⏰ 刷新超时，请稍后重试');
+      return;
+    }
+
+    await refreshPromise;
+    const added = await loadSince(beforeTs);
+    if (added > 0) {
+      showToast('✅ 已更新 ' + added + ' 篇文章');
+    } else if (refreshError) {
+      showToast('❌ 刷新失败: ' + refreshError);
+    } else {
+      showToast('✅ 文章无更新');
+    }
+  } finally {
+    setRefreshRunning(false);
     resetPullIndicator();
-    return;
   }
+}
 
-  // Poll every 2s until new data arrives or 120s timeout
-  const maxWait = 120000;
-  const pollInterval = 2000;
-  const startedAt = Date.now();
-
-  while (Date.now() - startedAt < maxWait) {
-    await new Promise(r => setTimeout(r, pollInterval));
-    const found = await loadSince(beforeTs);
-    if (found) {
-      showToast('✅ 已更新');
-      resetPullIndicator();
-      return;
-    }
-  }
-
-  showToast('⏰ 刷新超时，请稍后重试');
-  resetPullIndicator();
+function setRefreshRunning(isRunning) {
+  refreshInProgress = isRunning;
+  const btn = document.getElementById('refreshBtn');
+  if (!btn) return;
+  btn.classList.toggle('refresh-running', isRunning);
+  btn.disabled = isRunning;
+  const label = btn.querySelector('span') || btn;
+  label.textContent = isRunning ? '刷新中' : '刷新';
 }
 
 function resetPullIndicator() {
@@ -2386,11 +2433,11 @@ async function loadSince(timestamp) {
     clearTimeout(timeout);
     const data = await resp.json();
     const newItems = data.items || [];
-    if (newItems.length === 0) return false;
+    if (newItems.length === 0) return 0;
     // Prepend new items, dedup by id
     const existingIds = new Set(news.map(n => n.id));
     const fresh = newItems.filter(n => !existingIds.has(n.id));
-    if (fresh.length === 0) return false;
+    if (fresh.length === 0) return 0;
     await loadSourceCategories();
     news = fresh.concat(news);
     // Re-sort by timestamp descending
@@ -2399,14 +2446,14 @@ async function loadSince(timestamp) {
     // If overlay (article reader) is open, defer DOM refresh until user closes it
     if (document.getElementById('overlay').classList.contains('open')) {
       _pendingUpdate = true;
-      return true;
+      return fresh.length;
     }
     renderFilters();
     renderList();
-    return true;
+    return fresh.length;
   } catch (e) {
     // Silently ignore incremental fetch errors
-    return false;
+    return 0;
   }
 }
 
