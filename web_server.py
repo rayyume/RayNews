@@ -1405,15 +1405,9 @@ def _auto_summary_loop():
 
 
 @app.route("/ai/daily-summary/send", methods=["POST"])
+@require_role("admin")
 def ai_daily_summary_send():
-    """Scheduled daily summary delivery. Also triggered by internal scheduler."""
-    # Verify cron secret if set (optional — scheduler bypasses this)
-    cron_secret = os.environ.get("CRON_SECRET", "")
-    if cron_secret:
-        provided = request.headers.get("X-Cron-Secret", "")
-        if provided != cron_secret:
-            return jsonify({"error": "unauthorized"}), 401
-
+    """Manually trigger daily summary delivery for administrators."""
     _send_daily_summaries()
     return jsonify({"status": "ok", "checked_at": __import__("datetime").datetime.now().strftime("%H:%M")})
 

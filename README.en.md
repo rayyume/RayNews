@@ -86,6 +86,15 @@ The fetcher runs once on startup, then every 15 minutes.
 | `HTTP_PROXY` | (empty) | HTTP proxy |
 | `HTTPS_PROXY` | (empty) | HTTPS proxy |
 | `NO_PROXY` | `localhost,127.0.0.1` | Direct connection whitelist |
+| `AI_REQUEST_TIMEOUT_SECONDS` | `300` | AI request timeout in seconds, shared by daily digest, article summaries, translation, and source classification |
+| `AUTO_SUMMARY_BATCH_LIMIT` | `20` | Number of articles processed per background auto-summary batch |
+| `AUTO_SUMMARY_INTERVAL_SECONDS` | `30` | Background auto-summary polling interval in seconds |
+| `AUTO_TRANSLATION_BATCH_LIMIT` | `5` | Number of articles processed per background auto-translation batch |
+| `AUTO_TRANSLATION_INTERVAL_SECONDS` | `30` | Background auto-translation polling interval in seconds |
+| `AUTO_SOURCE_CLASSIFY_BATCH_LIMIT` | `20` | Number of pending sources processed per background AI classification batch |
+| `AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS` | `120` | Background AI source classification polling interval in seconds |
+| `RAYNEWS_PUBLIC_URL` | `https://news.rayyu.me` | Public RayNews URL used for email links and similar outbound links |
+| `CUSTOM_HEAD_HTML` | (empty) | Custom HTML injected into the page `<head>`, useful for analytics scripts or meta tags |
 
 ## Custom Build
 

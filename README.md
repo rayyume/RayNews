@@ -86,6 +86,15 @@ docker compose up -d
 | `HTTP_PROXY` | (空) | HTTP 代理（如需翻墙） |
 | `HTTPS_PROXY` | (空) | HTTPS 代理 |
 | `NO_PROXY` | `localhost,127.0.0.1` | 直连白名单 |
+| `AI_REQUEST_TIMEOUT_SECONDS` | `300` | AI 请求超时时间（秒），每日摘要、文章摘要、翻译、订阅源分类共用 |
+| `AUTO_SUMMARY_BATCH_LIMIT` | `20` | 后台自动生成文章摘要每轮处理的文章数 |
+| `AUTO_SUMMARY_INTERVAL_SECONDS` | `30` | 后台自动生成文章摘要的轮询间隔（秒） |
+| `AUTO_TRANSLATION_BATCH_LIMIT` | `5` | 后台自动翻译每轮处理的文章数 |
+| `AUTO_TRANSLATION_INTERVAL_SECONDS` | `30` | 后台自动翻译的轮询间隔（秒） |
+| `AUTO_SOURCE_CLASSIFY_BATCH_LIMIT` | `20` | 后台 AI 处理待分类订阅源每轮处理的来源数 |
+| `AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS` | `120` | 后台 AI 处理待分类订阅源的轮询间隔（秒） |
+| `RAYNEWS_PUBLIC_URL` | `https://news.rayyu.me` | RayNews 对外访问地址，用于邮件链接等场景 |
+| `CUSTOM_HEAD_HTML` | (空) | 注入到页面 `<head>` 的自定义 HTML，可用于访问统计脚本或 meta 标签 |
 
 ## 自定义构建
 
