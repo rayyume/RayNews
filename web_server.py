@@ -1468,11 +1468,24 @@ def _run_auto_source_classification_once():
 def _auto_source_classification_loop():
     import time as _time
     _time.sleep(90)
+    cleanup_counter = 0
     while True:
         try:
             _run_auto_source_classification_once()
         except Exception as e:
             print(f"[source-classify] Error in loop: {e}")
+        # Periodically clean up sources with 0 articles (every 10 cycles)
+        cleanup_counter += 1
+        if cleanup_counter % 10 == 0:
+            try:
+                conn = _get_news_db()
+                if conn:
+                    deleted = cleanup_stale_source_categories(conn)
+                    conn.commit()
+                    if deleted:
+                        print(f"[source-cleanup] removed {deleted} stale source(s)")
+            except Exception as e:
+                print(f"[source-cleanup] Error: {e}")
         _time.sleep(AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS)
 
 
@@ -2182,6 +2195,7 @@ def redetect_single_source():
         changed.append({"id": row["id"], "title": row["title"], "from": row["source"], "to": detected})
 
     ensure_article_sources(conn)
+    cleanup_stale_source_categories(conn)
     conn.commit()
     return jsonify({"ok": True, "checked": len(rows), "updated": len(changed), "changes": changed[:50]})
 

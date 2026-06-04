@@ -350,7 +350,11 @@ def detect_source_from_attribution(content: str) -> str | None:
 
 
 def _extract_bottom_via_sources(content: str) -> list[str]:
-    """Return valid via sources from bottom to top, preferring link text."""
+    """Return valid via sources from bottom to top, preferring link text.
+
+    Only examines links that appear AFTER the last "via" keyword in each chunk,
+    so that reference/body links elsewhere in the article cannot interfere.
+    """
     chunks = re.split(r"<br\s*/?>", content, flags=re.IGNORECASE)
     candidates = []
     for chunk in reversed(chunks):
@@ -358,19 +362,34 @@ def _extract_bottom_via_sources(content: str) -> list[str]:
         if not re.search(r"(?i)(^|\s)via\b", line):
             continue
 
-        soup = BeautifulSoup(chunk, "html.parser")
-        links = []
-        for link in soup.find_all("a"):
-            text = clean_html(link.get_text(" ", strip=True))
-            href = link.get("href", "")
-            if not text:
+        # Find the last "via" in the raw HTML — attribution lines are at the end
+        via_matches = list(re.finditer(r"(?i)\bvia\b", chunk))
+        if via_matches:
+            # Only examine HTML after the last "via" (at most 200 chars)
+            after_via_html = chunk[via_matches[-1].end():][:200]
+            after_via_soup = BeautifulSoup(after_via_html, "html.parser")
+            via_links = []
+            for link in after_via_soup.find_all("a"):
+                text = clean_html(link.get_text(" ", strip=True))
+                href = link.get("href", "")
+                if not text:
+                    continue
+                if href and "telegra.ph" in href:
+                    continue
+                via_links.append(text)
+            if via_links:
+                raw = _clean_source_name(via_links[0])
+                if raw and len(raw) < 60:
+                    candidates.append(raw)
                 continue
-            # Skip Telegraph article links (link text is the article title, not source).
-            # WeChat links (mp.weixin.qq.com) are KEPT — the link text IS the source name (公众号名称).
-            if href and "telegra.ph" in href:
-                continue
-            links.append(text)
-        raw = links[-1] if links else _text_after_last_via(line)
+
+        # No via-adjacent link found — fall back to plain text after "via"
+        raw = _text_after_last_via(line)
+        # _text_after_last_via returns everything after the last "via" in the
+        # cleaned line, which may include body text when the chunk is the whole
+        # article.  Limit to the first plausible source segment.
+        if raw and len(raw) > 120:
+            raw = raw[:120].rsplit(" ", 1)[0]
         raw = _clean_source_name(raw)
         if raw and len(raw) < 60:
             candidates.append(raw)

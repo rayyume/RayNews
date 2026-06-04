@@ -14,7 +14,7 @@ from pathlib import Path
 
 import requests
 
-from source_categories import CATEGORY_NAMES, CATEGORY_ORDER, source_rows
+from source_categories import CATEGORY_NAMES, CATEGORY_ORDER, cleanup_stale_source_categories, source_rows
 
 REFRESH_INTERVAL = 900  # 15 minutes
 LOCK_FILE = "/tmp/raynews-fetcher.lock"
@@ -85,6 +85,14 @@ def run_fetcher():
         log.info(f"Fetcher done (exit={result.returncode})")
         if is_ok:
             clear_article_cache()
+            try:
+                conn = get_db()
+                deleted = cleanup_stale_source_categories(conn)
+                conn.commit()
+                if deleted:
+                    log.info(f"Cleaned up {deleted} stale source(s)")
+            except Exception as e:
+                log.warning(f"Source cleanup failed: {e}")
         return body, 200 if is_ok else 500
     except subprocess.TimeoutExpired:
         body = json.dumps({"status": "error", "error": "timeout"}).encode()
