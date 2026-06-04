@@ -278,19 +278,10 @@ def save_state(state: dict):
 
 # ─── Source Detection ─────────────────────────────────────
 def detect_source(content: str) -> str:
-    """Extract and clean source name from content."""
-    via_candidates = []
-    via_pattern = re.compile(
-        r"via\s*(?:<a[^>]*>(.*?)</a>|([^<\r\n]+))",
-        re.IGNORECASE | re.DOTALL,
-    )
-    for via_match in via_pattern.finditer(content):
-        raw = clean_html(via_match.group(1) or via_match.group(2) or "")
-        raw = _clean_source_name(raw)
-        if raw and len(raw) < 60:
-            via_candidates.append(raw)
+    """Extract source from the bottom-most standalone via line."""
+    via_candidates = _extract_bottom_via_sources(content)
     if via_candidates:
-        return via_candidates[-1]
+        return via_candidates[0]
 
     tg = re.search(r't\.me/([a-zA-Z0-9_]+)', content)
     if tg:
@@ -305,6 +296,40 @@ def detect_source(content: str) -> str:
             return text
 
     return "Telegram"
+
+
+def _extract_bottom_via_sources(content: str) -> list[str]:
+    """Return valid via sources from bottom to top, preferring link text."""
+    chunks = re.split(r"<br\s*/?>", content, flags=re.IGNORECASE)
+    candidates = []
+    for chunk in reversed(chunks):
+        line = clean_html(chunk)
+        if not re.search(r"(?i)(^|\s)via\b", line):
+            continue
+
+        soup = BeautifulSoup(chunk, "html.parser")
+        links = []
+        for link in soup.find_all("a"):
+            text = clean_html(link.get_text(" ", strip=True))
+            href = link.get("href", "")
+            if not text:
+                continue
+            # Source attributions are usually Telegram/RSS/channel links; skip article links.
+            if href and any(host in href for host in ("telegra.ph", "mp.weixin.qq.com")):
+                continue
+            links.append(text)
+        raw = links[-1] if links else _text_after_last_via(line)
+        raw = _clean_source_name(raw)
+        if raw and len(raw) < 60:
+            candidates.append(raw)
+    return candidates
+
+
+def _text_after_last_via(line: str) -> str:
+    matches = list(re.finditer(r"(?i)(^|\s)via\b", line))
+    if not matches:
+        return ""
+    return line[matches[-1].end():].strip(" :：-—")
 
 
 def _clean_source_name(name: str) -> str:
