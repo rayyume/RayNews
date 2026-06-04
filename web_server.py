@@ -1349,6 +1349,56 @@ def _classify_source_batch(config: dict, limit: int = AUTO_SOURCE_CLASSIFY_BATCH
     }
 
 
+_source_classify_jobs = {}
+_source_classify_jobs_lock = threading.Lock()
+
+
+def _update_source_classify_job(job_id: str, **updates):
+    updates["updated_at"] = time.time()
+    with _source_classify_jobs_lock:
+        if job_id in _source_classify_jobs:
+            _source_classify_jobs[job_id].update(updates)
+
+
+def _run_source_classify_job(job_id: str, user_id: int, config: dict, force: bool):
+    _update_source_classify_job(job_id, status="running")
+    processed_total = 0
+    failed_total = 0
+    remaining = 0
+    try:
+        config = dict(config)
+        config["user_id"] = user_id
+        for _ in range(200):
+            result = _classify_source_batch(config, limit=50, force=force)
+            processed = len(result.get("processed") or [])
+            failed = len(result.get("failed") or [])
+            remaining = int(result.get("remaining") or 0)
+            processed_total += processed
+            failed_total += failed
+            _update_source_classify_job(
+                job_id,
+                processed=processed_total,
+                failed=failed_total,
+                remaining=remaining,
+            )
+            if remaining <= 0:
+                break
+            if processed == 0:
+                break
+            # With force=True, one pass over non-manual sources is enough.
+            if force:
+                break
+        _update_source_classify_job(
+            job_id,
+            status="completed",
+            processed=processed_total,
+            failed=failed_total,
+            remaining=remaining,
+        )
+    except Exception as exc:
+        _update_source_classify_job(job_id, status="failed", error=str(exc))
+
+
 def _run_auto_source_classification_once():
     if not _auto_source_classify_lock.acquire(blocking=False):
         return
@@ -1667,15 +1717,31 @@ def list_source_articles():
     conn = _get_news_db()
     if not conn:
         return jsonify({"error": "news db not found"}), 404
-    source = (request.args.get("source") or "").strip()
-    if not source:
+    sources_json = (request.args.get("sources") or "").strip()
+    if sources_json:
+        try:
+            base_sources = [
+                str(item).strip()
+                for item in json.loads(sources_json)
+                if str(item).strip()
+            ][:100]
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return jsonify({"error": "invalid sources"}), 400
+    else:
+        source = (request.args.get("source") or "").strip()
+        base_sources = [source] if source else []
+    if not base_sources:
         return jsonify({"error": "source required"}), 400
     try:
         limit = min(max(int(request.args.get("limit", "80")), 1), 200)
     except ValueError:
         limit = 80
 
-    sources = [source] + source_aliases_for_target(conn, g.user_id, source)
+    sources = []
+    for source in base_sources:
+        sources.append(source)
+        sources.extend(source_aliases_for_target(conn, g.user_id, source))
+    sources = list(dict.fromkeys(sources))
     placeholders = ",".join("?" * len(sources))
     rows = conn.execute(
         "SELECT id, title, source, date, time, timestamp, thumb, has_full_content "
@@ -1684,7 +1750,7 @@ def list_source_articles():
         (*sources, limit),
     ).fetchall()
     return jsonify({
-        "source": source,
+        "source": base_sources[0],
         "sources": sources,
         "items": [dict(row) for row in rows],
     })
@@ -1742,6 +1808,74 @@ def classify_sources():
     config = dict(config)
     config["user_id"] = g.user_id
     return jsonify(_classify_source_batch(config, limit, force))
+
+
+@app.route("/sources/reinitialize", methods=["POST"])
+@require_role("admin")
+def reinitialize_sources():
+    conn = _get_news_db()
+    if not conn:
+        return jsonify({"error": "news db not found"}), 404
+    data = request.get_json(silent=True) or {}
+    preserve_manual = data.get("preserve_manual", True) is not False
+    conn.execute("DELETE FROM source_categories")
+    conn.execute("DELETE FROM source_aliases")
+    if not preserve_manual:
+        conn.execute("DELETE FROM user_source_categories")
+        conn.execute("DELETE FROM user_source_aliases")
+    ensure_article_sources(conn)
+    cleanup_stale_source_categories(conn)
+    conn.commit()
+    count = conn.execute("SELECT COUNT(*) AS c FROM source_categories").fetchone()["c"]
+    return jsonify({"ok": True, "sources": count, "preserve_manual": preserve_manual})
+
+
+@app.route("/sources/classify-job", methods=["POST"])
+@require_auth
+def classify_sources_job():
+    conn = _get_news_db()
+    if not conn:
+        return jsonify({"error": "news db not found"}), 404
+    config = get_ai_config(g.user_id)
+    if not config or not config.get("enabled") or not config.get("api_key"):
+        return jsonify({"error": "请先在AI菜单中设置API"}), 400
+
+    data = request.get_json(silent=True) or {}
+    force = bool(data.get("force"))
+    with _source_classify_jobs_lock:
+        for job in _source_classify_jobs.values():
+            if job.get("user_id") == g.user_id and job.get("status") in ("queued", "running"):
+                return jsonify({"job_id": job["job_id"], "status": job["status"]}), 202
+        job_id = uuid.uuid4().hex
+        _source_classify_jobs[job_id] = {
+            "job_id": job_id,
+            "user_id": g.user_id,
+            "status": "queued",
+            "force": force,
+            "created_at": time.time(),
+            "updated_at": time.time(),
+            "processed": 0,
+            "failed": 0,
+            "remaining": 0,
+            "error": "",
+        }
+    threading.Thread(
+        target=_run_source_classify_job,
+        args=(job_id, g.user_id, config, force),
+        daemon=True,
+    ).start()
+    return jsonify({"job_id": job_id, "status": "queued"}), 202
+
+
+@app.route("/sources/classify-job/<job_id>", methods=["GET"])
+@require_auth
+def classify_sources_job_status(job_id):
+    with _source_classify_jobs_lock:
+        job = _source_classify_jobs.get(job_id)
+        if not job or job.get("user_id") != g.user_id:
+            return jsonify({"error": "job not found"}), 404
+        safe = {k: v for k, v in job.items() if k != "user_id"}
+    return jsonify(safe)
 
 
 def _fetch_telegram_message_content(article_id: int) -> str:
