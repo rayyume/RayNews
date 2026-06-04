@@ -349,6 +349,10 @@ body.body-scroll-lock{overflow:hidden!important}
 .settings-tab.active{color:var(--accent);border-bottom-color:var(--accent)}
 .source-manager{display:flex;flex-direction:column;gap:10px}
 .source-manager-head{display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin-bottom:8px}
+.source-step{padding:12px 0;border-bottom:1px solid var(--border)}
+.source-step:first-child{padding-top:0}
+.source-step-title{font-size:13px;font-weight:800;color:var(--text);margin-bottom:4px}
+.source-step-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
 .source-row{display:grid;grid-template-columns:minmax(120px,1.2fr) minmax(110px,.8fr) 110px 72px;gap:8px;align-items:center;padding:10px 0;border-bottom:1px solid var(--border)}
 .source-name{font-size:12px;color:var(--text-2);line-height:1.35;word-break:break-word}
 .source-name-btn{background:none;border:none;color:var(--accent);font:inherit;font-weight:700;text-align:left;cursor:pointer;padding:0}
@@ -556,12 +560,18 @@ body.body-scroll-lock{overflow:hidden!important}
 
       <!-- Sources Tab -->
       <div id="settingsTabSources" style="display:none">
-        <div class="source-manager-head">
-          <div>
-            <div style="font-weight:700;font-size:14px">订阅源分类</div>
-            <p class="ai-hint" style="margin-top:4px">AI 会缩写来源名称并固定归入四个分类，手动保存后不会被 AI 覆盖。</p>
+        <div class="source-step">
+          <div class="source-step-title">1. 识别文章来源标签</div>
+          <p class="ai-hint">从文章底部最后一个 via 链接重新识别真正来源，用于修复历史文章中误识别的来源。</p>
+          <div class="source-step-actions">
+            <button class="ai-save-btn" id="sourceRedetectBtn" onclick="redetectArticleSources()" style="display:none;margin:0;width:auto;padding:8px 12px">重新识别来源</button>
+            <span class="ai-hint" id="sourceRedetectHint" style="display:none;align-self:center;margin:0">仅管理员可执行全局来源重识别。</span>
           </div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap">
+        </div>
+        <div class="source-step">
+          <div class="source-step-title">2. 订阅源分类与合并</div>
+          <p class="ai-hint">AI 会将已识别的来源缩写并归入四个分类；手动保存和合并优先，不会被 AI 覆盖。</p>
+          <div class="source-step-actions">
             <button class="ai-save-btn" onclick="classifySources(false)" style="margin:0;width:auto;padding:8px 12px">AI处理待分类</button>
             <button class="ai-save-btn" onclick="classifySources(true)" style="margin:0;width:auto;padding:8px 12px;background:var(--bg-card);color:var(--text);border:1px solid var(--border)">重新分类</button>
           </div>
@@ -1109,6 +1119,10 @@ function updateUserUI() {
     document.getElementById('userAvatarImg').style.display = '';
     document.getElementById('userAvatarLetter').style.display = 'none';
     document.getElementById('adminPanelBtn').style.display = authUser.role === 'admin' ? '' : 'none';
+    const sourceRedetectBtn = document.getElementById('sourceRedetectBtn');
+    if (sourceRedetectBtn) sourceRedetectBtn.style.display = authUser.role === 'admin' ? '' : 'none';
+    const sourceRedetectHint = document.getElementById('sourceRedetectHint');
+    if (sourceRedetectHint) sourceRedetectHint.style.display = authUser.role === 'admin' ? 'none' : '';
 
     // Preview users: hide refresh button
     const refreshBtn = document.getElementById('refreshBtn');
@@ -1117,6 +1131,10 @@ function updateUserUI() {
     // Show login button in header
     const existingAvatar = document.querySelector('.header-avatar');
     if (existingAvatar) existingAvatar.style.display = 'none';
+    const sourceRedetectBtn = document.getElementById('sourceRedetectBtn');
+    if (sourceRedetectBtn) sourceRedetectBtn.style.display = 'none';
+    const sourceRedetectHint = document.getElementById('sourceRedetectHint');
+    if (sourceRedetectHint) sourceRedetectHint.style.display = 'none';
     const btn = document.createElement('button');
     btn.id = 'loginBtn';
     btn.className = 'refresh-btn';
@@ -1352,13 +1370,39 @@ async function classifySources(force) {
     const data = await parseJsonResponse(resp);
     const okCount = (data.processed || []).length;
     const failCount = (data.failed || []).length;
-    showSettingsStatus(`AI 已处理 ${okCount} 个来源，失败 ${failCount} 个，剩余 ${data.remaining || 0} 个`, failCount ? 'warn' : 'ok');
+    showSettingsStatus(`分类完成：已处理 ${okCount} 个来源，失败 ${failCount} 个，剩余 ${data.remaining || 0} 个`, failCount ? 'warn' : 'ok');
     await loadSourceCategories();
     await loadSourcesTab();
     renderFilters();
     renderList();
   } catch (e) {
     showSettingsStatus('AI处理失败: ' + e.message, 'error');
+    if (status) status.textContent = '';
+  }
+}
+
+async function redetectArticleSources() {
+  const status = document.getElementById('sourceManagerStatus');
+  if (status) status.textContent = '正在从文章底部 via 重新识别文章来源...';
+  try {
+    const resp = await fetch('/sources/redetect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
+      body: JSON.stringify({ limit: 10000 }),
+    });
+    const data = await parseJsonResponse(resp);
+    if (data.error) throw new Error(data.error);
+    showSettingsStatus(
+      `来源识别完成：已检查 ${data.checked || 0} 篇文章，修正 ${data.updated || 0} 篇，清理 ${data.deleted_sources || 0} 个旧来源。请继续处理待分类来源。`,
+      'ok'
+    );
+    await loadSourceCategories();
+    await loadSourcesTab();
+    renderFilters();
+    renderList();
+  } catch (e) {
+    showSettingsStatus('重新识别失败: ' + e.message, 'error');
+  } finally {
     if (status) status.textContent = '';
   }
 }

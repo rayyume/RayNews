@@ -279,9 +279,9 @@ def save_state(state: dict):
 # ─── Source Detection ─────────────────────────────────────
 def detect_source(content: str) -> str:
     """Extract source from the bottom-most standalone via line."""
-    via_candidates = _extract_bottom_via_sources(content)
-    if via_candidates:
-        return via_candidates[0]
+    via_source = detect_source_from_attribution(content)
+    if via_source:
+        return via_source
 
     tg = re.search(r't\.me/([a-zA-Z0-9_]+)', content)
     if tg:
@@ -296,6 +296,12 @@ def detect_source(content: str) -> str:
             return text
 
     return "Telegram"
+
+
+def detect_source_from_attribution(content: str) -> str | None:
+    """Extract source only from explicit bottom via attribution."""
+    via_candidates = _extract_bottom_via_sources(content)
+    return via_candidates[0] if via_candidates else None
 
 
 def _extract_bottom_via_sources(content: str) -> list[str]:

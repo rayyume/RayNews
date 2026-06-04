@@ -26,7 +26,8 @@ from models import (
 from auth import init_auth, create_token, require_auth, require_role
 from ai_service import AIService
 from source_categories import (
-    CATEGORY_NAMES, CATEGORY_ORDER, clamp_weighted, ensure_article_sources,
+    CATEGORY_NAMES, CATEGORY_ORDER, cleanup_stale_source_categories,
+    clamp_weighted, ensure_article_sources,
     effective_source_rows, find_user_merge_target, merge_source,
     recent_titles_for_source, source_aliases_for_target, source_rows,
     update_source_category,
@@ -1739,6 +1740,64 @@ def classify_sources():
     config = dict(config)
     config["user_id"] = g.user_id
     return jsonify(_classify_source_batch(config, limit, force))
+
+
+@app.route("/sources/redetect", methods=["POST"])
+@require_role("admin")
+def redetect_article_sources():
+    conn = _get_news_db()
+    if not conn:
+        return jsonify({"error": "news db not found"}), 404
+    data = request.get_json(silent=True) or {}
+    try:
+        limit = min(max(int(data.get("limit", 2000) or 2000), 1), 10000)
+    except (TypeError, ValueError):
+        limit = 2000
+
+    from fetcher import detect_source_from_attribution
+
+    rows = conn.execute(
+        """
+        SELECT id, title, source, body_html, summary
+        FROM articles
+        ORDER BY timestamp DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    changed = []
+    skipped = 0
+    for row in rows:
+        content = "\n".join([
+            row["body_html"] or "",
+            row["summary"] or "",
+            row["title"] or "",
+        ])
+        detected = detect_source_from_attribution(content)
+        if not detected:
+            skipped += 1
+            continue
+        current = (row["source"] or "").strip()
+        if detected == current:
+            skipped += 1
+            continue
+        conn.execute("UPDATE articles SET source = ? WHERE id = ?", (detected, row["id"]))
+        changed.append({
+            "id": row["id"],
+            "title": row["title"],
+            "from": current,
+            "to": detected,
+        })
+    ensure_article_sources(conn)
+    deleted_sources = cleanup_stale_source_categories(conn)
+    conn.commit()
+    return jsonify({
+        "checked": len(rows),
+        "updated": len(changed),
+        "skipped": skipped,
+        "deleted_sources": deleted_sources,
+        "changes": changed[:100],
+    })
 
 
 # ─── Settings Routes ────────────────────────────────────────

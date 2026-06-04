@@ -32,6 +32,11 @@ INITIAL_CATEGORY_MAP = {
 }
 
 VALID_STATUSES = {"pending", "classified", "manual", "failed"}
+INITIAL_SOURCES = {
+    source
+    for sources in INITIAL_CATEGORY_MAP.values()
+    for source in sources
+}
 
 
 def weighted_len(text: str) -> int:
@@ -151,6 +156,41 @@ def ensure_article_sources(conn: sqlite3.Connection) -> int:
         inserted += cur.rowcount
     conn.commit()
     return inserted
+
+
+def cleanup_stale_source_categories(conn: sqlite3.Connection) -> int:
+    """Remove discovered source rows that no longer have articles."""
+    initial_sources = set(INITIAL_SOURCES)
+    rows = conn.execute(
+        """
+        SELECT sc.source, sc.status, COUNT(a.id) AS article_count
+        FROM source_categories sc
+        LEFT JOIN articles a ON a.source = sc.source
+        GROUP BY sc.source
+        HAVING article_count = 0
+        """
+    ).fetchall()
+    deleted = 0
+    for row in rows:
+        source = row["source"] if isinstance(row, sqlite3.Row) else row[0]
+        status = row["status"] if isinstance(row, sqlite3.Row) else row[1]
+        if source in initial_sources or status == "manual":
+            continue
+        alias_ref = conn.execute(
+            """
+            SELECT 1 FROM source_aliases
+            WHERE alias_source = ? OR target_source = ?
+            LIMIT 1
+            """,
+            (source, source),
+        ).fetchone()
+        if alias_ref:
+            continue
+        cur = conn.execute("DELETE FROM source_categories WHERE source = ?", (source,))
+        deleted += cur.rowcount
+    if deleted:
+        conn.commit()
+    return deleted
 
 
 def find_merge_target(conn: sqlite3.Connection, source: str, label: str) -> str | None:
