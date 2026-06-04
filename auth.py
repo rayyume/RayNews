@@ -3,10 +3,20 @@
 import jwt
 import time
 import functools
+import os
 from flask import request, jsonify, g
 
 SECRET_KEY = None  # set on init
-JWT_EXPIRY = 86400  # 24 hours
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+JWT_EXPIRY = _int_env("RAYNEWS_TOKEN_EXPIRY_SECONDS", 30 * 24 * 3600)
 
 
 def init_auth(secret_key: str):

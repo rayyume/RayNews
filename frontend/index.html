@@ -431,10 +431,10 @@ body.body-scroll-lock{overflow:hidden!important}
     </div>
     <div class="auth-body">
       <div id="authForm">
-        <input type="text" id="authLogin" class="auth-input" placeholder="邮箱 / 用户名" autocomplete="username">
-        <input type="password" id="authPassword" class="auth-input" placeholder="密码" autocomplete="current-password">
-        <input type="text" id="authNickname" class="auth-input" placeholder="昵称（可选）" style="display:none">
-        <input type="text" id="authInviteCode" class="auth-input" placeholder="邀请码（注册时必填）" style="display:none" autocomplete="off">
+        <input type="text" id="authLogin" class="auth-input" placeholder="邮箱 / 用户名" autocomplete="username" disabled>
+        <input type="password" id="authPassword" class="auth-input" placeholder="密码" autocomplete="current-password" disabled>
+        <input type="text" id="authNickname" class="auth-input" placeholder="昵称（可选）" style="display:none" disabled>
+        <input type="text" id="authInviteCode" class="auth-input" placeholder="邀请码（注册时必填）" style="display:none" autocomplete="off" disabled>
         <p id="authInviteRequest" style="display:none;font-size:12px;color:var(--text-3);margin-top:4px;text-align:center">
           还没有邀请码？<a href="#" onclick="requestInvite()">点击申请</a>
         </p>
@@ -525,7 +525,7 @@ body.body-scroll-lock{overflow:hidden!important}
         <p class="ai-hint">例如：https://api.deepseek.com</p>
 
         <label class="ai-label">API Key</label>
-        <input class="ai-input" id="aiApiKey" type="password" placeholder="sk-...">
+        <input class="ai-input" id="aiApiKey" type="password" placeholder="sk-..." autocomplete="off" disabled>
 
         <label class="ai-label">模型</label>
         <input class="ai-input" id="aiModel" placeholder="gpt-4o-mini">
@@ -959,8 +959,16 @@ function unlockBodyScroll() {
 }
 
 // ═══ Auth Modal ══════════════════════════════════════════
+function setAuthInputsEnabled(enabled) {
+  ['authLogin', 'authPassword', 'authNickname', 'authInviteCode'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = !enabled;
+  });
+}
+
 function showAuth() {
   document.getElementById('authModal').classList.add('open');
+  setAuthInputsEnabled(true);
   lockBodyScroll();
   document.getElementById('authLogin').value = '';
   document.getElementById('authPassword').value = '';
@@ -972,6 +980,7 @@ function showAuth() {
 
 function closeAuth() {
   document.getElementById('authModal').classList.remove('open');
+  setAuthInputsEnabled(false);
   unlockBodyScroll();
 }
 
@@ -1138,6 +1147,10 @@ document.addEventListener('mousedown', e => {
 });
 
 // ═══ Settings (AI + Notification + General) ═════════════
+function setSettingsSensitiveInputsEnabled(enabled) {
+  const apiKey = document.getElementById('aiApiKey');
+  if (apiKey) apiKey.disabled = !enabled;
+}
 
 function openSettings() {
   closeUserMenu();
@@ -1156,6 +1169,7 @@ function openSettings() {
 
 function closeAISettings() {
   document.getElementById('aiOverlay').classList.remove('open');
+  setSettingsSensitiveInputsEnabled(false);
   unlockBodyScroll();
 }
 
@@ -1165,6 +1179,7 @@ function switchSettingsTab(tab) {
   ['account','ai','summary','sources','translate','notify'].forEach(t => {
     document.getElementById('settingsTab' + t.charAt(0).toUpperCase() + t.slice(1)).style.display = t === tab ? '' : 'none';
   });
+  setSettingsSensitiveInputsEnabled(tab === 'ai' && document.getElementById('aiOverlay').classList.contains('open'));
   // Load avatar preview when switching to account tab
   if (tab === 'account') loadAccountTab();
   if (tab === 'sources') loadSourcesTab();

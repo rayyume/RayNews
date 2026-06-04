@@ -46,12 +46,23 @@ CORS(app)
 
 DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
 
-# Secret key: from env or generate on first run
+# Secret key: from env or persisted under DATA_DIR.
 SECRET_KEY = os.environ.get("RAYNEWS_SECRET")
 if not SECRET_KEY:
+    from pathlib import Path
     import secrets
-    SECRET_KEY = secrets.token_hex(32)
-    print(f"[web] No RAYNEWS_SECRET set — using ephemeral key: {SECRET_KEY[:16]}...")
+    secret_file = Path(DATA_DIR) / "raynews_secret"
+    try:
+        secret_file.parent.mkdir(parents=True, exist_ok=True)
+        if secret_file.exists():
+            SECRET_KEY = secret_file.read_text(encoding="utf-8").strip()
+        if not SECRET_KEY:
+            SECRET_KEY = secrets.token_hex(32)
+            secret_file.write_text(SECRET_KEY, encoding="utf-8")
+        print(f"[web] Using persisted RAYNEWS_SECRET from {secret_file}")
+    except Exception as e:
+        SECRET_KEY = secrets.token_hex(32)
+        print(f"[web] Could not persist RAYNEWS_SECRET ({e}); using ephemeral key: {SECRET_KEY[:16]}...")
 
 init_auth(SECRET_KEY)
 

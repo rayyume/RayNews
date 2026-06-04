@@ -81,7 +81,8 @@ docker compose up -d
 |------|--------|------|
 | `TELEGRAM_CHANNEL` | `your_channel` | Telegram 频道名称（必填） |
 | `TZ` | `Asia/Shanghai` | 容器时区，影响日志时间戳 |
-| `RAYNEWS_SECRET` | (自动生成) | JWT 签名密钥（固定可避免重启后 token 失效） |
+| `RAYNEWS_SECRET` | (自动保存到 `/app/data/raynews_secret`) | JWT 签名密钥；也可手动指定 |
+| `RAYNEWS_TOKEN_EXPIRY_SECONDS` | `2592000` | 登录 token 有效期（秒），默认 30 天 |
 | `RESEND_API_KEY` | (空) | Resend 邮件 API Key（用于每日摘要/测试邮件） |
 | `HTTP_PROXY` | (空) | HTTP 代理（如需翻墙） |
 | `HTTPS_PROXY` | (空) | HTTPS 代理 |

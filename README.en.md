@@ -81,7 +81,8 @@ The fetcher runs once on startup, then every 15 minutes.
 |----------|---------|-------------|
 | `TELEGRAM_CHANNEL` | `your_channel` | Telegram channel name (required) |
 | `TZ` | `Asia/Shanghai` | Container timezone |
-| `RAYNEWS_SECRET` | (auto-generated) | JWT signing key (set to persist tokens across restarts) |
+| `RAYNEWS_SECRET` | (saved to `/app/data/raynews_secret`) | JWT signing key; can also be set manually |
+| `RAYNEWS_TOKEN_EXPIRY_SECONDS` | `2592000` | Login token lifetime in seconds, defaults to 30 days |
 | `RESEND_API_KEY` | (empty) | Resend email API key (for daily digest / test email) |
 | `HTTP_PROXY` | (empty) | HTTP proxy |
 | `HTTPS_PROXY` | (empty) | HTTPS proxy |
