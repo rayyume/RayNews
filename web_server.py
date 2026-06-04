@@ -2181,7 +2181,8 @@ def redetect_single_source():
 
     changed = []
     for row in rows:
-        content = "\n".join([
+        # Join with <br> so via line stays isolated from title/summary in chunk splitting
+        content = "<br>".join([
             row["body_html"] or "",
             row["summary"] or "",
             row["title"] or "",
