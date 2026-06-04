@@ -362,7 +362,7 @@ def _clean_source_name(name: str) -> str:
         if s in name:
             name = name.split(s)[0]
 
-    name = name.strip().rstrip(".")
+    name = name.strip().rstrip(".:：")
     name = re.sub(r"\s*[-–]\s*(Channel|Group|Bot|频道|群)$", "", name, flags=re.IGNORECASE)
     name = re.sub(r"^【.*?】\s*", "", name)
 

@@ -1263,13 +1263,15 @@ function renderSourceManager(rows) {
     ).join('');
     const label = esc(row.label || row.source || '');
     const source = esc(row.source || '');
+    const displayName = label || source;
+    const sourceMeta = row.label && row.label !== row.source ? ` · 原始：${row.source}` : '';
     const meta = row.alias_target
-      ? `${row.article_count || 0} 篇 · 已合并到 ${row.alias_target}`
-      : `${row.article_count || 0} 篇 · ${row.status || 'pending'}`;
+      ? `${row.article_count || 0} 篇 · 已合并到 ${row.alias_target}${sourceMeta}`
+      : `${row.article_count || 0} 篇 · ${row.status || 'pending'}${sourceMeta}`;
     return `
       <div class="source-row" data-source-idx="${idx}">
         <div>
-          <div class="source-name"><button class="source-name-btn" onclick="openSourceArticles(${idx})">${source}</button></div>
+          <div class="source-name"><button class="source-name-btn" onclick="openSourceArticles(${idx})" title="${source}">${displayName}</button></div>
           <div class="source-meta">${esc(meta)}</div>
         </div>
         <input class="source-label-input" value="${label}" maxlength="20" aria-label="来源缩写">
@@ -1388,12 +1390,12 @@ async function redetectArticleSources() {
     const resp = await fetch('/sources/redetect', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
-      body: JSON.stringify({ limit: 10000 }),
+      body: JSON.stringify({ limit: 10000, network_limit: 2000 }),
     });
     const data = await parseJsonResponse(resp);
     if (data.error) throw new Error(data.error);
     showSettingsStatus(
-      `来源识别完成：已检查 ${data.checked || 0} 篇文章，修正 ${data.updated || 0} 篇，清理 ${data.deleted_sources || 0} 个旧来源。请继续处理待分类来源。`,
+      `来源识别完成：已检查 ${data.checked || 0} 篇文章，回查 ${data.telegram_checked || 0} 条 Telegram 原始消息，修正 ${data.updated || 0} 篇，清理 ${data.deleted_sources || 0} 个旧来源。请继续处理待分类来源。`,
       'ok'
     );
     await loadSourceCategories();

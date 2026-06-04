@@ -9,6 +9,7 @@ import time
 import uuid
 import requests
 
+from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify, g
 from flask_cors import CORS
 
@@ -39,6 +40,7 @@ AUTO_TRANSLATION_BATCH_LIMIT = int(os.environ.get("AUTO_TRANSLATION_BATCH_LIMIT"
 AUTO_TRANSLATION_INTERVAL_SECONDS = int(os.environ.get("AUTO_TRANSLATION_INTERVAL_SECONDS", "30"))
 AUTO_SOURCE_CLASSIFY_BATCH_LIMIT = int(os.environ.get("AUTO_SOURCE_CLASSIFY_BATCH_LIMIT", "20"))
 AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS = int(os.environ.get("AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS", "120"))
+TELEGRAM_EMBED_TIMEOUT_SECONDS = int(os.environ.get("TELEGRAM_EMBED_TIMEOUT_SECONDS", "12"))
 
 # ─── App Setup ────────────────────────────────────────────────
 
@@ -1742,6 +1744,35 @@ def classify_sources():
     return jsonify(_classify_source_batch(config, limit, force))
 
 
+def _fetch_telegram_message_content(article_id: int) -> str:
+    """Fetch the original Telegram message body for historical source repair."""
+    channel = (os.environ.get("TELEGRAM_CHANNEL") or "").strip().lstrip("@")
+    if not channel or channel == "your_channel":
+        return ""
+    url = f"https://t.me/{channel}/{article_id}?embed=1&mode=tme"
+    try:
+        resp = requests.get(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36"
+                )
+            },
+            timeout=TELEGRAM_EMBED_TIMEOUT_SECONDS,
+        )
+        resp.raise_for_status()
+    except Exception as exc:
+        print(f"telegram source lookup failed for {article_id}: {exc}")
+        return ""
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    text_el = soup.select_one(".tgme_widget_message_text.js-message_text")
+    if not text_el:
+        text_el = soup.select_one(".tgme_widget_message_text")
+    return text_el.decode_contents() if text_el else ""
+
+
 @app.route("/sources/redetect", methods=["POST"])
 @require_role("admin")
 def redetect_article_sources():
@@ -1753,12 +1784,17 @@ def redetect_article_sources():
         limit = min(max(int(data.get("limit", 2000) or 2000), 1), 10000)
     except (TypeError, ValueError):
         limit = 2000
+    try:
+        network_limit = min(max(int(data.get("network_limit", 1000) or 1000), 0), limit)
+    except (TypeError, ValueError):
+        network_limit = min(1000, limit)
+    force_telegram = bool(data.get("force_telegram"))
 
     from fetcher import detect_source_from_attribution
 
     rows = conn.execute(
         """
-        SELECT id, title, source, body_html, summary
+        SELECT id, title, source, body_html, summary, telegraph_url
         FROM articles
         ORDER BY timestamp DESC
         LIMIT ?
@@ -1767,13 +1803,37 @@ def redetect_article_sources():
     ).fetchall()
     changed = []
     skipped = 0
+    telegram_checked = 0
+    telegram_hits = 0
     for row in rows:
+        detected = None
+        fetched_telegram = False
+        should_fetch_telegram = (
+            telegram_checked < network_limit
+            and (force_telegram or bool(row["telegraph_url"]))
+        )
+        if should_fetch_telegram:
+            fetched_telegram = True
+            telegram_checked += 1
+            telegram_content = _fetch_telegram_message_content(row["id"])
+            if telegram_content:
+                detected = detect_source_from_attribution(telegram_content)
+                if detected:
+                    telegram_hits += 1
+
         content = "\n".join([
             row["body_html"] or "",
             row["summary"] or "",
             row["title"] or "",
         ])
-        detected = detect_source_from_attribution(content)
+        detected = detected or detect_source_from_attribution(content)
+        if not detected and not fetched_telegram and telegram_checked < network_limit:
+            telegram_checked += 1
+            telegram_content = _fetch_telegram_message_content(row["id"])
+            if telegram_content:
+                detected = detect_source_from_attribution(telegram_content)
+                if detected:
+                    telegram_hits += 1
         if not detected:
             skipped += 1
             continue
@@ -1795,6 +1855,8 @@ def redetect_article_sources():
         "checked": len(rows),
         "updated": len(changed),
         "skipped": skipped,
+        "telegram_checked": telegram_checked,
+        "telegram_hits": telegram_hits,
         "deleted_sources": deleted_sources,
         "changes": changed[:100],
     })
