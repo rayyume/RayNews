@@ -27,6 +27,7 @@ from auth import init_auth, create_token, require_auth, require_role
 from ai_service import AIService
 from source_categories import (
     CATEGORY_NAMES, CATEGORY_ORDER, clamp_weighted, ensure_article_sources,
+    effective_source_rows, find_user_merge_target, merge_source,
     recent_titles_for_source, source_rows, update_source_category,
 )
 
@@ -34,6 +35,8 @@ AUTO_SUMMARY_BATCH_LIMIT = int(os.environ.get("AUTO_SUMMARY_BATCH_LIMIT", "20"))
 AUTO_SUMMARY_INTERVAL_SECONDS = int(os.environ.get("AUTO_SUMMARY_INTERVAL_SECONDS", "30"))
 AUTO_TRANSLATION_BATCH_LIMIT = int(os.environ.get("AUTO_TRANSLATION_BATCH_LIMIT", "5"))
 AUTO_TRANSLATION_INTERVAL_SECONDS = int(os.environ.get("AUTO_TRANSLATION_INTERVAL_SECONDS", "30"))
+AUTO_SOURCE_CLASSIFY_BATCH_LIMIT = int(os.environ.get("AUTO_SOURCE_CLASSIFY_BATCH_LIMIT", "20"))
+AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS = int(os.environ.get("AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS", "120"))
 
 # ─── App Setup ────────────────────────────────────────────────
 
@@ -888,6 +891,7 @@ def _run_daily_summary_job(job_id, user_id, config):
 _daily_summary_sent = set()  # {(user_id, date), ...}
 _auto_summary_lock = threading.Lock()
 _auto_translation_lock = threading.Lock()
+_auto_source_classify_lock = threading.Lock()
 
 
 def _send_daily_summaries():
@@ -1226,6 +1230,142 @@ def _auto_translation_loop():
         _time.sleep(AUTO_TRANSLATION_INTERVAL_SECONDS)
 
 
+def _get_source_classification_config() -> dict | None:
+    """Return the first user AI config available for fallback callers."""
+    try:
+        db = get_db()
+        row = db.execute(
+            "SELECT c.user_id, c.endpoint, c.model, c.api_key, c.provider_type, c.enabled "
+            "FROM ai_configs c "
+            "WHERE c.enabled = 1 "
+            "AND c.api_key != '' "
+            "ORDER BY c.user_id ASC LIMIT 1"
+        ).fetchone()
+        return dict(row) if row else None
+    except Exception as e:
+        print(f"[source-classify] settings DB error: {e}")
+        return None
+
+
+def _get_source_classification_users() -> list[dict]:
+    """Users whose own AI config can classify sources for their view."""
+    try:
+        db = get_db()
+        rows = db.execute(
+            "SELECT user_id, endpoint, model, api_key, provider_type, enabled "
+            "FROM ai_configs "
+            "WHERE enabled = 1 "
+            "AND api_key != '' "
+            "ORDER BY user_id ASC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        print(f"[source-classify] settings DB error: {e}")
+        return []
+
+
+def _classify_source_batch(config: dict, limit: int = AUTO_SOURCE_CLASSIFY_BATCH_LIMIT,
+                           force: bool = False) -> dict:
+    conn = _get_news_db()
+    if not conn:
+        return {"processed": [], "failed": [], "remaining": 0}
+    user_id = config.get("user_id")
+    ensure_article_sources(conn)
+    rows = effective_source_rows(conn, user_id) if user_id else source_rows(conn)
+    candidates = [
+        row for row in rows
+        if row.get("source")
+        and not row.get("alias_target")
+        and not row.get("user_override")
+        and row.get("status") != "manual"
+        and (force or row.get("status") in ("pending", "failed"))
+    ][:limit]
+
+    svc = AIService(
+        api_key=config["api_key"],
+        endpoint=config["endpoint"],
+        model=config["model"],
+        provider_type=config.get("provider_type", "openai"),
+    )
+    processed = []
+    failed = []
+    for row in candidates:
+        source = row["source"]
+        titles = recent_titles_for_source(conn, source, limit=8)
+        try:
+            result = svc.classify_source(source, titles)
+            saved = update_source_category(
+                conn,
+                source,
+                result["category"],
+                result["label"],
+                status="classified",
+                confidence=result.get("confidence"),
+                reason=result.get("reason") or "ai classified",
+                sample_titles=titles,
+            )
+            processed.append(saved)
+        except Exception as e:
+            try:
+                update_source_category(
+                    conn,
+                    source,
+                    row.get("category") or "Info",
+                    row.get("label") or source,
+                    status="failed",
+                    reason=str(e)[:300],
+                    sample_titles=titles,
+                )
+            except Exception:
+                pass
+            failed.append({"source": source, "error": str(e)})
+
+    remaining = [
+        row for row in (effective_source_rows(conn, user_id) if user_id else source_rows(conn))
+        if not row.get("alias_target")
+        and not row.get("user_override")
+        and row.get("status") in ("pending", "failed")
+        and row.get("status") != "manual"
+    ]
+    return {
+        "processed": processed,
+        "failed": failed,
+        "remaining": len(remaining),
+    }
+
+
+def _run_auto_source_classification_once():
+    if not _auto_source_classify_lock.acquire(blocking=False):
+        return
+    try:
+        configs = _get_source_classification_users()
+        if not configs:
+            return
+        for config in configs:
+            result = _classify_source_batch(config, AUTO_SOURCE_CLASSIFY_BATCH_LIMIT)
+            if result["processed"] or result["failed"]:
+                print(
+                    f"[source-classify] user={config['user_id']} processed="
+                    f"{len(result['processed'])} failed={len(result['failed'])} "
+                    f"remaining={result['remaining']}"
+                )
+            if result["remaining"] == 0:
+                break
+    finally:
+        _auto_source_classify_lock.release()
+
+
+def _auto_source_classification_loop():
+    import time as _time
+    _time.sleep(90)
+    while True:
+        try:
+            _run_auto_source_classification_once()
+        except Exception as e:
+            print(f"[source-classify] Error in loop: {e}")
+        _time.sleep(AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS)
+
+
 def _run_auto_summary_once():
     """Fill cached summaries in small batches so daily summaries can reuse them."""
     if not _auto_summary_lock.acquire(blocking=False):
@@ -1508,7 +1648,7 @@ def list_sources():
     return jsonify({
         "categories": CATEGORY_ORDER,
         "category_names": CATEGORY_NAMES,
-        "sources": source_rows(conn),
+        "sources": effective_source_rows(conn, g.user_id),
     })
 
 
@@ -1530,8 +1670,18 @@ def save_source():
         return jsonify({"error": "label required"}), 400
     label = clamp_weighted(label, 20)
     try:
+        target_source = find_user_merge_target(conn, g.user_id, source, label)
+        if target_source:
+            target = merge_source(conn, source, target_source, user_id=g.user_id)
+            return jsonify({
+                **target,
+                "merged": True,
+                "merged_from": source,
+                "target_source": target_source,
+            })
         row = update_source_category(
-            conn, source, category, label, status="manual", reason="user edited"
+            conn, source, category, label, status="manual", reason="user edited",
+            user_id=g.user_id,
         )
         return jsonify(row)
     except ValueError as e:
@@ -1549,65 +1699,11 @@ def classify_sources():
         return jsonify({"error": "请先在AI菜单中设置API"}), 400
 
     data = request.get_json(silent=True) or {}
-    limit = min(max(int(data.get("limit", 20) or 20), 1), 50)
+    limit = min(max(int(data.get("limit", 50) or 50), 1), 100)
     force = bool(data.get("force"))
-    ensure_article_sources(conn)
-    rows = source_rows(conn)
-    candidates = [
-        row for row in rows
-        if row.get("source")
-        and row.get("status") != "manual"
-        and (force or row.get("status") in ("pending", "failed"))
-    ][:limit]
-
-    svc = AIService(
-        api_key=config["api_key"],
-        endpoint=config["endpoint"],
-        model=config["model"],
-        provider_type=config.get("provider_type", "openai"),
-    )
-    processed = []
-    failed = []
-    for row in candidates:
-        source = row["source"]
-        titles = recent_titles_for_source(conn, source, limit=8)
-        try:
-            result = svc.classify_source(source, titles)
-            saved = update_source_category(
-                conn,
-                source,
-                result["category"],
-                result["label"],
-                status="classified",
-                confidence=result.get("confidence"),
-                reason=result.get("reason") or "ai classified",
-                sample_titles=titles,
-            )
-            processed.append(saved)
-        except Exception as e:
-            try:
-                update_source_category(
-                    conn,
-                    source,
-                    row.get("category") or "Info",
-                    row.get("label") or source,
-                    status="failed",
-                    reason=str(e)[:300],
-                    sample_titles=titles,
-                )
-            except Exception:
-                pass
-            failed.append({"source": source, "error": str(e)})
-
-    remaining = [
-        row for row in source_rows(conn)
-        if row.get("status") in ("pending", "failed") and row.get("status") != "manual"
-    ]
-    return jsonify({
-        "processed": processed,
-        "failed": failed,
-        "remaining": len(remaining),
-    })
+    config = dict(config)
+    config["user_id"] = g.user_id
+    return jsonify(_classify_source_batch(config, limit, force))
 
 
 # ─── Settings Routes ────────────────────────────────────────
@@ -1757,9 +1853,11 @@ if __name__ == "__main__":
     _th.Thread(target=_daily_summary_loop, daemon=True).start()
     _th.Thread(target=_auto_summary_loop, daemon=True).start()
     _th.Thread(target=_auto_translation_loop, daemon=True).start()
+    _th.Thread(target=_auto_source_classification_loop, daemon=True).start()
     print("[scheduler] Daily summary background thread started")
     print("[auto-summary] Background summary thread started")
     print("[auto-translate] Background translation thread started")
+    print("[source-classify] Background source classification thread started")
     port = int(os.environ.get("WEB_PORT", 8082))
     print(f"[web] RayNews Web Server listening on {port}")
     app.run(host="127.0.0.1", port=port, debug=False)

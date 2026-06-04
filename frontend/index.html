@@ -887,15 +887,21 @@ function rebuildCategoryMap(rows) {
     const cat = CATEGORY_ORDER.includes(row.category) ? row.category : 'Info';
     if (!source) continue;
     sourceMeta[source] = row;
-    if (!next[cat].includes(source)) next[cat].push(source);
+    const visibleSource = row.alias_target || source;
+    if (!next[cat].includes(visibleSource)) next[cat].push(visibleSource);
   }
   CATEGORY_MAP = next;
 }
 
 async function loadSourceCategories() {
   try {
-    const resp = await fetch('/api/sources?t=' + Date.now());
-    const data = await resp.json();
+    let data;
+    if (authToken) {
+      data = await apiFetch('/sources');
+    } else {
+      const resp = await fetch('/api/sources?t=' + Date.now());
+      data = await resp.json();
+    }
     if (data && Array.isArray(data.sources)) {
       rebuildCategoryMap(data.sources);
     }
@@ -913,6 +919,11 @@ function sourceCategory(source) {
   const meta = sourceMeta[source];
   if (meta && CATEGORY_ORDER.includes(meta.category)) return meta.category;
   return getCategory(source) || 'Info';
+}
+
+function canonicalSource(source) {
+  const meta = sourceMeta[source];
+  return (meta && meta.alias_target) ? meta.alias_target : source;
 }
 
 function categoryDisplayName(cat) {
@@ -1202,7 +1213,9 @@ function renderSourceManager(rows) {
     ).join('');
     const label = esc(row.label || row.source || '');
     const source = esc(row.source || '');
-    const meta = `${row.article_count || 0} 篇 · ${row.status || 'pending'}`;
+    const meta = row.alias_target
+      ? `${row.article_count || 0} 篇 · 已合并到 ${row.alias_target}`
+      : `${row.article_count || 0} 篇 · ${row.status || 'pending'}`;
     return `
       <div class="source-row" data-source-idx="${idx}">
         <div>
@@ -1229,7 +1242,11 @@ async function saveSourceRow(idx) {
       body: JSON.stringify({ source: row.source, label, category }),
     });
     if (data && data.error) throw new Error(data.error);
-    showSettingsStatus('订阅源已保存', 'ok');
+    if (data && data.merged) {
+      showSettingsStatus(`已将 ${data.merged_from} 合并到 ${data.target_source}`, 'ok');
+    } else {
+      showSettingsStatus('订阅源已保存', 'ok');
+    }
     await loadSourceCategories();
     await loadSourcesTab();
     renderFilters();
@@ -1246,7 +1263,7 @@ async function classifySources(force) {
     const resp = await fetch('/sources/classify', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
-      body: JSON.stringify({ limit: 20, force: !!force }),
+      body: JSON.stringify({ limit: 50, force: !!force }),
     });
     const data = await parseJsonResponse(resp);
     const okCount = (data.processed || []).length;
@@ -2489,7 +2506,7 @@ async function loadDataWithRetry(retries, delay) {
 }
 
 function renderFilters() {
-  const sources = [...new Set(news.map(n => n.source))];
+  const sources = [...new Set(news.map(n => canonicalSource(n.source)))];
   const el = document.getElementById('filters');
   // "All" button at top (styled like cat-header for consistent look)
   let html = '<div class="cat-header active" data-f="all" data-is-all="1">All<span class="arrow" style="opacity:0">▶</span></div>';
@@ -2597,7 +2614,7 @@ function renderList() {
     const cat = filter.replace('cat:', '');
     filtered = news.filter(n => sourceCategory(n.source) === cat);
   } else {
-    filtered = news.filter(n => n.source === filter);
+    filtered = news.filter(n => canonicalSource(n.source) === filter);
   }
   const el = document.getElementById('list');
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
@@ -2657,7 +2674,7 @@ function goToPage(page) {
     const cat = filter.replace('cat:', '');
     filtered = news.filter(n => sourceCategory(n.source) === cat);
   } else {
-    filtered = news.filter(n => n.source === filter);
+    filtered = news.filter(n => canonicalSource(n.source) === filter);
   }
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   if (page < 1 || page > totalPages) return;

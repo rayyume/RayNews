@@ -84,6 +84,33 @@ def init_source_categories(conn: sqlite3.Connection) -> None:
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_source_categories_status ON source_categories(status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_source_categories_category ON source_categories(category)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS source_aliases (
+            alias_source  TEXT PRIMARY KEY,
+            target_source TEXT NOT NULL,
+            created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_source_categories (
+            user_id    INTEGER NOT NULL,
+            source     TEXT NOT NULL,
+            category   TEXT NOT NULL DEFAULT 'Info',
+            label      TEXT NOT NULL DEFAULT '',
+            status     TEXT NOT NULL DEFAULT 'manual',
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (user_id, source)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_source_aliases (
+            user_id       INTEGER NOT NULL,
+            alias_source  TEXT NOT NULL,
+            target_source TEXT NOT NULL,
+            created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (user_id, alias_source)
+        )
+    """)
 
     for category, sources in INITIAL_CATEGORY_MAP.items():
         for source in sources:
@@ -101,6 +128,12 @@ def init_source_categories(conn: sqlite3.Connection) -> None:
 def ensure_article_sources(conn: sqlite3.Connection) -> int:
     """Insert pending source records for every distinct article source."""
     init_source_categories(conn)
+    aliases = conn.execute("SELECT alias_source, target_source FROM source_aliases").fetchall()
+    for row in aliases:
+        alias = row["alias_source"] if isinstance(row, sqlite3.Row) else row[0]
+        target = row["target_source"] if isinstance(row, sqlite3.Row) else row[1]
+        conn.execute("UPDATE articles SET source = ? WHERE source = ?", (target, alias))
+
     rows = conn.execute(
         "SELECT DISTINCT source FROM articles WHERE source IS NOT NULL AND TRIM(source) != ''"
     ).fetchall()
@@ -120,6 +153,91 @@ def ensure_article_sources(conn: sqlite3.Connection) -> int:
     return inserted
 
 
+def find_merge_target(conn: sqlite3.Connection, source: str, label: str) -> str | None:
+    """Find an existing source whose source name or label matches label."""
+    label = (label or "").strip()
+    if not label:
+        return None
+    rows = conn.execute(
+        """
+        SELECT sc.source, sc.status, COUNT(a.id) AS article_count
+        FROM source_categories sc
+        LEFT JOIN articles a ON a.source = sc.source
+        WHERE sc.source != ?
+          AND (sc.source = ? OR sc.label = ?)
+        GROUP BY sc.source
+        ORDER BY
+          CASE sc.status WHEN 'manual' THEN 0 WHEN 'classified' THEN 1 ELSE 2 END,
+          article_count DESC,
+          sc.source COLLATE NOCASE
+        LIMIT 1
+        """,
+        (source, label, label),
+    ).fetchone()
+    if not rows:
+        return None
+    return rows["source"] if isinstance(rows, sqlite3.Row) else rows[0]
+
+
+def find_user_merge_target(conn: sqlite3.Connection, user_id: int, source: str, label: str) -> str | None:
+    label = (label or "").strip()
+    if not label:
+        return None
+    rows = effective_source_rows(conn, user_id)
+    candidates = [
+        row for row in rows
+        if row.get("source") != source
+        and not row.get("alias_target")
+        and (row.get("source") == label or row.get("label") == label)
+    ]
+    candidates.sort(key=lambda row: (
+        0 if row.get("status") == "manual" else 1,
+        -(row.get("article_count") or 0),
+        row.get("source") or "",
+    ))
+    return candidates[0]["source"] if candidates else None
+
+
+def merge_source(conn: sqlite3.Connection, source: str, target_source: str,
+                 user_id: int | None = None) -> dict:
+    """Merge source into target_source. User merges are private to that user."""
+    if source == target_source:
+        raise ValueError("cannot merge a source into itself")
+    target = conn.execute(
+        "SELECT * FROM source_categories WHERE source = ?",
+        (target_source,),
+    ).fetchone()
+    if not target:
+        raise ValueError("target source not found")
+
+    if user_id is not None:
+        conn.execute(
+            """
+            INSERT INTO user_source_aliases (user_id, alias_source, target_source)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id, alias_source) DO UPDATE SET
+                target_source = excluded.target_source
+            """,
+            (user_id, source, target_source),
+        )
+        conn.commit()
+        return dict(target)
+
+    conn.execute("UPDATE articles SET source = ? WHERE source = ?", (target_source, source))
+    conn.execute(
+        """
+        INSERT INTO source_aliases (alias_source, target_source)
+        VALUES (?, ?)
+        ON CONFLICT(alias_source) DO UPDATE SET
+            target_source = excluded.target_source
+        """,
+        (source, target_source),
+    )
+    conn.execute("DELETE FROM source_categories WHERE source = ?", (source,))
+    conn.commit()
+    return dict(target)
+
+
 def source_rows(conn: sqlite3.Connection) -> list[dict]:
     ensure_article_sources(conn)
     rows = conn.execute(
@@ -135,6 +253,62 @@ def source_rows(conn: sqlite3.Connection) -> list[dict]:
         """
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def effective_source_rows(conn: sqlite3.Connection, user_id: int | None = None) -> list[dict]:
+    """Return shared source rows overlaid with a user's manual categories/aliases."""
+    rows = source_rows(conn)
+    if user_id is None:
+        return rows
+
+    by_source = {row["source"]: dict(row) for row in rows}
+    overrides = conn.execute(
+        "SELECT source, category, label, status, updated_at FROM user_source_categories WHERE user_id = ?",
+        (user_id,),
+    ).fetchall()
+    for row in overrides:
+        source = row["source"]
+        base = by_source.get(source, {
+            "source": source,
+            "article_count": 0,
+            "latest_timestamp": None,
+            "confidence": None,
+            "reason": "",
+            "sample_titles": None,
+        })
+        base.update({
+            "category": row["category"],
+            "label": row["label"],
+            "status": row["status"],
+            "updated_at": row["updated_at"],
+            "user_override": True,
+        })
+        by_source[source] = base
+
+    aliases = conn.execute(
+        "SELECT alias_source, target_source FROM user_source_aliases WHERE user_id = ?",
+        (user_id,),
+    ).fetchall()
+    for row in aliases:
+        alias = row["alias_source"]
+        target = row["target_source"]
+        target_row = by_source.get(target)
+        alias_row = by_source.get(alias)
+        if not target_row:
+            continue
+        if alias_row:
+            target_row["article_count"] = (target_row.get("article_count") or 0) + (alias_row.get("article_count") or 0)
+            by_source[alias] = {
+                **alias_row,
+                "category": target_row.get("category", "Info"),
+                "label": target_row.get("label") or target,
+                "status": "manual",
+                "alias_target": target,
+                "user_override": True,
+            }
+        target_row["has_aliases"] = True
+
+    return sorted(by_source.values(), key=lambda row: (-(row.get("article_count") or 0), row.get("source") or ""))
 
 
 def recent_titles_for_source(conn: sqlite3.Connection, source: str, limit: int = 8) -> list[str]:
@@ -159,6 +333,7 @@ def update_source_category(
     confidence: float | None = None,
     reason: str | None = None,
     sample_titles: list[str] | None = None,
+    user_id: int | None = None,
 ) -> dict:
     if category not in CATEGORY_ORDER:
         raise ValueError("invalid category")
@@ -166,6 +341,27 @@ def update_source_category(
         raise ValueError("invalid status")
     label = clamp_weighted(label or local_short_source_name(source), 20)
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    if user_id is not None:
+        conn.execute(
+            """
+            INSERT INTO user_source_categories
+                (user_id, source, category, label, status, updated_at)
+            VALUES (?, ?, ?, ?, 'manual', ?)
+            ON CONFLICT(user_id, source) DO UPDATE SET
+                category = excluded.category,
+                label = excluded.label,
+                status = excluded.status,
+                updated_at = excluded.updated_at
+            """,
+            (user_id, source, category, label, now),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT source, category, label, status, updated_at FROM user_source_categories WHERE user_id = ? AND source = ?",
+            (user_id, source),
+        ).fetchone()
+        return dict(row)
+
     conn.execute(
         """
         INSERT INTO source_categories
