@@ -291,6 +291,27 @@ class AIService:
         ]
         return self.chat(messages, max_tokens=4000)
 
+    def translate_title(self, title: str, target_lang: str = "zh-CN") -> str:
+        """Translate a single article title."""
+        lang_name = "中文" if "zh" in target_lang else target_lang
+        messages = [
+            {
+                "role": "system",
+                "content": f"你是一个专业的新闻标题翻译助手。将标题翻译为{lang_name}，只输出译文。",
+            },
+            {
+                "role": "user",
+                "content": (
+                    "请翻译以下新闻标题。要求：\n"
+                    "1. 只输出翻译后的标题，不要解释。\n"
+                    "2. 保留专有名词、公司名、产品名的通用写法。\n"
+                    "3. 不要添加原文没有的信息。\n\n"
+                    f"标题：{title}"
+                ),
+            },
+        ]
+        return self.chat(messages, max_tokens=200, temperature=0.2).strip()
+
     # ─── Daily summary (layered) ──────────────────────────────
     #
     # Strategy:

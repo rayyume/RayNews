@@ -32,6 +32,8 @@ from source_categories import (
 
 AUTO_SUMMARY_BATCH_LIMIT = int(os.environ.get("AUTO_SUMMARY_BATCH_LIMIT", "20"))
 AUTO_SUMMARY_INTERVAL_SECONDS = int(os.environ.get("AUTO_SUMMARY_INTERVAL_SECONDS", "30"))
+AUTO_TRANSLATION_BATCH_LIMIT = int(os.environ.get("AUTO_TRANSLATION_BATCH_LIMIT", "5"))
+AUTO_TRANSLATION_INTERVAL_SECONDS = int(os.environ.get("AUTO_TRANSLATION_INTERVAL_SECONDS", "30"))
 
 # ─── App Setup ────────────────────────────────────────────────
 
@@ -881,6 +883,7 @@ def _run_daily_summary_job(job_id, user_id, config):
 
 _daily_summary_sent = set()  # {(user_id, date), ...}
 _auto_summary_lock = threading.Lock()
+_auto_translation_lock = threading.Lock()
 
 
 def _send_daily_summaries():
@@ -1012,6 +1015,203 @@ def _get_auto_summary_users() -> list[dict]:
     except Exception as e:
         print(f"[auto-summary] settings DB error: {e}")
         return []
+
+
+def _get_auto_translation_users() -> list[dict]:
+    """Users who opted in to background translation and have usable AI config."""
+    try:
+        db = get_db()
+        rows = db.execute(
+            "SELECT s.user_id, s.auto_translate_title, s.auto_translate_content, "
+            "c.endpoint, c.model, c.api_key, c.provider_type, c.enabled "
+            "FROM user_settings s "
+            "JOIN ai_configs c ON c.user_id = s.user_id "
+            "WHERE (s.auto_translate_title = 1 OR s.auto_translate_content = 1) "
+            "AND c.enabled = 1 "
+            "AND c.api_key != ''"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        print(f"[auto-translate] settings DB error: {e}")
+        return []
+
+
+def _has_latin(text: str) -> bool:
+    return bool(re.search(r"[A-Za-z]", text or ""))
+
+
+def _plain_text(html: str) -> str:
+    text = re.sub(r"<[^>]+>", " ", html or "")
+    return " ".join(text.split()).strip()
+
+
+def _needs_translation(text: str) -> bool:
+    text = _plain_text(text)
+    if not text or not _has_latin(text):
+        return False
+    latin_count = len(re.findall(r"[A-Za-z]", text))
+    cjk_count = len(re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff]", text))
+    return cjk_count == 0 or (latin_count >= 40 and latin_count > cjk_count * 2)
+
+
+def _fetch_untranslated_articles(config: dict, limit: int = AUTO_TRANSLATION_BATCH_LIMIT) -> list[dict]:
+    """Fetch recent today articles that need background title/body translation."""
+    import datetime as _dt
+    import sqlite3
+    if not os.path.exists(NEWS_DB):
+        return []
+    translate_title = bool(config.get("auto_translate_title"))
+    translate_content = bool(config.get("auto_translate_content"))
+    if not translate_title and not translate_content:
+        return []
+    try:
+        _init_ai_results_table()
+        today_str = _dt.datetime.now().strftime("%Y-%m-%d")
+        conn = sqlite3.connect(NEWS_DB)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT a.id, a.title, a.source, a.summary, a.body_html, r.translation "
+            "FROM articles a "
+            "LEFT JOIN ai_results r ON r.article_id = a.id "
+            "WHERE a.date = ? "
+            "ORDER BY a.timestamp ASC LIMIT ?",
+            (today_str, max(limit * 8, 40)),
+        ).fetchall()
+        conn.close()
+    except Exception as e:
+        print(f"[auto-translate] fetch failed: {e}")
+        return []
+
+    selected = []
+    for row in rows:
+        article = dict(row)
+        title_needed = translate_title and _needs_translation(article.get("title", ""))
+        content_needed = (
+            translate_content
+            and bool(article.get("body_html"))
+            and _needs_translation(article.get("body_html") or article.get("summary") or "")
+        )
+        if title_needed or content_needed:
+            article["translate_title_needed"] = title_needed
+            article["translate_content_needed"] = content_needed
+            selected.append(article)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _save_article_translation(article_id: int, title: str | None = None,
+                              body_html: str | None = None):
+    conn = _get_news_db()
+    if not conn:
+        return
+    sets = []
+    vals = []
+    if title:
+        sets.append("title = ?")
+        vals.append(title)
+    if body_html:
+        sets.append("body_html = ?")
+        vals.append(body_html)
+    if not sets:
+        return
+    vals.append(article_id)
+    conn.execute(f"UPDATE articles SET {', '.join(sets)} WHERE id = ?", vals)
+    conn.commit()
+
+
+def _cached_full_translation(translation: str | None) -> tuple[str, str]:
+    text = (translation or "").strip()
+    if not text:
+        return "", ""
+    if text.startswith("{"):
+        try:
+            data = json.loads(text)
+            return data.get("title", "") or "", data.get("html", "") or ""
+        except (json.JSONDecodeError, TypeError):
+            return "", ""
+    if text.startswith("<"):
+        return "", text
+    return "", ""
+
+
+def _translate_article_background(article: dict, config: dict) -> bool:
+    svc = AIService(
+        api_key=config["api_key"],
+        endpoint=config["endpoint"],
+        model=config["model"],
+        provider_type=config.get("provider_type", "openai"),
+    )
+    article_id = article["id"]
+    translated_title = None
+    translated_html = None
+    cached_title = ""
+
+    if article.get("translate_content_needed"):
+        cached_title, cached_html = _cached_full_translation(article.get("translation"))
+        if cached_html:
+            translated_html = cached_html
+            if article.get("translate_title_needed"):
+                translated_title = cached_title or None
+        else:
+            title_for_translation = article.get("title", "") if article.get("translate_title_needed") else ""
+            result = svc.translate_full(
+                article.get("body_html") or "",
+                "zh-CN",
+                title=title_for_translation,
+            )
+            translated_html = result.get("html") or ""
+            if article.get("translate_title_needed"):
+                translated_title = result.get("title") or None
+        if translated_html:
+            cache_data = json.dumps({
+                "title": translated_title if translated_title is not None else cached_title,
+                "html": translated_html,
+            }, ensure_ascii=False)
+            _save_ai_result(article_id, translation=cache_data)
+        if article.get("translate_title_needed") and not translated_title:
+            translated_title = svc.translate_title(article.get("title", ""), "zh-CN")
+
+    elif article.get("translate_title_needed"):
+        translated_title = svc.translate_title(article.get("title", ""), "zh-CN")
+
+    _save_article_translation(article_id, title=translated_title, body_html=translated_html)
+    return bool(translated_title or translated_html)
+
+
+def _run_auto_translation_once():
+    """Translate article titles/bodies in small batches for opted-in users."""
+    if not _auto_translation_lock.acquire(blocking=False):
+        return
+    try:
+        users = _get_auto_translation_users()
+        if not users:
+            return
+        for config in users:
+            articles = _fetch_untranslated_articles(config, AUTO_TRANSLATION_BATCH_LIMIT)
+            if not articles:
+                continue
+            print(f"[auto-translate] User {config['user_id']}: translating {len(articles)} article(s)")
+            for article in articles:
+                try:
+                    if _translate_article_background(article, config):
+                        print(f"[auto-translate] Translated article {article['id']}: {article.get('title', '')[:50]}")
+                except Exception as e:
+                    print(f"[auto-translate] Article {article.get('id')}: failed: {e}")
+    finally:
+        _auto_translation_lock.release()
+
+
+def _auto_translation_loop():
+    """Background loop for opt-in automatic title/content translation."""
+    import time as _time
+    _time.sleep(60)
+    while True:
+        try:
+            _run_auto_translation_once()
+        except Exception as e:
+            print(f"[auto-translate] Error in loop: {e}")
+        _time.sleep(AUTO_TRANSLATION_INTERVAL_SECONDS)
 
 
 def _run_auto_summary_once():
@@ -1432,7 +1632,11 @@ def update_settings():
     if "notification_config" in data:
         nc = data["notification_config"]
         data["notification_config"] = json.dumps(nc) if isinstance(nc, dict) else nc
-    if _is_enabled_value(data.get("auto_summary_enabled")):
+    needs_ai_config = any(
+        _is_enabled_value(data.get(key))
+        for key in ("auto_summary_enabled", "auto_translate_title", "auto_translate_content")
+    )
+    if needs_ai_config:
         config = get_ai_config(g.user_id)
         if not config or not config.get("enabled") or not config.get("api_key"):
             return jsonify({
@@ -1452,6 +1656,8 @@ def update_settings():
     safe["notification_config"] = nc
     if _is_enabled_value(data.get("auto_summary_enabled")):
         threading.Thread(target=_run_auto_summary_once, daemon=True).start()
+    if _is_enabled_value(data.get("auto_translate_title")) or _is_enabled_value(data.get("auto_translate_content")):
+        threading.Thread(target=_run_auto_translation_once, daemon=True).start()
     return jsonify(safe)
 
 
@@ -1538,8 +1744,10 @@ if __name__ == "__main__":
     import threading as _th
     _th.Thread(target=_daily_summary_loop, daemon=True).start()
     _th.Thread(target=_auto_summary_loop, daemon=True).start()
+    _th.Thread(target=_auto_translation_loop, daemon=True).start()
     print("[scheduler] Daily summary background thread started")
     print("[auto-summary] Background summary thread started")
+    print("[auto-translate] Background translation thread started")
     port = int(os.environ.get("WEB_PORT", 8082))
     print(f"[web] RayNews Web Server listening on {port}")
     app.run(host="127.0.0.1", port=port, debug=False)

@@ -121,7 +121,6 @@ def ensure_article_sources(conn: sqlite3.Connection) -> int:
 
 
 def source_rows(conn: sqlite3.Connection) -> list[dict]:
-    init_source_categories(conn)
     ensure_article_sources(conn)
     rows = conn.execute(
         """

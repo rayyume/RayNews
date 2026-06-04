@@ -539,7 +539,10 @@ body.body-scroll-lock{overflow:hidden!important}
             <div style="font-weight:700;font-size:14px">订阅源分类</div>
             <p class="ai-hint" style="margin-top:4px">AI 会缩写来源名称并固定归入四个分类，手动保存后不会被 AI 覆盖。</p>
           </div>
-          <button class="ai-save-btn" onclick="classifySources()" style="margin:0;width:auto;padding:8px 12px">AI处理待分类</button>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="ai-save-btn" onclick="classifySources(false)" style="margin:0;width:auto;padding:8px 12px">AI处理待分类</button>
+            <button class="ai-save-btn" onclick="classifySources(true)" style="margin:0;width:auto;padding:8px 12px;background:var(--bg-card);color:var(--text);border:1px solid var(--border)">重新分类</button>
+          </div>
         </div>
         <div id="sourceManagerStatus" class="ai-hint" style="margin-bottom:8px"></div>
         <div class="source-manager" id="sourceManagerList">
@@ -578,7 +581,7 @@ body.body-scroll-lock{overflow:hidden!important}
           <input type="checkbox" id="autoTranslateContent" onclick="event.stopPropagation()">
           <span>📄 自动翻译内容</span>
         </div>
-        <p class="ai-hint" style="margin-top:8px">开启后，打开文章时自动调用 AI 翻译</p>
+        <p class="ai-hint" style="margin-top:8px">开启后，系统会在后台小批量翻译英文标题或正文，并替换原有英文内容。</p>
 
         <button class="ai-save-btn" onclick="saveGeneralSettings()" style="margin-top:16px">保存翻译设置</button>
       </div>
@@ -1230,14 +1233,14 @@ async function saveSourceRow(idx) {
   }
 }
 
-async function classifySources() {
+async function classifySources(force) {
   const status = document.getElementById('sourceManagerStatus');
-  if (status) status.textContent = 'AI 正在处理待分类来源...';
+  if (status) status.textContent = force ? 'AI 正在重新分类非手动来源...' : 'AI 正在处理待分类来源...';
   try {
     const resp = await fetch('/sources/classify', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
-      body: JSON.stringify({ limit: 20 }),
+      body: JSON.stringify({ limit: 20, force: !!force }),
     });
     const data = await parseJsonResponse(resp);
     const okCount = (data.processed || []).length;
