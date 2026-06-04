@@ -289,12 +289,6 @@ def detect_source(content: str) -> str:
         if name:
             return f"@{name}"
 
-    for match in re.finditer(r'<a[^>]*href=[\'"](https?://[^\'"]+)[\'"][^>]*>([^<]+)</a>', content):
-        url, text = match.group(1), clean_html(match.group(2))
-        text = _clean_source_name(text)
-        if text and len(text) < 50:
-            return text
-
     return "Telegram"
 
 

@@ -1773,13 +1773,11 @@ def _fetch_telegram_message_content(article_id: int) -> str:
     return text_el.decode_contents() if text_el else ""
 
 
-@app.route("/sources/redetect", methods=["POST"])
-@require_role("admin")
-def redetect_article_sources():
-    conn = _get_news_db()
-    if not conn:
-        return jsonify({"error": "news db not found"}), 404
-    data = request.get_json(silent=True) or {}
+_source_redetect_jobs = {}
+_source_redetect_jobs_lock = threading.Lock()
+
+
+def _parse_source_redetect_options(data: dict) -> tuple[int, int, bool]:
     try:
         limit = min(max(int(data.get("limit", 2000) or 2000), 1), 10000)
     except (TypeError, ValueError):
@@ -1789,9 +1787,35 @@ def redetect_article_sources():
     except (TypeError, ValueError):
         network_limit = min(1000, limit)
     force_telegram = bool(data.get("force_telegram"))
+    return limit, network_limit, force_telegram
 
-    from fetcher import detect_source_from_attribution
 
+def _cleanup_source_redetect_jobs():
+    cutoff = time.time() - 7200
+    with _source_redetect_jobs_lock:
+        old_ids = [
+            job_id for job_id, job in _source_redetect_jobs.items()
+            if job.get("updated_at", job.get("created_at", 0)) < cutoff
+        ]
+        for job_id in old_ids:
+            _source_redetect_jobs.pop(job_id, None)
+
+
+def _update_source_redetect_job(job_id: str, **updates):
+    updates["updated_at"] = time.time()
+    with _source_redetect_jobs_lock:
+        if job_id in _source_redetect_jobs:
+            _source_redetect_jobs[job_id].update(updates)
+
+
+def _redetect_article_sources_work(limit: int, network_limit: int, force_telegram: bool,
+                                   job_id: str | None = None) -> dict:
+    if not os.path.exists(NEWS_DB):
+        raise FileNotFoundError("news db not found")
+    from fetcher import detect_source, detect_source_from_attribution
+
+    conn = sqlite3.connect(NEWS_DB, timeout=30)
+    conn.row_factory = sqlite3.Row
     rows = conn.execute(
         """
         SELECT id, title, source, body_html, summary, telegraph_url
@@ -1805,12 +1829,26 @@ def redetect_article_sources():
     skipped = 0
     telegram_checked = 0
     telegram_hits = 0
+    checked = 0
+    def update_progress():
+        if job_id and (checked % 20 == 0 or checked == len(rows)):
+            _update_source_redetect_job(
+                job_id,
+                checked=checked,
+                updated=len(changed),
+                skipped=skipped,
+                telegram_checked=telegram_checked,
+                telegram_hits=telegram_hits,
+            )
+
     for row in rows:
+        checked += 1
         detected = None
         fetched_telegram = False
+        is_telegraph = bool(row["telegraph_url"])
         should_fetch_telegram = (
             telegram_checked < network_limit
-            and (force_telegram or bool(row["telegraph_url"]))
+            and (force_telegram or is_telegraph)
         )
         if should_fetch_telegram:
             fetched_telegram = True
@@ -1818,6 +1856,8 @@ def redetect_article_sources():
             telegram_content = _fetch_telegram_message_content(row["id"])
             if telegram_content:
                 detected = detect_source_from_attribution(telegram_content)
+                if not detected:
+                    detected = detect_source(telegram_content)
                 if detected:
                     telegram_hits += 1
 
@@ -1827,19 +1867,26 @@ def redetect_article_sources():
             row["title"] or "",
         ])
         detected = detected or detect_source_from_attribution(content)
+        # Telegraph body is mirrored article content; arbitrary links in it are not source attribution.
+        if not detected and not is_telegraph:
+            detected = detect_source(content)
         if not detected and not fetched_telegram and telegram_checked < network_limit:
             telegram_checked += 1
             telegram_content = _fetch_telegram_message_content(row["id"])
             if telegram_content:
                 detected = detect_source_from_attribution(telegram_content)
+                if not detected:
+                    detected = detect_source(telegram_content)
                 if detected:
                     telegram_hits += 1
         if not detected:
             skipped += 1
+            update_progress()
             continue
         current = (row["source"] or "").strip()
         if detected == current:
             skipped += 1
+            update_progress()
             continue
         conn.execute("UPDATE articles SET source = ? WHERE id = ?", (detected, row["id"]))
         changed.append({
@@ -1848,10 +1895,12 @@ def redetect_article_sources():
             "from": current,
             "to": detected,
         })
+        update_progress()
     ensure_article_sources(conn)
     deleted_sources = cleanup_stale_source_categories(conn)
     conn.commit()
-    return jsonify({
+    conn.close()
+    return {
         "checked": len(rows),
         "updated": len(changed),
         "skipped": skipped,
@@ -1859,7 +1908,64 @@ def redetect_article_sources():
         "telegram_hits": telegram_hits,
         "deleted_sources": deleted_sources,
         "changes": changed[:100],
-    })
+    }
+
+
+def _run_source_redetect_job(job_id: str, limit: int, network_limit: int, force_telegram: bool):
+    _update_source_redetect_job(job_id, status="running")
+    try:
+        result = _redetect_article_sources_work(limit, network_limit, force_telegram, job_id)
+        _update_source_redetect_job(job_id, status="completed", **result)
+    except Exception as exc:
+        _update_source_redetect_job(job_id, status="failed", error=str(exc))
+
+
+@app.route("/sources/redetect", methods=["POST"])
+@require_role("admin")
+def redetect_article_sources():
+    if not os.path.exists(NEWS_DB):
+        return jsonify({"error": "news db not found"}), 404
+    data = request.get_json(silent=True) or {}
+    limit, network_limit, force_telegram = _parse_source_redetect_options(data)
+    _cleanup_source_redetect_jobs()
+    with _source_redetect_jobs_lock:
+        for job in _source_redetect_jobs.values():
+            if job.get("user_id") == g.user_id and job.get("status") in ("queued", "running"):
+                return jsonify({"job_id": job["job_id"], "status": job["status"]}), 202
+        job_id = uuid.uuid4().hex
+        _source_redetect_jobs[job_id] = {
+            "job_id": job_id,
+            "user_id": g.user_id,
+            "status": "queued",
+            "created_at": time.time(),
+            "updated_at": time.time(),
+            "limit": limit,
+            "network_limit": network_limit,
+            "checked": 0,
+            "updated": 0,
+            "skipped": 0,
+            "telegram_checked": 0,
+            "telegram_hits": 0,
+            "deleted_sources": 0,
+            "error": "",
+        }
+    threading.Thread(
+        target=_run_source_redetect_job,
+        args=(job_id, limit, network_limit, force_telegram),
+        daemon=True,
+    ).start()
+    return jsonify({"job_id": job_id, "status": "queued"}), 202
+
+
+@app.route("/sources/redetect/<job_id>", methods=["GET"])
+@require_role("admin")
+def source_redetect_status(job_id):
+    with _source_redetect_jobs_lock:
+        job = _source_redetect_jobs.get(job_id)
+        if not job or job.get("user_id") != g.user_id:
+            return jsonify({"error": "job not found"}), 404
+        safe = {k: v for k, v in job.items() if k != "user_id"}
+    return jsonify(safe)
 
 
 # ─── Settings Routes ────────────────────────────────────────

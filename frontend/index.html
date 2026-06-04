@@ -895,7 +895,7 @@ async function parseJsonResponse(resp) {
   } catch (e) {
     const trimmed = text.trim();
     if (trimmed.startsWith('<')) {
-      throw new Error('接口返回了 HTML 页面，请检查服务是否超时或 /ai/ 代理是否生效');
+      throw new Error('接口返回了 HTML 页面，请检查服务是否超时或反向代理是否生效');
     }
     throw new Error('接口返回格式错误');
   }
@@ -1383,9 +1383,46 @@ async function classifySources(force) {
   }
 }
 
+let sourceRedetectTimer = null;
+
+async function pollSourceRedetectJob(jobId) {
+  const status = document.getElementById('sourceManagerStatus');
+  try {
+    const resp = await fetch('/sources/redetect/' + encodeURIComponent(jobId), {
+      headers: { 'Authorization': 'Bearer ' + authToken },
+    });
+    const data = await parseJsonResponse(resp);
+    if (data.error) throw new Error(data.error);
+    if (data.status === 'queued' || data.status === 'running') {
+      if (status) {
+        status.textContent = `正在后台重新识别：已检查 ${data.checked || 0} 篇，回查 ${data.telegram_checked || 0} 条 Telegram 原始消息，已修正 ${data.updated || 0} 篇...`;
+      }
+      sourceRedetectTimer = setTimeout(() => pollSourceRedetectJob(jobId), 2000);
+      return;
+    }
+    if (data.status === 'failed') {
+      throw new Error(data.error || '后台识别失败');
+    }
+    if (sourceRedetectTimer) clearTimeout(sourceRedetectTimer);
+    sourceRedetectTimer = null;
+    if (status) status.textContent = '';
+    showSettingsStatus(`来源识别完成：已检查 ${data.checked || 0} 篇文章，回查 ${data.telegram_checked || 0} 条 Telegram 原始消息，修正 ${data.updated || 0} 篇，清理 ${data.deleted_sources || 0} 个旧来源。请继续处理待分类来源。`, 'ok');
+    await loadSourceCategories();
+    await loadSourcesTab();
+    renderFilters();
+    renderList();
+  } catch (e) {
+    if (sourceRedetectTimer) clearTimeout(sourceRedetectTimer);
+    sourceRedetectTimer = null;
+    showSettingsStatus('重新识别失败: ' + e.message, 'error');
+    if (status) status.textContent = '';
+  }
+}
+
 async function redetectArticleSources() {
   const status = document.getElementById('sourceManagerStatus');
-  if (status) status.textContent = '正在从文章底部 via 重新识别文章来源...';
+  if (sourceRedetectTimer) clearTimeout(sourceRedetectTimer);
+  if (status) status.textContent = '正在提交后台来源识别任务...';
   try {
     const resp = await fetch('/sources/redetect', {
       method: 'POST',
@@ -1394,17 +1431,18 @@ async function redetectArticleSources() {
     });
     const data = await parseJsonResponse(resp);
     if (data.error) throw new Error(data.error);
-    showSettingsStatus(
-      `来源识别完成：已检查 ${data.checked || 0} 篇文章，回查 ${data.telegram_checked || 0} 条 Telegram 原始消息，修正 ${data.updated || 0} 篇，清理 ${data.deleted_sources || 0} 个旧来源。请继续处理待分类来源。`,
-      'ok'
-    );
+    if (data.job_id) {
+      showSettingsStatus('来源识别已在后台运行，可以稍后查看结果。', 'ok');
+      pollSourceRedetectJob(data.job_id);
+      return;
+    }
+    showSettingsStatus(`来源识别完成：已检查 ${data.checked || 0} 篇文章，回查 ${data.telegram_checked || 0} 条 Telegram 原始消息，修正 ${data.updated || 0} 篇，清理 ${data.deleted_sources || 0} 个旧来源。请继续处理待分类来源。`, 'ok');
     await loadSourceCategories();
     await loadSourcesTab();
     renderFilters();
     renderList();
   } catch (e) {
     showSettingsStatus('重新识别失败: ' + e.message, 'error');
-  } finally {
     if (status) status.textContent = '';
   }
 }
