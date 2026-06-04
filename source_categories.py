@@ -447,6 +447,31 @@ def merge_source(conn: sqlite3.Connection, source: str, target_source: str,
 
 def source_rows(conn: sqlite3.Connection) -> list[dict]:
     ensure_article_sources(conn)
+    # Include article sources not yet in source_categories (e.g. misdetected titles)
+    # so they don't silently disappear from the settings page.
+    unlinked = conn.execute(
+        """
+        SELECT a2.source, COUNT(*) AS article_count, MAX(a2.timestamp) AS latest_timestamp
+        FROM articles a2
+        WHERE a2.source IS NOT NULL
+          AND TRIM(a2.source) != ''
+          AND a2.source NOT IN (SELECT source FROM source_categories)
+        GROUP BY a2.source
+        """
+    ).fetchall()
+    unlinked_rows = [dict(
+        source=row["source"],
+        category="Info",
+        label=local_short_source_name(row["source"]),
+        status="pending",
+        confidence=None,
+        reason="unlinked",
+        sample_titles=None,
+        updated_at=None,
+        article_count=row["article_count"],
+        latest_timestamp=row["latest_timestamp"],
+    ) for row in unlinked]
+
     rows = conn.execute(
         """
         SELECT sc.source, sc.category, sc.label, sc.status, sc.confidence,
@@ -459,7 +484,9 @@ def source_rows(conn: sqlite3.Connection) -> list[dict]:
         ORDER BY article_count DESC, sc.source COLLATE NOCASE
         """
     ).fetchall()
-    return [dict(row) for row in rows]
+    result = [dict(row) for row in rows] + unlinked_rows
+    result.sort(key=lambda r: (-(r.get("article_count") or 0), (r.get("source") or "").lower()))
+    return result
 
 
 def effective_source_rows(conn: sqlite3.Connection, user_id: int | None = None) -> list[dict]:

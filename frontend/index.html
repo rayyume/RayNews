@@ -580,6 +580,7 @@ body.body-scroll-lock{overflow:hidden!important}
           </div>
         </div>
         <div id="sourceManagerStatus" class="ai-hint" style="margin-bottom:8px"></div>
+        <input class="ai-input" id="sourceSearchInput" type="text" placeholder="🔍 搜索订阅源..." oninput="renderSourceManager(sourceRows)" style="margin-bottom:8px">
         <div class="source-manager" id="sourceManagerList">
           <div class="fav-empty">加载中...</div>
         </div>
@@ -1359,13 +1360,35 @@ function renderSourceManager(rows) {
   const list = document.getElementById('sourceManagerList');
   const status = document.getElementById('sourceManagerStatus');
   if (!list) return;
+
+  // Search filter
+  const searchInput = document.getElementById('sourceSearchInput');
+  const query = searchInput ? (searchInput.value || '').trim().toLowerCase() : '';
+  let filtered = rows;
+  if (query) {
+    filtered = rows.filter(row => {
+      const haystack = [
+        (row.source || '').toLowerCase(),
+        (row.label || '').toLowerCase(),
+        ...(row.raw_rows || []).map(r => (r.source || '').toLowerCase()),
+        ...(row.sources || []).map(s => s.toLowerCase()),
+      ].join(' ');
+      return haystack.includes(query);
+    });
+  }
+
   const pending = rows.filter(r => r.status === 'pending' || r.status === 'failed').length;
-  if (status) status.textContent = pending ? `${pending} 个来源待 AI 处理` : '所有来源已处理';
-  if (!rows.length) {
-    list.innerHTML = '<div class="fav-empty">暂无订阅源</div>';
+  const shown = filtered.length;
+  if (status) status.textContent = query
+    ? `匹配 ${shown}/${rows.length} 个来源 · ${pending} 个待 AI 处理`
+    : (pending ? `${pending} 个来源待 AI 处理` : '所有来源已处理');
+  if (!filtered.length) {
+    list.innerHTML = '<div class="fav-empty">' + (query ? '无匹配来源' : '暂无订阅源') + '</div>';
     return;
   }
-  list.innerHTML = rows.map((row, idx) => {
+  list.innerHTML = filtered.map((row, idx) => {
+    // Find the original index in rows for save/detect actions
+    const origIdx = rows.indexOf(row);
     const options = CATEGORY_ORDER.map(cat =>
       `<option value="${cat}" ${row.category === cat ? 'selected' : ''}>${categoryDisplayName(cat)}</option>`
     ).join('');
@@ -1375,19 +1398,22 @@ function renderSourceManager(rows) {
     const sourceMeta = row.grouped
       ? ` · 包含 ${row.source_count || row.sources.length} 个来源变体`
       : (row.label && row.label !== row.source ? ` · 原始：${row.source}` : '');
+    const unlinkedWarn = row.reason === 'unlinked' ? ' ⚠️未关联' : '';
     const meta = row.alias_target
-      ? `${row.article_count || 0} 篇 · 已合并到 ${row.alias_target}${sourceMeta}`
-      : `${row.article_count || 0} 篇 · ${row.status || 'pending'}${sourceMeta}`;
+      ? `${row.article_count || 0} 篇 · 已合并到 ${row.alias_target}${sourceMeta}${unlinkedWarn}`
+      : `${row.article_count || 0} 篇 · ${row.status || 'pending'}${sourceMeta}${unlinkedWarn}`;
+    // Show all source names in tooltip for grouped rows
+    const allSources = (row.sources || [row.source]).map(s => esc(s)).join('\n');
     return `
-      <div class="source-row" data-source-idx="${idx}">
+      <div class="source-row" data-source-idx="${origIdx}">
         <div>
-          <div class="source-name"><button class="source-name-btn" onclick="openSourceArticles(${idx})" title="${source}">${displayName}</button></div>
+          <div class="source-name"><button class="source-name-btn" onclick="openSourceArticles(${origIdx})" title="${esc(allSources)}">${displayName}</button></div>
           <div class="source-meta">${esc(meta)}</div>
         </div>
         <input class="source-label-input" value="${label}" maxlength="20" aria-label="来源缩写">
         <select class="source-cat-select" aria-label="来源分类">${options}</select>
-        <button class="source-save-btn" onclick="saveSourceRow(${idx})">保存</button>
-        <button class="source-redetect-btn" onclick="redetectSourceArticles(${idx})" title="重新识别该来源下所有文章的来源标签">🔄</button>
+        <button class="source-save-btn" onclick="saveSourceRow(${origIdx})">保存</button>
+        <button class="source-redetect-btn" onclick="redetectSourceArticles(${origIdx})" title="重新识别该来源下所有文章的来源标签">🔄</button>
       </div>`;
   }).join('');
 }
