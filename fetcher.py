@@ -307,7 +307,7 @@ def detect_source(content: str, extra_html: str = "") -> str:
       2. domain from link_preview_url (always trustworthy — IS the article URL)
       3. domain from bottom ~15% of body links (source attributions are at the end)
       4. t.me/channel reference in content
-      5. fallback: "Telegram"
+      5. fallback: "未分类"
     """
     # 1) via attribution — already bottom-biased internally
     via_source = detect_source_from_attribution(content)
@@ -340,7 +340,7 @@ def detect_source(content: str, extra_html: str = "") -> str:
             return f"@{name}"
 
     # 5) fallback
-    return "Telegram"
+    return "未分类"
 
 
 def detect_source_from_attribution(content: str) -> str | None:
@@ -365,8 +365,9 @@ def _extract_bottom_via_sources(content: str) -> list[str]:
             href = link.get("href", "")
             if not text:
                 continue
-            # Source attributions are usually Telegram/RSS/channel links; skip article links.
-            if href and any(host in href for host in ("telegra.ph", "mp.weixin.qq.com")):
+            # Skip Telegraph article links (link text is the article title, not source).
+            # WeChat links (mp.weixin.qq.com) are KEPT — the link text IS the source name (公众号名称).
+            if href and "telegra.ph" in href:
                 continue
             links.append(text)
         raw = links[-1] if links else _text_after_last_via(line)
@@ -680,9 +681,9 @@ def process_message(msg: dict, orig_msg_id: int) -> dict:
             entry["thumb"] = result["images"][0] if result["images"] and not thumb else thumb
             # Telegraph articles have no "via" line; use the source detected from
             # Telegraph metadata (<address>, attribution links) when the initial
-            # detection is weak (plain "Telegram" or just an @channel name).
+            # detection is weak (plain "未分类" or just an @channel name).
             ts = result.get("detected_source", "")
-            if ts and (source == "Telegram" or source.startswith("@")):
+            if ts and (source == "未分类" or source.startswith("@")):
                 source = ts
                 entry["source"] = source
                 log.info(f"  ✓ {title[:40]}... ({result['char_count']} chars, from Telegraph, source → {source})")
