@@ -2897,8 +2897,10 @@ function renderFilters() {
       .sort((a, b) => a.label.localeCompare(b.label, 'zh-CN'));
     const collapsedKey = 'raynews_cat_' + cat;
     const isCollapsed = localStorage.getItem(collapsedKey) !== '0';
-    html += `<div class="cat-header" data-cat="${cat}">${categoryDisplayName(cat)}<span class="arrow ${isCollapsed ? '' : 'open'}">▶</span></div>`;
-    html += `<div class="cat-body ${isCollapsed ? 'collapsed' : ''}" data-cat="${cat}">`;
+    const headerActive = filter === 'cat:' + cat ? ' active' : '';
+    const expandBody = filter === 'cat:' + cat || localStorage.getItem(collapsedKey) !== '1';
+    html += `<div class="cat-header${headerActive}" data-cat="${cat}">${categoryDisplayName(cat)}<span class="arrow ${expandBody ? 'open' : ''}">▶</span></div>`;
+    html += `<div class="cat-body ${expandBody ? '' : 'collapsed'}" data-cat="${cat}">`;
     html += catGroups.map(group => {
       const title = group.sources.length > 1
         ? `${group.label} · 包含 ${group.sources.length} 个来源变体`
@@ -2918,18 +2920,17 @@ function renderFilters() {
       selectFilter('all');
       return;
     }
-    // Category header click → toggle collapse
+    // Category header click → filter by this category, toggle if already active
     const header = e.target.closest('.cat-header');
     if (header) {
       const cat = header.dataset.cat;
       if (!cat) return;
-      const collapsedKey = 'raynews_cat_' + cat;
-      const body = el.querySelector(`.cat-body[data-cat="${cat}"]`);
-      const arrow = header.querySelector('.arrow');
-      const isCollapsed = body ? !body.classList.contains('collapsed') : false;
-      if (body) body.classList.toggle('collapsed', isCollapsed);
-      if (arrow) arrow.classList.toggle('open', !isCollapsed);
-      localStorage.setItem(collapsedKey, isCollapsed ? '1' : '0');
+      if (filter === 'cat:' + cat) {
+        // Already filtering by this category → clear filter (show all)
+        selectFilter('all');
+      } else {
+        selectFilter('cat:' + cat);
+      }
       return;
     }
     // Source button click
@@ -2948,10 +2949,36 @@ function selectFilter(value) {
   currentPage = 1;
   renderList();
 
+  // Determine which category to expand (if any)
+  let activeCat = '';
+  if (value.startsWith('cat:')) {
+    activeCat = value.replace('cat:', '');
+  } else if (sourceFilterGroups[value]) {
+    activeCat = sourceFilterGroups[value].baseCategory || '';
+  }
+
+  // Sync collapse state: expand active category, respect saved prefs for others
+  for (const cat of CATEGORY_ORDER) {
+    const shouldExpand = cat === activeCat
+      ? true
+      : localStorage.getItem('raynews_cat_' + cat) !== '1';
+    const body = el.querySelector(`.cat-body[data-cat="${cat}"]`);
+    const header = el.querySelector(`.cat-header[data-cat="${cat}"]`);
+    if (body) body.classList.toggle('collapsed', !shouldExpand);
+    if (header) {
+      const arrow = header.querySelector('.arrow');
+      if (arrow) arrow.classList.toggle('open', shouldExpand);
+    }
+  }
+
   // Highlight active item
   if (value === 'all') {
     const allDiv = el.querySelector('[data-is-all]');
     if (allDiv) allDiv.classList.add('active');
+  } else if (value.startsWith('cat:')) {
+    const cat = value.replace('cat:', '');
+    const header = el.querySelector(`.cat-header[data-cat="${cat}"]`);
+    if (header) header.classList.add('active');
   } else {
     const btn = [...el.querySelectorAll('.fbtn')].find(b => b.dataset.f === value);
     if (btn) btn.classList.add('active');
@@ -2961,6 +2988,10 @@ function selectFilter(value) {
 function filteredNews() {
   if (filter === 'all') {
     return news;
+  }
+  if (filter.startsWith('cat:')) {
+    const cat = filter.replace('cat:', '');
+    return news.filter(n => sourceCategory(canonicalSource(n.source)) === cat);
   }
   const group = sourceFilterGroups[filter];
   if (group) {
