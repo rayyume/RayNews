@@ -1521,6 +1521,7 @@ def _run_auto_summary_once():
                     if not cached:
                         print(f"[auto-summary] Cached summary for article {article['id']}: {article.get('title', '')[:50]}")
                 except Exception as e:
+                    _save_ai_result(article["id"], summary_error=str(e))
                     print(f"[auto-summary] Article {article.get('id')}: failed: {e}")
     finally:
         _auto_summary_lock.release()
@@ -1653,6 +1654,7 @@ def _fetch_unsummarized_articles(limit: int = AUTO_SUMMARY_BATCH_LIMIT) -> list[
             "LEFT JOIN ai_results r ON r.article_id = a.id "
             "WHERE a.date = ? "
             "AND (r.summary IS NULL OR r.summary = '') "
+            "AND (r.summary_error_at IS NULL OR datetime(r.summary_error_at, '+6 hours') < datetime('now')) "
             "AND (a.body_html != '' OR a.summary != '') "
             "ORDER BY a.timestamp ASC LIMIT ?",
             (today_str, limit),
@@ -1698,9 +1700,19 @@ def _init_ai_results_table():
                 article_id   INTEGER PRIMARY KEY,
                 summary      TEXT,
                 translation  TEXT,
+                summary_error TEXT,
+                summary_error_at TEXT,
                 updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
             )
         """)
+        cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(ai_results)").fetchall()
+        }
+        if "summary_error" not in cols:
+            conn.execute("ALTER TABLE ai_results ADD COLUMN summary_error TEXT")
+        if "summary_error_at" not in cols:
+            conn.execute("ALTER TABLE ai_results ADD COLUMN summary_error_at TEXT")
         conn.commit()
         conn.close()
     except Exception:
@@ -1715,8 +1727,10 @@ def _get_ai_result(article_id: int) -> dict | None:
     try:
         conn = sqlite3.connect(NEWS_DB)
         conn.row_factory = sqlite3.Row
+        _init_ai_results_table()
         row = conn.execute(
-            "SELECT summary, translation FROM ai_results WHERE article_id = ?",
+            "SELECT summary, translation, summary_error, summary_error_at "
+            "FROM ai_results WHERE article_id = ?",
             (article_id,),
         ).fetchone()
         conn.close()
@@ -1726,7 +1740,8 @@ def _get_ai_result(article_id: int) -> dict | None:
 
 
 def _save_ai_result(article_id: int, summary: str | None = None,
-                    translation: str | None = None):
+                    translation: str | None = None,
+                    summary_error: str | None = None):
     """Save or update AI result for an article."""
     import sqlite3
     if not os.path.exists(NEWS_DB):
@@ -1740,9 +1755,15 @@ def _save_ai_result(article_id: int, summary: str | None = None,
             if summary is not None:
                 sets.append("summary = ?")
                 vals.append(summary)
+                sets.append("summary_error = NULL")
+                sets.append("summary_error_at = NULL")
             if translation is not None:
                 sets.append("translation = ?")
                 vals.append(translation)
+            if summary_error is not None:
+                sets.append("summary_error = ?")
+                vals.append(summary_error[:500])
+                sets.append("summary_error_at = datetime('now')")
             if sets:
                 sets.append("updated_at = datetime('now')")
                 vals.append(article_id)
@@ -1752,8 +1773,10 @@ def _save_ai_result(article_id: int, summary: str | None = None,
                 )
         else:
             conn.execute(
-                "INSERT INTO ai_results (article_id, summary, translation) VALUES (?, ?, ?)",
-                (article_id, summary, translation),
+                "INSERT INTO ai_results "
+                "(article_id, summary, translation, summary_error, summary_error_at) "
+                "VALUES (?, ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END)",
+                (article_id, summary, translation, summary_error[:500] if summary_error else None, summary_error),
             )
         conn.commit()
         conn.close()

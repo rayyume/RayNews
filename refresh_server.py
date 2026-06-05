@@ -24,6 +24,8 @@ REFRESH_INTERVAL = 900  # 15 minutes
 LOCK_FILE = "/tmp/raynews-fetcher.lock"
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
 DB_FILE = DATA_DIR / "news.db"
+NEWS_JSON_FILE = DATA_DIR / "news.json"
+STATE_FILE = DATA_DIR / "fetcher_state.json"
 LAST_FETCH_STATUS = {
     "status": "never",
     "returncode": None,
@@ -105,9 +107,12 @@ def run_fetcher():
         if is_ok:
             clear_article_cache()
             try:
-                conn = get_db()
+                conn = sqlite3.connect(str(DB_FILE))
+                conn.row_factory = sqlite3.Row
+                ensure_article_source_columns(conn)
                 deleted = cleanup_stale_source_categories(conn)
                 conn.commit()
+                conn.close()
                 if deleted:
                     log.info(f"Cleaned up {deleted} stale source(s)")
             except Exception as e:
@@ -152,12 +157,29 @@ def _diagnostics(count: int | None = None) -> dict:
         db_size = DB_FILE.stat().st_size if exists else 0
     except OSError:
         db_size = 0
+    news_json = {"exists": NEWS_JSON_FILE.exists(), "size": 0, "count": None}
+    if NEWS_JSON_FILE.exists():
+        try:
+            news_json["size"] = NEWS_JSON_FILE.stat().st_size
+            data = json.loads(NEWS_JSON_FILE.read_text(encoding="utf-8"))
+            news_json["count"] = data.get("count", len(data.get("items", [])))
+        except Exception as e:
+            news_json["error"] = str(e)
+    state = {"exists": STATE_FILE.exists(), "last_seen_id": None}
+    if STATE_FILE.exists():
+        try:
+            data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+            state["last_seen_id"] = data.get("last_seen_id")
+        except Exception as e:
+            state["error"] = str(e)
     return {
         "data_dir": str(DATA_DIR),
         "db_path": str(DB_FILE),
         "db_exists": exists,
         "db_size": db_size,
         "article_count": count,
+        "news_json": news_json,
+        "fetcher_state": state,
         "telegram_channel_configured": bool(channel and channel != "your_channel"),
         "telegram_channel": channel if channel and channel != "your_channel" else "",
         "telegram_channel_default": not bool(channel and channel != "your_channel"),

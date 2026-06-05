@@ -921,6 +921,20 @@ def run():
     log.info("Starting fetch cycle")
 
     state = load_state()
+    try:
+        conn = init_db()
+        migrate_news_json(conn)
+        article_count = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
+        conn.close()
+        if article_count == 0 and state.get("last_seen_id", 0) > 0:
+            log.warning(
+                "SQLite articles table is empty but fetcher_state has "
+                f"last_seen_id={state.get('last_seen_id')}; forcing bootstrap fetch"
+            )
+            state["last_seen_id"] = 0
+    except Exception as e:
+        log.error(f"SQLite bootstrap check failed: {e}")
+
     messages = fetch_all_new_messages(state)
 
     if not messages:
