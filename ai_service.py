@@ -447,13 +447,13 @@ class AIService:
                 category_items = [e for e in items if e["category"] == category][:10]
                 if not category_items:
                     category_items = [e for e in items if e["category"] != category][:3]
-                for e in category_items:
+                for idx, e in enumerate(category_items, 1):
                     title = compact_text(e.get("title", ""), 42)
                     text = compact_text(e.get("text", ""), 90)
                     if text and text[-1] not in "。！？.!?":
                         text = text.rstrip(" ，,、；;：:") + "。"
                     link = e.get("url", "")
-                    lines.append(f"- **{title}：** {text} [🔗]({link})")
+                    lines.append(f"{idx}. **{title}：** {text} [🔗]({link})")
             return "\n".join(lines)
 
         def summary_looks_truncated(text: str) -> bool:
@@ -482,6 +482,14 @@ class AIService:
                     continue
                 cleaned.append(line)
             return "\n".join(cleaned).strip()
+
+        def is_content_risk_error(exc: Exception) -> bool:
+            msg = str(exc).lower()
+            return (
+                "content exists risk" in msg
+                or "content risk" in msg
+                or ("risk" in msg and "400" in msg)
+            )
 
         final_format_rules = (
             "请严格按以下四个大分类输出，标题必须完全一致：\n"
@@ -604,24 +612,38 @@ class AIService:
             {"role": "user", "content": user_msg},
         ]
 
-        final_summary = self.chat(
-            final_prompt,
-            max_tokens=self._provider_output_cap(7000, "daily_final"),
-        )
-        if summary_looks_truncated(final_summary):
-            continuation_prompt = final_prompt + [
-                {"role": "assistant", "content": final_summary},
-                {"role": "user", "content": "你的输出被截断了。请只从最后一条未完成的位置继续输出，保持相同 Markdown 格式，不要重复已经完成的条目。"},
-            ]
-            final_summary = final_summary.rstrip() + "\n" + self.chat(
-                continuation_prompt,
-                max_tokens=self._provider_output_cap(2500, "daily_continue"),
+        fallback_reason = ""
+        try:
+            final_summary = self.chat(
+                final_prompt,
+                max_tokens=self._provider_output_cap(7000, "daily_final"),
             )
+            if summary_looks_truncated(final_summary):
+                continuation_prompt = final_prompt + [
+                    {"role": "assistant", "content": final_summary},
+                    {"role": "user", "content": "你的输出被截断了。请只从最后一条未完成的位置继续输出，保持相同 Markdown 格式，不要重复已经完成的条目。"},
+                ]
+                try:
+                    final_summary = final_summary.rstrip() + "\n" + self.chat(
+                        continuation_prompt,
+                        max_tokens=self._provider_output_cap(2500, "daily_continue"),
+                    )
+                except Exception as e:
+                    if not is_content_risk_error(e):
+                        raise
+                    fallback_reason = str(e)
+        except Exception as e:
+            if not is_content_risk_error(e):
+                raise
+            fallback_reason = str(e)
+            final_summary = fallback_daily_summary(capped)
         final_summary = cleanup_daily_summary_output(final_summary)
         if "[🔗](" not in final_summary:
             final_summary = fallback_daily_summary(capped)
+            fallback_reason = fallback_reason or "AI output missing links"
         elif summary_looks_truncated(final_summary):
             final_summary = fallback_daily_summary(capped)
+            fallback_reason = fallback_reason or "AI output looked truncated"
 
         return {
             "summary": final_summary,
@@ -635,6 +657,7 @@ class AIService:
                 "articles_without_summary": total_articles_without_summary,
                 "selected_articles_with_summary": total_articles_with_summary,
                 "selected_articles_without_summary": total_articles_without_summary,
+                "fallback_reason": fallback_reason,
             },
         }
 
