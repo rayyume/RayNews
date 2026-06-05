@@ -533,7 +533,7 @@ body.body-scroll-lock{overflow:hidden!important}
         <input class="ai-input" id="aiApiKey" type="password" placeholder="sk-..." autocomplete="off" disabled>
 
         <label class="ai-label">模型</label>
-        <input class="ai-input" id="aiModel" placeholder="gpt-4o-mini">
+        <input class="ai-input" id="aiModel" placeholder="gpt-4o-mini / deepseek-chat">
 
         <label class="ai-label">服务商名称</label>
         <input class="ai-input" id="aiProvider" placeholder="DeepSeek">
@@ -1784,6 +1784,12 @@ async function saveAIConfig() {
       provider_type: document.getElementById('aiProviderType').value,
       enabled: document.getElementById('aiEnabled').checked ? 1 : 0,
     };
+    const endpointLower = (payload.endpoint || '').toLowerCase();
+    const modelLower = (payload.model || '').trim().toLowerCase();
+    if (endpointLower.includes('deepseek.com') && (!modelLower || modelLower === 'gpt-4o-mini' || modelLower.startsWith('gpt-'))) {
+      showSettingsStatus('请将 DeepSeek 模型设置为 deepseek-chat 或 deepseek-reasoner', 'err');
+      return;
+    }
     // Only include api_key if user typed something new
     const keyVal = document.getElementById('aiApiKey').value;
     if (keyVal) {
