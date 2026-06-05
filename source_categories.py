@@ -38,6 +38,26 @@ INITIAL_SOURCES = {
     for source in sources
 }
 
+
+def ensure_article_source_columns(conn: sqlite3.Connection) -> None:
+    """Add split source fields to existing article tables when available."""
+    table = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'articles'"
+    ).fetchone()
+    if not table:
+        return
+    existing = {
+        row["name"] if isinstance(row, sqlite3.Row) else row[1]
+        for row in conn.execute("PRAGMA table_info(articles)").fetchall()
+    }
+    if "feed_source" not in existing:
+        conn.execute("ALTER TABLE articles ADD COLUMN feed_source TEXT NOT NULL DEFAULT ''")
+        conn.execute("UPDATE articles SET feed_source = source WHERE TRIM(feed_source) = ''")
+    if "origin_source" not in existing:
+        conn.execute("ALTER TABLE articles ADD COLUMN origin_source TEXT NOT NULL DEFAULT ''")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_feed_source ON articles(feed_source)")
+    conn.commit()
+
 # ─── Domain → Source mapping (used by fetcher + AI classification) ──
 # Format: "domain" → ("source_display_name", "default_category")
 # When detect_source() finds a domain in article content, it uses this
@@ -241,6 +261,7 @@ def local_short_source_name(source: str) -> str:
 
 
 def init_source_categories(conn: sqlite3.Connection) -> None:
+    ensure_article_source_columns(conn)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS source_categories (
             source TEXT PRIMARY KEY,
@@ -304,10 +325,17 @@ def ensure_article_sources(conn: sqlite3.Connection) -> int:
     for row in aliases:
         alias = row["alias_source"] if isinstance(row, sqlite3.Row) else row[0]
         target = row["target_source"] if isinstance(row, sqlite3.Row) else row[1]
-        conn.execute("UPDATE articles SET source = ? WHERE source = ?", (target, alias))
+        conn.execute(
+            "UPDATE articles SET feed_source = ?, source = ? "
+            "WHERE feed_source = ? OR (TRIM(feed_source) = '' AND source = ?) OR source = ?",
+            (target, target, alias, alias, alias),
+        )
 
     rows = conn.execute(
-        "SELECT DISTINCT source FROM articles WHERE source IS NOT NULL AND TRIM(source) != ''"
+        "SELECT DISTINCT COALESCE(NULLIF(feed_source, ''), source) AS source "
+        "FROM articles "
+        "WHERE COALESCE(NULLIF(feed_source, ''), source) IS NOT NULL "
+        "  AND TRIM(COALESCE(NULLIF(feed_source, ''), source)) != ''"
     ).fetchall()
     inserted = 0
     for row in rows:
@@ -332,7 +360,7 @@ def cleanup_stale_source_categories(conn: sqlite3.Connection) -> int:
         """
         SELECT sc.source, sc.status, COUNT(a.id) AS article_count
         FROM source_categories sc
-        LEFT JOIN articles a ON a.source = sc.source
+        LEFT JOIN articles a ON COALESCE(NULLIF(a.feed_source, ''), a.source) = sc.source
         GROUP BY sc.source
         HAVING article_count = 0
         """
@@ -369,7 +397,7 @@ def find_merge_target(conn: sqlite3.Connection, source: str, label: str) -> str 
         """
         SELECT sc.source, sc.status, COUNT(a.id) AS article_count
         FROM source_categories sc
-        LEFT JOIN articles a ON a.source = sc.source
+        LEFT JOIN articles a ON COALESCE(NULLIF(a.feed_source, ''), a.source) = sc.source
         WHERE sc.source != ?
           AND (sc.source = ? OR sc.label = ?)
         GROUP BY sc.source
@@ -430,7 +458,11 @@ def merge_source(conn: sqlite3.Connection, source: str, target_source: str,
         conn.commit()
         return dict(target)
 
-    conn.execute("UPDATE articles SET source = ? WHERE source = ?", (target_source, source))
+    conn.execute(
+        "UPDATE articles SET feed_source = ?, source = ? "
+        "WHERE COALESCE(NULLIF(feed_source, ''), source) = ? OR source = ?",
+        (target_source, target_source, source, source),
+    )
     conn.execute(
         """
         INSERT INTO source_aliases (alias_source, target_source)
@@ -451,12 +483,14 @@ def source_rows(conn: sqlite3.Connection) -> list[dict]:
     # so they don't silently disappear from the settings page.
     unlinked = conn.execute(
         """
-        SELECT a2.source, COUNT(*) AS article_count, MAX(a2.timestamp) AS latest_timestamp
+        SELECT COALESCE(NULLIF(a2.feed_source, ''), a2.source) AS source,
+               COUNT(*) AS article_count,
+               MAX(a2.timestamp) AS latest_timestamp
         FROM articles a2
-        WHERE a2.source IS NOT NULL
-          AND TRIM(a2.source) != ''
-          AND a2.source NOT IN (SELECT source FROM source_categories)
-        GROUP BY a2.source
+        WHERE COALESCE(NULLIF(a2.feed_source, ''), a2.source) IS NOT NULL
+          AND TRIM(COALESCE(NULLIF(a2.feed_source, ''), a2.source)) != ''
+          AND COALESCE(NULLIF(a2.feed_source, ''), a2.source) NOT IN (SELECT source FROM source_categories)
+        GROUP BY COALESCE(NULLIF(a2.feed_source, ''), a2.source)
         """
     ).fetchall()
     unlinked_rows = [dict(
@@ -479,7 +513,7 @@ def source_rows(conn: sqlite3.Connection) -> list[dict]:
                COUNT(a.id) AS article_count,
                MAX(a.timestamp) AS latest_timestamp
         FROM source_categories sc
-        LEFT JOIN articles a ON a.source = sc.source
+        LEFT JOIN articles a ON COALESCE(NULLIF(a.feed_source, ''), a.source) = sc.source
         GROUP BY sc.source
         ORDER BY article_count DESC, sc.source COLLATE NOCASE
         """
@@ -557,7 +591,8 @@ def recent_titles_for_source(conn: sqlite3.Connection, source: str, limit: int =
     rows = conn.execute(
         """
         SELECT title FROM articles
-        WHERE source = ? AND title IS NOT NULL AND TRIM(title) != ''
+        WHERE COALESCE(NULLIF(feed_source, ''), source) = ?
+          AND title IS NOT NULL AND TRIM(title) != ''
         ORDER BY timestamp DESC
         LIMIT ?
         """,

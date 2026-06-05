@@ -10,16 +10,27 @@ import urllib.parse
 import os
 import sqlite3
 import re
+import time
 from pathlib import Path
 
 import requests
 
-from source_categories import CATEGORY_NAMES, CATEGORY_ORDER, cleanup_stale_source_categories, source_rows
+from source_categories import (
+    CATEGORY_NAMES, CATEGORY_ORDER, cleanup_stale_source_categories,
+    ensure_article_source_columns, source_rows,
+)
 
 REFRESH_INTERVAL = 900  # 15 minutes
 LOCK_FILE = "/tmp/raynews-fetcher.lock"
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
 DB_FILE = DATA_DIR / "news.db"
+LAST_FETCH_STATUS = {
+    "status": "never",
+    "returncode": None,
+    "stdout": "",
+    "stderr": "",
+    "updated_at": None,
+}
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [refresh] %(message)s")
 log = logging.getLogger("refresh")
@@ -35,6 +46,7 @@ def get_db() -> sqlite3.Connection:
         _db_conn.row_factory = sqlite3.Row
         _db_conn.execute("PRAGMA journal_mode=WAL")
         _db_conn.execute("PRAGMA synchronous=NORMAL")
+        ensure_article_source_columns(_db_conn)
     return _db_conn
 
 
@@ -82,6 +94,13 @@ def run_fetcher():
             "stdout": result.stdout[-300:],
             "stderr": result.stderr[-300:],
         }).encode()
+        LAST_FETCH_STATUS.update({
+            "status": "ok" if is_ok else "error",
+            "returncode": result.returncode,
+            "stdout": result.stdout[-300:],
+            "stderr": result.stderr[-300:],
+            "updated_at": int(time.time()),
+        })
         log.info(f"Fetcher done (exit={result.returncode})")
         if is_ok:
             clear_article_cache()
@@ -95,9 +114,23 @@ def run_fetcher():
                 log.warning(f"Source cleanup failed: {e}")
         return body, 200 if is_ok else 500
     except subprocess.TimeoutExpired:
+        LAST_FETCH_STATUS.update({
+            "status": "error",
+            "returncode": None,
+            "stdout": "",
+            "stderr": "timeout",
+            "updated_at": int(time.time()),
+        })
         body = json.dumps({"status": "error", "error": "timeout"}).encode()
         return body, 500
     except Exception as e:
+        LAST_FETCH_STATUS.update({
+            "status": "error",
+            "returncode": None,
+            "stdout": "",
+            "stderr": str(e)[-300:],
+            "updated_at": int(time.time()),
+        })
         body = json.dumps({"status": "error", "error": str(e)}).encode()
         return body, 500
     finally:
@@ -112,14 +145,34 @@ def periodic_refresh():
 
 # ─── API Handlers ─────────────────────────────────────────
 
+def _diagnostics(count: int | None = None) -> dict:
+    channel = (os.environ.get("TELEGRAM_CHANNEL") or "").strip()
+    exists = DB_FILE.exists()
+    try:
+        db_size = DB_FILE.stat().st_size if exists else 0
+    except OSError:
+        db_size = 0
+    return {
+        "data_dir": str(DATA_DIR),
+        "db_path": str(DB_FILE),
+        "db_exists": exists,
+        "db_size": db_size,
+        "article_count": count,
+        "telegram_channel_configured": bool(channel and channel != "your_channel"),
+        "telegram_channel": channel if channel and channel != "your_channel" else "",
+        "telegram_channel_default": not bool(channel and channel != "your_channel"),
+        "last_fetch": dict(LAST_FETCH_STATUS),
+    }
+
+
 def api_meta() -> bytes:
     """GET /api/meta — total article count."""
     try:
         conn = get_db()
         count = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
-        return json.dumps({"count": count}).encode()
+        return json.dumps({"count": count, "diagnostics": _diagnostics(count)}).encode()
     except Exception as e:
-        return json.dumps({"error": str(e)}).encode()
+        return json.dumps({"error": str(e), "diagnostics": _diagnostics(None)}).encode()
 
 
 def api_news_list(params: dict) -> bytes:
@@ -137,7 +190,9 @@ def api_news_list(params: dict) -> bytes:
         if since:
             since_ts = int(since)
             rows = conn.execute(
-                "SELECT id, title, source, time, date, timestamp, thumb, has_full_content, telegraph_url, summary "
+                "SELECT id, title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
+                "       COALESCE(NULLIF(feed_source, ''), source) AS feed_source, origin_source, "
+                "       time, date, timestamp, thumb, has_full_content, telegraph_url, summary "
                 "FROM articles WHERE timestamp >= ? ORDER BY timestamp DESC LIMIT ?",
                 (since_ts, size),
             ).fetchall()
@@ -148,7 +203,9 @@ def api_news_list(params: dict) -> bytes:
         else:
             offset = (page - 1) * size
             rows = conn.execute(
-                "SELECT id, title, source, time, date, timestamp, thumb, has_full_content, telegraph_url, summary "
+                "SELECT id, title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
+                "       COALESCE(NULLIF(feed_source, ''), source) AS feed_source, origin_source, "
+                "       time, date, timestamp, thumb, has_full_content, telegraph_url, summary "
                 "FROM articles ORDER BY timestamp DESC LIMIT ? OFFSET ?",
                 (size, offset),
             ).fetchall()
@@ -160,9 +217,10 @@ def api_news_list(params: dict) -> bytes:
             "total": total,
             "page": page,
             "size": size,
+            "diagnostics": _diagnostics(total) if total == 0 else None,
         }, ensure_ascii=False).encode()
     except Exception as e:
-        return json.dumps({"error": str(e)}).encode()
+        return json.dumps({"error": str(e), "diagnostics": _diagnostics(None)}).encode()
 
 
 def api_news_detail(article_id: int) -> bytes:
@@ -177,7 +235,11 @@ def api_news_detail(article_id: int) -> bytes:
         ).fetchone()
         if not row:
             return json.dumps({"error": "not found"}).encode()
-        result = json.dumps(dict(row), ensure_ascii=False).encode()
+        item = dict(row)
+        item["feed_source"] = item.get("feed_source") or item.get("source") or ""
+        item["origin_source"] = item.get("origin_source") or ""
+        item["source"] = item["feed_source"]
+        result = json.dumps(item, ensure_ascii=False).encode()
         _article_cache[article_id] = result
         return result
     except Exception as e:
@@ -297,6 +359,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = 8081
+    diag = _diagnostics(None)
+    log.info(
+        "Startup diagnostics: data_dir=%s db_exists=%s db_size=%s telegram_configured=%s",
+        diag["data_dir"],
+        diag["db_exists"],
+        diag["db_size"],
+        diag["telegram_channel_configured"],
+    )
+    if diag["telegram_channel_default"]:
+        log.warning("TELEGRAM_CHANNEL is not configured or still equals your_channel")
     # Start periodic refresh in background
     threading.Timer(REFRESH_INTERVAL, periodic_refresh).start()
     server = http.server.HTTPServer(("127.0.0.1", port), Handler)

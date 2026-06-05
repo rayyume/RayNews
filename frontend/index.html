@@ -677,6 +677,7 @@ let sourceRows = [];
 let rawSourceRows = [];
 let sourceFilterGroups = {};
 let sourceToFilterGroup = {};
+let lastNewsDiagnostics = null;
 
 let news = [];
 let filter = 'all';
@@ -1045,6 +1046,16 @@ async function loadSourceCategories() {
 function sourceLabel(source) {
   const meta = sourceMeta[source];
   return (meta && meta.label) ? meta.label : source;
+}
+
+function feedSourceOf(item) {
+  return item.feed_source || item.source || '';
+}
+
+function originSourceOf(item) {
+  const feed = feedSourceOf(item);
+  const origin = (item.origin_source || '').trim();
+  return origin && origin !== feed ? origin : '';
 }
 
 function sourceCategory(source) {
@@ -1496,7 +1507,8 @@ function renderSourceArticles(items) {
       <div class="fav-item-body">
         <div class="fav-item-title">${esc(item.title)}</div>
         <div class="fav-item-meta">
-          <span class="badge" style="${badgeStyle(item.source)}" title="${esc(item.source)}">${esc(sourceLabel(item.source))}</span>
+          <span class="badge" style="${badgeStyle(feedSourceOf(item))}" title="${esc(feedSourceOf(item))}">${esc(sourceLabel(feedSourceOf(item)))}</span>
+          ${originSourceOf(item) ? `<span class="source-label-sub">出处：${esc(originSourceOf(item))}</span>` : ''}
           <span>${formatTime(item.date, item.time)}</span>
         </div>
       </div>
@@ -2556,7 +2568,8 @@ function renderFavorites(data) {
       <div class="fav-item-body">
         <div class="fav-item-title">${esc(item.title)}</div>
         <div class="fav-item-meta">
-          <span class="badge" style="${badgeStyle(item.source)}" title="${esc(item.source)}">${esc(sourceLabel(item.source))}</span>
+          <span class="badge" style="${badgeStyle(feedSourceOf(item))}" title="${esc(feedSourceOf(item))}">${esc(sourceLabel(feedSourceOf(item)))}</span>
+          ${originSourceOf(item) ? `<span class="source-label-sub">出处：${esc(originSourceOf(item))}</span>` : ''}
           <span>${formatTime(item.date, item.time)}</span>
         </div>
       </div>
@@ -2854,6 +2867,7 @@ async function loadData() {
     clearTimeout(timeout);
     const data = await resp.json();
     news = data.items || [];
+    lastNewsDiagnostics = data.diagnostics || null;
     articleBodyCache = {};
     document.getElementById('count').textContent = data.total + ' 条新闻';
     renderFilters();
@@ -2911,9 +2925,10 @@ async function loadDataWithRetry(retries, delay) {
       const resp = await fetch('/api/news?size=' + INITIAL_LOAD_SIZE + '&t=' + Date.now(), { signal: controller.signal });
       await loadSourceCategories();
       clearTimeout(to);
-      const data = await resp.json();
-      news = data.items || [];
-      articleBodyCache = {};
+    const data = await resp.json();
+    news = data.items || [];
+    lastNewsDiagnostics = data.diagnostics || null;
+    articleBodyCache = {};
       document.getElementById('count').textContent = data.total + ' 条新闻';
       renderFilters();
       renderList();
@@ -2928,7 +2943,7 @@ async function loadDataWithRetry(retries, delay) {
 }
 
 function renderFilters() {
-  const sources = [...new Set(news.map(n => canonicalSource(n.source)))];
+  const sources = [...new Set(news.map(n => canonicalSource(feedSourceOf(n))))];
   const el = document.getElementById('filters');
   sourceFilterGroups = {};
   sourceToFilterGroup = {};
@@ -3047,14 +3062,20 @@ function filteredNews() {
   }
   if (filter.startsWith('cat:')) {
     const cat = filter.replace('cat:', '');
-    return news.filter(n => sourceCategory(canonicalSource(n.source)) === cat);
+    return news.filter(n => {
+      const source = canonicalSource(feedSourceOf(n));
+      const groupKey = sourceToFilterGroup[source];
+      const group = groupKey ? sourceFilterGroups[groupKey] : null;
+      return (group && group.baseCategory === cat) || sourceCategory(source) === cat;
+    });
   }
   const group = sourceFilterGroups[filter];
   if (group) {
     const sourceSet = new Set(group.sources);
-    return news.filter(n => sourceSet.has(canonicalSource(n.source)));
+    return news.filter(n => sourceSet.has(canonicalSource(feedSourceOf(n))));
   }
-  return news.filter(n => canonicalSource(n.source) === filter);
+  filter = 'all';
+  return news;
 }
 
 function toggleSidebar() {
@@ -3068,7 +3089,12 @@ function toggleSidebar() {
 }
 
 function renderList() {
-  const filtered = filteredNews();
+  let filtered = filteredNews();
+  if (!filtered.length && news.length && filter !== 'all') {
+    filter = 'all';
+    filtered = news;
+    setTimeout(() => renderFilters(), 0);
+  }
   const el = document.getElementById('list');
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   if (currentPage > totalPages) currentPage = totalPages;
@@ -3080,7 +3106,15 @@ function renderList() {
   document.getElementById('count').textContent = filtered.length + ' 条新闻';
 
   if (!items.length) {
-    el.innerHTML = `<div class="empty"><div class="empty-icon">🔍</div><p>该分类暂无新闻</p></div>`;
+    if (!news.length && lastNewsDiagnostics) {
+      const d = lastNewsDiagnostics;
+      const channelHint = d.telegram_channel_default
+        ? '<p style="margin-top:6px;color:#f59e0b">TELEGRAM_CHANNEL 未配置或仍为 your_channel</p>'
+        : '';
+      el.innerHTML = `<div class="empty"><div class="empty-icon">📭</div><p>数据源暂无文章</p>${channelHint}<p style="margin-top:6px;color:var(--text-3);font-size:12px">DB: ${esc(d.db_path || '')} · size ${esc(String(d.db_size || 0))} · count ${esc(String(d.article_count || 0))}</p><button class="refresh-btn" onclick="triggerRefresh()" style="margin-top:12px">刷新</button></div>`;
+    } else {
+      el.innerHTML = `<div class="empty"><div class="empty-icon">🔍</div><p>该分类暂无新闻</p></div>`;
+    }
     renderPagination(0);
     return;
   }
@@ -3091,7 +3125,8 @@ function renderList() {
       <div class="item-body">
         <div class="item-title">${esc(n.title)}</div>
         <div class="item-meta">
-          <span class="badge" style="${badgeStyle(n.source)}" title="${esc(n.source)}">${esc(sourceLabel(n.source))}</span>
+          <span class="badge" style="${badgeStyle(feedSourceOf(n))}" title="${esc(feedSourceOf(n))}">${esc(sourceLabel(feedSourceOf(n)))}</span>
+          ${originSourceOf(n) ? `<span class="source-label-sub">出处：${esc(originSourceOf(n))}</span>` : ''}
           <span>${formatTime(n.date, n.time)}</span>
           ${n.has_full_content ? '<span class="full-tag">● 全文</span>' : ''}
         </div>
@@ -3177,7 +3212,8 @@ function openArticle(id) {
       wrap.innerHTML = `
         <h1>${esc(data.title || '')}</h1>
         <div class="article-meta" style="position:relative">
-          <span class="badge" style="${badgeStyle(data.source || '')}" title="${esc(data.source || '')}">${esc(sourceLabel(data.source || ''))}</span>
+          <span class="badge" style="${badgeStyle(feedSourceOf(data))}" title="${esc(feedSourceOf(data))}">${esc(sourceLabel(feedSourceOf(data)))}</span>
+          ${originSourceOf(data) ? `<span class="source-label-sub">出处：${esc(originSourceOf(data))}</span>` : ''}
           <span>${formatTime(data.date || '', data.time || '')}</span>
           <span style="margin-left:auto;display:flex;gap:8px;align-items:center" id="aiActions" data-article-id="${id}">
             <button id="favBtn" onclick="toggleFavorite()" style="display:none;background:#161a2a;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:3px 10px;border-radius:100px;font-family:var(--font)" title="收藏"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin-right:3px"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg><span>收藏</span></button>
@@ -3220,7 +3256,8 @@ function openArticle(id) {
   wrap.innerHTML = `
     <h1>${esc(n.title)}</h1>
     <div class="article-meta" style="position:relative">
-      <span class="badge" style="${badgeStyle(n.source)}" title="${esc(n.source)}">${esc(sourceLabel(n.source))}</span>
+      <span class="badge" style="${badgeStyle(feedSourceOf(n))}" title="${esc(feedSourceOf(n))}">${esc(sourceLabel(feedSourceOf(n)))}</span>
+      ${originSourceOf(n) ? `<span class="source-label-sub">出处：${esc(originSourceOf(n))}</span>` : ''}
       <span>${formatTime(n.date, n.time)}</span>
       <span style="margin-left:auto;display:flex;gap:8px;align-items:center" id="aiActions" data-article-id="${id}">
         <button id="favBtn" onclick="toggleFavorite()" style="display:none;background:#161a2a;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:3px 10px;border-radius:100px;font-family:var(--font)" title="收藏"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin-right:3px"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg><span>收藏</span></button>

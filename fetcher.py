@@ -25,6 +25,7 @@ from bs4 import BeautifulSoup
 
 from source_categories import (
     ensure_article_sources, init_source_categories,
+    ensure_article_source_columns,
     extract_domains_from_html, lookup_source_by_domain,
 )
 
@@ -65,6 +66,8 @@ def init_db() -> sqlite3.Connection:
             id INTEGER PRIMARY KEY,
             title TEXT NOT NULL DEFAULT '',
             source TEXT NOT NULL DEFAULT '',
+            feed_source TEXT NOT NULL DEFAULT '',
+            origin_source TEXT NOT NULL DEFAULT '',
             time TEXT DEFAULT '',
             date TEXT DEFAULT '',
             timestamp INTEGER NOT NULL DEFAULT 0,
@@ -75,6 +78,7 @@ def init_db() -> sqlite3.Connection:
             summary TEXT DEFAULT ''
         )
     """)
+    ensure_article_source_columns(conn)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON articles(timestamp DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_source ON articles(source)")
     init_source_categories(conn)
@@ -85,15 +89,17 @@ def init_db() -> sqlite3.Connection:
 def upsert_articles(conn: sqlite3.Connection, entries: list[dict]):
     """Batch insert or update articles into SQLite."""
     sql = """INSERT OR REPLACE INTO articles
-        (id, title, source, time, date, timestamp, thumb,
+        (id, title, source, feed_source, origin_source, time, date, timestamp, thumb,
          has_full_content, telegraph_url, body_html, summary)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
     rows = []
     for e in entries:
         rows.append((
             e.get("id", 0),
             e.get("title", ""),
             e.get("source", ""),
+            e.get("feed_source", e.get("source", "")),
+            e.get("origin_source", ""),
             e.get("time", ""),
             e.get("date", ""),
             e.get("timestamp", 0),
@@ -341,6 +347,30 @@ def detect_source(content: str, extra_html: str = "") -> str:
 
     # 5) fallback
     return "未分类"
+
+
+def detect_feed_source(content: str, link_preview_title: str = "") -> str:
+    """Extract the stable subscription/feed source for sidebar filtering.
+
+    This intentionally avoids article-link domains and Telegraph metadata; those
+    describe the original publisher and belong in origin_source.
+    """
+    via_source = detect_source_from_attribution(content)
+    if via_source:
+        return via_source
+
+    tg = re.search(r't\.me/([a-zA-Z0-9_]+)', content)
+    if tg:
+        name = _clean_source_name(tg.group(1))
+        if name:
+            return f"@{name}"
+
+    title = _clean_source_name(link_preview_title or "")
+    if title and 1 < len(title) <= 30:
+        return title
+
+    channel = (TELEGRAM_CHANNEL or "").strip().lstrip("@")
+    return f"@{channel}" if channel else "Unknown Feed"
 
 
 def detect_source_from_attribution(content: str) -> str | None:
@@ -723,16 +753,19 @@ def process_message(msg: dict, orig_msg_id: int) -> dict:
     text = msg["text"]
     title = extract_title(text)
     telegraph_url = extract_telegraph_url(content)
+    feed_source = detect_feed_source(content, msg.get("link_preview_title", "") or "")
     # Pass link_preview_url as extra_html so domain detection can use the article URL
     link_preview_url = msg.get("link_preview_url", "") or ""
-    source = detect_source(content, extra_html=link_preview_url)
+    origin_source = detect_source(content, extra_html=link_preview_url)
     thumb = msg["images"][0] if msg["images"] else ""
     time_info = parse_datetime(msg["datetime"])
 
     entry = {
         "id": orig_msg_id,  # Use stable Telegram message ID
         "title": title,
-        "source": source,
+        "source": feed_source,
+        "feed_source": feed_source,
+        "origin_source": origin_source,
         "time": time_info.get("time", ""),
         "date": time_info.get("date", ""),
         "timestamp": time_info.get("timestamp", 0),
@@ -753,10 +786,10 @@ def process_message(msg: dict, orig_msg_id: int) -> dict:
             # Telegraph metadata (<address>, attribution links) when the initial
             # detection is weak (plain "未分类" or just an @channel name).
             ts = result.get("detected_source", "")
-            if ts and (source == "未分类" or source.startswith("@")):
-                source = ts
-                entry["source"] = source
-                log.info(f"  ✓ {title[:40]}... ({result['char_count']} chars, from Telegraph, source → {source})")
+            if ts:
+                origin_source = ts
+                entry["origin_source"] = origin_source
+                log.info(f"  ✓ {title[:40]}... ({result['char_count']} chars, from Telegraph, origin → {origin_source})")
             else:
                 log.info(f"  ✓ {title[:40]}... ({result['char_count']} chars, from Telegraph)")
         else:

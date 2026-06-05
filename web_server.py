@@ -28,7 +28,7 @@ from auth import init_auth, create_token, require_auth, require_role
 from ai_service import AIService
 from source_categories import (
     CATEGORY_NAMES, CATEGORY_ORDER, cleanup_stale_source_categories,
-    clamp_weighted, ensure_article_sources,
+    clamp_weighted, ensure_article_source_columns, ensure_article_sources,
     effective_source_rows, find_user_merge_target, merge_source,
     recent_titles_for_source, source_aliases_for_target, source_rows,
     update_source_category, extract_domains_from_html,
@@ -319,8 +319,12 @@ def _get_article_meta(article_id: int) -> dict | None:
     try:
         conn = sqlite3.connect(NEWS_DB)
         conn.row_factory = sqlite3.Row
+        ensure_article_source_columns(conn)
         row = conn.execute(
-            "SELECT id, title, source, date, time, thumb, has_full_content, timestamp FROM articles WHERE id = ?",
+            "SELECT id, title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
+            "       COALESCE(NULLIF(feed_source, ''), source) AS feed_source, origin_source, "
+            "       date, time, thumb, has_full_content, timestamp "
+            "FROM articles WHERE id = ?",
             (article_id,),
         ).fetchone()
         conn.close()
@@ -338,6 +342,7 @@ def _get_news_db():
     if _news_conn is None and os.path.exists(NEWS_DB):
         _news_conn = sqlite3.connect(NEWS_DB, check_same_thread=False)
         _news_conn.row_factory = sqlite3.Row
+        ensure_article_source_columns(_news_conn)
     return _news_conn
 
 
@@ -351,7 +356,9 @@ def _get_article_meta_batch(article_ids: list[int]) -> dict[int, dict]:
     try:
         placeholders = ",".join("?" * len(article_ids))
         rows = conn.execute(
-            f"SELECT id, title, source, date, time, thumb, has_full_content, timestamp FROM articles WHERE id IN ({placeholders})",
+            "SELECT id, title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
+            "       COALESCE(NULLIF(feed_source, ''), source) AS feed_source, origin_source, "
+            f"      date, time, thumb, has_full_content, timestamp FROM articles WHERE id IN ({placeholders})",
             article_ids,
         ).fetchall()
         return {r["id"]: dict(r) for r in rows}
@@ -378,6 +385,8 @@ def list_favorites():
                 "created_at": f["created_at"],
                 "title": meta["title"],
                 "source": meta["source"],
+                "feed_source": meta.get("feed_source", meta["source"]),
+                "origin_source": meta.get("origin_source", ""),
                 "date": meta["date"],
                 "time": meta["time"],
                 "thumb": meta["thumb"],
@@ -1110,8 +1119,10 @@ def _fetch_untranslated_articles(config: dict, limit: int = AUTO_TRANSLATION_BAT
         today_str = _dt.datetime.now().strftime("%Y-%m-%d")
         conn = sqlite3.connect(NEWS_DB)
         conn.row_factory = sqlite3.Row
+        ensure_article_source_columns(conn)
         rows = conn.execute(
-            "SELECT a.id, a.title, a.source, a.summary, a.body_html, r.translation "
+            "SELECT a.id, a.title, COALESCE(NULLIF(a.feed_source, ''), a.source) AS source, "
+            "       a.origin_source, a.summary, a.body_html, r.translation "
             "FROM articles a "
             "LEFT JOIN ai_results r ON r.article_id = a.id "
             "WHERE a.date = ? "
@@ -1377,7 +1388,8 @@ def _extract_domains_for_source(conn, source: str) -> list[str]:
     try:
         rows = conn.execute(
             "SELECT body_html, telegraph_url FROM articles "
-            "WHERE source = ? AND (body_html != '' OR telegraph_url != '') "
+            "WHERE COALESCE(NULLIF(feed_source, ''), source) = ? "
+            "AND (body_html != '' OR telegraph_url != '') "
             "ORDER BY timestamp DESC LIMIT 5",
             (source,),
         ).fetchall()
@@ -1556,8 +1568,11 @@ def _fetch_recent_articles(limit: int = 20) -> list[dict]:
     try:
         conn = sqlite3.connect(NEWS_DB)
         conn.row_factory = sqlite3.Row
+        ensure_article_source_columns(conn)
         rows = conn.execute(
-            "SELECT id, title, source, date, time FROM articles ORDER BY timestamp DESC LIMIT ?",
+            "SELECT id, title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
+            "       COALESCE(NULLIF(feed_source, ''), source) AS feed_source, origin_source, "
+            "       date, time FROM articles ORDER BY timestamp DESC LIMIT ?",
             (limit,),
         ).fetchall()
         conn.close()
@@ -1598,12 +1613,14 @@ def _fetch_articles_by_date(date_str: str, include_shared_summary: bool = True) 
         _init_ai_results_table()
         conn = sqlite3.connect(NEWS_DB)
         conn.row_factory = sqlite3.Row
+        ensure_article_source_columns(conn)
         summary_expr = (
             "COALESCE(NULLIF(r.summary, ''), a.summary)"
             if include_shared_summary else "a.summary"
         )
         rows = conn.execute(
-            "SELECT a.id, a.title, a.source, a.date, a.time, a.body_html, "
+            "SELECT a.id, a.title, COALESCE(NULLIF(a.feed_source, ''), a.source) AS source, "
+            "a.origin_source, a.date, a.time, a.body_html, "
             f"{summary_expr} AS summary, "
             "a.telegraph_url "
             "FROM articles a "
@@ -1628,8 +1645,10 @@ def _fetch_unsummarized_articles(limit: int = AUTO_SUMMARY_BATCH_LIMIT) -> list[
         today_str = _dt.datetime.now().strftime("%Y-%m-%d")
         conn = sqlite3.connect(NEWS_DB)
         conn.row_factory = sqlite3.Row
+        ensure_article_source_columns(conn)
         rows = conn.execute(
-            "SELECT a.id, a.title, a.source, a.summary, a.body_html "
+            "SELECT a.id, a.title, COALESCE(NULLIF(a.feed_source, ''), a.source) AS source, "
+            "a.origin_source, a.summary, a.body_html "
             "FROM articles a "
             "LEFT JOIN ai_results r ON r.article_id = a.id "
             "WHERE a.date = ? "
@@ -1652,8 +1671,10 @@ def _fetch_article_body(article_id: int) -> dict | None:
     try:
         conn = sqlite3.connect(NEWS_DB)
         conn.row_factory = sqlite3.Row
+        ensure_article_source_columns(conn)
         row = conn.execute(
-            "SELECT id, title, source, summary, body_html FROM articles WHERE id = ?",
+            "SELECT id, title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
+            "origin_source, summary, body_html FROM articles WHERE id = ?",
             (article_id,),
         ).fetchone()
         conn.close()
@@ -1802,8 +1823,10 @@ def list_source_articles():
     sources = list(dict.fromkeys(sources))
     placeholders = ",".join("?" * len(sources))
     rows = conn.execute(
-        "SELECT id, title, source, date, time, timestamp, thumb, has_full_content "
-        f"FROM articles WHERE source IN ({placeholders}) "
+        "SELECT id, title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
+        "       COALESCE(NULLIF(feed_source, ''), source) AS feed_source, origin_source, "
+        "       date, time, timestamp, thumb, has_full_content "
+        f"FROM articles WHERE COALESCE(NULLIF(feed_source, ''), source) IN ({placeholders}) "
         "ORDER BY timestamp DESC LIMIT ?",
         (*sources, limit),
     ).fetchall()
@@ -2004,13 +2027,14 @@ def _redetect_article_sources_work(limit: int, network_limit: int, force_telegra
                                    job_id: str | None = None) -> dict:
     if not os.path.exists(NEWS_DB):
         raise FileNotFoundError("news db not found")
-    from fetcher import detect_source, detect_source_from_attribution
+    from fetcher import detect_feed_source, detect_source, detect_source_from_attribution
 
     conn = sqlite3.connect(NEWS_DB, timeout=30)
     conn.row_factory = sqlite3.Row
+    ensure_article_source_columns(conn)
     rows = conn.execute(
         """
-        SELECT id, title, source, body_html, summary, telegraph_url
+        SELECT id, title, source, feed_source, origin_source, body_html, summary, telegraph_url
         FROM articles
         ORDER BY timestamp DESC
         LIMIT ?
@@ -2035,8 +2059,10 @@ def _redetect_article_sources_work(limit: int, network_limit: int, force_telegra
 
     for row in rows:
         checked += 1
-        detected = None
+        detected_feed = None
+        detected_origin = None
         fetched_telegram = False
+        telegram_content = ""
         is_telegraph = bool(row["telegraph_url"])
         should_fetch_telegram = (
             telegram_checked < network_limit
@@ -2047,10 +2073,9 @@ def _redetect_article_sources_work(limit: int, network_limit: int, force_telegra
             telegram_checked += 1
             telegram_content = _fetch_telegram_message_content(row["id"])
             if telegram_content:
-                detected = detect_source_from_attribution(telegram_content)
-                if not detected:
-                    detected = detect_source(telegram_content)
-                if detected:
+                detected_feed = detect_feed_source(telegram_content)
+                detected_origin = detect_source(telegram_content)
+                if detected_feed or detected_origin:
                     telegram_hits += 1
 
         content = "\n".join([
@@ -2058,34 +2083,43 @@ def _redetect_article_sources_work(limit: int, network_limit: int, force_telegra
             row["summary"] or "",
             row["title"] or "",
         ])
-        detected = detected or detect_source_from_attribution(content)
+        if not detected_feed and (telegram_content or not is_telegraph):
+            detected_feed = detect_feed_source(telegram_content or content)
+        detected_origin = detected_origin or detect_source_from_attribution(content)
         # Telegraph body is mirrored article content; arbitrary links in it are not source attribution.
-        if not detected and not is_telegraph:
-            detected = detect_source(content)
-        if not detected and not fetched_telegram and telegram_checked < network_limit:
+        if not detected_origin and not is_telegraph:
+            detected_origin = detect_source(content)
+        if (not detected_feed or not detected_origin) and not fetched_telegram and telegram_checked < network_limit:
             telegram_checked += 1
             telegram_content = _fetch_telegram_message_content(row["id"])
             if telegram_content:
-                detected = detect_source_from_attribution(telegram_content)
-                if not detected:
-                    detected = detect_source(telegram_content)
-                if detected:
+                detected_feed = detected_feed or detect_feed_source(telegram_content)
+                detected_origin = detected_origin or detect_source(telegram_content)
+                if detected_feed or detected_origin:
                     telegram_hits += 1
-        if not detected:
+        if not detected_feed and not detected_origin:
             skipped += 1
             update_progress()
             continue
-        current = (row["source"] or "").strip()
-        if detected == current:
+        current_feed = (row["feed_source"] or row["source"] or "").strip()
+        current_origin = (row["origin_source"] or "").strip()
+        next_feed = detected_feed or current_feed
+        next_origin = detected_origin or current_origin
+        if next_feed == current_feed and next_origin == current_origin:
             skipped += 1
             update_progress()
             continue
-        conn.execute("UPDATE articles SET source = ? WHERE id = ?", (detected, row["id"]))
+        conn.execute(
+            "UPDATE articles SET source = ?, feed_source = ?, origin_source = ? WHERE id = ?",
+            (next_feed, next_feed, next_origin, row["id"]),
+        )
         changed.append({
             "id": row["id"],
             "title": row["title"],
-            "from": current,
-            "to": detected,
+            "from": current_feed,
+            "to": next_feed,
+            "origin_from": current_origin,
+            "origin_to": next_origin,
         })
         update_progress()
     ensure_article_sources(conn)
@@ -2172,10 +2206,13 @@ def redetect_single_source():
     if not source:
         return jsonify({"error": "source required"}), 400
 
-    from fetcher import detect_source, detect_source_from_attribution
+    from fetcher import detect_feed_source, detect_source, detect_source_from_attribution
 
     rows = conn.execute(
-        "SELECT id, title, source, body_html, summary, telegraph_url FROM articles WHERE source = ? ORDER BY timestamp DESC",
+        "SELECT id, title, source, feed_source, origin_source, body_html, summary, telegraph_url "
+        "FROM articles "
+        "WHERE COALESCE(NULLIF(feed_source, ''), source) = ? "
+        "ORDER BY timestamp DESC",
         (source,),
     ).fetchall()
 
@@ -2187,21 +2224,35 @@ def redetect_single_source():
             row["summary"] or "",
             row["title"] or "",
         ])
-        detected = detect_source_from_attribution(content)
-        if not detected and not row["telegraph_url"]:
-            detected = detect_source(content)
+        detected_feed = None if row["telegraph_url"] else detect_feed_source(content)
+        detected_origin = detect_source_from_attribution(content)
+        if not detected_origin and not row["telegraph_url"]:
+            detected_origin = detect_source(content)
         # If still no result, try fetching the original Telegram message
         # (body_html may be Telegraph content without via lines)
-        if not detected:
+        if not detected_feed or not detected_origin:
             tg_content = _fetch_telegram_message_content(row["id"])
             if tg_content:
-                detected = detect_source_from_attribution(tg_content)
-                if not detected:
-                    detected = detect_source(tg_content)
-        if not detected or detected == (row["source"] or "").strip():
+                detected_feed = detected_feed or detect_feed_source(tg_content)
+                detected_origin = detected_origin or detect_source(tg_content)
+        current_feed = (row["feed_source"] or row["source"] or "").strip()
+        current_origin = (row["origin_source"] or "").strip()
+        next_feed = detected_feed or current_feed
+        next_origin = detected_origin or current_origin
+        if next_feed == current_feed and next_origin == current_origin:
             continue
-        conn.execute("UPDATE articles SET source = ? WHERE id = ?", (detected, row["id"]))
-        changed.append({"id": row["id"], "title": row["title"], "from": row["source"], "to": detected})
+        conn.execute(
+            "UPDATE articles SET source = ?, feed_source = ?, origin_source = ? WHERE id = ?",
+            (next_feed, next_feed, next_origin, row["id"]),
+        )
+        changed.append({
+            "id": row["id"],
+            "title": row["title"],
+            "from": current_feed,
+            "to": next_feed,
+            "origin_from": current_origin,
+            "origin_to": next_origin,
+        })
 
     ensure_article_sources(conn)
     cleanup_stale_source_categories(conn)
