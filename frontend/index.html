@@ -920,15 +920,34 @@ function rebuildCategoryMap(rows) {
   rawSourceRows = rows || [];
   // build source rows for the Settings tab (groups by label, filters aliases)
   sourceRows = buildSourceGroups(rawSourceRows);
+  const targetRows = {};
   for (const row of rawSourceRows) {
     const source = row.source || '';
-    const cat = CATEGORY_ORDER.includes(row.category) ? row.category : 'Info';
     if (!source) continue;
-    // Skip alias rows — they are represented by their target in the UI
-    if (row.alias_target) continue;
+    if (!row.alias_target) targetRows[source] = row;
+  }
+  for (const row of rawSourceRows) {
+    const source = row.source || '';
+    if (!source) continue;
+    // Alias rows map legacy sources to their target, but stay out of the left menu.
+    if (row.alias_target) {
+      const target = row.alias_target;
+      const targetRow = targetRows[target] || {};
+      sourceMeta[source] = {
+        ...row,
+        alias_target: target,
+        category: targetRow.category || row.category,
+        label: targetRow.label || target,
+      };
+      continue;
+    }
     sourceMeta[source] = row;
-    const visibleSource = row.alias_target || source;
-    if (!next[cat].includes(visibleSource)) next[cat].push(visibleSource);
+  }
+  for (const row of rawSourceRows) {
+    const source = row.source || '';
+    if (!source || row.alias_target) continue;
+    const cat = CATEGORY_ORDER.includes(row.category) ? row.category : 'Info';
+    if (!next[cat].includes(source)) next[cat].push(source);
   }
   CATEGORY_MAP = next;
 }
@@ -977,8 +996,12 @@ function buildSourceGroups(rows) {
   const byLabel = {};
   // First pass: map alias sources to their targets for merging
   const aliasTarget = {};
+  const aliasRows = {};
   for (const row of rows || []) {
-    if (row.alias_target) aliasTarget[row.source] = row.alias_target;
+    if (row.alias_target) {
+      aliasTarget[row.source] = row.alias_target;
+      aliasRows[row.source] = row;
+    }
   }
   for (const row of rows || []) {
     const source = row.source || '';
@@ -988,7 +1011,7 @@ function buildSourceGroups(rows) {
     const label = (row.label || source).trim();
     const key = sourceGroupKey(label);
     if (!byLabel[key]) {
-      byLabel[key] = { key, source, label, rows: [], sources: [] };
+      byLabel[key] = { key, source, label, rows: [], aliasRows: [], sources: [] };
     }
     byLabel[key].rows.push(row);
     byLabel[key].sources.push(source);
@@ -999,14 +1022,16 @@ function buildSourceGroups(rows) {
     for (const group of Object.values(byLabel)) {
       if (group.sources.includes(target)) {
         group.sources.push(alias);
+        if (aliasRows[alias]) group.aliasRows.push(aliasRows[alias]);
         break;
       }
     }
   }
   return Object.values(byLabel).map(group => {
-    const category = chooseSourceGroupCategory(group.rows);
-    const status = chooseSourceGroupStatus(group.rows);
-    const articleCount = group.rows.reduce((sum, row) => sum + (row.article_count || 0), 0);
+    const allRows = group.rows.concat(group.aliasRows || []);
+    const category = chooseSourceGroupCategory(allRows);
+    const status = chooseSourceGroupStatus(allRows);
+    const articleCount = allRows.reduce((sum, row) => sum + (row.article_count || 0), 0);
     const primary = group.rows
       .slice()
       .sort((a, b) => (categoryRank(b) - categoryRank(a)) || ((b.article_count || 0) - (a.article_count || 0)))[0] || {};
@@ -1019,7 +1044,7 @@ function buildSourceGroups(rows) {
       status,
       article_count: articleCount,
       sources: uniqueSources,
-      raw_rows: group.rows,
+      raw_rows: allRows,
       source_count: uniqueSources.length,
       grouped: uniqueSources.length > 1,
     };
@@ -1045,7 +1070,10 @@ async function loadSourceCategories() {
 
 function sourceLabel(source) {
   const meta = sourceMeta[source];
-  return (meta && meta.label) ? meta.label : source;
+  if (meta && meta.label) return meta.label;
+  const canonical = canonicalSource(source);
+  const canonicalMeta = canonical !== source ? sourceMeta[canonical] : null;
+  return (canonicalMeta && canonicalMeta.label) ? canonicalMeta.label : canonical;
 }
 
 function feedSourceOf(item) {
@@ -1067,6 +1095,16 @@ function sourceCategory(source) {
 function canonicalSource(source) {
   const meta = sourceMeta[source];
   return (meta && meta.alias_target) ? meta.alias_target : source;
+}
+
+function displaySourceForArticle(source) {
+  return canonicalSource(source || '');
+}
+
+function sourceBadgeTitle(source) {
+  const raw = source || '';
+  const display = displaySourceForArticle(raw);
+  return raw && raw !== display ? `${raw} → ${display}` : display;
 }
 
 function categoryDisplayName(cat) {
@@ -1367,6 +1405,21 @@ async function loadSourcesTab() {
   }
 }
 
+async function refreshSourceDependentViews({ refreshSettings = false, reloadNews = false } = {}) {
+  if (reloadNews) {
+    await loadData();
+    if (refreshSettings) await loadSourcesTab();
+    return;
+  }
+  await loadSourceCategories();
+  if (refreshSettings) {
+    await loadSourcesTab();
+  } else {
+    renderFilters();
+  }
+  renderList();
+}
+
 function renderSourceManager(rows) {
   const list = document.getElementById('sourceManagerList');
   const status = document.getElementById('sourceManagerStatus');
@@ -1476,8 +1529,9 @@ async function redetectSourceArticles(idx) {
     showSettingsStatus(msg, 'ok');
     if (status) status.textContent = '';
     if (data.updated > 0) {
-      loadSourcesTab();
-      renderList();
+      await refreshSourceDependentViews({ refreshSettings: true, reloadNews: true });
+    } else {
+      await refreshSourceDependentViews({ refreshSettings: true });
     }
   } catch (e) {
     showSettingsStatus('重新识别失败: ' + e.message, 'error');
@@ -1507,7 +1561,7 @@ function renderSourceArticles(items) {
       <div class="fav-item-body">
         <div class="fav-item-title">${esc(item.title)}</div>
         <div class="fav-item-meta">
-          <span class="badge" style="${badgeStyle(feedSourceOf(item))}" title="${esc(feedSourceOf(item))}">${esc(sourceLabel(feedSourceOf(item)))}</span>
+          <span class="badge" style="${badgeStyle(displaySourceForArticle(feedSourceOf(item)))}" title="${esc(sourceBadgeTitle(feedSourceOf(item)))}">${esc(sourceLabel(displaySourceForArticle(feedSourceOf(item))))}</span>
           ${originSourceOf(item) ? `<span class="source-label-sub">出处：${esc(originSourceOf(item))}</span>` : ''}
           <span>${formatTime(item.date, item.time)}</span>
         </div>
@@ -1540,10 +1594,7 @@ async function saveSourceRow(idx) {
         : '订阅源已保存',
       'ok'
     );
-    await loadSourceCategories();
-    await loadSourcesTab();
-    renderFilters();
-    renderList();
+    await refreshSourceDependentViews({ refreshSettings: true });
   } catch (e) {
     showSettingsStatus('保存失败: ' + e.message, 'error');
   }
@@ -1562,10 +1613,7 @@ async function reinitializeSourceLabels() {
     const data = await parseJsonResponse(resp);
     if (data.error) throw new Error(data.error);
     showSettingsStatus(`订阅源标签已初始化：${data.sources || 0} 个来源，已保留手工设置`, 'ok');
-    await loadSourceCategories();
-    await loadSourcesTab();
-    renderFilters();
-    renderList();
+    await refreshSourceDependentViews({ refreshSettings: true });
   } catch (e) {
     showSettingsStatus('初始化失败: ' + e.message, 'error');
   } finally {
@@ -1586,10 +1634,7 @@ async function classifySources(force) {
     const okCount = (data.processed || []).length;
     const failCount = (data.failed || []).length;
     showSettingsStatus(`分类完成：已处理 ${okCount} 个来源，失败 ${failCount} 个，剩余 ${data.remaining || 0} 个`, failCount ? 'warn' : 'ok');
-    await loadSourceCategories();
-    await loadSourcesTab();
-    renderFilters();
-    renderList();
+    await refreshSourceDependentViews({ refreshSettings: true });
   } catch (e) {
     showSettingsStatus('AI处理失败: ' + e.message, 'error');
     if (status) status.textContent = '';
@@ -1615,10 +1660,7 @@ async function pollSourceClassifyJob(jobId) {
     if (sourceClassifyTimer) clearTimeout(sourceClassifyTimer);
     sourceClassifyTimer = null;
     showSettingsStatus(`后台分类完成：已处理 ${data.processed || 0} 个来源，失败 ${data.failed || 0} 个，剩余 ${data.remaining || 0} 个`, data.failed ? 'warn' : 'ok');
-    await loadSourceCategories();
-    await loadSourcesTab();
-    renderFilters();
-    renderList();
+    await refreshSourceDependentViews({ refreshSettings: true });
   } catch (e) {
     if (sourceClassifyTimer) clearTimeout(sourceClassifyTimer);
     sourceClassifyTimer = null;
@@ -1673,10 +1715,7 @@ async function pollSourceRedetectJob(jobId) {
     sourceRedetectTimer = null;
     if (status) status.textContent = '';
     showSettingsStatus(`来源识别完成：已检查 ${data.checked || 0} 篇文章，回查 ${data.telegram_checked || 0} 条 Telegram 原始消息，修正 ${data.updated || 0} 篇，清理 ${data.deleted_sources || 0} 个旧来源。请继续处理待分类来源。`, 'ok');
-    await loadSourceCategories();
-    await loadSourcesTab();
-    renderFilters();
-    renderList();
+    await refreshSourceDependentViews({ refreshSettings: true, reloadNews: true });
   } catch (e) {
     if (sourceRedetectTimer) clearTimeout(sourceRedetectTimer);
     sourceRedetectTimer = null;
@@ -1703,10 +1742,7 @@ async function redetectArticleSources() {
       return;
     }
     showSettingsStatus(`来源识别完成：已检查 ${data.checked || 0} 篇文章，回查 ${data.telegram_checked || 0} 条 Telegram 原始消息，修正 ${data.updated || 0} 篇，清理 ${data.deleted_sources || 0} 个旧来源。请继续处理待分类来源。`, 'ok');
-    await loadSourceCategories();
-    await loadSourcesTab();
-    renderFilters();
-    renderList();
+    await refreshSourceDependentViews({ refreshSettings: true, reloadNews: true });
   } catch (e) {
     showSettingsStatus('重新识别失败: ' + e.message, 'error');
     if (status) status.textContent = '';
@@ -2568,7 +2604,7 @@ function renderFavorites(data) {
       <div class="fav-item-body">
         <div class="fav-item-title">${esc(item.title)}</div>
         <div class="fav-item-meta">
-          <span class="badge" style="${badgeStyle(feedSourceOf(item))}" title="${esc(feedSourceOf(item))}">${esc(sourceLabel(feedSourceOf(item)))}</span>
+          <span class="badge" style="${badgeStyle(displaySourceForArticle(feedSourceOf(item)))}" title="${esc(sourceBadgeTitle(feedSourceOf(item)))}">${esc(sourceLabel(displaySourceForArticle(feedSourceOf(item))))}</span>
           ${originSourceOf(item) ? `<span class="source-label-sub">出处：${esc(originSourceOf(item))}</span>` : ''}
           <span>${formatTime(item.date, item.time)}</span>
         </div>
@@ -3125,7 +3161,7 @@ function renderList() {
       <div class="item-body">
         <div class="item-title">${esc(n.title)}</div>
         <div class="item-meta">
-          <span class="badge" style="${badgeStyle(feedSourceOf(n))}" title="${esc(feedSourceOf(n))}">${esc(sourceLabel(feedSourceOf(n)))}</span>
+          <span class="badge" style="${badgeStyle(displaySourceForArticle(feedSourceOf(n)))}" title="${esc(sourceBadgeTitle(feedSourceOf(n)))}">${esc(sourceLabel(displaySourceForArticle(feedSourceOf(n))))}</span>
           ${originSourceOf(n) ? `<span class="source-label-sub">出处：${esc(originSourceOf(n))}</span>` : ''}
           <span>${formatTime(n.date, n.time)}</span>
           ${n.has_full_content ? '<span class="full-tag">● 全文</span>' : ''}
@@ -3212,7 +3248,7 @@ function openArticle(id) {
       wrap.innerHTML = `
         <h1>${esc(data.title || '')}</h1>
         <div class="article-meta" style="position:relative">
-          <span class="badge" style="${badgeStyle(feedSourceOf(data))}" title="${esc(feedSourceOf(data))}">${esc(sourceLabel(feedSourceOf(data)))}</span>
+          <span class="badge" style="${badgeStyle(displaySourceForArticle(feedSourceOf(data)))}" title="${esc(sourceBadgeTitle(feedSourceOf(data)))}">${esc(sourceLabel(displaySourceForArticle(feedSourceOf(data))))}</span>
           ${originSourceOf(data) ? `<span class="source-label-sub">出处：${esc(originSourceOf(data))}</span>` : ''}
           <span>${formatTime(data.date || '', data.time || '')}</span>
           <span style="margin-left:auto;display:flex;gap:8px;align-items:center" id="aiActions" data-article-id="${id}">
@@ -3256,7 +3292,7 @@ function openArticle(id) {
   wrap.innerHTML = `
     <h1>${esc(n.title)}</h1>
     <div class="article-meta" style="position:relative">
-      <span class="badge" style="${badgeStyle(feedSourceOf(n))}" title="${esc(feedSourceOf(n))}">${esc(sourceLabel(feedSourceOf(n)))}</span>
+      <span class="badge" style="${badgeStyle(displaySourceForArticle(feedSourceOf(n)))}" title="${esc(sourceBadgeTitle(feedSourceOf(n)))}">${esc(sourceLabel(displaySourceForArticle(feedSourceOf(n))))}</span>
       ${originSourceOf(n) ? `<span class="source-label-sub">出处：${esc(originSourceOf(n))}</span>` : ''}
       <span>${formatTime(n.date, n.time)}</span>
       <span style="margin-left:auto;display:flex;gap:8px;align-items:center" id="aiActions" data-article-id="${id}">
