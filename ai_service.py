@@ -113,6 +113,42 @@ class AIService:
         self.provider_type = provider_type  # 'openai' or 'claude'
         self.request_timeout = int(os.environ.get("AI_REQUEST_TIMEOUT_SECONDS", "300"))
 
+    def _is_deepseek(self) -> bool:
+        return "deepseek.com" in (self.endpoint or "").lower()
+
+    def _provider_output_cap(self, requested: int, purpose: str = "default") -> int:
+        if not self._is_deepseek():
+            return requested
+        if purpose == "daily_final":
+            cap = int(os.environ.get("AI_DAILY_DEEPSEEK_FINAL_MAX_TOKENS", "3600"))
+        elif purpose == "daily_continue":
+            cap = int(os.environ.get("AI_DAILY_DEEPSEEK_CONTINUE_MAX_TOKENS", "1200"))
+        else:
+            cap = int(os.environ.get("AI_DEEPSEEK_MAX_TOKENS", "4000"))
+        return min(requested, cap)
+
+    def _format_api_error(self, resp: requests.Response) -> str:
+        body = (resp.text or "").strip()
+        detail = ""
+        if body:
+            try:
+                data = resp.json()
+                err = data.get("error") if isinstance(data, dict) else None
+                if isinstance(err, dict):
+                    detail = err.get("message") or err.get("type") or json.dumps(err, ensure_ascii=False)
+                elif isinstance(err, str):
+                    detail = err
+                elif isinstance(data, dict):
+                    detail = data.get("message") or json.dumps(data, ensure_ascii=False)
+            except Exception:
+                detail = body
+        if not detail:
+            detail = resp.reason or "empty response"
+        detail = " ".join(str(detail).split())
+        if len(detail) > 500:
+            detail = detail[:500] + "..."
+        return f"AI API HTTP {resp.status_code}: {detail}"
+
     # ─── OpenAI-compatible API call ──────────────────────────
 
     def _call_openai(self, messages: list, max_tokens: int = 2000,
@@ -141,7 +177,8 @@ class AIService:
             raise TimeoutError(
                 f"AI 服务响应超时（超过 {self.request_timeout} 秒），请稍后重试或减少日报文章数量"
             ) from e
-        resp.raise_for_status()
+        if not resp.ok:
+            raise RuntimeError(self._format_api_error(resp))
         data = resp.json()
         return data["choices"][0]["message"]["content"]
 
@@ -190,7 +227,8 @@ class AIService:
             raise TimeoutError(
                 f"AI 服务响应超时（超过 {self.request_timeout} 秒），请稍后重试或减少日报文章数量"
             ) from e
-        resp.raise_for_status()
+        if not resp.ok:
+            raise RuntimeError(self._format_api_error(resp))
         data = resp.json()
         return data["content"][0]["text"]
 
@@ -335,11 +373,24 @@ class AIService:
     # Returns {"summary": str, "stats": {...}}
 
     def daily_summary(self, articles: list[dict]) -> dict:
-        MAX_SUMMARY_CHARS = 360
-        MAX_TITLE_CHARS = 160
+        is_deepseek = self._is_deepseek()
+        MAX_SUMMARY_CHARS = int(os.environ.get(
+            "AI_DAILY_SUMMARY_CHARS",
+            "260" if is_deepseek else "360",
+        ))
+        MAX_TITLE_CHARS = int(os.environ.get(
+            "AI_DAILY_TITLE_CHARS",
+            "120" if is_deepseek else "160",
+        ))
         MAX_ARTICLES_PER_SOURCE = 100  # cap per source to avoid one dominating
-        MAX_DAILY_CANDIDATES = 80
-        MAX_CANDIDATES_PER_CATEGORY = 20
+        MAX_DAILY_CANDIDATES = int(os.environ.get(
+            "AI_DAILY_MAX_CANDIDATES",
+            "60" if is_deepseek else "80",
+        ))
+        MAX_CANDIDATES_PER_CATEGORY = int(os.environ.get(
+            "AI_DAILY_MAX_CANDIDATES_PER_CATEGORY",
+            "15" if is_deepseek else "20",
+        ))
         def article_link(article: dict) -> str:
             date = article.get("date", "") or ""
             art_id = article.get("id", 0)
@@ -553,13 +604,19 @@ class AIService:
             {"role": "user", "content": user_msg},
         ]
 
-        final_summary = self.chat(final_prompt, max_tokens=7000)
+        final_summary = self.chat(
+            final_prompt,
+            max_tokens=self._provider_output_cap(7000, "daily_final"),
+        )
         if summary_looks_truncated(final_summary):
             continuation_prompt = final_prompt + [
                 {"role": "assistant", "content": final_summary},
                 {"role": "user", "content": "你的输出被截断了。请只从最后一条未完成的位置继续输出，保持相同 Markdown 格式，不要重复已经完成的条目。"},
             ]
-            final_summary = final_summary.rstrip() + "\n" + self.chat(continuation_prompt, max_tokens=2500)
+            final_summary = final_summary.rstrip() + "\n" + self.chat(
+                continuation_prompt,
+                max_tokens=self._provider_output_cap(2500, "daily_continue"),
+            )
         final_summary = cleanup_daily_summary_output(final_summary)
         if "[🔗](" not in final_summary:
             final_summary = fallback_daily_summary(capped)
@@ -695,29 +752,20 @@ class AIService:
     # ─── Test connection ──────────────────────────────────────
 
     def test_connection(self) -> str:
-        """Verify API connectivity with a lightweight models/list request (5s timeout).
-        
-        Instead of sending a chat completion (which is slow through proxy chains),
-        we just list models — much faster and sufficient to verify API key + endpoint.
-        """
-        import requests as http_req
-        base = self.endpoint.rstrip("/")
-        if "/v1" not in base:
-            base = f"{base}/v1"
-        
-        headers = {"Content-Type": "application/json"}
-        if self.provider_type == "claude":
-            headers["x-api-key"] = self.api_key
-            headers["anthropic-version"] = "2023-06-01"
-        else:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-        
-        resp = http_req.get(f"{base}/models", headers=headers, timeout=5)
-        resp.raise_for_status()
-        data = resp.json()
-        # Return first model name as confirmation
-        models = data.get("data", []) if isinstance(data, dict) else data
-        if models and isinstance(models, list) and len(models) > 0:
-            name = models[0].get("id", models[0].get("name", "connected"))
-            return f"✅ 连接成功 — 可用模型: {name}"
-        return "✅ 连接成功 — 已获取模型列表"
+        """Verify API key, endpoint, and the configured model with a tiny chat call."""
+        old_timeout = self.request_timeout
+        self.request_timeout = min(old_timeout, int(os.environ.get("AI_TEST_TIMEOUT_SECONDS", "20")))
+        try:
+            result = self.chat(
+                [
+                    {"role": "system", "content": "Reply with pong only."},
+                    {"role": "user", "content": "ping"},
+                ],
+                max_tokens=8,
+                temperature=0,
+            )
+        finally:
+            self.request_timeout = old_timeout
+        if not (result or "").strip():
+            raise RuntimeError("AI API returned an empty chat completion")
+        return f"连接成功，当前模型可用：{self.model}"
