@@ -1564,7 +1564,6 @@ function renderSourceArticles(items) {
         <div class="fav-item-title">${esc(item.title)}</div>
         <div class="fav-item-meta">
           <span class="badge" style="${badgeStyle(displaySourceForArticle(feedSourceOf(item)))}" title="${esc(sourceBadgeTitle(feedSourceOf(item)))}">${esc(sourceLabel(displaySourceForArticle(feedSourceOf(item))))}</span>
-          ${originSourceOf(item) ? `<span class="source-label-sub">出处：${esc(originSourceOf(item))}</span>` : ''}
           <span>${formatTime(item.date, item.time)}</span>
         </div>
       </div>
@@ -2613,7 +2612,6 @@ function renderFavorites(data) {
         <div class="fav-item-title">${esc(item.title)}</div>
         <div class="fav-item-meta">
           <span class="badge" style="${badgeStyle(displaySourceForArticle(feedSourceOf(item)))}" title="${esc(sourceBadgeTitle(feedSourceOf(item)))}">${esc(sourceLabel(displaySourceForArticle(feedSourceOf(item))))}</span>
-          ${originSourceOf(item) ? `<span class="source-label-sub">出处：${esc(originSourceOf(item))}</span>` : ''}
           <span>${formatTime(item.date, item.time)}</span>
         </div>
       </div>
