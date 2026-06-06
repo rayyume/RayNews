@@ -197,6 +197,34 @@ def api_meta() -> bytes:
         return json.dumps({"error": str(e), "diagnostics": _diagnostics(None)}).encode()
 
 
+_DISPLAY_ATTRIBUTION_RE = re.compile(
+    r"(?is)(?:"
+    r"\s*<p[^>]*>\s*(?:出处\s*[:：]\s*|via\s*)"
+    r"(?:<a\b[^>]*>.*?</a>|[^<\r\n]{1,80})\s*</p>\s*|"
+    r"(?:^|[\r\n])\s*(?:出处\s*[:：]\s*|via\s*)"
+    r"(?:<a\b[^>]*>.*?</a>|[^\r\n]{1,80})\s*"
+    r")$"
+)
+
+
+def _strip_display_attribution(value: str | None) -> str | None:
+    if not value:
+        return value
+    cleaned = value
+    while True:
+        next_value = _DISPLAY_ATTRIBUTION_RE.sub("", cleaned).rstrip()
+        if next_value == cleaned:
+            return cleaned
+        cleaned = next_value
+
+
+def _clean_article_display_fields(item: dict) -> dict:
+    for field in ("summary", "body_html"):
+        if field in item:
+            item[field] = _strip_display_attribution(item.get(field))
+    return item
+
+
 def api_news_list(params: dict) -> bytes:
     """GET /api/news — paginated or incremental list (no body_html)."""
     try:
@@ -233,7 +261,7 @@ def api_news_list(params: dict) -> bytes:
             ).fetchall()
             total = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
 
-        items = [dict(r) for r in rows]
+        items = [_clean_article_display_fields(dict(r)) for r in rows]
         return json.dumps({
             "items": items,
             "total": total,
@@ -261,6 +289,7 @@ def api_news_detail(article_id: int) -> bytes:
         item["feed_source"] = item.get("feed_source") or item.get("source") or ""
         item["origin_source"] = item.get("origin_source") or ""
         item["source"] = item["feed_source"]
+        item = _clean_article_display_fields(item)
         result = json.dumps(item, ensure_ascii=False).encode()
         _article_cache[article_id] = result
         return result
