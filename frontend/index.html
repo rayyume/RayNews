@@ -420,7 +420,7 @@ body.body-scroll-lock{overflow:hidden!important}
 </div>
 
 <div class="overlay" id="overlay">
-  <header class="overlay-header"><div class="overlay-header-inner"><button class="back-btn" id="backBtn"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 12L6 8l4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>返回</button><div style="display:flex;align-items:center;gap:4px;margin-left:auto"><button class="share-btn" id="shareBtn" onclick="shareArticle()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>分享</button></div></div></header>
+  <header class="overlay-header"><div class="overlay-header-inner"><button class="back-btn" id="backBtn"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 12L6 8l4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>返回</button><div style="display:flex;align-items:center;gap:4px;margin-left:auto"><button class="share-btn" id="favBtn" onclick="toggleFavorite()" style="display:none" title="收藏"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg><span>收藏</span></button><button class="share-btn" id="shareBtn" onclick="shareArticle()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>分享</button></div></div></header>
   <div class="article-wrap" id="articleWrap"></div>
 </div>
 
@@ -3235,7 +3235,7 @@ function openArticle(id) {
   if (favBtn) {
     favBtn.classList.remove('on');
     favBtn.title = '收藏';
-    favBtn.style.display = authToken ? '' : 'none';
+    favBtn.style.display = (authToken && !(authUser && authUser.role === 'preview')) ? '' : 'none';
   }
 
   // If article not in memory, fetch metadata from API
@@ -3263,7 +3263,6 @@ function openArticle(id) {
           ${originSourceOf(data) ? `<span class="source-label-sub">出处：${esc(originSourceOf(data))}</span>` : ''}
           <span>${formatTime(data.date || '', data.time || '')}</span>
           <span style="margin-left:auto;display:flex;gap:8px;align-items:center" id="aiActions" data-article-id="${id}">
-            <button id="favBtn" onclick="toggleFavorite()" style="display:none;background:#161a2a;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:3px 10px;border-radius:100px;font-family:var(--font)" title="收藏"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin-right:3px"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg><span>收藏</span></button>
             <button class="ai-summarize-btn" onclick="aiSummarize(${id})" style="background:#161a2a;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:3px 10px;border-radius:100px;font-family:var(--font)">摘要</button>
             <button class="ai-translate-btn" onclick="aiTranslate(${id})" style="background:#161a2a;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:3px 10px;border-radius:100px;font-family:var(--font)">翻译</button>
           </span>
@@ -3308,7 +3307,6 @@ function openArticle(id) {
       ${originSourceOf(n) ? `<span class="source-label-sub">出处：${esc(originSourceOf(n))}</span>` : ''}
       <span>${formatTime(n.date, n.time)}</span>
       <span style="margin-left:auto;display:flex;gap:8px;align-items:center" id="aiActions" data-article-id="${id}">
-        <button id="favBtn" onclick="toggleFavorite()" style="display:none;background:#161a2a;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:3px 10px;border-radius:100px;font-family:var(--font)" title="收藏"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin-right:3px"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg><span>收藏</span></button>
         <button class="ai-summarize-btn" onclick="aiSummarize(${id})" style="background:#161a2a;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:3px 10px;border-radius:100px;font-family:var(--font)">摘要</button>
         <button class="ai-translate-btn" onclick="aiTranslate(${id})" style="background:#161a2a;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:3px 10px;border-radius:100px;font-family:var(--font)">翻译</button>
       </span>
