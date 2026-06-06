@@ -16,6 +16,7 @@ COPY frontend/ /usr/share/nginx/html/
 
 RUN mkdir -p /app/data /var/log/nginx /run/nginx
 
+ARG COMMIT_SHA=unknown
 COPY VERSION BETA_REVISION /app/
 RUN VERSION=$(cat /app/VERSION) && \
     BETA_REV=$(cat /app/BETA_REVISION) && \
@@ -25,6 +26,7 @@ RUN VERSION=$(cat /app/VERSION) && \
       FULL_VERSION="v${VERSION}-beta.${BETA_REV}"; \
     fi && \
     sed -i "s/{{VERSION}}/$VERSION/g" /usr/share/nginx/html/sw.js && \
+    sed -i "s/{{COMMIT_SHA}}/$COMMIT_SHA/g" /usr/share/nginx/html/sw.js && \
     sed -i "s/{{FULL_VERSION}}/$FULL_VERSION/g" /usr/share/nginx/html/index.html
 
 COPY entrypoint.sh /entrypoint.sh

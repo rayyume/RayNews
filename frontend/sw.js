@@ -1,7 +1,7 @@
 // RayNews Service Worker
-// Cache key includes VERSION — auto-busted on each release
-const CACHE = 'raynews-v{{VERSION}}';
-const API_CACHE = 'raynews-api-v{{VERSION}}';
+// Cache key includes VERSION + COMMIT_SHA — busted on every build
+const CACHE = 'raynews-v{{VERSION}}-{{COMMIT_SHA}}';
+const API_CACHE = 'raynews-api-v{{VERSION}}-{{COMMIT_SHA}}';
 
 // Files to pre-cache on install
 const PRECACHE = [
