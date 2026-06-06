@@ -2831,8 +2831,17 @@ async function triggerRefresh() {
     try { data = text ? JSON.parse(text) : {}; } catch {}
     if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
 
-    // Full reload after refresh — no timestamp boundary issues, no duplicates
-    await loadData();
+    // Silent full reload — no skeleton flash, no timestamp boundary duplicates
+    const listResp = await fetch('/api/news?size=' + INITIAL_LOAD_SIZE + '&t=' + Date.now());
+    await loadSourceCategories();
+    const listData = await listResp.json();
+    news = listData.items || [];
+    lastNewsDiagnostics = listData.diagnostics || null;
+    articleBodyCache = {};
+    document.getElementById('count').textContent = listData.total + ' 条新闻';
+    renderFilters();
+    renderList();
+
     const added = Math.max(0, news.length - beforeCount);
     showToast(added > 0 ? '✅ 已更新 ' + added + ' 篇文章' : '✅ 刷新完成');
     window.scrollTo({ top: 0, behavior: 'smooth' });
