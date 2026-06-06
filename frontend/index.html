@@ -2819,35 +2819,26 @@ async function triggerRefresh() {
     fetchOpts = { method: 'POST', headers: { 'Authorization': 'Bearer ' + authToken } };
   }
 
-  const beforeTs = news.length > 0 ? Math.max(...news.map(n => n.timestamp)) : 0;
   const beforeCount = news.length;
-  let refreshDone = false;
   let refreshError = '';
-  const refreshPromise = fetch(refreshUrl, fetchOpts)
-    .then(async resp => {
-      const text = await resp.text();
-      let data = {};
-      try { data = text ? JSON.parse(text) : {}; } catch {}
-      if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
-      return data;
-    })
-    .catch(e => {
-      refreshError = e.message || '刷新失败';
-      return null;
-    })
-    .finally(() => { refreshDone = true; });
 
   showToast('🔄 正在后台抓取...');
 
   try {
-    await refreshPromise;
+    const resp = await fetch(refreshUrl, fetchOpts);
+    const text = await resp.text();
+    let data = {};
+    try { data = text ? JSON.parse(text) : {}; } catch {}
+    if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+
+    // Full reload after refresh — no timestamp boundary issues, no duplicates
     await loadData();
-    if (refreshError) {
-      showToast('❌ 刷新失败: ' + refreshError);
-    } else {
-      const added = Math.max(0, news.length - beforeCount);
-      showToast(added > 0 ? '✅ 已更新 ' + added + ' 篇文章' : '✅ 刷新完成');
-    }
+    const added = Math.max(0, news.length - beforeCount);
+    showToast(added > 0 ? '✅ 已更新 ' + added + ' 篇文章' : '✅ 刷新完成');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  } catch (e) {
+    refreshError = e.message || '刷新失败';
+    showToast('❌ 刷新失败: ' + refreshError);
   } finally {
     setRefreshRunning(false);
     resetPullIndicator();
