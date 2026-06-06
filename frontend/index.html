@@ -2840,41 +2840,13 @@ async function triggerRefresh() {
   showToast('🔄 正在后台抓取...');
 
   try {
-    if (beforeTs === 0) {
-      await refreshPromise;
-      await loadData();
-      const added = Math.max(0, news.length - beforeCount);
-      showToast(added > 0 ? '✅ 已更新 ' + added + ' 篇文章' : '✅ 刷新完成');
-      return;
-    }
-
-    const maxWait = 120000;
-    const pollInterval = 2000;
-    const startedAt = Date.now();
-
-    while (Date.now() - startedAt < maxWait) {
-      const added = await loadSince(beforeTs);
-      if (added > 0) {
-        showToast('✅ 已更新 ' + added + ' 篇文章');
-        return;
-      }
-      if (refreshDone) break;
-      await new Promise(r => setTimeout(r, pollInterval));
-    }
-
-    if (!refreshDone) {
-      showToast('⏰ 刷新超时，请稍后重试');
-      return;
-    }
-
     await refreshPromise;
-    const added = await loadSince(beforeTs);
-    if (added > 0) {
-      showToast('✅ 已更新 ' + added + ' 篇文章');
-    } else if (refreshError) {
+    await loadData();
+    if (refreshError) {
       showToast('❌ 刷新失败: ' + refreshError);
     } else {
-      showToast('✅ 文章无更新');
+      const added = Math.max(0, news.length - beforeCount);
+      showToast(added > 0 ? '✅ 已更新 ' + added + ' 篇文章' : '✅ 刷新完成');
     }
   } finally {
     setRefreshRunning(false);
