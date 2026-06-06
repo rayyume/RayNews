@@ -1564,7 +1564,6 @@ function renderSourceArticles(items) {
         <div class="fav-item-title">${esc(item.title)}</div>
         <div class="fav-item-meta">
           <span class="badge" style="${badgeStyle(displaySourceForArticle(feedSourceOf(item)))}" title="${esc(sourceBadgeTitle(feedSourceOf(item)))}">${esc(sourceLabel(displaySourceForArticle(feedSourceOf(item))))}</span>
-          ${originSourceOf(item) ? `<span class="source-label-sub">出处：${esc(originSourceOf(item))}</span>` : ''}
           <span>${formatTime(item.date, item.time)}</span>
         </div>
       </div>
@@ -2613,7 +2612,6 @@ function renderFavorites(data) {
         <div class="fav-item-title">${esc(item.title)}</div>
         <div class="fav-item-meta">
           <span class="badge" style="${badgeStyle(displaySourceForArticle(feedSourceOf(item)))}" title="${esc(sourceBadgeTitle(feedSourceOf(item)))}">${esc(sourceLabel(displaySourceForArticle(feedSourceOf(item))))}</span>
-          ${originSourceOf(item) ? `<span class="source-label-sub">出处：${esc(originSourceOf(item))}</span>` : ''}
           <span>${formatTime(item.date, item.time)}</span>
         </div>
       </div>
@@ -3175,7 +3173,6 @@ function renderList() {
         <div class="item-title">${esc(n.title)}</div>
         <div class="item-meta">
           <span class="badge" style="${badgeStyle(displaySourceForArticle(feedSourceOf(n)))}" title="${esc(sourceBadgeTitle(feedSourceOf(n)))}">${esc(sourceLabel(displaySourceForArticle(feedSourceOf(n))))}</span>
-          ${originSourceOf(n) ? `<span class="source-label-sub">出处：${esc(originSourceOf(n))}</span>` : ''}
           <span>${formatTime(n.date, n.time)}</span>
           ${n.has_full_content ? '<span class="full-tag">● 全文</span>' : ''}
         </div>
@@ -3262,7 +3259,6 @@ function openArticle(id) {
         <h1>${esc(data.title || '')}</h1>
         <div class="article-meta" style="position:relative">
           <span class="badge" style="${badgeStyle(displaySourceForArticle(feedSourceOf(data)))}" title="${esc(sourceBadgeTitle(feedSourceOf(data)))}">${esc(sourceLabel(displaySourceForArticle(feedSourceOf(data))))}</span>
-          ${originSourceOf(data) ? `<span class="source-label-sub">出处：${esc(originSourceOf(data))}</span>` : ''}
           <span>${formatTime(data.date || '', data.time || '')}</span>
           <span style="margin-left:auto;display:flex;gap:8px;align-items:center" id="aiActions" data-article-id="${id}">
             <button class="ai-summarize-btn" onclick="aiSummarize(${id})" style="background:#161a2a;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:3px 10px;border-radius:100px;font-family:var(--font)">摘要</button>
@@ -3306,7 +3302,6 @@ function openArticle(id) {
     <h1>${esc(n.title)}</h1>
     <div class="article-meta" style="position:relative">
       <span class="badge" style="${badgeStyle(displaySourceForArticle(feedSourceOf(n)))}" title="${esc(sourceBadgeTitle(feedSourceOf(n)))}">${esc(sourceLabel(displaySourceForArticle(feedSourceOf(n))))}</span>
-      ${originSourceOf(n) ? `<span class="source-label-sub">出处：${esc(originSourceOf(n))}</span>` : ''}
       <span>${formatTime(n.date, n.time)}</span>
       <span style="margin-left:auto;display:flex;gap:8px;align-items:center" id="aiActions" data-article-id="${id}">
         <button class="ai-summarize-btn" onclick="aiSummarize(${id})" style="background:#161a2a;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:3px 10px;border-radius:100px;font-family:var(--font)">摘要</button>

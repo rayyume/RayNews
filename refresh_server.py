@@ -219,7 +219,7 @@ def _strip_display_attribution(value: str | None) -> str | None:
 
 
 def _clean_article_display_fields(item: dict) -> dict:
-    for field in ("summary", "body_html"):
+    for field in ("summary", "body_html", "origin_source"):
         if field in item:
             item[field] = _strip_display_attribution(item.get(field))
     return item
