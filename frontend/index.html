@@ -2674,11 +2674,16 @@ async function toggleFavorite() {
 async function checkFavoriteStatus(articleId) {
   try {
     const data = await apiFetch('/favorites/' + articleId + '/status');
+    const btn = document.getElementById('favBtn');
+    if (!btn) return;
+    btn.classList.remove('on');
+    btn.title = '收藏';
+    const label = btn.querySelector('span');
+    if (label) label.textContent = '收藏';
+    btn.style.display = (authToken && !(authUser && authUser.role === 'preview')) ? '' : 'none';
     if (data && data.favorited) {
-      const btn = document.getElementById('favBtn');
       btn.classList.add('on');
       btn.title = '取消收藏';
-      const label = btn.querySelector('span');
       if (label) label.textContent = '取消收藏';
     }
   } catch (e) {}
@@ -3269,6 +3274,7 @@ function openArticle(id) {
         </div>
       `;
       renderArticleBody(wrap, data, id);
+      if (authToken) checkFavoriteStatus(id);
     };
     if (articleBodyCache[id]) {
       renderFull(articleBodyCache[id]);
