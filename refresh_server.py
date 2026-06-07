@@ -232,6 +232,7 @@ def api_news_list(params: dict) -> bytes:
         size = int(params.get("size", ["99999"])[0])
         size = min(max(size, 1), 99999)
         since = params.get("since", [None])[0]
+        query = (params.get("q", [""])[0] or "").strip()
     except (ValueError, IndexError):
         return json.dumps({"error": "invalid params"}).encode()
 
@@ -252,14 +253,35 @@ def api_news_list(params: dict) -> bytes:
             ).fetchone()[0]
         else:
             offset = (page - 1) * size
-            rows = conn.execute(
+            base_select = (
                 "SELECT id, title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
                 "       COALESCE(NULLIF(feed_source, ''), source) AS feed_source, origin_source, "
                 "       time, date, timestamp, thumb, has_full_content, telegraph_url, summary "
-                "FROM articles ORDER BY timestamp DESC LIMIT ? OFFSET ?",
-                (size, offset),
-            ).fetchall()
-            total = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
+                "FROM articles"
+            )
+            if query:
+                pattern = f"%{query.lower()}%"
+                where = (
+                    " WHERE lower(title) LIKE ? "
+                    "OR lower(COALESCE(NULLIF(feed_source, ''), source)) LIKE ? "
+                    "OR lower(origin_source) LIKE ? "
+                    "OR lower(summary) LIKE ?"
+                )
+                args = (pattern, pattern, pattern, pattern)
+                rows = conn.execute(
+                    f"{base_select}{where} ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+                    (*args, size, offset),
+                ).fetchall()
+                total = conn.execute(
+                    f"SELECT COUNT(*) FROM articles{where}",
+                    args,
+                ).fetchone()[0]
+            else:
+                rows = conn.execute(
+                    f"{base_select} ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+                    (size, offset),
+                ).fetchall()
+                total = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
 
         items = [_clean_article_display_fields(dict(r)) for r in rows]
         return json.dumps({
