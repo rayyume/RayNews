@@ -740,6 +740,8 @@ let refreshInProgress = false;
 // In-memory cache for article bodies — avoids re-fetching on re-open
 let articleBodyCache = {};
 let searchDebounceTimer = null;
+let searchRequestController = null;
+let searchRequestSeq = 0;
 // User settings cache for auto-translate decisions
 let userAutoSettings = null;
 
@@ -3189,6 +3191,11 @@ function articleItemHtml(n) {
 }
 
 function openSearch() {
+  if (!authToken) {
+    showToast('请先登录后使用搜索');
+    showAuth();
+    return;
+  }
   const overlay = document.getElementById('searchOverlay');
   overlay.classList.add('open');
   overlay.setAttribute('aria-hidden', 'false');
@@ -3204,6 +3211,9 @@ function closeSearch() {
   const overlay = document.getElementById('searchOverlay');
   const input = document.getElementById('articleSearchInput');
   if (!overlay.classList.contains('open')) return;
+  clearTimeout(searchDebounceTimer);
+  searchRequestSeq++;
+  if (searchRequestController) searchRequestController.abort();
   input.blur();
   overlay.classList.remove('open');
   overlay.setAttribute('aria-hidden', 'true');
@@ -3212,6 +3222,9 @@ function closeSearch() {
 
 function clearArticleSearch() {
   const input = document.getElementById('articleSearchInput');
+  clearTimeout(searchDebounceTimer);
+  searchRequestSeq++;
+  if (searchRequestController) searchRequestController.abort();
   input.value = '';
   focusSearchInput();
   renderSearchResults();
@@ -3228,7 +3241,11 @@ function focusSearchInput() {
 
 function scheduleSearchRender() {
   clearTimeout(searchDebounceTimer);
-  searchDebounceTimer = setTimeout(renderSearchResults, 120);
+  renderSearchResults();
+  const query = (document.getElementById('articleSearchInput').value || '').trim();
+  if (searchRequestController) searchRequestController.abort();
+  if (!query) return;
+  searchDebounceTimer = setTimeout(() => fetchServerSearchResults(query), 260);
 }
 
 function renderSearchResults() {
@@ -3255,6 +3272,40 @@ function renderSearchResults() {
   }
   resultsEl.className = 'search-results';
   resultsEl.innerHTML = matches.map(articleItemHtml).join('');
+}
+
+async function fetchServerSearchResults(query) {
+  const currentInput = document.getElementById('articleSearchInput');
+  const status = document.getElementById('searchStatus');
+  const resultsEl = document.getElementById('searchResults');
+  const requestSeq = ++searchRequestSeq;
+  if (searchRequestController) searchRequestController.abort();
+  searchRequestController = new AbortController();
+  const localMatches = searchArticles(query);
+  status.textContent = `本地找到 ${localMatches.length} 条，正在搜索完整结果...`;
+  try {
+    const url = '/api/news?q=' + encodeURIComponent(query) + '&size=' + INITIAL_LOAD_SIZE + '&t=' + Date.now();
+    const resp = await fetch(url, { signal: searchRequestController.signal });
+    if (!resp.ok) throw new Error('search failed');
+    const data = await resp.json();
+    const activeQuery = (currentInput.value || '').trim();
+    if (requestSeq !== searchRequestSeq || activeQuery !== query) return;
+    const items = data.items || [];
+    status.textContent = `找到 ${data.total ?? items.length} 条与「${query}」相关的新闻`;
+    if (!items.length) {
+      resultsEl.className = '';
+      resultsEl.innerHTML = '<div class="search-empty"><div class="search-empty-icon">⌕</div><p>未找到相关文章</p></div>';
+      return;
+    }
+    resultsEl.className = 'search-results';
+    resultsEl.innerHTML = items.map(articleItemHtml).join('');
+  } catch (e) {
+    if (e.name === 'AbortError') return;
+    const activeQuery = (currentInput.value || '').trim();
+    if (activeQuery === query) {
+      status.textContent = `本地找到 ${localMatches.length} 条与「${query}」相关的新闻`;
+    }
+  }
 }
 
 function toggleSidebar() {
