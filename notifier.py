@@ -10,8 +10,9 @@ RESEND_API = "https://api.resend.com/emails"
 
 def send_email(api_key: str, to_email: str, subject: str,
                html_body: str, from_name: str = "RayNews",
-               from_email: str = "news@rayyu.me") -> dict:
+               from_email: str | None = None) -> dict:
     """Send an email via Resend API. Returns response dict."""
+    from_email = (from_email or os.environ.get("RAYNEWS_FROM_EMAIL") or "onboarding@resend.dev").strip()
     resp = requests.post(
         RESEND_API,
         headers={
@@ -49,7 +50,8 @@ def send_daily_summary_email(api_key: str, to_email: str,
     deduped = stats.get("articles_after_dedup", 0)
     selected = stats.get("articles_selected_for_ai", deduped)
     with_summary = stats.get("selected_articles_with_summary", stats.get("articles_with_summary", 0))
-    public_url = os.environ.get("RAYNEWS_PUBLIC_URL", "https://news.rayyu.me").rstrip("/")
+    public_url = os.environ.get("RAYNEWS_PUBLIC_URL", "").rstrip("/")
+    footer_link = f'<a href="{public_url}">打开 RayNews</a>' if public_url else "RayNews"
     subtitle = f"{total} 篇原始 · {deduped} 篇去重 · 入选 {selected} 篇 · 入选中 {with_summary} 篇已有摘要"
     html = f"""<!DOCTYPE html>
 <html>
@@ -76,7 +78,7 @@ hr{{border:none;border-top:1px solid rgba(255,255,255,0.08);margin:16px 0}}
 <div class="summary">
 {summary_html}
 </div>
-<p class="footer">由 RayNews 自动生成 · <a href="{public_url}">打开 RayNews</a></p>
+<p class="footer">由 RayNews 自动生成 · {footer_link}</p>
 </body>
 </html>"""
     return send_email(

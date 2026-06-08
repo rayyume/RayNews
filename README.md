@@ -84,6 +84,8 @@ docker compose up -d
 | `RAYNEWS_SECRET` | (自动保存到 `/app/data/raynews_secret`) | JWT 签名密钥；也可手动指定 |
 | `RAYNEWS_TOKEN_EXPIRY_SECONDS` | `2592000` | 登录 token 有效期（秒），默认 30 天 |
 | `RESEND_API_KEY` | (空) | Resend 邮件 API Key（用于每日摘要/测试邮件） |
+| `RAYNEWS_ADMIN_EMAIL` | (第一个管理员邮箱) | 接收新用户邀请码申请的管理员邮箱 |
+| `RAYNEWS_FROM_EMAIL` | `onboarding@resend.dev` | 邮件发件人地址；生产建议改成自己的已验证域名邮箱 |
 | `HTTP_PROXY` | (空) | HTTP 代理（如需翻墙） |
 | `HTTPS_PROXY` | (空) | HTTPS 代理 |
 | `NO_PROXY` | `localhost,127.0.0.1` | 直连白名单 |

@@ -177,6 +177,14 @@ def list_users() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_first_admin_email() -> str:
+    db = get_db()
+    row = db.execute(
+        "SELECT email FROM users WHERE role = 'admin' ORDER BY id LIMIT 1"
+    ).fetchone()
+    return row["email"] if row else ""
+
+
 def count_users() -> int:
     db = get_db()
     return db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
