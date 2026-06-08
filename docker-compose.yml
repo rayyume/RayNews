@@ -1,8 +1,8 @@
 services:
   raynews:
-    # 🧪 本地测试：用 build: . 构建本地镜像（基于当前代码）
-    # 🚀 生产部署：注释掉 build 行，取消注释 image 行（拉取正式版本）
-    # 🟡 Beta 测试：拉取 ghcr.io/rayyume/raynews:vX.Y.Z-beta.N
+    # 本地测试：使用 build: . 基于当前代码构建镜像
+    # 生产部署：注释 build 行，取消注释 image 行以拉取预构建镜像
+    # Beta 测试：使用 ghcr.io/rayyume/raynews:dev
     build: .
     # image: ghcr.io/rayyume/raynews:latest
     container_name: raynews
@@ -11,22 +11,38 @@ services:
     volumes:
       - ./data:/app/data
     environment:
+      # 必填：数据源与站点对外地址
+      - TELEGRAM_CHANNEL=${TELEGRAM_CHANNEL:-your_channel}
+      - RAYNEWS_PUBLIC_URL=${RAYNEWS_PUBLIC_URL:?请填写 RayNews 对外访问地址，例如 https://news.example.com}
+
+      # 核心运行配置
       - PYTHONUNBUFFERED=1
       - TZ=Asia/Shanghai
       - DATA_DIR=/app/data
       - RAYNEWS_SECRET=${RAYNEWS_SECRET:-}
       - RAYNEWS_TOKEN_EXPIRY_SECONDS=${RAYNEWS_TOKEN_EXPIRY_SECONDS:-2592000}
+
+      # AI 与邮件配置
+      - AI_REQUEST_TIMEOUT_SECONDS=${AI_REQUEST_TIMEOUT_SECONDS:-300}
+      - RESEND_API_KEY=${RESEND_API_KEY:-}
+
+      # 后台自动任务
       - AUTO_SUMMARY_BATCH_LIMIT=${AUTO_SUMMARY_BATCH_LIMIT:-20}
       - AUTO_SUMMARY_INTERVAL_SECONDS=${AUTO_SUMMARY_INTERVAL_SECONDS:-30}
-      - AI_REQUEST_TIMEOUT_SECONDS=${AI_REQUEST_TIMEOUT_SECONDS:-300}
       - AUTO_TRANSLATION_BATCH_LIMIT=${AUTO_TRANSLATION_BATCH_LIMIT:-5}
       - AUTO_TRANSLATION_INTERVAL_SECONDS=${AUTO_TRANSLATION_INTERVAL_SECONDS:-30}
       - AUTO_SOURCE_CLASSIFY_BATCH_LIMIT=${AUTO_SOURCE_CLASSIFY_BATCH_LIMIT:-20}
       - AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS=${AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS:-120}
-      - RAYNEWS_PUBLIC_URL=${RAYNEWS_PUBLIC_URL:-https://news.rayyu.me}
+
+      # 图片缓存配置（容量单位：MB）
+      - IMAGE_CACHE_ENABLED=${IMAGE_CACHE_ENABLED:-true}
+      - IMAGE_CACHE_MAX_MB=${IMAGE_CACHE_MAX_MB:-5120}
+      - IMAGE_CACHE_MAX_FILE_MB=${IMAGE_CACHE_MAX_FILE_MB:-10}
+      - IMAGE_CACHE_PREFETCH_BODY_LIMIT=${IMAGE_CACHE_PREFETCH_BODY_LIMIT:-3}
+
+      # 页面自定义注入
       - CUSTOM_HEAD_HTML=${CUSTOM_HEAD_HTML:-}
-      # Telegram 频道（需配合 BroadcastChannel 使用）
-      - TELEGRAM_CHANNEL=${TELEGRAM_CHANNEL:-your_channel}
+
       # 代理配置（通过 .env 注入，按需）
       - HTTP_PROXY=${HTTP_PROXY:-}
       - HTTPS_PROXY=${HTTPS_PROXY:-}

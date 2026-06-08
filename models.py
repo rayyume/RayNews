@@ -230,6 +230,15 @@ def is_favorited(user_id: int, article_id: int) -> bool:
     return row is not None
 
 
+def count_article_favorites(article_id: int) -> int:
+    db = get_db()
+    row = db.execute(
+        "SELECT COUNT(*) AS count FROM favorites WHERE article_id = ?",
+        (article_id,),
+    ).fetchone()
+    return int(row["count"] if row else 0)
+
+
 # ─── AI Config ─────────────────────────────────────────────
 
 
