@@ -94,7 +94,11 @@ docker compose up -d
 | `AUTO_TRANSLATION_INTERVAL_SECONDS` | `30` | 后台自动翻译的轮询间隔（秒） |
 | `AUTO_SOURCE_CLASSIFY_BATCH_LIMIT` | `20` | 后台 AI 处理待分类订阅源每轮处理的来源数 |
 | `AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS` | `120` | 后台 AI 处理待分类订阅源的轮询间隔（秒） |
-| `RAYNEWS_PUBLIC_URL` | `https://news.rayyu.me` | RayNews 对外访问地址，用于邮件链接等场景 |
+| `IMAGE_CACHE_ENABLED` | `true` | 是否启用文章图片本地缓存 |
+| `IMAGE_CACHE_MAX_MB` | `5120` | 普通图片缓存容量上限（MB）；收藏文章图片不参与清理 |
+| `IMAGE_CACHE_MAX_FILE_MB` | `10` | 单张图片最大缓存大小（MB） |
+| `IMAGE_CACHE_PREFETCH_BODY_LIMIT` | `3` | 抓取后后台预缓存每篇文章正文前几张图片 |
+| `RAYNEWS_PUBLIC_URL` | (必填) | RayNews 对外访问地址，用于邮件链接等场景，例如 `https://news.example.com` |
 | `CUSTOM_HEAD_HTML` | (空) | 注入到页面 `<head>` 的自定义 HTML，可用于访问统计脚本或 meta 标签 |
 
 ## 自定义构建

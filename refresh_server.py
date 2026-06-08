@@ -13,8 +13,7 @@ import re
 import time
 from pathlib import Path
 
-import requests
-
+from image_cache import cache_image, fetch_remote_image, get_cached_image, prefetch_article_images
 from source_categories import (
     CATEGORY_NAMES, CATEGORY_ORDER, cleanup_stale_source_categories,
     ensure_article_source_columns, source_rows,
@@ -117,6 +116,7 @@ def run_fetcher():
                     log.info(f"Cleaned up {deleted} stale source(s)")
             except Exception as e:
                 log.warning(f"Source cleanup failed: {e}")
+            threading.Thread(target=prefetch_recent_article_images, daemon=True).start()
         return body, 200 if is_ok else 500
     except subprocess.TimeoutExpired:
         LAST_FETCH_STATUS.update({
@@ -140,6 +140,30 @@ def run_fetcher():
         return body, 500
     finally:
         release_lock()
+
+
+def prefetch_recent_article_images(limit: int = 40) -> None:
+    """Warm the persistent image cache for recent articles without blocking refresh."""
+    try:
+        conn = sqlite3.connect(str(DB_FILE))
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT id, thumb, body_html
+            FROM articles
+            ORDER BY timestamp DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        conn.close()
+        total = 0
+        for row in rows:
+            total += prefetch_article_images(row["id"], row["body_html"], row["thumb"])
+        if total:
+            log.info(f"Prefetched {total} image(s) into cache")
+    except Exception as exc:
+        log.warning(f"Image prefetch failed: {exc}")
 
 
 def periodic_refresh():
@@ -388,13 +412,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             send_json(self, body, status)
             return
 
-        if path == "/img-proxy":
-            self._handle_img_proxy(params)
+        if path in ("/img-cache", "/img-proxy"):
+            self._handle_img_cache(params)
             return
 
         send_text(self, "not found", 404)
 
-    def _handle_img_proxy(self, params):
+    def _handle_img_cache(self, params):
         img_url = params.get("url", [None])[0]
         if not img_url:
             send_text(self, "Missing url parameter", 400)
@@ -406,25 +430,35 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         try:
-            proxy_headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Referer": f"{parsed_url.scheme}://{parsed_url.netloc}/",
-            }
-            resp = requests.get(img_url, headers=proxy_headers, timeout=15, stream=True)
-            resp.raise_for_status()
-
-            content_type = resp.headers.get("Content-Type", "application/octet-stream")
-            body = resp.content
+            cached = get_cached_image(img_url)
+            if not cached:
+                cached = cache_image(img_url)
+            if not cached:
+                body, content_type = fetch_remote_image(img_url)
+            else:
+                path, content_type = cached
+                body = path.read_bytes()
 
             self.send_response(200)
             self.send_header("Content-Type", content_type)
-            self.send_header("Cache-Control", "public, max-age=86400")
+            self.send_header("Cache-Control", "public, max-age=2592000")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
         except Exception as e:
-            log.warning(f"img-proxy failed for {img_url[:80]}: {e}")
-            send_text(self, f"Proxy error: {e}", 502)
+            cached = get_cached_image(img_url)
+            if cached:
+                path, content_type = cached
+                body = path.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Cache-Control", "public, max-age=2592000")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            log.warning(f"img-cache failed for {img_url[:80]}: {e}")
+            send_text(self, f"Image cache error: {e}", 502)
 
     def log_message(self, fmt, *args):
         log.info(fmt % args)

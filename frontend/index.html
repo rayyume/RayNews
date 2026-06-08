@@ -3544,8 +3544,8 @@ function renderArticleBody(wrap, data, id) {
     const thumbProxy = proxyImgSrc(data.thumb);
     // Normalize both URLs for comparison
     const normalizeUrl = (url) => {
-      if (url.startsWith('/img-proxy?url=')) {
-        return decodeURIComponent(url.replace('/img-proxy?url=', '')).replace(/\/+$/, '').split('?')[0];
+      if (url.startsWith('/img-cache?url=') || url.startsWith('/img-proxy?url=')) {
+        return decodeURIComponent(url.replace(/^\/img-(?:cache|proxy)\?url=/, '')).replace(/\/+$/, '').split('?')[0];
       }
       return url.replace(/\/+$/, '').split('?')[0];
     };
@@ -3733,9 +3733,8 @@ function renderMarkdown(text) {
   return html;
 }
 
-const HOTLINK_DOMAINS = ['cdnfile.sspai.com'];
-
 function resolveImageUrl(url) {
+  if (!url || url.startsWith('/img-cache?') || url.startsWith('/img-proxy?')) return url;
   // Extract underlying source from wsrv.nl proxy URLs (used by sspai articles)
   const wsrvMatch = url.match(/^https?:\/\/wsrv\.nl\/\?url=([^&]+)/);
   if (wsrvMatch) {
@@ -3744,27 +3743,22 @@ function resolveImageUrl(url) {
   return url;
 }
 
-function needsProxy(url) {
-  // Only proxy images from known hotlink-protected domains
-  try {
-    const hostname = new URL(url).hostname;
-    return HOTLINK_DOMAINS.some(d => hostname === d || hostname.endsWith('.' + d));
-  } catch {
-    return false;
-  }
-}
-
 function proxyImgSrc(url) {
-  // Return proxied URL if needed, otherwise original URL
+  // Route remote images through the persistent backend cache.
   const resolved = resolveImageUrl(url);
-  if (needsProxy(resolved)) {
-    return '/img-proxy?url=' + encodeURIComponent(resolved);
+  try {
+    const parsed = new URL(resolved, location.href);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      return '/img-cache?url=' + encodeURIComponent(parsed.href);
+    }
+  } catch {
+    return resolved;
   }
   return resolved;
 }
 
 function proxyImages(html) {
-  // Rewrite external image URLs through the backend proxy to bypass hotlink protection
+  // Rewrite external image URLs through the persistent backend cache.
   return html.replace(/(<img[^>]+src\s*=\s*["'])(https?:\/\/[^"']+)(["'][^>]*>)/gi, (match, prefix, url, suffix) => {
     return prefix + proxyImgSrc(url) + suffix;
   });

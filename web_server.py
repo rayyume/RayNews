@@ -20,12 +20,14 @@ from models import (
     get_db, create_user, get_user, get_user_by_email, get_user_by_username,
     update_user, delete_user, list_users, count_users,
     verify_password,
-    add_favorite, remove_favorite, get_favorites, is_favorited,
+    add_favorite, remove_favorite, get_favorites, get_all_favorite_article_ids, is_favorited,
+    count_article_favorites,
     get_ai_config, set_ai_config, get_user_settings, set_user_settings,
     create_invitation_code, validate_invitation_code, use_invitation_code,
 )
 from auth import init_auth, create_token, require_auth, require_role
 from ai_service import AIService
+from image_cache import pin_article_images, unpin_article_images
 from source_categories import (
     CATEGORY_NAMES, CATEGORY_ORDER, cleanup_stale_source_categories,
     clamp_weighted, ensure_article_source_columns, ensure_article_sources,
@@ -366,6 +368,44 @@ def _get_article_meta_batch(article_ids: list[int]) -> dict[int, dict]:
         return {}
 
 
+def _fetch_article_images(article_id: int) -> dict | None:
+    conn = _get_news_db()
+    if not conn:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT id, thumb, body_html FROM articles WHERE id = ?",
+            (article_id,),
+        ).fetchone()
+        return dict(row) if row else None
+    except Exception:
+        return None
+
+
+def _pin_favorite_article_images(article_id: int):
+    article = _fetch_article_images(article_id)
+    if not article:
+        return
+    pin_article_images(article_id, article.get("body_html"), article.get("thumb"))
+
+
+def _pin_favorite_articles_images(article_ids: list[int]):
+    for article_id in article_ids:
+        _pin_favorite_article_images(article_id)
+
+
+def _pin_existing_favorite_images_on_startup():
+    try:
+        article_ids = get_all_favorite_article_ids()
+        if not article_ids:
+            return
+        print(f"[image-cache] Pinning images for {len(article_ids)} existing favorite article(s)")
+        _pin_favorite_articles_images(article_ids)
+        print("[image-cache] Existing favorite image pinning finished")
+    except Exception as exc:
+        print(f"[image-cache] Existing favorite image pinning failed: {exc}")
+
+
 import sqlite3
 
 
@@ -375,6 +415,8 @@ def list_favorites():
     """List user's favorites with article metadata."""
     favs = get_favorites(g.user_id)
     article_ids = [f["article_id"] for f in favs]
+    if article_ids:
+        threading.Thread(target=_pin_favorite_articles_images, args=(article_ids,), daemon=True).start()
     articles = _get_article_meta_batch(article_ids)
     items = []
     for f in favs:
@@ -405,6 +447,7 @@ def add_favorite_route():
     fav = add_favorite(g.user_id, article_id)
     if fav is None:
         return jsonify({"error": "already favorited"}), 409
+    threading.Thread(target=_pin_favorite_article_images, args=(article_id,), daemon=True).start()
     return jsonify({"ok": True, "favorite": fav}), 201
 
 
@@ -413,6 +456,8 @@ def add_favorite_route():
 def remove_favorite_route(article_id):
     ok = remove_favorite(g.user_id, article_id)
     if ok:
+        if count_article_favorites(article_id) == 0:
+            threading.Thread(target=unpin_article_images, args=(article_id,), daemon=True).start()
         return jsonify({"ok": True}), 200
     return jsonify({"error": "not found"}), 404
 
@@ -2431,10 +2476,12 @@ if __name__ == "__main__":
     _th.Thread(target=_auto_summary_loop, daemon=True).start()
     _th.Thread(target=_auto_translation_loop, daemon=True).start()
     _th.Thread(target=_auto_source_classification_loop, daemon=True).start()
+    _th.Thread(target=_pin_existing_favorite_images_on_startup, daemon=True).start()
     print("[scheduler] Daily summary background thread started")
     print("[auto-summary] Background summary thread started")
     print("[auto-translate] Background translation thread started")
     print("[source-classify] Background source classification thread started")
+    print("[image-cache] Existing favorite image pinning thread started")
     port = int(os.environ.get("WEB_PORT", 8082))
     print(f"[web] RayNews Web Server listening on {port}")
     app.run(host="127.0.0.1", port=port, debug=False)

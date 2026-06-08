@@ -221,6 +221,14 @@ def get_favorites(user_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_all_favorite_article_ids() -> list[int]:
+    db = get_db()
+    rows = db.execute(
+        "SELECT DISTINCT article_id FROM favorites ORDER BY article_id"
+    ).fetchall()
+    return [int(r["article_id"]) for r in rows]
+
+
 def is_favorited(user_id: int, article_id: int) -> bool:
     db = get_db()
     row = db.execute(
@@ -228,6 +236,15 @@ def is_favorited(user_id: int, article_id: int) -> bool:
         (user_id, article_id),
     ).fetchone()
     return row is not None
+
+
+def count_article_favorites(article_id: int) -> int:
+    db = get_db()
+    row = db.execute(
+        "SELECT COUNT(*) AS count FROM favorites WHERE article_id = ?",
+        (article_id,),
+    ).fetchone()
+    return int(row["count"] if row else 0)
 
 
 # ─── AI Config ─────────────────────────────────────────────
