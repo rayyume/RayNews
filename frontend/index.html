@@ -643,7 +643,7 @@ body.body-scroll-lock{overflow:hidden!important}
       <div id="settingsTabNotify" style="display:none">
         <label class="ai-label">接收邮箱</label>
         <input class="ai-input" id="notifyToEmail" type="email" placeholder="you@example.com">
-        <p class="ai-hint">用于接收每日摘要和测试通知。发件人固定为 news@rayyu.me</p>
+        <p class="ai-hint">用于接收每日摘要和测试通知。发件人由服务端 RAYNEWS_FROM_EMAIL 配置。</p>
 
         <div class="ai-toggle" onclick="document.getElementById('dailySummaryToggle').click()">
           <input type="checkbox" id="dailySummaryToggle" onclick="event.stopPropagation()">

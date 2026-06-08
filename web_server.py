@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from models import (
     get_db, create_user, get_user, get_user_by_email, get_user_by_username,
-    update_user, delete_user, list_users, count_users,
+    update_user, delete_user, list_users, get_first_admin_email, count_users,
     verify_password,
     add_favorite, remove_favorite, get_favorites, get_all_favorite_article_ids, is_favorited,
     count_article_favorites,
@@ -143,6 +143,10 @@ def request_invite():
     api_key = os.environ.get("RESEND_API_KEY", "")
     if not api_key:
         return jsonify({"error": "invitation code generated but email service not configured. Contact admin."}), 500
+    admin_email = (os.environ.get("RAYNEWS_ADMIN_EMAIL") or get_first_admin_email() or "").strip()
+    if not admin_email:
+        return jsonify({"error": "invitation code generated but admin email is not configured."}), 500
+    from_email = os.environ.get("RAYNEWS_FROM_EMAIL") or "onboarding@resend.dev"
 
     try:
         from notifier import send_email
@@ -160,9 +164,9 @@ h1{{color:#6e8efb;font-size:18px}}
 <p>将此邀请码告知用户，用户在注册时输入即可完成注册。</p>
 <p class="footer">RayNews · 邀请码在注册后自动失效</p>
 </body></html>"""
-        send_email(api_key, "mail@rayyu.me",
+        send_email(api_key, admin_email,
                    f"RayNews 新用户邀请 — {email}",
-                   html, from_name="RayNews")
+                   html, from_name="RayNews", from_email=from_email)
     except Exception as e:
         print(f"[web] Failed to send invite email: {e}")
         return jsonify({"error": f"邀请码已生成，但邮件发送失败：{e}"}), 500
@@ -2398,7 +2402,7 @@ def _is_enabled_value(value) -> bool:
 @app.route("/settings/test-notification", methods=["POST"])
 @require_auth
 def test_notification():
-    """Send a test email via Resend API using env var RESEND_API_KEY, always from news@rayyu.me."""
+    """Send a test email via Resend API using configured server email settings."""
     settings = get_user_settings(g.user_id) or {}
 
     nc = settings.get("notification_config", "{}")
@@ -2420,10 +2424,11 @@ def test_notification():
 
     try:
         from notifier import send_email
+        from_email = os.environ.get("RAYNEWS_FROM_EMAIL") or "onboarding@resend.dev"
         result = send_email(api_key, to_email,
                             "RayNews 测试通知",
                             "<h2>✅ 配置成功</h2><p>这是一封来自 RayNews 的测试邮件，通知功能正常工作。</p>",
-                            from_email="news@rayyu.me")
+                            from_email=from_email)
         return jsonify({"ok": True, "id": result.get("id", "")})
     except Exception as e:
         return jsonify({"error": f"send failed: {str(e)}"}), 502

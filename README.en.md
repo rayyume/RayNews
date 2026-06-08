@@ -84,6 +84,8 @@ The fetcher runs once on startup, then every 15 minutes.
 | `RAYNEWS_SECRET` | (saved to `/app/data/raynews_secret`) | JWT signing key; can also be set manually |
 | `RAYNEWS_TOKEN_EXPIRY_SECONDS` | `2592000` | Login token lifetime in seconds, defaults to 30 days |
 | `RESEND_API_KEY` | (empty) | Resend email API key (for daily digest / test email) |
+| `RAYNEWS_ADMIN_EMAIL` | (first admin email) | Admin inbox for new-user invitation requests |
+| `RAYNEWS_FROM_EMAIL` | `onboarding@resend.dev` | Sender email address; use your verified domain address in production |
 | `HTTP_PROXY` | (empty) | HTTP proxy |
 | `HTTPS_PROXY` | (empty) | HTTPS proxy |
 | `NO_PROXY` | `localhost,127.0.0.1` | Direct connection whitelist |
