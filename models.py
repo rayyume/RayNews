@@ -221,6 +221,14 @@ def get_favorites(user_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_all_favorite_article_ids() -> list[int]:
+    db = get_db()
+    rows = db.execute(
+        "SELECT DISTINCT article_id FROM favorites ORDER BY article_id"
+    ).fetchall()
+    return [int(r["article_id"]) for r in rows]
+
+
 def is_favorited(user_id: int, article_id: int) -> bool:
     db = get_db()
     row = db.execute(

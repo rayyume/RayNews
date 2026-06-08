@@ -20,7 +20,7 @@ from models import (
     get_db, create_user, get_user, get_user_by_email, get_user_by_username,
     update_user, delete_user, list_users, count_users,
     verify_password,
-    add_favorite, remove_favorite, get_favorites, is_favorited,
+    add_favorite, remove_favorite, get_favorites, get_all_favorite_article_ids, is_favorited,
     count_article_favorites,
     get_ai_config, set_ai_config, get_user_settings, set_user_settings,
     create_invitation_code, validate_invitation_code, use_invitation_code,
@@ -392,6 +392,18 @@ def _pin_favorite_article_images(article_id: int):
 def _pin_favorite_articles_images(article_ids: list[int]):
     for article_id in article_ids:
         _pin_favorite_article_images(article_id)
+
+
+def _pin_existing_favorite_images_on_startup():
+    try:
+        article_ids = get_all_favorite_article_ids()
+        if not article_ids:
+            return
+        print(f"[image-cache] Pinning images for {len(article_ids)} existing favorite article(s)")
+        _pin_favorite_articles_images(article_ids)
+        print("[image-cache] Existing favorite image pinning finished")
+    except Exception as exc:
+        print(f"[image-cache] Existing favorite image pinning failed: {exc}")
 
 
 import sqlite3
@@ -2464,10 +2476,12 @@ if __name__ == "__main__":
     _th.Thread(target=_auto_summary_loop, daemon=True).start()
     _th.Thread(target=_auto_translation_loop, daemon=True).start()
     _th.Thread(target=_auto_source_classification_loop, daemon=True).start()
+    _th.Thread(target=_pin_existing_favorite_images_on_startup, daemon=True).start()
     print("[scheduler] Daily summary background thread started")
     print("[auto-summary] Background summary thread started")
     print("[auto-translate] Background translation thread started")
     print("[source-classify] Background source classification thread started")
+    print("[image-cache] Existing favorite image pinning thread started")
     port = int(os.environ.get("WEB_PORT", 8082))
     print(f"[web] RayNews Web Server listening on {port}")
     app.run(host="127.0.0.1", port=port, debug=False)
