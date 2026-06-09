@@ -22,6 +22,7 @@ COPY VERSION BETA_REVISION /app/
 RUN VERSION=$(cat /app/VERSION) && \
     if [ -n "$FULL_VERSION_OVERRIDE" ]; then \
       FULL_VERSION="$FULL_VERSION_OVERRIDE"; \
+      FULL_BUILD_VERSION="$FULL_VERSION_OVERRIDE"; \
     else \
       BETA_REV=$(cat /app/BETA_REVISION) && \
       if [ "$BETA_REV" = "0" ]; then \
@@ -29,8 +30,8 @@ RUN VERSION=$(cat /app/VERSION) && \
       else \
         FULL_VERSION="v${VERSION}-beta.${BETA_REV}"; \
       fi; \
+      FULL_BUILD_VERSION="${FULL_VERSION}-${COMMIT_SHA}"; \
     fi && \
-    FULL_BUILD_VERSION="${FULL_VERSION}-${COMMIT_SHA}" && \
     sed -i "s/{{VERSION}}/$VERSION/g" /usr/share/nginx/html/sw.js && \
     sed -i "s/{{COMMIT_SHA}}/$COMMIT_SHA/g" /usr/share/nginx/html/sw.js && \
     sed -i "s/{{FULL_VERSION}}/$FULL_VERSION/g" /usr/share/nginx/html/index.html && \
