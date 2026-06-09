@@ -22,7 +22,7 @@ COPY VERSION BETA_REVISION /app/
 RUN VERSION=$(cat /app/VERSION) && \
     if [ -n "$FULL_VERSION_OVERRIDE" ]; then \
       FULL_VERSION="$FULL_VERSION_OVERRIDE"; \
-      FULL_BUILD_VERSION="$FULL_VERSION_OVERRIDE"; \
+      FULL_BUILD_VERSION="${FULL_VERSION_OVERRIDE}-${COMMIT_SHA}"; \
     else \
       BETA_REV=$(cat /app/BETA_REVISION) && \
       if [ "$BETA_REV" = "0" ]; then \
