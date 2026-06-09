@@ -165,20 +165,24 @@ def run_fetcher():
 
 def article_id_snapshot() -> set[int]:
     """Return current article IDs so refresh can queue only newly inserted images."""
+    conn = None
     try:
         if not DB_FILE.exists():
             return set()
         conn = sqlite3.connect(str(DB_FILE), timeout=30)
         rows = conn.execute("SELECT id FROM articles").fetchall()
-        conn.close()
         return {int(row[0]) for row in rows}
     except Exception as exc:
         log.warning(f"Article snapshot failed: {exc}")
         return set()
+    finally:
+        if conn:
+            conn.close()
 
 
 def enqueue_new_article_images(existing_article_ids: set[int]) -> None:
     """Queue image cache warmup for newly fetched articles without blocking refresh."""
+    conn = None
     try:
         conn = sqlite3.connect(str(DB_FILE), timeout=30)
         conn.row_factory = sqlite3.Row
@@ -189,7 +193,6 @@ def enqueue_new_article_images(existing_article_ids: set[int]) -> None:
             ORDER BY timestamp DESC
             """
         ).fetchall()
-        conn.close()
         rows = [row for row in rows if int(row["id"]) not in existing_article_ids]
         queued = 0
         for row in rows:
@@ -198,6 +201,9 @@ def enqueue_new_article_images(existing_article_ids: set[int]) -> None:
             log.info(f"Queued {queued} image(s) for background cache warmup")
     except Exception as exc:
         log.warning(f"Image prefetch enqueue failed: {exc}")
+    finally:
+        if conn:
+            conn.close()
 
 
 def periodic_refresh():

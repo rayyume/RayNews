@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import logging
 import os
 import queue
 import re
@@ -16,6 +17,7 @@ from pathlib import Path
 import requests
 
 
+log = logging.getLogger("image_cache")
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
 CACHE_DIR = DATA_DIR / "image_cache"
 DB_FILE = CACHE_DIR / "cache.db"
@@ -315,19 +317,6 @@ def unpin_article_images(article_id: int) -> None:
     prune_cache()
 
 
-def prefetch_article_images(article_id: int, body_html: str | None, thumb: str | None = "", *, body_limit: int | None = None) -> int:
-    count = 0
-    if body_limit is None:
-        body_limit = IMAGE_CACHE_PREFETCH_BODY_LIMIT
-    for url, is_cover in collect_image_urls(body_html, thumb, body_limit=body_limit):
-        try:
-            if cache_image(url, is_cover=is_cover, pinned=False):
-                count += 1
-        except Exception:
-            continue
-    return count
-
-
 def _ensure_prefetch_workers() -> None:
     global _prefetch_started
     if _prefetch_started or not IMAGE_CACHE_ENABLED:
@@ -366,8 +355,8 @@ def _prefetch_worker() -> None:
                     conn.commit()
                 finally:
                     conn.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("Image prefetch failed for article=%s url=%s: %s", article_id, url[:120], exc)
         finally:
             with _prefetch_lock:
                 _prefetch_pending.discard(pending_key)
