@@ -122,11 +122,12 @@ docker compose pull
 - [x] **Favorites** — Article bookmarking with dedicated panel
 - [x] **Auto-translate** — Automatically translate English titles and articles
 - [x] **Custom AI API** — Bring your own AI API for summaries and daily digest
-- [ ] **Keyword Filter** — Hide articles containing specific words
+- [ ] **Follow Article Source and Push** — Support subscription feeds and push notifications when new articles are fetched (PWA app)
 
 ### Long-term
 
 - [ ] **Integrate [RSStT](https://github.com/Rongronggg9/RSS-to-Telegram-Bot)** — No extra deployment needed, OOTB support
+- [ ] **Keyword Filter** — Hide articles containing specific words
 - [ ] **TTS News Reading** — Text-to-speech for listening to news
 - [ ] **iOS App** — Native iOS client
 
