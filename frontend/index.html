@@ -739,6 +739,8 @@ let _pendingUpdate = false;
 let refreshInProgress = false;
 // In-memory cache for article bodies — avoids re-fetching on re-open
 let articleBodyCache = {};
+let articleBodyPromises = {};
+let activeArticleRequestId = 0;
 let searchDebounceTimer = null;
 let searchRequestController = null;
 let searchRequestSeq = 0;
@@ -3416,8 +3418,7 @@ function openArticle(id) {
     // Check favorite status
     if (authToken) checkFavoriteStatus(id);
     wrap.innerHTML = '<p style="color:var(--text-2);text-align:center;padding:60px 0">加载中...</p>';
-    const ac1 = new AbortController();
-    const t1 = setTimeout(() => ac1.abort(), 8000);
+    const requestId = ++activeArticleRequestId;
     // Try cache first
     const renderFull = (data) => {
       articleBodyCache[id] = data;
@@ -3441,27 +3442,24 @@ function openArticle(id) {
         </div>
       `;
       renderArticleBody(wrap, data, id);
+      autoDisplaySummary(id);
       if (authToken) checkFavoriteStatus(id);
     };
-    if (articleBodyCache[id]) {
-      renderFull(articleBodyCache[id]);
-      return;
-    }
-    fetch('/api/news/' + id, { signal: ac1.signal })
-      .then(r => { if (!r.ok) throw new Error('not found'); return r.json(); })
+    fetchArticleDetail(id)
       .then(data => {
-        clearTimeout(t1);
+        if (requestId !== activeArticleRequestId || document.getElementById('overlay').dataset.articleId != id) return;
         renderFull(data);
       })
-      .catch(() => {
-        clearTimeout(t1);
+      .catch((e) => {
+        if (requestId !== activeArticleRequestId || document.getElementById('overlay').dataset.articleId != id) return;
         wrap.innerHTML = '<p style="color:var(--text-2);text-align:center;padding:60px 0">文章未找到</p>';
       });
     return;
   }
 
-  // Already open for this article — skip
-  if (document.getElementById('overlay').classList.contains('open') && document.getElementById('overlay').dataset.articleId == id) return;
+  // Already open with loaded content — skip. If it is still loading, retry below.
+  const sameArticleOpen = document.getElementById('overlay').classList.contains('open') && document.getElementById('overlay').dataset.articleId == id;
+  if (sameArticleOpen && articleBodyCache[id]) return;
 
   // Show placeholder immediately while body loads
   const coverSrc = n.thumb ? proxyImgSrc(n.thumb) : '';
@@ -3499,26 +3497,40 @@ function openArticle(id) {
   }
 
   // Fetch full article body from API
-  if (articleBodyCache[id]) {
-    renderArticleBody(wrap, articleBodyCache[id], id);
-    autoDisplaySummary(id);
-  } else {
-    const ac2 = new AbortController();
-    const t2 = setTimeout(() => ac2.abort(), 8000);
-    fetch('/api/news/' + id, { signal: ac2.signal })
-      .then(r => r.json())
-      .then(data => {
-        clearTimeout(t2);
-        articleBodyCache[id] = data;
-        renderArticleBody(wrap, data, id);
-        autoDisplaySummary(id);
-      })
-      .catch(() => {
-        clearTimeout(t2);
-        const bodyEl = document.getElementById('articleBody');
-        if (bodyEl) bodyEl.innerHTML = '<p style="color:var(--text-2);padding:40px 0;text-align:center">加载失败</p>';
-      });
-  }
+  const requestId = ++activeArticleRequestId;
+  fetchArticleDetail(id)
+    .then(data => {
+      if (requestId !== activeArticleRequestId || document.getElementById('overlay').dataset.articleId != id) return;
+      renderArticleBody(wrap, data, id);
+      autoDisplaySummary(id);
+    })
+    .catch(() => {
+      if (requestId !== activeArticleRequestId || document.getElementById('overlay').dataset.articleId != id) return;
+      const bodyEl = document.getElementById('articleBody');
+      if (bodyEl) bodyEl.innerHTML = '<p style="color:var(--text-2);padding:40px 0;text-align:center">加载失败，点返回后可重试</p>';
+    });
+}
+
+function fetchArticleDetail(id, timeoutMs = 8000) {
+  if (articleBodyCache[id]) return Promise.resolve(articleBodyCache[id]);
+  if (articleBodyPromises[id]) return articleBodyPromises[id];
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  articleBodyPromises[id] = fetch('/api/news/' + id + '?t=' + Date.now(), { signal: controller.signal, cache: 'no-store' })
+    .then(r => {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    })
+    .then(data => {
+      if (!data || data.error) throw new Error((data && data.error) || 'article not found');
+      articleBodyCache[id] = data;
+      return data;
+    })
+    .finally(() => {
+      clearTimeout(timeout);
+      delete articleBodyPromises[id];
+    });
+  return articleBodyPromises[id];
 }
 
 function renderArticleBody(wrap, data, id) {
@@ -3526,11 +3538,6 @@ function renderArticleBody(wrap, data, id) {
   if (!bodyEl) return;
   if (data.body_html) {
     let html = proxyImages(data.body_html);
-    // Strip the first <img> from body_html when cover image is shown separately,
-    // to prevent duplicate cover images (the URL may differ due to CDN/proxy)
-    if (data.thumb) {
-      html = html.replace(/<img\s[^>]*>/i, '');
-    }
     bodyEl.innerHTML = html;
   } else if (data.summary) {
     bodyEl.innerHTML = `<p style="color:var(--text-2);padding:20px 0;text-align:center">暂无全文内容<br><span style="font-size:13px;color:var(--text-3)">${esc(data.summary || '')}</span></p>`;
@@ -3634,6 +3641,7 @@ let _closingOverlay = false;
 function closeArticle() {
   if (_closingOverlay) return;
   _closingOverlay = true;
+  activeArticleRequestId++;
   const overlay = document.getElementById('overlay');
   overlay.classList.remove('open');
   overlay.classList.remove('from-source-history');
@@ -3654,15 +3662,7 @@ function handleHash() {
   const match = location.hash.match(/^#\/article\/\d{2}-\d{2}-\d{2}-(\d+)$/);
   if (match) {
     const id = parseInt(match[1]);
-    // Wait for news to load, then open
-    const tryOpen = () => {
-      if (news.length > 0) {
-        openArticle(id);
-      } else {
-        setTimeout(tryOpen, 100);
-      }
-    };
-    tryOpen();
+    openArticle(id);
   }
 }
 
@@ -3735,11 +3735,6 @@ function renderMarkdown(text) {
 
 function resolveImageUrl(url) {
   if (!url || url.startsWith('/img-cache?') || url.startsWith('/img-proxy?')) return url;
-  // Extract underlying source from wsrv.nl proxy URLs (used by sspai articles)
-  const wsrvMatch = url.match(/^https?:\/\/wsrv\.nl\/\?url=([^&]+)/);
-  if (wsrvMatch) {
-    return decodeURIComponent(wsrvMatch[1]);
-  }
   return url;
 }
 
