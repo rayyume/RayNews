@@ -3511,7 +3511,7 @@ function openArticle(id) {
     });
 }
 
-function fetchArticleDetail(id, timeoutMs = 15000) {
+function fetchArticleDetail(id, timeoutMs = 8000) {
   if (articleBodyCache[id]) return Promise.resolve(articleBodyCache[id]);
   if (articleBodyPromises[id]) return articleBodyPromises[id];
   const controller = new AbortController();
@@ -3538,11 +3538,6 @@ function renderArticleBody(wrap, data, id) {
   if (!bodyEl) return;
   if (data.body_html) {
     let html = proxyImages(data.body_html);
-    // Strip the first <img> from body_html when cover image is shown separately,
-    // to prevent duplicate cover images (the URL may differ due to CDN/proxy)
-    if (data.thumb) {
-      html = html.replace(/<img\s[^>]*>/i, '');
-    }
     bodyEl.innerHTML = html;
   } else if (data.summary) {
     bodyEl.innerHTML = `<p style="color:var(--text-2);padding:20px 0;text-align:center">暂无全文内容<br><span style="font-size:13px;color:var(--text-3)">${esc(data.summary || '')}</span></p>`;
