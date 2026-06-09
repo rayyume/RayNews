@@ -97,35 +97,50 @@ def _valid_remote_url(url: str) -> bool:
     return parsed.scheme in ("http", "https") and bool(parsed.netloc)
 
 
+def _remote_image_candidates(url: str) -> list[str]:
+    parsed = urllib.parse.urlparse(url)
+    candidates = [url]
+    if parsed.hostname and parsed.hostname.lower() != "wsrv.nl":
+        candidates.append("https://wsrv.nl/?url=" + urllib.parse.quote(url, safe=""))
+    return candidates
+
+
 def fetch_remote_image(url: str) -> tuple[bytes, str]:
     url = normalize_image_url(url)
     if not _valid_remote_url(url):
         raise ValueError("invalid URL")
-    parsed = urllib.parse.urlparse(url)
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Referer": f"{parsed.scheme}://{parsed.netloc}/",
-    }
-    resp = requests.get(url, headers=headers, timeout=15, stream=True)
-    resp.raise_for_status()
+    last_error: Exception | None = None
+    for candidate in _remote_image_candidates(url):
+        parsed = urllib.parse.urlparse(candidate)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": f"{parsed.scheme}://{parsed.netloc}/",
+        }
+        try:
+            resp = requests.get(candidate, headers=headers, timeout=15, stream=True)
+            resp.raise_for_status()
 
-    content_type = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-    if content_type not in ALLOWED_IMAGE_TYPES:
-        raise ValueError(f"unsupported image type: {content_type or 'unknown'}")
+            content_type = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            if content_type not in ALLOWED_IMAGE_TYPES:
+                raise ValueError(f"unsupported image type: {content_type or 'unknown'}")
 
-    chunks: list[bytes] = []
-    total = 0
-    for chunk in resp.iter_content(chunk_size=65536):
-        if not chunk:
+            chunks: list[bytes] = []
+            total = 0
+            for chunk in resp.iter_content(chunk_size=65536):
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > MAX_FILE_BYTES:
+                    raise ValueError("image too large")
+                chunks.append(chunk)
+            body = b"".join(chunks)
+            if not body:
+                raise ValueError("empty image")
+            return body, content_type
+        except Exception as exc:
+            last_error = exc
             continue
-        total += len(chunk)
-        if total > MAX_FILE_BYTES:
-            raise ValueError("image too large")
-        chunks.append(chunk)
-    body = b"".join(chunks)
-    if not body:
-        raise ValueError("empty image")
-    return body, content_type
+    raise last_error or ValueError("image fetch failed")
 
 
 def collect_image_urls(body_html: str | None, thumb: str | None = "", body_limit: int | None = None) -> list[tuple[str, bool]]:
