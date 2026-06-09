@@ -47,6 +47,7 @@ elif [ "$CURRENT_BRANCH" = "main" ]; then
     --build-arg COMMIT_SHA="$(git rev-parse --short HEAD)" \
     -t "${IMAGE_NAME}:latest" \
     -t "${IMAGE_NAME}:v${VERSION}" \
+    -t "${IMAGE_NAME}:dev" \
     --push \
     .
 
