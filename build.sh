@@ -18,6 +18,7 @@ if [ "$CURRENT_BRANCH" = "beta" ]; then
 
   docker buildx build \
     --platform linux/amd64 \
+    --build-arg COMMIT_SHA="$(git rev-parse --short HEAD)" \
     -t "${FULL_TAG}" \
     -t "${IMAGE_NAME}:dev" \
     --push \
@@ -43,8 +44,10 @@ elif [ "$CURRENT_BRANCH" = "main" ]; then
   docker buildx build \
     --platform linux/amd64 \
     --build-arg FULL_VERSION_OVERRIDE="v${VERSION}" \
+    --build-arg COMMIT_SHA="$(git rev-parse --short HEAD)" \
     -t "${IMAGE_NAME}:latest" \
     -t "${IMAGE_NAME}:v${VERSION}" \
+    -t "${IMAGE_NAME}:dev" \
     --push \
     .
 
