@@ -1615,7 +1615,7 @@ function renderSourceArticles(items) {
   }
   body.innerHTML = items.map(item => `
     <div class="fav-item" onclick="openSourceHistoryArticle(${item.id})">
-      ${item.thumb ? `<div class="fav-item-thumb"><img src="${proxyImgSrc(item.thumb)}" alt="" loading="lazy"></div>` : ''}
+      ${item.thumb ? `<div class="fav-item-thumb"><img src="${proxyImgSrc(item.thumb)}" alt="" loading="lazy" decoding="async"></div>` : ''}
       <div class="fav-item-body">
         <div class="fav-item-title">${esc(item.title)}</div>
         <div class="fav-item-meta">
@@ -2663,7 +2663,7 @@ function renderFavorites(data) {
   }
   document.getElementById('favBody').innerHTML = items.map(item => `
     <div class="fav-item" onclick="openFavArticle(${item.article_id})">
-      ${item.thumb ? `<div class="fav-item-thumb"><img src="${proxyImgSrc(item.thumb)}" alt="" loading="lazy"></div>` : ''}
+      ${item.thumb ? `<div class="fav-item-thumb"><img src="${proxyImgSrc(item.thumb)}" alt="" loading="lazy" decoding="async"></div>` : ''}
       <div class="fav-item-body">
         <div class="fav-item-title">${esc(item.title)}</div>
         <div class="fav-item-meta">
@@ -2893,14 +2893,19 @@ async function triggerRefresh() {
     const listData = await listResp.json();
     news = listData.items || [];
     lastNewsDiagnostics = listData.diagnostics || null;
-    articleBodyCache = {};
+    const overlayOpen = document.getElementById('overlay').classList.contains('open');
+    if (!overlayOpen) articleBodyCache = {};
     document.getElementById('count').textContent = listData.total + ' 条新闻';
-    renderFilters();
-    renderList();
+    if (overlayOpen) {
+      _pendingUpdate = true;
+    } else {
+      renderFilters();
+      renderList();
+    }
 
     const added = Math.max(0, news.length - beforeCount);
     showToast(added > 0 ? '✅ 已更新 ' + added + ' 篇文章' : '✅ 刷新完成');
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    if (!overlayOpen) window.scrollTo({ top: 0, behavior: 'smooth' });
   } catch (e) {
     refreshError = e.message || '刷新失败';
     showToast('❌ 刷新失败: ' + refreshError);
@@ -3178,7 +3183,7 @@ function searchArticles(query) {
 function articleItemHtml(n) {
   return `
     <div class="item" onclick="openArticle(${n.id})">
-      ${n.thumb ? `<div class="item-thumb"><img src="${proxyImgSrc(n.thumb)}" alt="" loading="lazy"></div>` : ''}
+      ${n.thumb ? `<div class="item-thumb"><img src="${proxyImgSrc(n.thumb)}" alt="" loading="lazy" decoding="async"></div>` : ''}
       <div class="item-body">
         <div class="item-title">${esc(n.title)}</div>
         <div class="item-meta">
@@ -3397,6 +3402,31 @@ async function goHome() {
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
+function articleDetailErrorText(e) {
+  const message = (e && e.message) ? e.message : '';
+  if (e && e.name === 'AbortError') return '文章加载超时';
+  if (message.includes('not found') || message.includes('404')) return '文章未找到';
+  if (message.startsWith('HTTP')) return '文章加载失败：' + message;
+  return '文章加载失败';
+}
+
+function renderArticleRetry(targetEl, id, e, isFullPage) {
+  if (!targetEl) return;
+  const padding = isFullPage ? '60px 0' : '40px 0';
+  targetEl.innerHTML = `
+    <div style="color:var(--text-2);padding:${padding};text-align:center">
+      <p>${esc(articleDetailErrorText(e))}</p>
+      <button class="refresh-btn" onclick="retryArticleDetail(${id})" style="margin-top:12px">重试</button>
+    </div>
+  `;
+}
+
+function retryArticleDetail(id) {
+  delete articleBodyCache[id];
+  delete articleBodyPromises[id];
+  openArticle(id);
+}
+
 function openArticle(id) {
   const n = news.find(x => x.id === id);
   const wrap = document.getElementById('articleWrap');
@@ -3424,7 +3454,7 @@ function openArticle(id) {
       articleBodyCache[id] = data;
       const coverSrc = data.thumb ? proxyImgSrc(data.thumb) : '';
       const coverImg = coverSrc
-        ? `<div style="margin-bottom:20px"><img src="${coverSrc}" alt="" style="max-width:100%;border-radius:var(--radius);background:var(--bg-surface)"></div>`
+        ? `<div style="margin-bottom:20px"><img src="${coverSrc}" alt="" decoding="async" style="max-width:100%;border-radius:var(--radius);background:var(--bg-surface)"></div>`
         : '';
       wrap.innerHTML = `
         <h1>${esc(data.title || '')}</h1>
@@ -3452,7 +3482,7 @@ function openArticle(id) {
       })
       .catch((e) => {
         if (requestId !== activeArticleRequestId || document.getElementById('overlay').dataset.articleId != id) return;
-        wrap.innerHTML = '<p style="color:var(--text-2);text-align:center;padding:60px 0">文章未找到</p>';
+        renderArticleRetry(wrap, id, e, true);
       });
     return;
   }
@@ -3464,7 +3494,7 @@ function openArticle(id) {
   // Show placeholder immediately while body loads
   const coverSrc = n.thumb ? proxyImgSrc(n.thumb) : '';
   const coverImg = coverSrc
-    ? `<div style="margin-bottom:20px"><img src="${coverSrc}" alt="" style="max-width:100%;border-radius:var(--radius);background:var(--bg-surface)"></div>`
+    ? `<div style="margin-bottom:20px"><img src="${coverSrc}" alt="" decoding="async" style="max-width:100%;border-radius:var(--radius);background:var(--bg-surface)"></div>`
     : '';
   wrap.innerHTML = `
     <h1>${esc(n.title)}</h1>
@@ -3504,10 +3534,10 @@ function openArticle(id) {
       renderArticleBody(wrap, data, id);
       autoDisplaySummary(id);
     })
-    .catch(() => {
+    .catch((e) => {
       if (requestId !== activeArticleRequestId || document.getElementById('overlay').dataset.articleId != id) return;
       const bodyEl = document.getElementById('articleBody');
-      if (bodyEl) bodyEl.innerHTML = '<p style="color:var(--text-2);padding:40px 0;text-align:center">加载失败，点返回后可重试</p>';
+      renderArticleRetry(bodyEl, id, e, false);
     });
 }
 
@@ -3590,6 +3620,8 @@ function renderArticleBody(wrap, data, id) {
   }
   // Attach lightbox
   bodyEl.querySelectorAll('img').forEach(img => {
+    img.loading = img.loading || 'lazy';
+    img.decoding = 'async';
     img.addEventListener('click', e => {
       e.stopPropagation();
       document.getElementById('lbImg').src = img.src;

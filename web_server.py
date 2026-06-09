@@ -27,7 +27,7 @@ from models import (
 )
 from auth import init_auth, create_token, require_auth, require_role
 from ai_service import AIService
-from image_cache import pin_article_images, unpin_article_images
+from image_cache import enqueue_article_image_prefetch, unpin_article_images
 from source_categories import (
     CATEGORY_NAMES, CATEGORY_ORDER, cleanup_stale_source_categories,
     clamp_weighted, ensure_article_source_columns, ensure_article_sources,
@@ -390,7 +390,12 @@ def _pin_favorite_article_images(article_id: int):
     article = _fetch_article_images(article_id)
     if not article:
         return
-    pin_article_images(article_id, article.get("body_html"), article.get("thumb"))
+    enqueue_article_image_prefetch(
+        article_id,
+        article.get("body_html"),
+        article.get("thumb"),
+        pinned=True,
+    )
 
 
 def _pin_favorite_articles_images(article_ids: list[int]):

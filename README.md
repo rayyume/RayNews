@@ -100,6 +100,8 @@ docker compose up -d
 | `IMAGE_CACHE_MAX_MB` | `5120` | 普通图片缓存容量上限（MB）；收藏文章图片不参与清理 |
 | `IMAGE_CACHE_MAX_FILE_MB` | `10` | 单张图片最大缓存大小（MB） |
 | `IMAGE_CACHE_PREFETCH_BODY_LIMIT` | `3` | 抓取后后台预缓存每篇文章正文前几张图片 |
+| `IMAGE_CACHE_PREFETCH_WORKERS` | `2` | 后台图片预缓存并发 worker 数 |
+| `IMAGE_CACHE_PREFETCH_QUEUE_SIZE` | `3000` | 后台图片预缓存队列容量 |
 | `RAYNEWS_PUBLIC_URL` | (必填) | RayNews 对外访问地址，用于邮件链接等场景，例如 `https://news.example.com` |
 | `CUSTOM_HEAD_HTML` | (空) | 注入到页面 `<head>` 的自定义 HTML，可用于访问统计脚本或 meta 标签 |
 

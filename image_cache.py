@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import html
 import os
+import queue
 import re
 import sqlite3
+import threading
 import time
 import urllib.parse
 from pathlib import Path
@@ -24,6 +26,8 @@ IMAGE_CACHE_ENABLED = os.environ.get("IMAGE_CACHE_ENABLED", "true").lower() not 
 IMAGE_CACHE_MAX_MB = int(os.environ.get("IMAGE_CACHE_MAX_MB", "5120"))
 IMAGE_CACHE_MAX_FILE_MB = int(os.environ.get("IMAGE_CACHE_MAX_FILE_MB", "10"))
 IMAGE_CACHE_PREFETCH_BODY_LIMIT = int(os.environ.get("IMAGE_CACHE_PREFETCH_BODY_LIMIT", "3"))
+IMAGE_CACHE_PREFETCH_WORKERS = max(1, int(os.environ.get("IMAGE_CACHE_PREFETCH_WORKERS", "2")))
+IMAGE_CACHE_PREFETCH_QUEUE_SIZE = max(100, int(os.environ.get("IMAGE_CACHE_PREFETCH_QUEUE_SIZE", "3000")))
 
 MAX_CACHE_BYTES = max(1, IMAGE_CACHE_MAX_MB) * 1024 * 1024
 MAX_FILE_BYTES = max(1, IMAGE_CACHE_MAX_FILE_MB) * 1024 * 1024
@@ -34,6 +38,11 @@ ALLOWED_IMAGE_TYPES = {
     "image/webp": ".webp",
     "image/gif": ".gif",
 }
+
+_prefetch_queue: queue.Queue[tuple[int, str, bool, bool]] = queue.Queue(maxsize=IMAGE_CACHE_PREFETCH_QUEUE_SIZE)
+_prefetch_pending: set[str] = set()
+_prefetch_lock = threading.Lock()
+_prefetch_started = False
 
 
 def init_cache() -> None:
@@ -317,6 +326,87 @@ def prefetch_article_images(article_id: int, body_html: str | None, thumb: str |
         except Exception:
             continue
     return count
+
+
+def _ensure_prefetch_workers() -> None:
+    global _prefetch_started
+    if _prefetch_started or not IMAGE_CACHE_ENABLED:
+        return
+    with _prefetch_lock:
+        if _prefetch_started:
+            return
+        for idx in range(IMAGE_CACHE_PREFETCH_WORKERS):
+            thread = threading.Thread(
+                target=_prefetch_worker,
+                name=f"image-cache-prefetch-{idx + 1}",
+                daemon=True,
+            )
+            thread.start()
+        _prefetch_started = True
+
+
+def _prefetch_worker() -> None:
+    while True:
+        article_id, url, is_cover, pinned = _prefetch_queue.get()
+        url_hash = _url_hash(normalize_image_url(url))
+        pending_key = f"{url_hash}:{1 if pinned else 0}"
+        try:
+            cached = cache_image(url, is_cover=is_cover, pinned=pinned)
+            if cached and pinned:
+                conn = _connect()
+                try:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO image_cache_article_images (article_id, url_hash) VALUES (?, ?)",
+                        (article_id, url_hash),
+                    )
+                    conn.execute(
+                        "UPDATE image_cache_entries SET pinned = 1 WHERE url_hash = ?",
+                        (url_hash,),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+        except Exception:
+            pass
+        finally:
+            with _prefetch_lock:
+                _prefetch_pending.discard(pending_key)
+            _prefetch_queue.task_done()
+
+
+def enqueue_article_image_prefetch(
+    article_id: int,
+    body_html: str | None,
+    thumb: str | None = "",
+    *,
+    body_limit: int | None = None,
+    pinned: bool = False,
+) -> int:
+    """Queue article images for background caching and return queued count."""
+    if not IMAGE_CACHE_ENABLED:
+        return 0
+    if body_limit is None and not pinned:
+        body_limit = IMAGE_CACHE_PREFETCH_BODY_LIMIT
+    elif pinned:
+        body_limit = None
+    _ensure_prefetch_workers()
+    queued = 0
+    for url, is_cover in collect_image_urls(body_html, thumb, body_limit=body_limit):
+        url_hash = _url_hash(url)
+        if not pinned and get_cached_image(url):
+            continue
+        pending_key = f"{url_hash}:{1 if pinned else 0}"
+        with _prefetch_lock:
+            if pending_key in _prefetch_pending:
+                continue
+            _prefetch_pending.add(pending_key)
+            try:
+                _prefetch_queue.put_nowait((article_id, url, is_cover, pinned))
+            except queue.Full:
+                _prefetch_pending.discard(pending_key)
+                continue
+            queued += 1
+    return queued
 
 
 def prune_cache() -> int:

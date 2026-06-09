@@ -100,6 +100,8 @@ The fetcher runs once on startup, then every 15 minutes.
 | `IMAGE_CACHE_MAX_MB` | `5120` | Normal image cache size limit in MB; favorited article images are protected |
 | `IMAGE_CACHE_MAX_FILE_MB` | `10` | Maximum cached size per image in MB |
 | `IMAGE_CACHE_PREFETCH_BODY_LIMIT` | `3` | Number of body images to prefetch per article after refresh |
+| `IMAGE_CACHE_PREFETCH_WORKERS` | `2` | Number of background image prefetch workers |
+| `IMAGE_CACHE_PREFETCH_QUEUE_SIZE` | `3000` | Background image prefetch queue capacity |
 | `RAYNEWS_PUBLIC_URL` | (required) | Public RayNews URL used for email links and similar outbound links, e.g. `https://news.example.com` |
 | `CUSTOM_HEAD_HTML` | (empty) | Custom HTML injected into the page `<head>`, useful for analytics scripts or meta tags |
 

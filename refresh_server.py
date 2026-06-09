@@ -13,7 +13,12 @@ import re
 import time
 from pathlib import Path
 
-from image_cache import cache_image, fetch_remote_image, get_cached_image, prefetch_article_images
+from image_cache import (
+    cache_image,
+    enqueue_article_image_prefetch,
+    fetch_remote_image,
+    get_cached_image,
+)
 from source_categories import (
     CATEGORY_NAMES, CATEGORY_ORDER, cleanup_stale_source_categories,
     ensure_article_source_columns, source_rows,
@@ -35,28 +40,39 @@ LAST_FETCH_STATUS = {
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [refresh] %(message)s")
 log = logging.getLogger("refresh")
+_schema_lock = threading.Lock()
+_schema_ready = False
 
-# Persistent SQLite connection — avoid connect overhead per request
-_db_conn = None
+
+def ensure_schema_once(conn: sqlite3.Connection) -> None:
+    global _schema_ready
+    if _schema_ready:
+        return
+    with _schema_lock:
+        if _schema_ready:
+            return
+        ensure_article_source_columns(conn)
+        conn.commit()
+        _schema_ready = True
 
 
 def get_db() -> sqlite3.Connection:
-    global _db_conn
-    if _db_conn is None:
-        _db_conn = sqlite3.connect(str(DB_FILE))
-        _db_conn.row_factory = sqlite3.Row
-        _db_conn.execute("PRAGMA journal_mode=WAL")
-        _db_conn.execute("PRAGMA synchronous=NORMAL")
-        ensure_article_source_columns(_db_conn)
-    return _db_conn
+    conn = sqlite3.connect(str(DB_FILE), timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    ensure_schema_once(conn)
+    return conn
 
 
 # In-memory cache for article detail responses — invalidated on fetcher run
 _article_cache: dict[int, bytes] = {}
+_article_cache_lock = threading.Lock()
 
 
 def clear_article_cache():
-    _article_cache.clear()
+    with _article_cache_lock:
+        _article_cache.clear()
 
 
 def acquire_lock() -> bool:
@@ -82,6 +98,7 @@ def run_fetcher():
         log.warning("Fetcher already running — skipping")
         body = json.dumps({"status": "skipped", "error": "fetcher already running"}).encode()
         return body, 429
+    existing_article_ids = article_id_snapshot()
     try:
         log.info("Triggering fetcher...")
         result = subprocess.run(
@@ -116,7 +133,11 @@ def run_fetcher():
                     log.info(f"Cleaned up {deleted} stale source(s)")
             except Exception as e:
                 log.warning(f"Source cleanup failed: {e}")
-            threading.Thread(target=prefetch_recent_article_images, daemon=True).start()
+            threading.Thread(
+                target=enqueue_new_article_images,
+                args=(existing_article_ids,),
+                daemon=True,
+            ).start()
         return body, 200 if is_ok else 500
     except subprocess.TimeoutExpired:
         LAST_FETCH_STATUS.update({
@@ -142,28 +163,41 @@ def run_fetcher():
         release_lock()
 
 
-def prefetch_recent_article_images(limit: int = 40) -> None:
-    """Warm the persistent image cache for recent articles without blocking refresh."""
+def article_id_snapshot() -> set[int]:
+    """Return current article IDs so refresh can queue only newly inserted images."""
     try:
-        conn = sqlite3.connect(str(DB_FILE))
+        if not DB_FILE.exists():
+            return set()
+        conn = sqlite3.connect(str(DB_FILE), timeout=30)
+        rows = conn.execute("SELECT id FROM articles").fetchall()
+        conn.close()
+        return {int(row[0]) for row in rows}
+    except Exception as exc:
+        log.warning(f"Article snapshot failed: {exc}")
+        return set()
+
+
+def enqueue_new_article_images(existing_article_ids: set[int]) -> None:
+    """Queue image cache warmup for newly fetched articles without blocking refresh."""
+    try:
+        conn = sqlite3.connect(str(DB_FILE), timeout=30)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
             SELECT id, thumb, body_html
             FROM articles
             ORDER BY timestamp DESC
-            LIMIT ?
-            """,
-            (limit,),
+            """
         ).fetchall()
         conn.close()
-        total = 0
+        rows = [row for row in rows if int(row["id"]) not in existing_article_ids]
+        queued = 0
         for row in rows:
-            total += prefetch_article_images(row["id"], row["body_html"], row["thumb"])
-        if total:
-            log.info(f"Prefetched {total} image(s) into cache")
+            queued += enqueue_article_image_prefetch(row["id"], row["body_html"], row["thumb"])
+        if queued:
+            log.info(f"Queued {queued} image(s) for background cache warmup")
     except Exception as exc:
-        log.warning(f"Image prefetch failed: {exc}")
+        log.warning(f"Image prefetch enqueue failed: {exc}")
 
 
 def periodic_refresh():
@@ -213,12 +247,16 @@ def _diagnostics(count: int | None = None) -> dict:
 
 def api_meta() -> bytes:
     """GET /api/meta — total article count."""
+    conn = None
     try:
         conn = get_db()
         count = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
         return json.dumps({"count": count, "diagnostics": _diagnostics(count)}).encode()
     except Exception as e:
         return json.dumps({"error": str(e), "diagnostics": _diagnostics(None)}).encode()
+    finally:
+        if conn:
+            conn.close()
 
 
 _DISPLAY_ATTRIBUTION_RE = re.compile(
@@ -260,6 +298,7 @@ def api_news_list(params: dict) -> bytes:
     except (ValueError, IndexError):
         return json.dumps({"error": "invalid params"}).encode()
 
+    conn = None
     try:
         conn = get_db()
         if since:
@@ -317,13 +356,18 @@ def api_news_list(params: dict) -> bytes:
         }, ensure_ascii=False).encode()
     except Exception as e:
         return json.dumps({"error": str(e), "diagnostics": _diagnostics(None)}).encode()
+    finally:
+        if conn:
+            conn.close()
 
 
 def api_news_detail(article_id: int) -> bytes:
     """GET /api/news/<id> — single article with body_html (cached)."""
-    cached = _article_cache.get(article_id)
-    if cached is not None:
-        return cached
+    with _article_cache_lock:
+        cached = _article_cache.get(article_id)
+        if cached is not None:
+            return cached
+    conn = None
     try:
         conn = get_db()
         row = conn.execute(
@@ -337,14 +381,19 @@ def api_news_detail(article_id: int) -> bytes:
         item["source"] = item["feed_source"]
         item = _clean_article_display_fields(item)
         result = json.dumps(item, ensure_ascii=False).encode()
-        _article_cache[article_id] = result
+        with _article_cache_lock:
+            _article_cache[article_id] = result
         return result
     except Exception as e:
         return json.dumps({"error": str(e)}).encode()
+    finally:
+        if conn:
+            conn.close()
 
 
 def api_sources() -> bytes:
     """GET /api/sources — source category metadata."""
+    conn = None
     try:
         conn = get_db()
         rows = source_rows(conn)
@@ -355,6 +404,9 @@ def api_sources() -> bytes:
         }, ensure_ascii=False).encode()
     except Exception as e:
         return json.dumps({"error": str(e)}).encode()
+    finally:
+        if conn:
+            conn.close()
 
 
 def send_json(handler, data: bytes, status=200):
@@ -464,6 +516,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         log.info(fmt % args)
 
 
+class RayNewsThreadingHTTPServer(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+
+
 if __name__ == "__main__":
     port = 8081
     diag = _diagnostics(None)
@@ -478,6 +534,6 @@ if __name__ == "__main__":
         log.warning("TELEGRAM_CHANNEL is not configured or still equals your_channel")
     # Start periodic refresh in background
     threading.Timer(REFRESH_INTERVAL, periodic_refresh).start()
-    server = http.server.HTTPServer(("127.0.0.1", port), Handler)
+    server = RayNewsThreadingHTTPServer(("127.0.0.1", port), Handler)
     log.info(f"Refresh + API server listening on {port} (auto-refresh every {REFRESH_INTERVAL}s)")
     server.serve_forever()
