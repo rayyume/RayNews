@@ -17,13 +17,18 @@ COPY frontend/ /usr/share/nginx/html/
 RUN mkdir -p /app/data /var/log/nginx /run/nginx
 
 ARG COMMIT_SHA=unknown
+ARG FULL_VERSION_OVERRIDE=
 COPY VERSION BETA_REVISION /app/
 RUN VERSION=$(cat /app/VERSION) && \
-    BETA_REV=$(cat /app/BETA_REVISION) && \
-    if [ "$BETA_REV" = "0" ]; then \
-      FULL_VERSION="v${VERSION}"; \
+    if [ -n "$FULL_VERSION_OVERRIDE" ]; then \
+      FULL_VERSION="$FULL_VERSION_OVERRIDE"; \
     else \
-      FULL_VERSION="v${VERSION}-beta.${BETA_REV}"; \
+      BETA_REV=$(cat /app/BETA_REVISION) && \
+      if [ "$BETA_REV" = "0" ]; then \
+        FULL_VERSION="v${VERSION}"; \
+      else \
+        FULL_VERSION="v${VERSION}-beta.${BETA_REV}"; \
+      fi; \
     fi && \
     FULL_BUILD_VERSION="${FULL_VERSION}-${COMMIT_SHA}" && \
     sed -i "s/{{VERSION}}/$VERSION/g" /usr/share/nginx/html/sw.js && \
