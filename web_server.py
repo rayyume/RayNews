@@ -43,6 +43,7 @@ AUTO_TRANSLATION_BATCH_LIMIT = int(os.environ.get("AUTO_TRANSLATION_BATCH_LIMIT"
 AUTO_TRANSLATION_INTERVAL_SECONDS = int(os.environ.get("AUTO_TRANSLATION_INTERVAL_SECONDS", "30"))
 AUTO_TITLE_PROCESS_BATCH_LIMIT = int(os.environ.get("AUTO_TITLE_PROCESS_BATCH_LIMIT", "20"))
 AUTO_TITLE_PROCESS_INTERVAL_SECONDS = int(os.environ.get("AUTO_TITLE_PROCESS_INTERVAL_SECONDS", "10"))
+AUTO_TITLE_PROCESS_SCAN_LIMIT = int(os.environ.get("AUTO_TITLE_PROCESS_SCAN_LIMIT", "1000"))
 AUTO_SOURCE_CLASSIFY_BATCH_LIMIT = int(os.environ.get("AUTO_SOURCE_CLASSIFY_BATCH_LIMIT", "50"))
 AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS = int(os.environ.get("AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS", "60"))
 TELEGRAM_EMBED_TIMEOUT_SECONDS = int(os.environ.get("TELEGRAM_EMBED_TIMEOUT_SECONDS", "12"))
@@ -1170,7 +1171,13 @@ def _needs_title_summary(title: str) -> bool:
 
 def _clean_title_summary(title: str | None) -> str:
     text = " ".join((title or "").strip().split())
-    text = re.sub(r"^(?:标题|简写标题|短标题|总结标题)\s*[:：]\s*", "", text, flags=re.I)
+    text = re.sub(
+        r"^(?:以下是)?(?:我为你)?(?:简写后的|压缩后的|优化后的)?"
+        r"(?:标题|简写标题|短标题|总结标题)\s*[:：]\s*",
+        "",
+        text,
+        flags=re.I,
+    )
     text = re.sub(r"^\s*(?:[-*]\s+|\d{1,2}[.、]\s+)", "", text)
     return text.strip(" \t\r\n\"'“”‘’《》「」『』")
 
@@ -1189,6 +1196,50 @@ def _is_valid_title_summary(title: str | None) -> bool:
     if "…" in text or "..." in text:
         return False
     return _title_weight(text) <= TITLE_SUMMARY_MAX_WEIGHT
+
+
+def _clip_title_by_weight(title: str, max_weight: int = TITLE_SUMMARY_MAX_WEIGHT) -> str:
+    title = _clean_title_summary(title)
+    if _title_weight(title) <= max_weight:
+        return title
+    out = []
+    weight = 0
+    for ch in title:
+        ch_weight = 1 if ord(ch) < 128 else 2
+        if weight + ch_weight > max_weight:
+            break
+        out.append(ch)
+        weight += ch_weight
+    clipped = "".join(out).rstrip(" ，,、：:；;。.!！?？-_/")
+    if " " in clipped and re.search(r"[A-Za-z0-9]$", clipped):
+        clipped = clipped.rsplit(" ", 1)[0].rstrip(" ，,、：:；;。.!！?？-_/") or clipped
+    return clipped
+
+
+def _repair_title_summary(title: str | None) -> str:
+    """Turn a slightly non-compliant AI title into a valid short title when safe."""
+    text = _clean_title_summary(title)
+    if not text:
+        return ""
+    text = text.replace("……", " ").replace("...", " ").replace("…", " ")
+    text = " ".join(text.split())
+    if _is_valid_title_summary(text):
+        return text
+
+    sentence_parts = [p.strip() for p in re.split(r"[。！？!?；;]\s*", text) if p.strip()]
+    for part in sentence_parts:
+        part = _clean_title_summary(part)
+        if _is_valid_title_summary(part):
+            return part
+
+    clause_source = sentence_parts[0] if sentence_parts else text
+    clause_parts = [p.strip() for p in re.split(r"[，,、：:]\s*", clause_source) if p.strip()]
+    for part in clause_parts:
+        part = _clean_title_summary(part)
+        if _is_valid_title_summary(part):
+            return part
+
+    return _clip_title_by_weight(clause_source)
 
 
 def _ensure_article_title_columns(conn) -> None:
@@ -1433,12 +1484,12 @@ def _fetch_title_process_articles(config: dict, limit: int = AUTO_TITLE_PROCESS_
         conn.commit()
         rows = conn.execute(
             "SELECT a.id, a.title, a.original_title, a.title_source, a.title_updated_at, "
-            "       r.title_summary, r.title_summary_error_at "
+            "       r.title_summary, r.title_summary_error, r.title_summary_error_at "
             "FROM articles a "
             "LEFT JOIN ai_results r ON r.article_id = a.id "
             "WHERE a.date = ? "
             "ORDER BY a.timestamp DESC LIMIT ?",
-            (today_str, max(limit * 10, 100)),
+            (today_str, max(limit * 10, AUTO_TITLE_PROCESS_SCAN_LIMIT)),
         ).fetchall()
     except Exception as e:
         print(f"[auto-title] fetch failed: {e}")
@@ -1460,7 +1511,9 @@ def _fetch_title_process_articles(config: dict, limit: int = AUTO_TITLE_PROCESS_
         )
         if not translate_needed and not summary_needed:
             continue
-        if summary_needed and article.get("title_summary_error_at") and not cached_summary:
+        previous_error = (article.get("title_summary_error") or "").lower()
+        retryable_invalid_output = "invalid title summary" in previous_error
+        if summary_needed and article.get("title_summary_error_at") and not cached_summary and not retryable_invalid_output:
             try:
                 err_ts = time.mktime(time.strptime(article["title_summary_error_at"], "%Y-%m-%d %H:%M:%S"))
                 if now - err_ts < 6 * 3600:
@@ -1511,9 +1564,11 @@ def _process_article_title(article: dict, config: dict) -> bool:
 
     try:
         svc = svc or _title_service(config)
-        short_title = _clean_title_summary(svc.summarize_title(title, TITLE_SUMMARY_MAX_CHARS))
+        raw_title = svc.summarize_title(title, TITLE_SUMMARY_MAX_CHARS)
+        short_title = _repair_title_summary(raw_title)
         if not _is_valid_title_summary(short_title):
-            raise ValueError("AI returned invalid title summary")
+            snippet = _clean_title_summary(raw_title)[:120]
+            raise ValueError(f"AI returned invalid title summary: {snippet}")
         _save_ai_result(
             article_id,
             title_summary=short_title,
