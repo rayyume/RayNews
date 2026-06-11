@@ -458,7 +458,7 @@ body.body-scroll-lock{overflow:hidden!important}
     <div class="search-header-inner">
       <div class="search-box">
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
-        <input class="search-input" id="articleSearchInput" type="search" placeholder="搜索标题、来源、摘要" autocomplete="off" enterkeyhint="search" oninput="scheduleSearchRender()">
+        <input class="search-input" id="articleSearchInput" type="text" placeholder="搜索标题、来源、摘要" autocomplete="off" enterkeyhint="search" oninput="scheduleSearchRender()">
         <button class="search-clear" id="articleSearchClear" onclick="clearArticleSearch()" title="清空搜索" aria-label="清空搜索">×</button>
       </div>
       <button class="search-close" onclick="closeSearch()">关闭</button>
@@ -3332,6 +3332,7 @@ function renderList() {
     filtered = news;
     setTimeout(() => renderFilters(), 0);
   }
+  if (!authToken) currentPage = 1;
   const el = document.getElementById('list');
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   if (currentPage > totalPages) currentPage = totalPages;
@@ -3376,6 +3377,11 @@ function renderPagination(totalPages) {
 }
 
 function goToPage(page) {
+  if (!authToken) {
+    showToast('请先登录');
+    showAuth();
+    return;
+  }
   // Preview users: no pagination
   if (authUser && authUser.role === 'preview') return;
   const filtered = filteredNews();
