@@ -49,6 +49,7 @@ AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS = int(os.environ.get("AUTO_SOURCE_CLASSIFY
 TELEGRAM_EMBED_TIMEOUT_SECONDS = int(os.environ.get("TELEGRAM_EMBED_TIMEOUT_SECONDS", "12"))
 TITLE_SUMMARY_MAX_CHARS = int(os.environ.get("TITLE_SUMMARY_MAX_CHARS", "30"))
 TITLE_SUMMARY_MAX_WEIGHT = TITLE_SUMMARY_MAX_CHARS * 2
+TITLE_SUMMARY_MAX_TOTAL_CHARS = int(os.environ.get("TITLE_SUMMARY_MAX_TOTAL_CHARS", "40"))
 
 # ─── App Setup ────────────────────────────────────────────────
 
@@ -1165,8 +1166,19 @@ def _title_weight(title: str) -> int:
     return sum(1 if ord(ch) < 128 else 2 for ch in (title or "").strip())
 
 
+def _title_cjk_count(title: str) -> int:
+    return len(re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff]", title or ""))
+
+
+def _title_total_chars(title: str) -> int:
+    return len(re.sub(r"\s+", "", title or ""))
+
+
 def _needs_title_summary(title: str) -> bool:
-    return _title_weight(title) > TITLE_SUMMARY_MAX_WEIGHT
+    return (
+        _title_cjk_count(title) > TITLE_SUMMARY_MAX_CHARS
+        or _title_total_chars(title) > TITLE_SUMMARY_MAX_TOTAL_CHARS
+    )
 
 
 def _clean_title_summary(title: str | None) -> str:
@@ -1565,9 +1577,9 @@ def _process_article_title(article: dict, config: dict) -> bool:
     try:
         svc = svc or _title_service(config)
         raw_title = svc.summarize_title(title, TITLE_SUMMARY_MAX_CHARS)
-        short_title = _repair_title_summary(raw_title)
+        short_title = _repair_title_summary(raw_title) or _repair_title_summary(title)
         if not _is_valid_title_summary(short_title):
-            snippet = _clean_title_summary(raw_title)[:120]
+            snippet = _clean_title_summary(raw_title)[:120] or "<empty>"
             raise ValueError(f"AI returned invalid title summary: {snippet}")
         _save_ai_result(
             article_id,

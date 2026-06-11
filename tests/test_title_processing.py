@@ -26,6 +26,13 @@ class TitleProcessingTests(unittest.TestCase):
     def test_overlong_title_uses_chinese_character_budget(self):
         self.assertFalse(web_server._needs_title_summary(SHORT_CHINESE_TITLE))
         self.assertTrue(web_server._needs_title_summary(LONG_CHINESE_TITLE))
+        self.assertFalse(web_server._needs_title_summary(
+            "\u6ce1\u6ce1\u739b\u7279\u56de\u5e94\u4f9d\u8d56\u5355\u4e00\u7206\u6b3e\u62c5\u5fe7 "
+            "\u79f0\u7f8e\u56fd\u975eLabubu\u591a\u5143\u5316\u9500\u552e\u989d\u5df2\u536050%"
+        ))
+        self.assertFalse(web_server._needs_title_summary(
+            "OpenAI Codex CLI 支持 GPT-5 Code 模型"
+        ))
 
     def test_clean_title_summary_rejects_explanatory_output(self):
         self.assertEqual(web_server._clean_title_summary(f"\u300c{SHORTENED_CHINESE_TITLE}\u300d"), SHORTENED_CHINESE_TITLE)
@@ -43,6 +50,15 @@ class TitleProcessingTests(unittest.TestCase):
         repaired = web_server._repair_title_summary(raw)
         self.assertTrue(web_server._is_valid_title_summary(repaired))
         self.assertNotIn("…", repaired)
+
+    def test_empty_ai_title_summary_can_fallback_to_original_title(self):
+        original = (
+            "macOS 27 \u8d77\u82f9\u679c\u79fb\u9664\u4e86 AFP \u534f\u8bae\uff0c"
+            "\u8001\u6b3e Time Capsule \u4e0d\u80fd\u518d\u7ed9 Time Machine "
+            "\u505a\u65e0\u7ebf\u5907\u4efd\u4e86"
+        )
+        repaired = web_server._repair_title_summary("") or web_server._repair_title_summary(original)
+        self.assertTrue(web_server._is_valid_title_summary(repaired))
 
     def test_save_article_title_update_preserves_original_title(self):
         db_path = temp_db_path()
