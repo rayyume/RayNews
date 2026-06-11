@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import json
+import sqlite3
 import threading
 import time
 import uuid
@@ -40,9 +41,13 @@ AUTO_SUMMARY_BATCH_LIMIT = int(os.environ.get("AUTO_SUMMARY_BATCH_LIMIT", "20"))
 AUTO_SUMMARY_INTERVAL_SECONDS = int(os.environ.get("AUTO_SUMMARY_INTERVAL_SECONDS", "30"))
 AUTO_TRANSLATION_BATCH_LIMIT = int(os.environ.get("AUTO_TRANSLATION_BATCH_LIMIT", "5"))
 AUTO_TRANSLATION_INTERVAL_SECONDS = int(os.environ.get("AUTO_TRANSLATION_INTERVAL_SECONDS", "30"))
+AUTO_TITLE_PROCESS_BATCH_LIMIT = int(os.environ.get("AUTO_TITLE_PROCESS_BATCH_LIMIT", "20"))
+AUTO_TITLE_PROCESS_INTERVAL_SECONDS = int(os.environ.get("AUTO_TITLE_PROCESS_INTERVAL_SECONDS", "10"))
 AUTO_SOURCE_CLASSIFY_BATCH_LIMIT = int(os.environ.get("AUTO_SOURCE_CLASSIFY_BATCH_LIMIT", "50"))
 AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS = int(os.environ.get("AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS", "60"))
 TELEGRAM_EMBED_TIMEOUT_SECONDS = int(os.environ.get("TELEGRAM_EMBED_TIMEOUT_SECONDS", "12"))
+TITLE_SUMMARY_MAX_CHARS = int(os.environ.get("TITLE_SUMMARY_MAX_CHARS", "30"))
+TITLE_SUMMARY_MAX_WEIGHT = TITLE_SUMMARY_MAX_CHARS * 2
 
 # ─── App Setup ────────────────────────────────────────────────
 
@@ -678,12 +683,7 @@ def ai_translate_full(article_id):
         _save_ai_result(article_id, translation=cache_data)
         # Also update article title in news.db so home page shows translated title
         if translated_title:
-            try:
-                _ndb = _get_news_db()
-                _ndb.execute("UPDATE articles SET title = ? WHERE id = ?", (translated_title, article_id))
-                _ndb.commit()
-            except Exception:
-                pass  # non-fatal if title update fails
+            _save_article_title_update(article_id, translated_title, "translation")
         return jsonify({"translated_html": translated_html, "translated_title": translated_title})
     except Exception as e:
         return jsonify({"error": f"AI request failed: {str(e)}"}), 502
@@ -983,6 +983,7 @@ def _run_daily_summary_job(job_id, user_id, config):
 _daily_summary_sent = set()  # {(user_id, date), ...}
 _auto_summary_lock = threading.Lock()
 _auto_translation_lock = threading.Lock()
+_auto_title_process_lock = threading.Lock()
 _auto_source_classify_lock = threading.Lock()
 
 
@@ -1158,6 +1159,76 @@ def _needs_translation(text: str) -> bool:
     return cjk_count == 0 or (latin_count >= 40 and latin_count > cjk_count * 2)
 
 
+def _title_weight(title: str) -> int:
+    """Count Chinese-like characters as 2 and ASCII characters as 1."""
+    return sum(1 if ord(ch) < 128 else 2 for ch in (title or "").strip())
+
+
+def _needs_title_summary(title: str) -> bool:
+    return _title_weight(title) > TITLE_SUMMARY_MAX_WEIGHT
+
+
+def _clean_title_summary(title: str | None) -> str:
+    text = " ".join((title or "").strip().split())
+    text = re.sub(r"^(?:标题|简写标题|短标题|总结标题)\s*[:：]\s*", "", text, flags=re.I)
+    text = re.sub(r"^\s*(?:[-*]\s+|\d{1,2}[.、]\s+)", "", text)
+    return text.strip(" \t\r\n\"'“”‘’《》「」『』")
+
+
+def _is_valid_title_summary(title: str | None) -> bool:
+    text = _clean_title_summary(title)
+    if not text:
+        return False
+    lowered = text.lower()
+    bad_markers = (
+        "以下是", "简写后的", "无法", "不能", "请提供", "请补充",
+        "as an ai", "i cannot", "i'm unable",
+    )
+    if any(marker in lowered for marker in bad_markers):
+        return False
+    if "…" in text or "..." in text:
+        return False
+    return _title_weight(text) <= TITLE_SUMMARY_MAX_WEIGHT
+
+
+def _ensure_article_title_columns(conn) -> None:
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(articles)").fetchall()}
+    if "original_title" not in cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN original_title TEXT")
+    if "title_updated_at" not in cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN title_updated_at TEXT")
+    if "title_source" not in cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN title_source TEXT")
+
+
+def _save_article_title_update(article_id: int, title: str | None,
+                               title_source: str = "ai") -> bool:
+    title = _clean_title_summary(title)
+    if not title or not os.path.exists(NEWS_DB):
+        return False
+    conn = sqlite3.connect(NEWS_DB, timeout=30)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        _ensure_article_title_columns(conn)
+        row = conn.execute("SELECT title FROM articles WHERE id = ?", (article_id,)).fetchone()
+        if not row:
+            return False
+        current_title = row[0] or ""
+        if current_title == title:
+            return False
+        conn.execute(
+            "UPDATE articles SET "
+            "original_title = CASE WHEN original_title IS NULL OR original_title = '' THEN title ELSE original_title END, "
+            "title = ?, title_updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now'), title_source = ? "
+            "WHERE id = ?",
+            (title, title_source, article_id),
+        )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
 def _fetch_untranslated_articles(config: dict, limit: int = AUTO_TRANSLATION_BATCH_LIMIT) -> list[dict]:
     """Fetch recent today articles that need background title/body translation."""
     import datetime as _dt
@@ -1213,8 +1284,7 @@ def _save_article_translation(article_id: int, title: str | None = None,
     sets = []
     vals = []
     if title:
-        sets.append("title = ?")
-        vals.append(title)
+        _save_article_title_update(article_id, title, "translation")
     if body_html:
         sets.append("body_html = ?")
         vals.append(body_html)
@@ -1322,6 +1392,176 @@ def _auto_translation_loop():
         except Exception as e:
             print(f"[auto-translate] Error in loop: {e}")
         _time.sleep(AUTO_TRANSLATION_INTERVAL_SECONDS)
+
+
+def _get_auto_title_process_users() -> list[dict]:
+    """Users who enabled title translation/shortening and have usable AI config."""
+    try:
+        db = get_db()
+        rows = db.execute(
+            "SELECT s.user_id, s.auto_translate_title, s.auto_title_summary_enabled, "
+            "c.endpoint, c.model, c.api_key, c.provider_type, c.enabled "
+            "FROM user_settings s "
+            "JOIN ai_configs c ON c.user_id = s.user_id "
+            "WHERE (s.auto_translate_title = 1 OR s.auto_title_summary_enabled = 1) "
+            "AND c.enabled = 1 "
+            "AND c.api_key != ''"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        print(f"[auto-title] settings DB error: {e}")
+        return []
+
+
+def _fetch_title_process_articles(config: dict, limit: int = AUTO_TITLE_PROCESS_BATCH_LIMIT) -> list[dict]:
+    """Fetch today's articles needing title translation or AI title shortening."""
+    import datetime as _dt
+    if not os.path.exists(NEWS_DB):
+        return []
+    translate_title = bool(config.get("auto_translate_title"))
+    summarize_title = bool(config.get("auto_title_summary_enabled"))
+    if not translate_title and not summarize_title:
+        return []
+    conn = None
+    try:
+        _init_ai_results_table()
+        today_str = _dt.datetime.now().strftime("%Y-%m-%d")
+        conn = sqlite3.connect(NEWS_DB, timeout=30)
+        conn.row_factory = sqlite3.Row
+        ensure_article_source_columns(conn)
+        _ensure_article_title_columns(conn)
+        conn.commit()
+        rows = conn.execute(
+            "SELECT a.id, a.title, a.original_title, a.title_source, a.title_updated_at, "
+            "       r.title_summary, r.title_summary_error_at "
+            "FROM articles a "
+            "LEFT JOIN ai_results r ON r.article_id = a.id "
+            "WHERE a.date = ? "
+            "ORDER BY a.timestamp DESC LIMIT ?",
+            (today_str, max(limit * 10, 100)),
+        ).fetchall()
+    except Exception as e:
+        print(f"[auto-title] fetch failed: {e}")
+        return []
+    finally:
+        if conn:
+            conn.close()
+
+    selected = []
+    now = time.time()
+    for row in rows:
+        article = dict(row)
+        title = article.get("title") or ""
+        cached_summary = _clean_title_summary(article.get("title_summary"))
+        translate_needed = translate_title and _needs_translation(title)
+        summary_needed = summarize_title and (
+            (cached_summary and title != cached_summary)
+            or (not cached_summary and _needs_title_summary(title))
+        )
+        if not translate_needed and not summary_needed:
+            continue
+        if summary_needed and article.get("title_summary_error_at") and not cached_summary:
+            try:
+                err_ts = time.mktime(time.strptime(article["title_summary_error_at"], "%Y-%m-%d %H:%M:%S"))
+                if now - err_ts < 6 * 3600:
+                    summary_needed = False
+            except Exception:
+                pass
+        if translate_needed or summary_needed:
+            article["translate_title_needed"] = translate_needed
+            article["title_summary_needed"] = summary_needed
+            selected.append(article)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _title_service(config: dict) -> AIService:
+    return AIService(
+        api_key=config["api_key"],
+        endpoint=config["endpoint"],
+        model=config["model"],
+        provider_type=config.get("provider_type", "openai"),
+    )
+
+
+def _process_article_title(article: dict, config: dict) -> bool:
+    article_id = article["id"]
+    title = article.get("title") or ""
+    changed = False
+    svc = None
+
+    if article.get("translate_title_needed") and _needs_translation(title):
+        svc = _title_service(config)
+        translated = _clean_title_summary(svc.translate_title(title, "zh-CN"))
+        if translated:
+            if _save_article_title_update(article_id, translated, "translation"):
+                changed = True
+            title = translated
+
+    if not config.get("auto_title_summary_enabled"):
+        return changed
+    if not _needs_title_summary(title):
+        return changed
+
+    cached = _get_ai_result(article_id) or {}
+    cached_summary = _clean_title_summary(cached.get("title_summary"))
+    if cached_summary and _is_valid_title_summary(cached_summary):
+        return _save_article_title_update(article_id, cached_summary, "title_summary") or changed
+
+    try:
+        svc = svc or _title_service(config)
+        short_title = _clean_title_summary(svc.summarize_title(title, TITLE_SUMMARY_MAX_CHARS))
+        if not _is_valid_title_summary(short_title):
+            raise ValueError("AI returned invalid title summary")
+        _save_ai_result(
+            article_id,
+            title_summary=short_title,
+            title_summary_provider=config.get("provider_type") or "openai",
+            title_summary_model=config.get("model") or "",
+            title_summary_by_user_id=config.get("user_id"),
+        )
+        if _save_article_title_update(article_id, short_title, "title_summary"):
+            changed = True
+    except Exception as e:
+        _save_ai_result(article_id, title_summary_error=str(e))
+        raise
+    return changed
+
+
+def _run_auto_title_process_once():
+    """Translate and shorten today's titles for opted-in users."""
+    if not _auto_title_process_lock.acquire(blocking=False):
+        return
+    try:
+        users = _get_auto_title_process_users()
+        if not users:
+            return
+        for config in users:
+            articles = _fetch_title_process_articles(config, AUTO_TITLE_PROCESS_BATCH_LIMIT)
+            if not articles:
+                continue
+            print(f"[auto-title] User {config['user_id']}: processing {len(articles)} title(s)")
+            for article in articles:
+                try:
+                    if _process_article_title(article, config):
+                        print(f"[auto-title] Updated article {article['id']}: {article.get('title', '')[:50]}")
+                except Exception as e:
+                    print(f"[auto-title] Article {article.get('id')}: failed: {e}")
+    finally:
+        _auto_title_process_lock.release()
+
+
+def _auto_title_process_loop():
+    """Background loop for fast title translation/shortening."""
+    import time as _time
+    _time.sleep(20)
+    while True:
+        try:
+            _run_auto_title_process_once()
+        except Exception as e:
+            print(f"[auto-title] Error in loop: {e}")
+        _time.sleep(AUTO_TITLE_PROCESS_INTERVAL_SECONDS)
 
 
 def _get_source_classification_config() -> dict | None:
@@ -1754,6 +1994,12 @@ def _init_ai_results_table():
                 article_id   INTEGER PRIMARY KEY,
                 summary      TEXT,
                 translation  TEXT,
+                title_summary TEXT,
+                title_summary_error TEXT,
+                title_summary_error_at TEXT,
+                title_summary_provider TEXT,
+                title_summary_model TEXT,
+                title_summary_by_user_id INTEGER,
                 summary_error TEXT,
                 summary_error_at TEXT,
                 updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
@@ -1767,6 +2013,18 @@ def _init_ai_results_table():
             conn.execute("ALTER TABLE ai_results ADD COLUMN summary_error TEXT")
         if "summary_error_at" not in cols:
             conn.execute("ALTER TABLE ai_results ADD COLUMN summary_error_at TEXT")
+        if "title_summary" not in cols:
+            conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary TEXT")
+        if "title_summary_error" not in cols:
+            conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_error TEXT")
+        if "title_summary_error_at" not in cols:
+            conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_error_at TEXT")
+        if "title_summary_provider" not in cols:
+            conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_provider TEXT")
+        if "title_summary_model" not in cols:
+            conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_model TEXT")
+        if "title_summary_by_user_id" not in cols:
+            conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_by_user_id INTEGER")
         conn.commit()
         conn.close()
     except Exception:
@@ -1783,7 +2041,9 @@ def _get_ai_result(article_id: int) -> dict | None:
         conn.row_factory = sqlite3.Row
         _init_ai_results_table()
         row = conn.execute(
-            "SELECT summary, translation, summary_error, summary_error_at "
+            "SELECT summary, translation, summary_error, summary_error_at, "
+            "title_summary, title_summary_error, title_summary_error_at, "
+            "title_summary_provider, title_summary_model, title_summary_by_user_id "
             "FROM ai_results WHERE article_id = ?",
             (article_id,),
         ).fetchone()
@@ -1795,7 +2055,12 @@ def _get_ai_result(article_id: int) -> dict | None:
 
 def _save_ai_result(article_id: int, summary: str | None = None,
                     translation: str | None = None,
-                    summary_error: str | None = None):
+                    summary_error: str | None = None,
+                    title_summary: str | None = None,
+                    title_summary_error: str | None = None,
+                    title_summary_provider: str | None = None,
+                    title_summary_model: str | None = None,
+                    title_summary_by_user_id: int | None = None):
     """Save or update AI result for an article."""
     import sqlite3
     if not os.path.exists(NEWS_DB):
@@ -1818,6 +2083,24 @@ def _save_ai_result(article_id: int, summary: str | None = None,
                 sets.append("summary_error = ?")
                 vals.append(summary_error[:500])
                 sets.append("summary_error_at = datetime('now')")
+            if title_summary is not None:
+                sets.append("title_summary = ?")
+                vals.append(title_summary)
+                sets.append("title_summary_error = NULL")
+                sets.append("title_summary_error_at = NULL")
+            if title_summary_error is not None:
+                sets.append("title_summary_error = ?")
+                vals.append(title_summary_error[:500])
+                sets.append("title_summary_error_at = datetime('now')")
+            if title_summary_provider is not None:
+                sets.append("title_summary_provider = ?")
+                vals.append(title_summary_provider)
+            if title_summary_model is not None:
+                sets.append("title_summary_model = ?")
+                vals.append(title_summary_model)
+            if title_summary_by_user_id is not None:
+                sets.append("title_summary_by_user_id = ?")
+                vals.append(title_summary_by_user_id)
             if sets:
                 sets.append("updated_at = datetime('now')")
                 vals.append(article_id)
@@ -1828,9 +2111,24 @@ def _save_ai_result(article_id: int, summary: str | None = None,
         else:
             conn.execute(
                 "INSERT INTO ai_results "
-                "(article_id, summary, translation, summary_error, summary_error_at) "
-                "VALUES (?, ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END)",
-                (article_id, summary, translation, summary_error[:500] if summary_error else None, summary_error),
+                "(article_id, summary, translation, summary_error, summary_error_at, "
+                "title_summary, title_summary_error, title_summary_error_at, "
+                "title_summary_provider, title_summary_model, title_summary_by_user_id) "
+                "VALUES (?, ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END, "
+                "?, ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END, ?, ?, ?)",
+                (
+                    article_id,
+                    summary,
+                    translation,
+                    summary_error[:500] if summary_error else None,
+                    summary_error,
+                    title_summary,
+                    title_summary_error[:500] if title_summary_error else None,
+                    title_summary_error,
+                    title_summary_provider,
+                    title_summary_model,
+                    title_summary_by_user_id,
+                ),
             )
         conn.commit()
         conn.close()
@@ -2347,6 +2645,7 @@ def get_settings():
         return jsonify({
             "auto_translate_title": False,
             "auto_translate_content": False,
+            "auto_title_summary_enabled": False,
             "auto_summary_enabled": False,
             "daily_summary_enabled": False,
             "notification_config": {},
@@ -2373,7 +2672,12 @@ def update_settings():
         data["notification_config"] = json.dumps(nc) if isinstance(nc, dict) else nc
     needs_ai_config = any(
         _is_enabled_value(data.get(key))
-        for key in ("auto_summary_enabled", "auto_translate_title", "auto_translate_content")
+        for key in (
+            "auto_summary_enabled",
+            "auto_translate_title",
+            "auto_translate_content",
+            "auto_title_summary_enabled",
+        )
     )
     if needs_ai_config:
         config = get_ai_config(g.user_id)
@@ -2397,6 +2701,8 @@ def update_settings():
         threading.Thread(target=_run_auto_summary_once, daemon=True).start()
     if _is_enabled_value(data.get("auto_translate_title")) or _is_enabled_value(data.get("auto_translate_content")):
         threading.Thread(target=_run_auto_translation_once, daemon=True).start()
+    if _is_enabled_value(data.get("auto_title_summary_enabled")) or _is_enabled_value(data.get("auto_translate_title")):
+        threading.Thread(target=_run_auto_title_process_once, daemon=True).start()
     return jsonify(safe)
 
 
@@ -2485,11 +2791,13 @@ if __name__ == "__main__":
     _th.Thread(target=_daily_summary_loop, daemon=True).start()
     _th.Thread(target=_auto_summary_loop, daemon=True).start()
     _th.Thread(target=_auto_translation_loop, daemon=True).start()
+    _th.Thread(target=_auto_title_process_loop, daemon=True).start()
     _th.Thread(target=_auto_source_classification_loop, daemon=True).start()
     _th.Thread(target=_pin_existing_favorite_images_on_startup, daemon=True).start()
     print("[scheduler] Daily summary background thread started")
     print("[auto-summary] Background summary thread started")
     print("[auto-translate] Background translation thread started")
+    print("[auto-title] Background title processing thread started")
     print("[source-classify] Background source classification thread started")
     print("[image-cache] Existing favorite image pinning thread started")
     port = int(os.environ.get("WEB_PORT", 8082))

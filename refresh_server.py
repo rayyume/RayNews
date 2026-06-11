@@ -52,8 +52,19 @@ def ensure_schema_once(conn: sqlite3.Connection) -> None:
         if _schema_ready:
             return
         ensure_article_source_columns(conn)
+        ensure_article_title_columns(conn)
         conn.commit()
         _schema_ready = True
+
+
+def ensure_article_title_columns(conn: sqlite3.Connection) -> None:
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(articles)").fetchall()}
+    if "original_title" not in cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN original_title TEXT")
+    if "title_updated_at" not in cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN title_updated_at TEXT")
+    if "title_source" not in cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN title_source TEXT")
 
 
 def get_db() -> sqlite3.Connection:
@@ -367,6 +378,42 @@ def api_news_list(params: dict) -> bytes:
             conn.close()
 
 
+def api_title_updates(params: dict) -> bytes:
+    """GET /api/news/title-updates — lightweight title changes after cursor."""
+    since = (params.get("since", [""])[0] or "").strip()
+    conn = None
+    try:
+        conn = get_db()
+        if not since:
+            cursor = conn.execute("SELECT strftime('%Y-%m-%d %H:%M:%f', 'now')").fetchone()[0]
+            return json.dumps({
+                "items": [],
+                "cursor": cursor,
+            }, ensure_ascii=False).encode()
+        rows = conn.execute(
+            "SELECT id, title, title_updated_at, title_source "
+            "FROM articles "
+            "WHERE title_updated_at IS NOT NULL AND title_updated_at > ? "
+            "ORDER BY title_updated_at ASC, id ASC LIMIT 500",
+            (since,),
+        ).fetchall()
+        items = [dict(r) for r in rows]
+        if items:
+            with _article_cache_lock:
+                for item in items:
+                    _article_cache.pop(int(item["id"]), None)
+        cursor = items[-1]["title_updated_at"] if items else since
+        return json.dumps({
+            "items": items,
+            "cursor": cursor,
+        }, ensure_ascii=False).encode()
+    except Exception as e:
+        return json.dumps({"error": str(e)}).encode()
+    finally:
+        if conn:
+            conn.close()
+
+
 def api_news_detail(article_id: int) -> bytes:
     """GET /api/news/<id> — single article with body_html (cached)."""
     with _article_cache_lock:
@@ -452,6 +499,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if path == "/api/news":
             send_json(self, api_news_list(params))
+            return
+
+        if path == "/api/news/title-updates":
+            send_json(self, api_title_updates(params))
             return
 
         if path == "/api/sources":

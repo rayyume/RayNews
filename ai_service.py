@@ -361,6 +361,28 @@ class AIService:
         ]
         return self.chat(messages, max_tokens=200, temperature=0.2).strip()
 
+    def summarize_title(self, title: str, max_chars: int = 30) -> str:
+        """Shorten a news title while preserving the core fact."""
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是新闻标题编辑。把过长标题压缩为简洁中文标题，只输出标题本身。"
+                    "不得解释，不得加引号，不得使用省略号。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"请将下面标题简写到 {max_chars} 个中文字符以内。\n"
+                    "要求：保留主体、动作和关键事实；不要新增原文没有的信息；"
+                    "不要输出“标题：”或任何说明。\n\n"
+                    f"原标题：{title}"
+                ),
+            },
+        ]
+        return self.chat(messages, max_tokens=120, temperature=0.2).strip()
+
     # ─── Daily summary (layered) ──────────────────────────────
     #
     # Strategy:

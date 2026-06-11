@@ -609,6 +609,12 @@ body.body-scroll-lock{overflow:hidden!important}
         </div>
         <p class="ai-hint" style="margin-top:8px">开启后，系统会在后台小批量为新文章生成摘要，供文章页和每日摘要复用。</p>
 
+        <div class="ai-toggle" onclick="document.getElementById('autoTitleSummaryEnabled').click()" style="margin-top:12px">
+          <input type="checkbox" id="autoTitleSummaryEnabled" onclick="event.stopPropagation()">
+          <span>🏷️ 自动简写过长文章标题</span>
+        </div>
+        <p class="ai-hint" style="margin-top:8px">开启后，抓取到当天标题超过 30 个中文字符的文章时，会在后台用你的 AI API 简写标题，其他用户可复用结果。</p>
+
         <button class="ai-save-btn" onclick="saveSummarySettings()" style="margin-top:16px">保存摘要设置</button>
       </div>
 
@@ -742,6 +748,8 @@ let articleBodyCache = {};
 let articleBodyPromises = {};
 let activeArticleRequestId = 0;
 let searchDebounceTimer = null;
+let titleUpdateCursor = '';
+let titleUpdatePolling = false;
 let searchRequestController = null;
 let searchRequestSeq = 0;
 // User settings cache for auto-translate decisions
@@ -1912,6 +1920,7 @@ async function loadSummarySettings() {
     const data = await apiFetch('/settings');
     if (!data) return;
     document.getElementById('autoSummaryEnabled').checked = !!data.auto_summary_enabled;
+    document.getElementById('autoTitleSummaryEnabled').checked = !!data.auto_title_summary_enabled;
   } catch (e) {}
 }
 
@@ -1922,6 +1931,7 @@ async function saveSummarySettings() {
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
       body: JSON.stringify({
         auto_summary_enabled: document.getElementById('autoSummaryEnabled').checked ? 1 : 0,
+        auto_title_summary_enabled: document.getElementById('autoTitleSummaryEnabled').checked ? 1 : 0,
       }),
     });
     const data = await resp.json();
@@ -1933,6 +1943,7 @@ async function saveSummarySettings() {
     userAutoSettings = {
       ...(userAutoSettings || {}),
       auto_summary_enabled: !!document.getElementById('autoSummaryEnabled').checked,
+      auto_title_summary_enabled: !!document.getElementById('autoTitleSummaryEnabled').checked,
     };
     showSettingsStatus('✅ 摘要设置已保存');
   } catch (e) { showSettingsStatus('❌ 保存失败', 'err'); }
@@ -2443,7 +2454,7 @@ async function aiTranslate(articleId) {
     }
     showToast('✅ 翻译完成');
 
-    syncTranslatedArticleTitle(articleId, translatedTitle);
+    syncArticleTitle(articleId, translatedTitle);
   } catch (e) {
     bodyEl.innerHTML = originalHtml;
     showToast('❌ 网络错误: ' + (e.message || ''));
@@ -2545,7 +2556,7 @@ async function autoDisplaySummary(articleId) {
         bodyEl.dataset.showingTranslation = 'true';
         bodyEl.innerHTML = bodyEl.dataset.translatedHtml;
         if (h1El && cachedData.title) h1El.textContent = cachedData.title;
-        syncTranslatedArticleTitle(articleId, cachedData.title);
+        syncArticleTitle(articleId, cachedData.title);
         // Re-attach lightbox
         bodyEl.querySelectorAll('img').forEach(img => {
           img.addEventListener('click', e => {
@@ -2941,6 +2952,7 @@ async function loadData() {
     renderFilters();
     renderList();
     if (document.getElementById('searchOverlay').classList.contains('open')) renderSearchResults();
+    pollTitleUpdates();
   } catch (e) {
     const msg = e.name === 'AbortError' ? '连接超时，轻触重试或检查网络' : '加载失败，点击重试';
     list.innerHTML = '<div class="empty"><div class="empty-icon">📡</div><p>' + msg + '</p><button class="refresh-btn" onclick="loadData()" style="margin-top:12px">重试</button></div>';
@@ -3168,13 +3180,37 @@ function searchArticles(query) {
     .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
 }
 
-function syncTranslatedArticleTitle(articleId, translatedTitle) {
+function syncArticleTitle(articleId, translatedTitle) {
   if (!translatedTitle) return;
   const newsItem = news.find(n => n.id === articleId);
   if (newsItem) newsItem.title = translatedTitle;
   document.querySelectorAll(`.item[data-id="${articleId}"] .item-title`).forEach(el => {
     el.textContent = translatedTitle;
   });
+  const overlay = document.getElementById('overlay');
+  if (overlay && overlay.dataset.articleId === String(articleId)) {
+    const h1 = document.querySelector('#articleWrap h1');
+    if (h1) h1.textContent = translatedTitle;
+  }
+}
+
+async function pollTitleUpdates() {
+  if (titleUpdatePolling) return;
+  titleUpdatePolling = true;
+  try {
+    const resp = await fetch('/api/news/title-updates?since=' + encodeURIComponent(titleUpdateCursor) + '&t=' + Date.now());
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (data.error) return;
+    titleUpdateCursor = data.cursor || titleUpdateCursor;
+    (data.items || []).forEach(item => {
+      if (item && item.id && item.title) syncArticleTitle(item.id, item.title);
+    });
+  } catch (e) {
+    // Title updates are opportunistic; never disturb reading.
+  } finally {
+    titleUpdatePolling = false;
+  }
 }
 
 function articleItemHtml(n) {
@@ -3841,6 +3877,9 @@ setInterval(function() {
     loadSince(maxTs);
   }
 }, 60000);
+setInterval(function() {
+  if (news.length > 0) pollTitleUpdates();
+}, 12000);
 // ═══ Mobile: swipe-to-go-back on article overlay ════════
 (function() {
   const overlay = document.getElementById('overlay');
