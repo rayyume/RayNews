@@ -73,7 +73,8 @@ class TitleProcessingTests(unittest.TestCase):
             conn.execute(
                 "INSERT INTO articles (id, title, title_updated_at, title_source) VALUES "
                 "(1, 'Old', '2026-06-11 08:00:00', 'title_summary'), "
-                "(2, 'New', '2026-06-11 08:05:00', 'translation')"
+                "(2, 'New', '2026-06-11 08:05:00', 'translation'), "
+                "(3, 'Same Tick', '2026-06-11 08:05:00', 'title_summary')"
             )
             conn.commit()
             conn.close()
@@ -83,14 +84,14 @@ class TitleProcessingTests(unittest.TestCase):
             try:
                 refresh_server.DB_FILE = db_path
                 refresh_server._schema_ready = False
-                body = refresh_server.api_title_updates({"since": ["2026-06-11 08:00:00"]})
+                body = refresh_server.api_title_updates({"since": ["2026-06-11 08:05:00|2"]})
             finally:
                 refresh_server.DB_FILE = old_db
                 refresh_server._schema_ready = old_schema_ready
 
             data = json.loads(body.decode("utf-8"))
-            self.assertEqual([item["id"] for item in data["items"]], [2])
-            self.assertEqual(data["cursor"], "2026-06-11 08:05:00")
+            self.assertEqual([item["id"] for item in data["items"]], [3])
+            self.assertEqual(data["cursor"], "2026-06-11 08:05:00|3")
         finally:
             for suffix in ("", "-wal", "-shm"):
                 try:

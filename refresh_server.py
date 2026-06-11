@@ -381,6 +381,14 @@ def api_news_list(params: dict) -> bytes:
 def api_title_updates(params: dict) -> bytes:
     """GET /api/news/title-updates — lightweight title changes after cursor."""
     since = (params.get("since", [""])[0] or "").strip()
+    since_ts = since
+    since_id = 0
+    if "|" in since:
+        since_ts, since_id_text = since.rsplit("|", 1)
+        try:
+            since_id = int(since_id_text)
+        except ValueError:
+            since_id = 0
     conn = None
     try:
         conn = get_db()
@@ -393,16 +401,17 @@ def api_title_updates(params: dict) -> bytes:
         rows = conn.execute(
             "SELECT id, title, title_updated_at, title_source "
             "FROM articles "
-            "WHERE title_updated_at IS NOT NULL AND title_updated_at > ? "
+            "WHERE title_updated_at IS NOT NULL "
+            "AND (title_updated_at > ? OR (title_updated_at = ? AND id > ?)) "
             "ORDER BY title_updated_at ASC, id ASC LIMIT 500",
-            (since,),
+            (since_ts, since_ts, since_id),
         ).fetchall()
         items = [dict(r) for r in rows]
         if items:
             with _article_cache_lock:
                 for item in items:
                     _article_cache.pop(int(item["id"]), None)
-        cursor = items[-1]["title_updated_at"] if items else since
+        cursor = f"{items[-1]['title_updated_at']}|{items[-1]['id']}" if items else since
         return json.dumps({
             "items": items,
             "cursor": cursor,
