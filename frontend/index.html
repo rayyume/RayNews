@@ -2443,13 +2443,7 @@ async function aiTranslate(articleId) {
     }
     showToast('✅ 翻译完成');
 
-    // Update title in home page news list
-    const newsItem = news.find(n => n.id === articleId);
-    if (newsItem && translatedTitle) {
-      newsItem.title = translatedTitle;
-      const titleEl = document.querySelector(`.item[data-id="${articleId}"] .item-title`);
-      if (titleEl) titleEl.textContent = translatedTitle;
-    }
+    syncTranslatedArticleTitle(articleId, translatedTitle);
   } catch (e) {
     bodyEl.innerHTML = originalHtml;
     showToast('❌ 网络错误: ' + (e.message || ''));
@@ -2551,13 +2545,7 @@ async function autoDisplaySummary(articleId) {
         bodyEl.dataset.showingTranslation = 'true';
         bodyEl.innerHTML = bodyEl.dataset.translatedHtml;
         if (h1El && cachedData.title) h1El.textContent = cachedData.title;
-        // Also sync title back to news list
-        const ni = news.find(n => n.id === articleId);
-        if (ni && cachedData.title) {
-          ni.title = cachedData.title;
-          const te = document.querySelector(`.item[data-id="${articleId}"] .item-title`);
-          if (te) te.textContent = cachedData.title;
-        }
+        syncTranslatedArticleTitle(articleId, cachedData.title);
         // Re-attach lightbox
         bodyEl.querySelectorAll('img').forEach(img => {
           img.addEventListener('click', e => {
@@ -3180,9 +3168,18 @@ function searchArticles(query) {
     .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
 }
 
+function syncTranslatedArticleTitle(articleId, translatedTitle) {
+  if (!translatedTitle) return;
+  const newsItem = news.find(n => n.id === articleId);
+  if (newsItem) newsItem.title = translatedTitle;
+  document.querySelectorAll(`.item[data-id="${articleId}"] .item-title`).forEach(el => {
+    el.textContent = translatedTitle;
+  });
+}
+
 function articleItemHtml(n) {
   return `
-    <div class="item" onclick="openArticle(${n.id})">
+    <div class="item" data-id="${n.id}" onclick="openArticle(${n.id})">
       ${n.thumb ? `<div class="item-thumb"><img src="${proxyImgSrc(n.thumb)}" alt="" loading="lazy" decoding="async"></div>` : ''}
       <div class="item-body">
         <div class="item-title">${esc(n.title)}</div>
