@@ -373,24 +373,29 @@ class AIService:
     # Returns {"summary": str, "stats": {...}}
 
     def daily_summary(self, articles: list[dict]) -> dict:
+        return self._daily_summary_v2(articles)
+
+    def _daily_summary_v2(self, articles: list[dict]) -> dict:
         is_deepseek = self._is_deepseek()
-        MAX_SUMMARY_CHARS = int(os.environ.get(
+        max_summary_chars = int(os.environ.get(
             "AI_DAILY_SUMMARY_CHARS",
             "260" if is_deepseek else "360",
         ))
-        MAX_TITLE_CHARS = int(os.environ.get(
+        max_title_chars = int(os.environ.get(
             "AI_DAILY_TITLE_CHARS",
             "120" if is_deepseek else "160",
         ))
-        MAX_ARTICLES_PER_SOURCE = 100  # cap per source to avoid one dominating
-        MAX_DAILY_CANDIDATES = int(os.environ.get(
+        max_articles_per_source = int(os.environ.get("AI_DAILY_MAX_ARTICLES_PER_SOURCE", "100"))
+        target_items = int(os.environ.get("AI_DAILY_TARGET_ITEMS", "40"))
+        min_items = int(os.environ.get("AI_DAILY_MIN_ITEMS", str(max(1, target_items - 5))))
+        max_items = int(os.environ.get("AI_DAILY_MAX_ITEMS", str(target_items + 5)))
+        max_daily_candidates = int(os.environ.get(
             "AI_DAILY_MAX_CANDIDATES",
-            "60" if is_deepseek else "80",
+            "110" if is_deepseek else "120",
         ))
-        MAX_CANDIDATES_PER_CATEGORY = int(os.environ.get(
-            "AI_DAILY_MAX_CANDIDATES_PER_CATEGORY",
-            "15" if is_deepseek else "20",
-        ))
+        max_items_per_category = int(os.environ.get("AI_DAILY_MAX_ITEMS_PER_CATEGORY", "16"))
+        categories = ("政经新闻", "科技动态", "商业聚焦", "其他信息")
+
         def article_link(article: dict) -> str:
             date = article.get("date", "") or ""
             art_id = article.get("id", 0)
@@ -398,68 +403,177 @@ class AIService:
                 return f"https://news.rayyu.me/#/article/{date[2:]}-{art_id}"
             return ""
 
+        def plain_text(text: str) -> str:
+            text = re.sub(r"<[^>]+>", " ", text or "")
+            return " ".join(text.split()).strip()
+
         def compact_text(text: str, limit: int) -> str:
-            text = re.sub(r'<[^>]+>', ' ', text or "")
-            text = " ".join(text.split()).strip()
+            text = plain_text(text)
             if len(text) <= limit:
                 return text
             clipped = text[:limit].rstrip(" ，,、；;：:")
-            # Prefer real sentence endings. Ignore "." because it often appears
-            # inside decimals, versions, and abbreviations.
             punct_positions = [clipped.rfind(p) for p in "。！？!?"]
             best = max(punct_positions)
             if best >= max(12, limit // 2):
                 return clipped[:best + 1].strip()
-            # If there is no safe sentence boundary, keep the full source text.
-            # A longer complete summary is better than a short broken fact.
-            return text
+            return clipped.strip()
+
+        invalid_summary_re = re.compile(
+            r"(请补充|请提供|缺少.*正文|缺少.*文章|文章全文|无法.*摘要|无法生成|"
+            r"不能生成|没有提供|仅为[“\"']?via|您提供的文章内容|需要摘要的文章|"
+            r"200字以内|no content|\(no content\))",
+            re.I,
+        )
+
+        def informative_length(text: str) -> int:
+            text = re.sub(r"(via|出处|来源)\s*[:：]?", " ", text or "", flags=re.I)
+            text = re.sub(r"[\W_]+", "", text, flags=re.U)
+            return len(text)
+
+        def is_invalid_digest_text(text: str, source: str = "") -> bool:
+            value = plain_text(text)
+            if not value:
+                return True
+            if invalid_summary_re.search(value):
+                return True
+            if re.fullmatch(r"(?:via|出处|来源)\s*[:：]?\s*[\w\u4e00-\u9fff .,\-·🎗📮]+", value, re.I):
+                return True
+            if source and value.strip(" ：:，,。 ") == source.strip():
+                return True
+            if value.lower() in {"via", "source", "no content", "(no content)"}:
+                return True
+            return informative_length(value) < 6
+
+        category_keywords = {
+            "政经新闻": (
+                "央行", "美联储", "利率", "通胀", "gdp", "pmi", "就业", "财政",
+                "关税", "政府", "政策", "总统", "选举", "经济", "外交", "制裁",
+                "国会", "法院", "战争", "伊朗", "俄罗斯", "欧盟", "税",
+            ),
+            "科技动态": (
+                "ai", "openai", "deepseek", "claude", "模型", "大模型", "芯片", "半导体",
+                "科技", "人工智能", "机器人", "苹果", "微软", "谷歌", "英伟达", "算力",
+                "安卓", "ios", "软件", "开发者", "卫星", "spacex",
+            ),
+            "商业聚焦": (
+                "公司", "财报", "营收", "利润", "融资", "上市", "ipo", "并购", "收购",
+                "裁员", "市场", "品牌", "电商", "商业", "投资", "基金", "股价", "估值",
+                "订单", "销量", "银行", "外汇", "人民币", "黄金", "原油",
+            ),
+        }
+        category_priority = {"政经新闻": 3, "科技动态": 2, "商业聚焦": 1, "其他信息": 0}
+        importance_keywords = (
+            "央行", "美联储", "利率", "通胀", "gdp", "pmi", "关税", "政策", "制裁",
+            "选举", "财政", "财报", "营收", "利润", "融资", "ipo", "上市", "并购",
+            "收购", "ai", "openai", "芯片", "半导体", "英伟达", "苹果", "微软",
+            "spacex", "黄金", "原油", "人民币", "汇率",
+        )
+
+        def category_scores(title: str, text: str, source: str) -> dict[str, int]:
+            haystack = f"{title} {text} {source}".lower()
+            scores = {}
+            for category, keywords in category_keywords.items():
+                scores[category] = sum(1 for keyword in keywords if keyword.lower() in haystack)
+            scores["其他信息"] = 0
+            return scores
 
         def classify_article(title: str, text: str, source: str) -> str:
-            haystack = f"{title} {text} {source}".lower()
-            category_keywords = (
-                ("科技动态", ("ai", "openai", "deepseek", "芯片", "半导体", "模型", "科技", "人工智能", "机器人", "苹果", "英伟达", "算力")),
-                ("商业聚焦", ("公司", "财报", "营收", "利润", "融资", "上市", "并购", "裁员", "市场", "品牌", "电商", "商业", "投资")),
-                ("政经新闻", ("央行", "美联储", "利率", "通胀", "gdp", "pmi", "就业", "财政", "关税", "政府", "政策", "总统", "选举", "经济")),
+            scores = category_scores(title, text, source)
+            category, score = max(
+                scores.items(),
+                key=lambda pair: (pair[1], category_priority.get(pair[0], 0)),
             )
-            for category, keywords in category_keywords:
-                if any(keyword in haystack for keyword in keywords):
-                    return category
-            return "其他信息"
+            return category if score > 0 else "其他信息"
+
+        def score_article(title: str, text: str, source: str, has_summary: bool) -> tuple[float, int]:
+            haystack = f"{title} {text} {source}".lower()
+            keyword_hits = sum(1 for keyword in importance_keywords if keyword.lower() in haystack)
+            info_score = min(len(title) / 18, 3) + min(len(text) / 90, 4)
+            quality_score = (4 if has_summary else 1) + info_score
+            importance_score = keyword_hits * 2 + info_score
+            if re.search(r"\d|%|亿元|亿美元|万亿|百分点|基点", haystack):
+                importance_score += 1.5
+            return quality_score + importance_score, keyword_hits
+
+        def normalize_title_key(title: str) -> str:
+            value = plain_text(title).lower()
+            value = re.sub(r"[\s\"'“”‘’「」『』:：,，.。!！?？\-—_]+", "", value)
+            return value[:80]
 
         def format_article_entry(article: dict, index: int) -> str:
-            link = article.get("url", "")
             text_label = "内容摘要" if article.get("has_summary") else "标题线索"
-            parts = [
-                f"{index}. 来源：{article['source']}",
+            return "\n".join([
+                f"{index}. ID：{article['id']}",
+                f"来源：{article['source']}",
                 f"建议分类：{article['category']}",
+                f"关键词命中：{', '.join(article.get('keyword_hits') or []) or '无'}",
                 f"标题：{article['title']}",
                 f"{text_label}：{article['text']}",
-            ]
-            if link:
-                parts.append(f"链接：{link}")
-            return "\n".join(parts)
+                f"链接：{article.get('url', '')}",
+            ])
+
+        def select_local(items: list[dict], target: int | None = None) -> list[dict]:
+            target = target or target_items
+            sorted_items = sorted(items, key=lambda e: e.get("score", 0), reverse=True)
+            chosen = []
+            chosen_ids = set()
+            per_category = defaultdict(int)
+
+            # Keep dynamic allocation, but give each non-empty category one
+            # representative when the target has enough room. This avoids a
+            # single hot category hiding all other meaningful news.
+            for category in categories:
+                category_items = [e for e in sorted_items if e.get("category") == category]
+                if not category_items:
+                    continue
+                item = category_items[0]
+                if item.get("id") in chosen_ids:
+                    continue
+                chosen.append(item)
+                chosen_ids.add(item.get("id"))
+                per_category[category] += 1
+                if len(chosen) >= min(target, max_items):
+                    return chosen
+
+            for item in sorted_items:
+                if len(chosen) >= max_items:
+                    break
+                category = item.get("category") or "其他信息"
+                if item.get("id") in chosen_ids:
+                    continue
+                if per_category[category] >= max_items_per_category and len(chosen) >= min_items:
+                    continue
+                chosen.append(item)
+                chosen_ids.add(item.get("id"))
+                per_category[category] += 1
+                if len(chosen) >= target and len(chosen) >= min_items:
+                    break
+            return chosen
 
         def fallback_daily_summary(items: list[dict]) -> str:
+            chosen = select_local(items)
+
             lines = []
-            categories = ("政经新闻", "科技动态", "商业聚焦", "其他信息")
             for category in categories:
-                lines.append(f"## {category}")
-                category_items = [e for e in items if e["category"] == category][:10]
+                category_items = [e for e in chosen if e["category"] == category]
                 if not category_items:
-                    category_items = [e for e in items if e["category"] != category][:3]
+                    continue
+                lines.append(f"## {category}")
                 for idx, e in enumerate(category_items, 1):
                     title = compact_text(e.get("title", ""), 42)
                     text = compact_text(e.get("text", ""), 90)
                     if text and text[-1] not in "。！？.!?":
                         text = text.rstrip(" ，,、；;：:") + "。"
-                    link = e.get("url", "")
-                    lines.append(f"{idx}. **{title}：** {text} [🔗]({link})")
-            return "\n".join(lines)
+                    lines.append(f"{idx}. **{title}：** {text} [🔗]({e.get('url', '')})")
+            return "\n".join(lines) if lines else "今日无高质量新闻可总结。"
 
         def summary_looks_truncated(text: str) -> bool:
             stripped = (text or "").strip()
             if not stripped:
                 return True
+            linked_items = len(re.findall(r"^\s*\d+\.\s+.*?\[🔗\]\(", stripped, flags=re.M))
+            if linked_items >= min_items and stripped.count("**") % 2 == 0:
+                return False
             if "…" in stripped or "..." in stripped:
                 return True
             last_line = stripped.splitlines()[-1].strip()
@@ -473,7 +587,7 @@ class AIService:
 
         def cleanup_daily_summary_output(text: str) -> str:
             bad_tail = re.compile(
-                r"(?:至|为|达|升至|跌至|占比|估值|募资|成为除|补选|报|涨|跌|第)[\dA-Za-z%.\-]*[。.]$"
+                r"(?:至|为|升至|跌至|占比|估值|募资|成为除|补选|批评|取消|涨|跌)[\dA-Za-z%.\-]*[。.]$"
             )
             cleaned = []
             for line in (text or "").splitlines():
@@ -491,101 +605,75 @@ class AIService:
                 or ("risk" in msg and "400" in msg)
             )
 
-        final_format_rules = (
-            "请严格按以下四个大分类输出，标题必须完全一致：\n"
-            "## 政经新闻\n"
-            "## 科技动态\n"
-            "## 商业聚焦\n"
-            "## 其他信息\n\n"
-            "每个分类输出 10-12 条；如果某分类素材不足，可以少于 10 条，但不要省略该分类。\n"
-            "每条必须使用如下格式：\n"
-            "1. **总结性短标题：** 一句完整摘要 [🔗](URL)\n"
-            "每个分类下必须使用有序编号列表，不要使用 '-' 或 '*' 作为项目符号。\n"
-            "总结性短标题必须根据该条新闻内容生成，例如“全球多项财经数据与事件：”，"
-            "不要使用固定文案“单条摘要总结”。\n"
-            "短标题加摘要正文尽量控制在 90 个中文字符以内；链接不计入字数。\n"
-            "每条摘要必须是完整句子，不能以省略号结尾，不能使用“…”或“...”截断内容。\n"
-            "如果输入信息不足以写完整数字、机构名、地点或事件结果，就省略该细节，不要输出半截事实。\n"
-            "每条末尾必须附文章链接，格式为 [🔗](URL)，且 URL 必须使用输入中的 https://news.rayyu.me/#/article/xxx 链接。\n"
-            "不得输出“（无相关新闻）”；只要输入列表中有文章，就必须归入最接近的分类并输出条目。\n"
-            "不要输出总述、寒暄或额外说明；不要把链接集中放到末尾。"
-        )
+        def parse_selected_ids(raw: str) -> list[int]:
+            match = re.search(r"\{.*\}", raw or "", flags=re.S)
+            if not match:
+                return []
+            try:
+                data = json.loads(match.group(0))
+            except Exception:
+                return []
+            values = data.get("selected_ids") or data.get("ids") or []
+            selected_ids = []
+            for value in values:
+                try:
+                    selected_ids.append(int(value))
+                except (TypeError, ValueError):
+                    continue
+            return selected_ids
 
-        # ── Build per-article excerpts ──
         excerpts = []
+        seen_titles = set()
         for a in articles:
             art_id = a.get("id", 0)
-            source = a.get("source", "?")
-            title = a.get("title", "?")
-            url = article_link(a)
-            summary = a.get("summary", "") or ""
-            body_html = a.get("body_html", "") or ""
+            source = plain_text(a.get("source", "") or "?")
+            title = compact_text(a.get("title", "") or "", max_title_chars)
+            if is_invalid_digest_text(title, source):
+                continue
+            title_key = normalize_title_key(title)
+            if title_key and title_key in seen_titles:
+                continue
+            seen_titles.add(title_key)
 
-            # Layer 1: existing AI summary
-            text = ""
-            if summary:
-                text = compact_text(summary, MAX_SUMMARY_CHARS)
-            # Layer 2: title only. Daily summary should not ingest article bodies.
-            else:
-                text = compact_text(title, MAX_TITLE_CHARS)
-
-            if not text:
-                text = "(no content)"
-
+            raw_summary = a.get("summary", "") or ""
+            has_valid_summary = not is_invalid_digest_text(raw_summary, source)
+            text = compact_text(raw_summary, max_summary_chars) if has_valid_summary else title
+            if is_invalid_digest_text(text, source):
+                continue
             category = classify_article(title, text, source)
-
+            score, keyword_count = score_article(title, text, source, has_valid_summary)
+            keyword_hits = [
+                keyword for keyword in importance_keywords
+                if keyword.lower() in f"{title} {text} {source}".lower()
+            ][:8]
             excerpts.append({
                 "id": art_id,
                 "source": source,
                 "title": title,
-                "url": url,
+                "url": article_link(a),
                 "text": text,
                 "category": category,
-                "has_summary": bool(summary),
+                "has_summary": has_valid_summary,
+                "score": score,
+                "keyword_count": keyword_count,
+                "keyword_hits": keyword_hits,
             })
 
-        # ── Group by source, cap per source ──
         by_source = defaultdict(list)
         for ex in excerpts:
             by_source[ex["source"]].append(ex)
 
-        # Cap per source to avoid one source dominating
         capped = []
-        for src, items in by_source.items():
-            capped.extend(items[:MAX_ARTICLES_PER_SOURCE])
+        for items in by_source.values():
+            items.sort(key=lambda e: e.get("score", 0), reverse=True)
+            capped.extend(items[:max_articles_per_source])
         articles_after_source_cap = len(capped)
-
-        # Select a balanced candidate set for the AI. Processing every article in
-        # a 500-item day is expensive and slow; the final digest only needs about
-        # 40 high-signal items, so keep a wider but bounded candidate pool.
-        categories = ("政经新闻", "科技动态", "商业聚焦", "其他信息")
-        by_category = defaultdict(list)
-        for ex in capped:
-            by_category[ex["category"]].append(ex)
-        for items in by_category.values():
-            items.sort(key=lambda e: (not e["has_summary"]))
-
-        selected = []
-        selected_ids = set()
-        for category in categories:
-            for ex in by_category.get(category, [])[:MAX_CANDIDATES_PER_CATEGORY]:
-                selected.append(ex)
-                selected_ids.add(ex["id"])
-
-        if len(selected) < MAX_DAILY_CANDIDATES:
-            remaining = [ex for ex in capped if ex["id"] not in selected_ids]
-            remaining.sort(key=lambda e: (not e["has_summary"]))
-            selected.extend(remaining[:MAX_DAILY_CANDIDATES - len(selected)])
-
-        capped = selected[:MAX_DAILY_CANDIDATES]
+        capped.sort(key=lambda e: e.get("score", 0), reverse=True)
+        capped = capped[:max_daily_candidates]
         articles_selected_for_ai = len(capped)
 
-        total_articles_with_summary = sum(1 for e in capped if e["has_summary"])
-        total_articles_without_summary = len(capped) - total_articles_with_summary
-
-        # ── Final summary ──
         if not capped:
-            return {"summary": "今日无新闻。", "stats": {
+            return {"summary": "今日无高质量新闻可总结。", "stats": {
                 "total_articles": len(articles),
                 "articles_after_dedup": len(articles),
                 "articles_after_source_cap": 0,
@@ -595,28 +683,99 @@ class AIService:
                 "articles_without_summary": 0,
                 "selected_articles_with_summary": 0,
                 "selected_articles_without_summary": 0,
+                "daily_target_items": target_items,
+                "selection_ai_used": False,
             }}
+
+        fallback_reason = ""
+        selection_ai_used = False
+        selected_for_final = select_local(capped)
+        selection_text = "\n\n".join(format_article_entry(e, i + 1) for i, e in enumerate(capped))
+        selection_prompt = [
+            {
+                "role": "system",
+                "content": (
+                    "你是一个资深新闻选题编辑。请基于来源分类、关键词命中和内容事实，从候选文章中选择最值得进入每日摘要的文章。"
+                    f"目标选择 {target_items} 条，允许 {min_items}-{max_items} 条。"
+                    "请修正明显错误分类，合并重复事件，只保留信息量最高的一篇。"
+                    "忽略 via-only、提示补充正文、缺少正文、无法摘要等低质量候选。"
+                    "只输出 JSON，格式为 {\"selected_ids\":[1,2,3]}。"
+                ),
+            },
+            {"role": "user", "content": f"以下是今日新闻候选列表：\n\n{selection_text}"},
+        ]
+        try:
+            raw_selection = self.chat(
+                selection_prompt,
+                max_tokens=self._provider_output_cap(1200, "daily_continue"),
+                temperature=0.1,
+            )
+            selected_ids = parse_selected_ids(raw_selection)
+            id_map = {int(e["id"]): e for e in capped if e.get("id")}
+            selected = []
+            seen_ids = set()
+            for selected_id in selected_ids:
+                if selected_id in id_map and selected_id not in seen_ids:
+                    selected.append(id_map[selected_id])
+                    seen_ids.add(selected_id)
+                if len(selected) >= max_items:
+                    break
+            if selected:
+                for item in capped:
+                    if len(selected) >= min_items:
+                        break
+                    if item.get("id") not in seen_ids:
+                        selected.append(item)
+                        seen_ids.add(item.get("id"))
+                selected_for_final = selected[:max_items]
+                selection_ai_used = True
+        except Exception as e:
+            fallback_reason = f"selection failed: {e}"
+
+        total_articles_with_summary = sum(1 for e in capped if e["has_summary"])
+        total_articles_without_summary = len(capped) - total_articles_with_summary
+        selected_articles_with_summary = sum(1 for e in selected_for_final if e["has_summary"])
+        selected_articles_without_summary = len(selected_for_final) - selected_articles_with_summary
+
+        final_format_rules = (
+            "请按以下四个大分类输出，分类标题只能使用这些名称：\n"
+            "## 政经新闻\n"
+            "## 科技动态\n"
+            "## 商业聚焦\n"
+            "## 其他信息\n\n"
+            f"总条数目标为 {target_items} 条，允许 {min_items}-{max_items} 条；不要按分类平均凑数。\n"
+            "根据文章重要性动态分配分类条数，素材不足的分类可以少写或不写，不得输出“（无相关新闻）”。\n"
+            "每条必须使用如下格式：\n"
+            "1. **总结性短标题：** 一句完整摘要 [🔗](URL)\n"
+            "每个分类下必须使用有序编号列表，不要使用 '-' 或 '*' 作为项目符号。\n"
+            "总结性短标题必须根据该条新闻内容生成，不要使用固定文案“单条摘要总结”。\n"
+            "短标题加摘要正文尽量控制在 90 个中文字符以内；链接不计入字数。\n"
+            "每条摘要必须是完整句子，不能以省略号结尾，不能使用“…”或“...”截断内容。\n"
+            "不要输出“请补充正文”“无法生成摘要”“缺少文章全文”等模型说明或提示词残留。\n"
+            "如果输入信息不足以写完整数字、机构名、地点或事件结果，就省略该细节，不要输出半截事实。\n"
+            "每条末尾必须附文章链接，格式为 [🔗](URL)，且 URL 必须使用输入中的 https://news.rayyu.me/#/article/xxx 链接。\n"
+            "不要输出总述、寒暄或额外说明；不要把链接集中放到末尾。"
+        )
 
         articles_text = "\n\n".join(
             format_article_entry(e, i + 1)
-            for i, e in enumerate(capped)
+            for i, e in enumerate(selected_for_final)
         )
         sys_msg = (
             "你是一个资深新闻编辑。请基于输入中的文章摘要或标题线索生成每日摘要。"
-            "没有内容摘要的文章，只能根据标题线索做保守概括，不要编造标题之外的事实。\n"
+            "没有内容摘要的文章，只能根据标题线索做保守概括，不要编造标题之外的事实。"
+            "允许根据内容事实对建议分类做最终纠偏。\n"
             + final_format_rules
         )
-        user_msg = f"以下是今日新闻候选列表，请生成每日摘要：\n\n{articles_text}"
         final_prompt = [
             {"role": "system", "content": sys_msg},
-            {"role": "user", "content": user_msg},
+            {"role": "user", "content": f"以下是已经筛选出的今日重要新闻，请生成每日摘要：\n\n{articles_text}"},
         ]
 
-        fallback_reason = ""
         try:
             final_summary = self.chat(
                 final_prompt,
-                max_tokens=self._provider_output_cap(7000, "daily_final"),
+                max_tokens=self._provider_output_cap(4200, "daily_final"),
             )
             if summary_looks_truncated(final_summary):
                 continuation_prompt = final_prompt + [
@@ -626,7 +785,7 @@ class AIService:
                 try:
                     final_summary = final_summary.rstrip() + "\n" + self.chat(
                         continuation_prompt,
-                        max_tokens=self._provider_output_cap(2500, "daily_continue"),
+                        max_tokens=self._provider_output_cap(1400, "daily_continue"),
                     )
                 except Exception as e:
                     if not is_content_risk_error(e):
@@ -636,13 +795,13 @@ class AIService:
             if not is_content_risk_error(e):
                 raise
             fallback_reason = str(e)
-            final_summary = fallback_daily_summary(capped)
+            final_summary = fallback_daily_summary(selected_for_final)
         final_summary = cleanup_daily_summary_output(final_summary)
         if "[🔗](" not in final_summary:
-            final_summary = fallback_daily_summary(capped)
+            final_summary = fallback_daily_summary(selected_for_final)
             fallback_reason = fallback_reason or "AI output missing links"
         elif summary_looks_truncated(final_summary):
-            final_summary = fallback_daily_summary(capped)
+            final_summary = fallback_daily_summary(selected_for_final)
             fallback_reason = fallback_reason or "AI output looked truncated"
 
         return {
@@ -652,11 +811,15 @@ class AIService:
                 "articles_after_dedup": len(articles),
                 "articles_after_source_cap": articles_after_source_cap,
                 "articles_selected_for_ai": articles_selected_for_ai,
-                "total_batches": 1,
+                "total_batches": 2 if selection_ai_used else 1,
                 "articles_with_summary": total_articles_with_summary,
                 "articles_without_summary": total_articles_without_summary,
-                "selected_articles_with_summary": total_articles_with_summary,
-                "selected_articles_without_summary": total_articles_without_summary,
+                "selected_articles_with_summary": selected_articles_with_summary,
+                "selected_articles_without_summary": selected_articles_without_summary,
+                "daily_target_items": target_items,
+                "daily_min_items": min_items,
+                "daily_max_items": max_items,
+                "selection_ai_used": selection_ai_used,
                 "fallback_reason": fallback_reason,
             },
         }
