@@ -116,6 +116,36 @@ class DailySummaryTests(unittest.TestCase):
         news_count = summary.split("## 政经新闻", 1)[1].split("##", 1)[0].count(". **")
         self.assertGreater(tech_count, news_count)
 
+    def test_long_unpunctuated_english_summary_uses_word_boundary(self):
+        env = {
+            "AI_DAILY_TARGET_ITEMS": "1",
+            "AI_DAILY_MIN_ITEMS": "1",
+            "AI_DAILY_MAX_ITEMS": "2",
+            "AI_DAILY_MAX_CANDIDATES": "2",
+            "AI_DAILY_SUMMARY_CHARS": "44",
+        }
+        article = _article(
+            7,
+            "OpenAI platform update expands enterprise developer workflows",
+            (
+                "OpenAI platform update expands enterprise developer "
+                "workflows with automation observability governance controls"
+            ),
+            "Tech Source",
+        )
+        final = (
+            "## 科技动态\n"
+            "1. **OpenAI 更新企业平台：** OpenAI 扩展企业开发者工作流能力。 "
+            "[🔗](https://news.rayyu.me/#/article/26-06-10-7)\n"
+        )
+        with patch.dict(os.environ, env, clear=False):
+            svc = FakeDailyAI(replies=['{"selected_ids":[7]}', final])
+            svc.daily_summary([article])
+
+        selection_prompt = "\n".join(m["content"] for m in svc.calls[0]["messages"])
+        summary_line = re.search(r"内容摘要：(.+)", selection_prompt).group(1)
+        self.assertEqual(summary_line, "OpenAI platform update expands enterprise")
+
 
 if __name__ == "__main__":
     unittest.main()

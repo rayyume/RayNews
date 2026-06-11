@@ -416,6 +416,10 @@ class AIService:
             best = max(punct_positions)
             if best >= max(12, limit // 2):
                 return clipped[:best + 1].strip()
+            soft_breaks = (" ", "\t", "，", ",", "、", "；", ";", "：", ":")
+            soft_best = max(clipped.rfind(p) for p in soft_breaks)
+            if len(clipped) < len(text) / 2 and soft_best >= max(16, int(limit * 0.6)):
+                return clipped[:soft_best].strip()
             return clipped.strip()
 
         invalid_summary_re = re.compile(
