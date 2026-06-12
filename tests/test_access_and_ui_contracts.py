@@ -157,6 +157,18 @@ def test_mobile_edge_swipe_claims_navigation_at_touch_start():
     assert "closeArticle();" in swipe_block
 
 
+def test_mobile_back_button_is_excluded_from_edge_swipe_and_handles_touch_directly():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    swipe_marker = html.index("let sx = 0, sy = 0, swiping = false")
+    swipe_start = html.rindex("(function() {", 0, swipe_marker)
+    swipe_end = html.index("(function() {", swipe_marker + 1)
+    swipe_block = html[swipe_start:swipe_end]
+    assert "if (e.target.closest('#backBtn')) return;" in swipe_block
+    assert "backBtn.addEventListener('touchstart'" in html
+    assert "backBtn.addEventListener('touchend'" in html
+    assert "e.stopPropagation();" in html
+
+
 def test_article_back_and_refresh_do_not_replace_the_whole_list():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     close_start = html.index("function closeArticle(fromHistoryNavigation = false, forceInAppNavigation = false)")
@@ -287,8 +299,7 @@ def test_home_controls_scroll_immediately_then_use_shared_background_refresh():
     start = html.index("async function goHome()")
     end = html.index("function articleDetailErrorText", start)
     block = html[start:end]
-    assert "window.scrollTo({ top: 0, behavior: 'smooth' });" in block
-    assert block.index("window.scrollTo({ top: 0, behavior: 'smooth' });") < block.index("await waitForScrollTop()")
+    assert "await scrollPageToTop();" in block
     assert "await showHomepageAfterScroll();" in block
     assert "triggerRefresh({ silentStart: true });" in block
     assert "await selectFilter('all');" not in block
@@ -302,10 +313,9 @@ def test_header_refresh_scrolls_first_without_changing_the_active_page():
     start = html.index("async function refreshFromHeader()")
     end = html.index("async function goHome()", start)
     block = html[start:end]
-    assert "window.scrollTo({ top: 0, behavior: 'smooth' });" in block
-    assert block.index("window.scrollTo({ top: 0, behavior: 'smooth' });") < block.index("await waitForScrollTop()")
-    wait_index = block.index("await waitForScrollTop()")
-    assert block.index("triggerRefresh();", wait_index) > wait_index
+    assert "await scrollPageToTop();" in block
+    scroll_index = block.index("await scrollPageToTop();")
+    assert block.index("triggerRefresh();", scroll_index) > scroll_index
     assert "showHomepageAfterScroll" not in block
 
 
@@ -314,12 +324,22 @@ def test_pagination_scrolls_immediately_and_switches_only_after_reaching_top():
     start = html.index("async function goToPage(page)")
     end = html.index("function waitForScrollTop(", start)
     block = html[start:end]
-    assert "window.scrollTo({ top: 0, behavior: 'smooth' });" in block
     assert "const pagePromise = preparePageNavigation(page, filter);" in block
-    assert block.index("window.scrollTo({ top: 0, behavior: 'smooth' });") < block.index("await waitForScrollTop()")
+    assert "await scrollPageToTop();" in block
     assert "const data = await pagePromise;" in block
-    assert block.index("await waitForScrollTop()") < block.index("applyNewsPage(data")
+    assert block.index("await scrollPageToTop()") < block.index("applyNewsPage(data")
     assert "async function preparePageNavigation(" in html
+
+
+def test_desktop_scroll_to_top_uses_duration_controlled_animation():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    start = html.index("function scrollPageToTop(")
+    end = html.index("async function showHomepageAfterScroll()", start)
+    block = html[start:end]
+    assert "requestAnimationFrame(step)" in block
+    assert "Math.min(700, Math.max(480" in block
+    assert "usesMobileArticleNavigation()" in block
+    assert "prefers-reduced-motion" in block
 
 
 def test_article_history_keeps_only_one_desktop_article_entry():

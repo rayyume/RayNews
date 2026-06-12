@@ -168,7 +168,7 @@ a:hover{text-decoration:underline}
 .overlay.open{transform:translateX(0)}
 .overlay-header{position:sticky;top:0;z-index:10;background:var(--header-bg);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-bottom:1px solid var(--border);padding-top:env(safe-area-inset-top,0px)}
 .overlay-header-inner{max-width:720px;margin:0 auto;display:flex;align-items:center;min-height:48px;padding:0 20px}
-.back-btn{display:flex;align-items:center;gap:6px;background:none;border:none;color:var(--accent);font-size:13px;font-weight:600;cursor:pointer;font-family:var(--font);padding:4px 0}
+.back-btn{display:flex;align-items:center;gap:6px;min-height:44px;background:none;border:none;color:var(--accent);font-size:13px;font-weight:600;cursor:pointer;font-family:var(--font);padding:0 8px 0 0;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
 .back-btn:hover{text-decoration:underline}
 .share-btn{display:flex;align-items:center;gap:6px;background:none;border:none;color:var(--text-2);font-size:13px;font-weight:600;cursor:pointer;font-family:var(--font);padding:4px 12px;border-radius:6px;transition:all 0.15s}
 .share-btn:hover{background:var(--bg-card);color:var(--accent)}
@@ -4268,8 +4268,7 @@ async function goToPage(page) {
   const activeFilter = filter;
   const pagePromise = preparePageNavigation(page, filter);
   programmaticScrollUntil = Date.now() + 1000;
-  window.scrollTo({ top: 0, behavior: 'smooth' });
-  await waitForScrollTop();
+  await scrollPageToTop();
   const data = await pagePromise;
   if (!data || activeFilter !== filter) return;
   applyNewsPage(data, page, activeFilter, { animate: true });
@@ -4288,6 +4287,35 @@ function waitForScrollTop(timeout = 700) {
       requestAnimationFrame(check);
     };
     requestAnimationFrame(check);
+  });
+}
+
+function scrollPageToTop() {
+  const startY = window.scrollY || document.documentElement.scrollTop || 0;
+  if (startY <= 4) return Promise.resolve();
+  const reduceMotion = window.matchMedia
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (usesMobileArticleNavigation() || reduceMotion) {
+    window.scrollTo({ top: 0, behavior: reduceMotion ? 'auto' : 'smooth' });
+    return waitForScrollTop(900);
+  }
+  const duration = Math.min(700, Math.max(480, startY * 0.16));
+  return new Promise(resolve => {
+    const startedAt = performance.now();
+    const step = now => {
+      const progress = Math.min(1, (now - startedAt) / duration);
+      const eased = progress < 0.5
+        ? 4 * progress * progress * progress
+        : 1 - Math.pow(-2 * progress + 2, 3) / 2;
+      window.scrollTo(0, Math.round(startY * (1 - eased)));
+      if (progress < 1) {
+        requestAnimationFrame(step);
+      } else {
+        window.scrollTo(0, 0);
+        resolve();
+      }
+    };
+    requestAnimationFrame(step);
   });
 }
 
@@ -4323,8 +4351,7 @@ async function refreshFromHeader() {
     return;
   }
   programmaticScrollUntil = Date.now() + 1000;
-  window.scrollTo({ top: 0, behavior: 'smooth' });
-  await waitForScrollTop();
+  await scrollPageToTop();
   triggerRefresh();
 }
 
@@ -4334,8 +4361,7 @@ async function goHome() {
     return;
   }
   programmaticScrollUntil = Date.now() + 1000;
-  window.scrollTo({ top: 0, behavior: 'smooth' });
-  await waitForScrollTop();
+  await scrollPageToTop();
   await showHomepageAfterScroll();
   triggerRefresh({ silentStart: true });
 }
@@ -4671,6 +4697,24 @@ function closeArticleFromButton() {
   closeArticle(false, navigator.maxTouchPoints > 0);
 }
 
+let articleBackTouchStart = null;
+const backBtn = document.getElementById('backBtn');
+backBtn.addEventListener('touchstart', e => {
+  const touch = e.changedTouches[0];
+  articleBackTouchStart = touch ? { x: touch.clientX, y: touch.clientY } : null;
+  e.stopPropagation();
+}, { passive: true });
+backBtn.addEventListener('touchend', e => {
+  e.stopPropagation();
+  const touch = e.changedTouches[0];
+  const start = articleBackTouchStart;
+  articleBackTouchStart = null;
+  if (!touch || !start) return;
+  if (Math.abs(touch.clientX - start.x) > 12 || Math.abs(touch.clientY - start.y) > 12) return;
+  e.preventDefault();
+  closeArticleFromButton();
+}, { passive: false });
+
 // Handle hash-based article links
 function handleHash() {
   const match = location.hash.match(/^#\/article\/(\d{2}-\d{2}-\d{2})-(\d+)$/);
@@ -4871,6 +4915,7 @@ document.addEventListener('visibilitychange', () => {
     if (!usesMobileArticleNavigation()) return;
     if (document.getElementById('lb').classList.contains('open')) return;
     if (!overlay.classList.contains('open')) return;
+    if (e.target.closest('#backBtn')) return;
     sx = e.touches[0].clientX;
     sy = e.touches[0].clientY;
     swiping = false;
