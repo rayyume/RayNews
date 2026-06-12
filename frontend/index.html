@@ -625,7 +625,7 @@ body.body-scroll-lock{overflow:hidden!important}
         <button class="settings-tab active" data-tab="account" onclick="switchSettingsTab('account')">账号</button>
         <button class="settings-tab" data-tab="ai" onclick="switchSettingsTab('ai')">AI</button>
         <button class="settings-tab" data-tab="summary" onclick="switchSettingsTab('summary')">摘要</button>
-        <button class="settings-tab" data-tab="sources" onclick="switchSettingsTab('sources')">订阅源</button>
+        <button class="settings-tab" data-tab="sources" id="sourcesSettingsTab" onclick="switchSettingsTab('sources')" style="display:none">订阅源</button>
         <button class="settings-tab" data-tab="translate" onclick="switchSettingsTab('translate')">翻译</button>
         <button class="settings-tab" data-tab="notify" onclick="switchSettingsTab('notify')">通知</button>
         <button class="settings-tab" data-tab="theme" onclick="switchSettingsTab('theme')">主题</button>
@@ -1449,6 +1449,8 @@ function updateUserUI() {
     document.getElementById('userAvatarImg').style.display = '';
     document.getElementById('userAvatarLetter').style.display = 'none';
     document.getElementById('adminPanelBtn').style.display = authUser.role === 'admin' ? '' : 'none';
+    const sourcesSettingsTab = document.getElementById('sourcesSettingsTab');
+    if (sourcesSettingsTab) sourcesSettingsTab.style.display = authUser.role === 'admin' ? '' : 'none';
     const sourceRedetectBtn = document.getElementById('sourceRedetectBtn');
     if (sourceRedetectBtn) sourceRedetectBtn.style.display = authUser.role === 'admin' ? '' : 'none';
     const sourceReinitBtn = document.getElementById('sourceReinitBtn');
@@ -1466,6 +1468,8 @@ function updateUserUI() {
     // Show login button in header
     const existingAvatar = document.querySelector('.header-avatar');
     if (existingAvatar) existingAvatar.style.display = 'none';
+    const sourcesSettingsTab = document.getElementById('sourcesSettingsTab');
+    if (sourcesSettingsTab) sourcesSettingsTab.style.display = 'none';
     const sourceRedetectBtn = document.getElementById('sourceRedetectBtn');
     if (sourceRedetectBtn) sourceRedetectBtn.style.display = 'none';
     const sourceReinitBtn = document.getElementById('sourceReinitBtn');
@@ -1521,7 +1525,7 @@ function openSettings() {
   loadGeneralSettings();
   loadThemeSettings();
   loadAccountTab();
-  loadSourcesTab();
+  if (authUser && authUser.role === 'admin') loadSourcesTab();
   hideSettingsStatus();
 }
 
@@ -1532,6 +1536,7 @@ function closeAISettings() {
 }
 
 function switchSettingsTab(tab) {
+  if (tab === 'sources' && (!authUser || authUser.role !== 'admin')) tab = 'account';
   document.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
   document.querySelector('.settings-tab[data-tab="' + tab + '"]').classList.add('active');
   ['account','ai','summary','sources','translate','notify','theme'].forEach(t => {

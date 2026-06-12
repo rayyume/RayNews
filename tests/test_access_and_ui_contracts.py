@@ -132,3 +132,11 @@ def test_legacy_admin_source_promotion_is_guarded_after_success():
     assert "_legacy_admin_source_settings_promoted = False" in server
     assert "global _legacy_admin_source_settings_promoted" in server
     assert "if _legacy_admin_source_settings_promoted:" in server
+
+
+def test_sources_settings_tab_is_admin_only():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert 'id="sourcesSettingsTab"' in html
+    assert "sourcesSettingsTab.style.display = authUser.role === 'admin' ? '' : 'none';" in html
+    assert "if (tab === 'sources' && (!authUser || authUser.role !== 'admin')) tab = 'account';" in html
+    assert "if (authUser && authUser.role === 'admin') loadSourcesTab();" in html
