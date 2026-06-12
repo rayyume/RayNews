@@ -127,6 +127,36 @@ def test_article_navigation_uses_browser_history_for_back():
     assert "closeArticle(true)" in html
 
 
+def test_article_back_and_refresh_do_not_replace_the_whole_list():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    close_start = html.index("function closeArticle(fromHistoryNavigation = false)")
+    close_end = html.index("// Handle hash-based article links", close_start)
+    close_block = html[close_start:close_end]
+    refresh_start = html.index("async function triggerRefresh()")
+    refresh_end = html.index("function setRefreshRunning", refresh_start)
+    refresh_block = html[refresh_start:refresh_end]
+
+    assert "function reconcileVisibleArticles()" in html
+    assert "function flushPendingListUpdate()" in html
+    assert "flushPendingListUpdate();" in close_block
+    assert "renderList();" not in close_block
+    assert "const refreshCursor = latestNewsTimestamp();" in refresh_block
+    assert "await loadSince(refreshCursor, { forceApply: true });" in refresh_block
+    assert "const listResp = await fetch('/api/news?size='" not in refresh_block
+
+
+def test_blocking_list_loading_is_only_used_when_no_articles_are_available():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    load_start = html.index("async function loadData(")
+    load_end = html.index("async function loadSince", load_start)
+    load_block = html[load_start:load_end]
+
+    assert "const showBlockingLoader = news.length === 0;" in load_block
+    assert "if (showBlockingLoader)" in load_block
+    assert "reconcileVisibleArticles();" in load_block
+    assert "indicator.innerHTML = '<span class=\"spin\"></span>刷新中...';" in html
+
+
 def test_legacy_admin_source_promotion_is_guarded_after_success():
     server = (ROOT / "web_server.py").read_text(encoding="utf-8")
     assert "_legacy_admin_source_settings_promoted = False" in server

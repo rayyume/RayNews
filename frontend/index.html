@@ -114,7 +114,9 @@ a:hover{text-decoration:underline}
 .fbtn.active{background:var(--accent-dim);border-color:var(--accent);color:var(--accent)}
 
 /* ═══ News List ═══════════════════════════════════ */
-.list{display:flex;flex-direction:column;gap:1px;background:var(--border);border-radius:var(--radius);overflow:hidden;margin-bottom:40px}
+.list{display:flex;flex-direction:column;gap:1px;background:var(--border);border-radius:var(--radius);overflow:hidden;margin-bottom:40px;position:relative}
+.list.manual-refreshing::before{content:'';position:absolute;z-index:4;left:0;top:0;width:36%;height:2px;background:linear-gradient(90deg,transparent,var(--accent),transparent);pointer-events:none;animation:listRefreshSweep 1.15s ease-in-out infinite}
+@keyframes listRefreshSweep{0%{transform:translateX(-110%);opacity:.35}50%{opacity:.9}100%{transform:translateX(385%);opacity:.35}}
 .item{display:flex;gap:16px;padding:18px 20px;background:var(--bg-card);cursor:pointer;transition:background 0.12s;position:relative}
 .item:hover{background:var(--bg-card-hover)}
 .item-thumb{width:120px;height:80px;border-radius:6px;overflow:hidden;flex-shrink:0;background:var(--bg-surface)}
@@ -213,6 +215,7 @@ a:hover{text-decoration:underline}
 .skeleton-lines{flex:1;display:flex;flex-direction:column;gap:8px;padding:4px 0}
 .skeleton-line{height:14px;border-radius:4px;background:linear-gradient(90deg,var(--bg-surface) 25%,var(--bg-card-hover) 50%,var(--bg-surface) 75%);background-size:200% 100%;animation:shimmer 1.5s infinite}
 .skeleton-line:last-child{width:60%}
+.blocking-load-spinner{display:inline-block;width:20px;height:20px;border:2px solid var(--border-hover);border-top-color:var(--accent);border-radius:50%;animation:ptr-spin .7s linear infinite}
 
 /* ═══ Pagination ════════════════════════════════ */
 .pagination{display:flex;align-items:center;justify-content:center;gap:8px;padding:24px 0 8px}
@@ -3205,6 +3208,121 @@ function getCategory(source) {
   return '';
 }
 
+function latestNewsTimestamp() {
+  if (!news.length) return 0;
+  return Math.max(...news.map(item => Number(item.timestamp) || 0));
+}
+
+function mergeNewsItems(items) {
+  const byId = new Map(news.map(item => [Number(item.id), item]));
+  let added = 0;
+  for (const item of items || []) {
+    const id = Number(item && item.id);
+    if (!id) continue;
+    const existing = byId.get(id);
+    if (existing) {
+      Object.assign(existing, item);
+    } else {
+      news.push(item);
+      byId.set(id, item);
+      added++;
+    }
+  }
+  news.sort((a, b) => (Number(b.timestamp) || 0) - (Number(a.timestamp) || 0));
+  return added;
+}
+
+function createArticleElement(item) {
+  const template = document.createElement('template');
+  template.innerHTML = articleItemHtml(item).trim();
+  return template.content.firstElementChild;
+}
+
+function updateArticleElement(node, item) {
+  const title = node.querySelector('.item-title');
+  if (title && title.textContent !== (item.title || '')) title.textContent = item.title || '';
+  const badge = node.querySelector('[data-role="source"]');
+  if (badge) {
+    const displaySource = displaySourceForArticle(feedSourceOf(item));
+    badge.textContent = sourceLabel(displaySource);
+    badge.title = sourceBadgeTitle(feedSourceOf(item));
+    badge.setAttribute('style', badgeStyle(displaySource));
+  }
+  const time = node.querySelector('[data-role="time"]');
+  if (time) time.textContent = formatTime(item.date, item.time);
+}
+
+function reconcileVisibleArticles() {
+  let filtered = filteredNews();
+  if (!filtered.length && news.length && filter !== 'all') {
+    filter = 'all';
+    filtered = news;
+    renderFilters();
+  }
+  if (!authToken) currentPage = 1;
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  if (currentPage > totalPages) currentPage = totalPages;
+  const start = (currentPage - 1) * PAGE_SIZE;
+  const items = filtered.slice(start, start + PAGE_SIZE);
+  const list = document.getElementById('list');
+  document.getElementById('count').textContent = filtered.length + ' 条新闻';
+
+  if (!items.length || !list.querySelector('.item[data-id]')) {
+    renderList();
+    return;
+  }
+
+  const currentCards = Array.from(list.children)
+    .filter(node => node.matches('.item[data-id]'));
+  const existing = new Map(
+    currentCards.map(node => [Number(node.dataset.id), node]),
+  );
+  const desiredIds = new Set(items.map(item => Number(item.id)));
+  const anchor = Array.from(existing.values()).find(node => node.getBoundingClientRect().bottom > 0);
+  const anchorId = anchor ? Number(anchor.dataset.id) : 0;
+  const anchorTop = anchor ? anchor.getBoundingClientRect().top : 0;
+
+  Array.from(list.children).forEach(node => {
+    if (!node.matches('.item[data-id]')) node.remove();
+  });
+
+  let cursor = list.firstElementChild;
+  for (const item of items) {
+    const id = Number(item.id);
+    let node = existing.get(id);
+    if (!node) {
+      node = createArticleElement(item);
+    } else {
+      updateArticleElement(node, item);
+    }
+    if (node !== cursor) list.insertBefore(node, cursor);
+    cursor = node.nextElementSibling;
+  }
+
+  Array.from(list.children)
+    .filter(node => node.matches('.item[data-id]'))
+    .forEach(node => {
+      if (!desiredIds.has(Number(node.dataset.id))) node.remove();
+    });
+  renderPagination(totalPages);
+
+  if (anchorId) {
+    const nextAnchor = list.querySelector(`.item[data-id="${anchorId}"]`);
+    if (nextAnchor) {
+      const delta = nextAnchor.getBoundingClientRect().top - anchorTop;
+      if (Math.abs(delta) > 0.5) window.scrollBy(0, delta);
+    }
+  }
+}
+
+function flushPendingListUpdate() {
+  if (!_pendingUpdate) return;
+  _pendingUpdate = false;
+  renderFilters();
+  reconcileVisibleArticles();
+  if (document.getElementById('searchOverlay').classList.contains('open')) renderSearchResults();
+}
+
 async function triggerRefresh() {
   if (refreshInProgress) {
     showToast('🔄 正在刷新，请稍候');
@@ -3224,6 +3342,7 @@ async function triggerRefresh() {
   }
 
   setRefreshRunning(true);
+  const refreshCursor = latestNewsTimestamp();
 
   let refreshUrl = '/refresh';
   let fetchOpts = { cache: 'no-store' };
@@ -3244,25 +3363,15 @@ async function triggerRefresh() {
     try { data = text ? JSON.parse(text) : {}; } catch {}
     if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
 
-    // Silent full reload — no skeleton flash, no timestamp boundary duplicates
-    const listResp = await fetch('/api/news?size=' + INITIAL_LOAD_SIZE + '&t=' + Date.now());
-    await loadSourceCategories();
-    const listData = await listResp.json();
-    news = listData.items || [];
-    lastNewsDiagnostics = listData.diagnostics || null;
-    const overlayOpen = document.getElementById('overlay').classList.contains('open');
-    if (!overlayOpen) articleBodyCache = {};
-    document.getElementById('count').textContent = listData.total + ' 条新闻';
-    if (overlayOpen) {
-      _pendingUpdate = true;
+    let added = 0;
+    if (news.length) {
+      added = await loadSince(refreshCursor, { forceApply: true });
     } else {
-      renderFilters();
-      renderList();
+      await loadData();
+      added = Math.max(0, news.length - beforeCount);
     }
 
-    const added = Math.max(0, news.length - beforeCount);
     showToast(added > 0 ? '✅ 已更新 ' + added + ' 篇文章' : '✅ 刷新完成');
-    if (!overlayOpen) window.scrollTo({ top: 0, behavior: 'smooth' });
   } catch (e) {
     refreshError = e.message || '刷新失败';
     showToast('❌ 刷新失败: ' + refreshError);
@@ -3280,6 +3389,8 @@ function setRefreshRunning(isRunning) {
   btn.disabled = isRunning;
   const label = btn.querySelector('span') || btn;
   label.textContent = isRunning ? '刷新中' : '刷新';
+  const list = document.getElementById('list');
+  if (list) list.classList.toggle('manual-refreshing', isRunning);
 }
 
 function resetPullIndicator() {
@@ -3292,9 +3403,14 @@ function resetPullIndicator() {
   }
 }
 
+// Full snapshot: reserved for cold start, explicit recovery, and admin mutations.
+// When articles already exist, reconcile the snapshot without clearing the list.
 async function loadData() {
   const list = document.getElementById('list');
-  list.innerHTML = `<div class="skeleton-item"><div class="skeleton-thumb"></div><div class="skeleton-lines"><div class="skeleton-line"></div><div class="skeleton-line"></div></div></div>`.repeat(3);
+  const showBlockingLoader = news.length === 0;
+  if (showBlockingLoader) {
+    list.innerHTML = `<div class="skeleton-item"><div class="skeleton-thumb"></div><div class="skeleton-lines"><div class="skeleton-line"></div><div class="skeleton-line"></div></div></div>`.repeat(3);
+  }
 
   try {
     const controller = new AbortController();
@@ -3305,19 +3421,28 @@ async function loadData() {
     const data = await resp.json();
     news = data.items || [];
     lastNewsDiagnostics = data.diagnostics || null;
-    articleBodyCache = {};
     document.getElementById('count').textContent = data.total + ' 条新闻';
-    renderFilters();
-    renderList();
-    if (document.getElementById('searchOverlay').classList.contains('open')) renderSearchResults();
+    if (document.getElementById('overlay').classList.contains('open')) {
+      _pendingUpdate = true;
+    } else {
+      renderFilters();
+      if (showBlockingLoader) renderList();
+      else reconcileVisibleArticles();
+      if (document.getElementById('searchOverlay').classList.contains('open')) renderSearchResults();
+    }
     pollTitleUpdates();
   } catch (e) {
     const msg = e.name === 'AbortError' ? '连接超时，轻触重试或检查网络' : '加载失败，点击重试';
-    list.innerHTML = '<div class="empty"><div class="empty-icon">📡</div><p>' + msg + '</p><button class="refresh-btn" onclick="loadData()" style="margin-top:12px">重试</button></div>';
+    if (showBlockingLoader) {
+      list.innerHTML = '<div class="empty"><div class="empty-icon">📡</div><p>' + msg + '</p><button class="refresh-btn" onclick="loadData()" style="margin-top:12px">重试</button></div>';
+    } else {
+      showToast('后台同步失败: ' + msg);
+    }
   }
 }
 
-async function loadSince(timestamp) {
+// Routine refresh path: merge only changed/new rows and preserve existing DOM nodes.
+async function loadSince(timestamp, { forceApply = false } = {}) {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 8000);
@@ -3325,25 +3450,25 @@ async function loadSince(timestamp) {
     clearTimeout(timeout);
     const data = await resp.json();
     const newItems = data.items || [];
-    if (newItems.length === 0) return 0;
-    // Prepend new items, dedup by id
-    const existingIds = new Set(news.map(n => n.id));
-    const fresh = newItems.filter(n => !existingIds.has(n.id));
-    if (fresh.length === 0) return 0;
+    if (newItems.length === 0) {
+      if (forceApply && !document.getElementById('overlay').classList.contains('open')) {
+        flushPendingListUpdate();
+      }
+      return 0;
+    }
+    const added = mergeNewsItems(newItems);
+    if (added === 0) return 0;
     await loadSourceCategories();
-    news = fresh.concat(news);
-    // Re-sort by timestamp descending
-    news.sort((a, b) => b.timestamp - a.timestamp);
-    document.getElementById('count').textContent = (data.total || news.length) + ' 条新闻';
+    document.getElementById('count').textContent = news.length + ' 条新闻';
     // If overlay (article reader) is open, defer DOM refresh until user closes it
     if (document.getElementById('overlay').classList.contains('open')) {
       _pendingUpdate = true;
-      return fresh.length;
+      return added;
     }
     renderFilters();
-    renderList();
+    reconcileVisibleArticles();
     if (document.getElementById('searchOverlay').classList.contains('open')) renderSearchResults();
-    return fresh.length;
+    return added;
   } catch (e) {
     // Silently ignore incremental fetch errors
     return 0;
@@ -3356,7 +3481,7 @@ async function loadDataWithRetry(retries, delay) {
   for (let i = 0; i < retries; i++) {
     const list = document.getElementById('list');
     if (i > 0) {
-      list.innerHTML = '<div class="empty"><div class="empty-icon">⏳</div><p>获取中 (' + i + '/' + (retries-1) + ')...</p></div>';
+      list.innerHTML = '<div class="empty"><span class="blocking-load-spinner"></span><p>正在重新连接 (' + i + '/' + (retries-1) + ')...</p></div>';
       await new Promise(r => setTimeout(r, delay));
     }
     try {
@@ -3578,8 +3703,8 @@ function articleItemHtml(n) {
       <div class="item-body">
         <div class="item-title">${esc(n.title)}</div>
         <div class="item-meta">
-          <span class="badge" style="${badgeStyle(displaySourceForArticle(feedSourceOf(n)))}" title="${esc(sourceBadgeTitle(feedSourceOf(n)))}">${esc(sourceLabel(displaySourceForArticle(feedSourceOf(n))))}</span>
-          <span>${formatTime(n.date, n.time)}</span>
+          <span class="badge" data-role="source" style="${badgeStyle(displaySourceForArticle(feedSourceOf(n)))}" title="${esc(sourceBadgeTitle(feedSourceOf(n)))}">${esc(sourceLabel(displaySourceForArticle(feedSourceOf(n))))}</span>
+          <span data-role="time">${formatTime(n.date, n.time)}</span>
           ${n.has_full_content ? '<span class="full-tag">● 全文</span>' : ''}
         </div>
       </div>
@@ -4098,13 +4223,8 @@ function closeArticle(fromHistoryNavigation = false) {
   if (!fromHistoryNavigation && location.hash) {
     history.replaceState(null, '', window.location.pathname + window.location.search);
   }
-  // If new articles arrived while reading, refresh the list now
-  if (_pendingUpdate) {
-    _pendingUpdate = false;
-    document.getElementById('count').textContent = news.length + ' 条新闻';
-    renderFilters();
-    renderList();
-  }
+  // Apply queued changes by reusing existing cards; never blank the homepage on return.
+  flushPendingListUpdate();
   _closingOverlay = false;
 }
 
@@ -4346,7 +4466,7 @@ setInterval(function() {
       pulling = false;
       if (pullDist > 60) {
         released = true;
-        indicator.innerHTML = '🔄 刷新中...';
+        indicator.innerHTML = '<span class="spin"></span>刷新中...';
         indicator.style.top = '0';
         indicator.style.opacity = '1';
         indicator.style.transition = 'top 0.2s, opacity 0.2s';
