@@ -4,118 +4,257 @@
 
 # RayNews 📡 🤖
 
-新闻聚合阅读器——从 Telegram 频道抓取新闻消息（通过 RSS-to-Telegram-Bot 推送），自动提取 Telegraph 全文，生成暗色模式新闻站。
+RayNews 是一个以 Telegram 公开频道为数据入口的自托管新闻聚合阅读器。它可以增量抓取频道消息、提取 Telegraph 和微信公众号等文章全文，并提供 AI 摘要、翻译、每日总结、订阅源管理、收藏和图片持久缓存。
 
-![screenshot](assets/screenshot.jpg)
+前端为响应式 PWA，支持跟随系统、明色和暗色三种主题。
 
-## 🤖 AI 功能
+**示例网站：** [https://news.rayyu.me](https://news.rayyu.me)
 
-- **📝 文章摘要** — 一键 AI 生成文章摘要，结果缓存至数据库，不重复消耗 API
-- **🌐 全文翻译** — 英译中全文翻译，保留原文排版，支持原文/译文一键切换
-- **⚡ 自动翻译** — 打开英文文章自动显示中文，无需手动点击
-- **📬 每日摘要** — 定时汇总当日新闻，AI 生成分类摘要，Markdown 邮件推送
-- **🔌 自定义 AI API** — 支持 OpenAI / Claude / 任意兼容接口，使用你自己的 Key
+## 页面预览
+
+<table>
+  <tr>
+    <th width="72%">桌面端</th>
+    <th width="28%">移动端 PWA</th>
+  </tr>
+  <tr>
+    <td align="center" valign="top">
+      <img src="https://img.rayyu.me/file/1781248235309_PC.png" alt="RayNews 桌面端页面" width="100%">
+    </td>
+    <td align="center" valign="top">
+      <img src="https://img.rayyu.me/file/1781248235931_PWA.jpg" alt="RayNews 移动端 PWA 页面" width="100%">
+    </td>
+  </tr>
+</table>
+
+## 主要功能
+
+### 阅读与整理
+
+- 从 Telegram 公开频道每 15 分钟增量抓取新闻，也支持手动刷新
+- 提取 Telegraph、微信公众号及普通网页文章内容
+- 按订阅源和四个固定分类筛选文章
+- 搜索文章标题、来源和摘要
+- 收藏文章并在多设备登录后同步
+- 管理员可识别、分类、合并和删除订阅源及历史文章
+- 删除记录写入 tombstone，避免文章在后续刷新时重新出现
+
+### AI 能力
+
+- 使用每个用户自己配置的 OpenAI-compatible 或 Claude/Anthropic API
+- 手动或后台自动生成文章摘要
+- 自动翻译英文标题和正文
+- 自动将过长标题简写为适合首页展示的短标题
+- 从当天数百篇文章中筛选重点新闻，生成分类每日总结
+- AI 结果写入数据库，可在符合权限和功能开关的情况下复用
+- 订阅源 AI 分类仅由管理员执行，并使用管理员自己的 AI API
+
+### 图片缓存
+
+- 文章图片统一经过服务端缓存，降低历史图片失效和防盗链影响
+- 新文章抓取后后台预热封面和正文前几张图片
+- 普通图片按缓存容量自动清理，默认上限为 `5120 MB`
+- 收藏文章的全部图片会被标记为永久保护，不参与普通缓存清理
+- 图片缓存保存在 `/app/data/image_cache`
+
+### 用户与通知
+
+- 第一个注册账号自动成为管理员
+- 后续用户需要邀请码注册，初始角色为预览用户
+- 管理员可以管理用户角色、订阅源及全局文章删除
+- 支持通过 Resend 发送邀请码、注册成功通知和定时每日摘要邮件
 
 ## 架构
 
+```text
+新闻源 (RSS / 网页 / API)
+          │
+          ▼
+RSS-to-Telegram-Bot ──推送──▶ Telegram 公开频道
+                                      │
+                                      ▼
+                              RayNews Fetcher
+                                      │
+                     ┌────────────────┴────────────────┐
+                     ▼                                 ▼
+              news.db / news.json              图片缓存目录
+                     │                                 │
+                     └────────────────┬────────────────┘
+                                      ▼
+             Nginx ──▶ refresh_server.py + web_server.py
+                                      │
+                                      ▼
+                              原生 JavaScript SPA
 ```
-新闻源 (RSS/网页/API)
-       ↓
- RSS-to-Telegram-Bot ──推送──→ Telegram 频道
-                                      ↓
-                        RayNews Fetcher ──定时抓取──→ SQLite
-                                      ↓
-                          Flask API + Nginx ──→ 前端 SPA
-```
 
-**数据流说明：**
+- `refresh_server.py`：多线程文章 API、刷新任务、文章详情和图片缓存
+- `web_server.py`：登录、用户、AI、收藏、设置、邮件和订阅源管理
+- `Nginx`：静态文件、SPA 路由和后端反向代理
+- `SQLite`：文章、用户、AI 结果、设置、收藏及删除记录
 
-1. **[RSS-to-Telegram-Bot](https://github.com/Rongronggg9/RSS-to-Telegram-Bot)** —— 订阅 RSS 源，将新文章推送到你的 Telegram 频道
-2. **Telegram 频道** —— 作为中间存储，RayNews 从此频道的公开页面（`t.me/s/频道名`）抓取消息
-3. **RayNews Fetcher** —— Python 脚本，每 15 分钟增量抓取新消息，自动识别来源、提取 Telegraph 全文
-4. **后端** —— Flask API，提供文章列表、详情、AI 摘要/翻译、收藏、用户管理等接口
-5. **前端** —— 纯原生 JS SPA，暗色风格，支持来源筛选、文章详情、AI 阅读、PWA
-
-> **注意：** RayNews 只负责**读取** Telegram 频道的数据，不做消息推送。推送需要用其他工具（如 [RSS-to-Telegram-Bot](https://github.com/Rongronggg9/RSS-to-Telegram-Bot)）或者手动在频道里发消息。
-
-## 前置条件
-
-- 一个 Telegram 公开频道
-- （可选）[RSS-to-Telegram-Bot](https://github.com/Rongronggg9/RSS-to-Telegram-Bot) 或其他工具将新闻推送到该频道
+> RayNews 只读取 Telegram 频道，不负责把 RSS 内容推送到频道。你可以使用 [RSS-to-Telegram-Bot](https://github.com/Rongronggg9/RSS-to-Telegram-Bot)、其他机器人或手工发消息。
 
 ## 快速开始
 
-### 1. 克隆项目
+### 1. 前置条件
+
+- Docker 和 Docker Compose
+- 一个 Telegram 公开频道
+- 可选：用于向频道推送新闻的 [RSS-to-Telegram-Bot](https://github.com/Rongronggg9/RSS-to-Telegram-Bot)
+- 可选：AI API 和 Resend 邮件 API
+
+### 2. 克隆项目
 
 ```bash
-git clone https://github.com/rayyume/RayNews-Reader.git
+git clone https://github.com/rayyume/RayNews.git
 cd RayNews
 ```
 
-### 2. 配置
+### 3. 配置环境变量
 
 ```bash
-# 复制环境配置模板
 cp .env.example .env
-
-# 编辑 .env，填入你的 Telegram 频道名称等配置
 ```
 
-### 3. 启动
+至少在 `.env` 中填写：
+
+```dotenv
+TELEGRAM_CHANNEL=your_public_channel
+RAYNEWS_PUBLIC_URL=https://news.example.com
+```
+
+`RAYNEWS_PUBLIC_URL` 是必填项，用于邮件页脚等对外站点链接。不要保留示例域名。
+
+如需邮件功能，再配置：
+
+```dotenv
+RESEND_API_KEY=re_xxxxxxxxx
+RAYNEWS_ADMIN_EMAIL=admin@example.com
+RAYNEWS_FROM_EMAIL=news@example.com
+```
+
+### 4. 启动
 
 ```bash
 docker compose up -d
 ```
 
-容器启动时自动抓取一次，之后每 15 分钟刷新。
+访问 `http://<服务器地址>:8090`。容器首次启动会抓取一次数据，之后每 15 分钟自动刷新。
 
-### 4. 访问
+第一个成功注册的账号会成为管理员。管理员邮箱建议与 `RAYNEWS_ADMIN_EMAIL` 保持一致。
 
-- 前端: `http://<your-ip>:8090`
-- 手动刷新 API: `http://<your-ip>:8090/refresh`
-- 调度器状态: `http://<your-ip>:8090/scheduler/status`
+## 镜像与更新
+
+仓库中的 `docker-compose.yml` 默认使用 `build: .` 构建当前代码。
+
+- 稳定版：注释 `build: .`，启用 `image: ghcr.io/rayyume/raynews:latest`
+- 开发测试版：使用 `image: ghcr.io/rayyume/raynews:dev`
+
+更新预构建镜像：
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+如果使用 Watchtower，请确认容器由 `ghcr.io/rayyume/raynews` 镜像创建，而不是 Compose 自动生成的本地镜像名。
+
+## 数据持久化
+
+Compose 默认挂载：
+
+```yaml
+volumes:
+  - ./data:/app/data
+```
+
+`/app/data` 中包含文章数据库、用户和 AI 设置、登录密钥、头像、图片缓存及抓取状态。升级或重建容器时必须保留整个目录。
 
 ## 环境变量
 
+### 必填与核心配置
+
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `TELEGRAM_CHANNEL` | `your_channel` | Telegram 频道名称（必填） |
-| `TZ` | `Asia/Shanghai` | 容器时区，影响日志时间戳 |
-| `RAYNEWS_SECRET` | (自动保存到 `/app/data/raynews_secret`) | JWT 签名密钥；也可手动指定 |
-| `RAYNEWS_TOKEN_EXPIRY_SECONDS` | `2592000` | 登录 token 有效期（秒），默认 30 天 |
-| `RESEND_API_KEY` | (空) | Resend 邮件 API Key（用于每日摘要/测试邮件） |
-| `RAYNEWS_ADMIN_EMAIL` | (第一个管理员邮箱) | 接收新用户邀请码申请的管理员邮箱 |
-| `RAYNEWS_FROM_EMAIL` | `onboarding@resend.dev` | 邮件发件人地址；生产建议改成自己的已验证域名邮箱 |
-| `HTTP_PROXY` | (空) | HTTP 代理（如需翻墙） |
-| `HTTPS_PROXY` | (空) | HTTPS 代理 |
-| `NO_PROXY` | `localhost,127.0.0.1` | 直连白名单 |
-| `AI_REQUEST_TIMEOUT_SECONDS` | `300` | AI 请求超时时间（秒），每日摘要、文章摘要、翻译、订阅源分类共用 |
-| `AUTO_SUMMARY_BATCH_LIMIT` | `20` | 后台自动生成文章摘要每轮处理的文章数 |
-| `AUTO_SUMMARY_INTERVAL_SECONDS` | `30` | 后台自动生成文章摘要的轮询间隔（秒） |
-| `AUTO_TRANSLATION_BATCH_LIMIT` | `5` | 后台自动翻译每轮处理的文章数 |
-| `AUTO_TRANSLATION_INTERVAL_SECONDS` | `30` | 后台自动翻译的轮询间隔（秒） |
-| `AUTO_SOURCE_CLASSIFY_BATCH_LIMIT` | `20` | 后台 AI 处理待分类订阅源每轮处理的来源数 |
-| `AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS` | `120` | 后台 AI 处理待分类订阅源的轮询间隔（秒） |
-| `IMAGE_CACHE_ENABLED` | `true` | 是否启用文章图片本地缓存 |
-| `IMAGE_CACHE_MAX_MB` | `5120` | 普通图片缓存容量上限（MB）；收藏文章图片不参与清理 |
-| `IMAGE_CACHE_MAX_FILE_MB` | `10` | 单张图片最大缓存大小（MB） |
-| `IMAGE_CACHE_PREFETCH_BODY_LIMIT` | `3` | 抓取后后台预缓存每篇文章正文前几张图片 |
-| `IMAGE_CACHE_PREFETCH_WORKERS` | `2` | 后台图片预缓存并发 worker 数 |
-| `IMAGE_CACHE_PREFETCH_QUEUE_SIZE` | `3000` | 后台图片预缓存队列容量 |
-| `RAYNEWS_PUBLIC_URL` | (必填) | RayNews 对外访问地址，用于邮件链接等场景，例如 `https://news.example.com` |
-| `CUSTOM_HEAD_HTML` | (空) | 注入到页面 `<head>` 的自定义 HTML，可用于访问统计脚本或 meta 标签 |
+| `TELEGRAM_CHANNEL` | `your_channel` | Telegram 公开频道名称；必须自行填写 |
+| `RAYNEWS_PUBLIC_URL` | 无 | 对外访问地址；Compose 中为必填，用于邮件页脚等场景 |
+| `TZ` | `Asia/Shanghai` | 容器时区 |
+| `DATA_DIR` | `/app/data` | 持久化数据目录 |
+| `RAYNEWS_SECRET` | 自动生成 | JWT 签名密钥；未设置时保存到 `/app/data/raynews_secret` |
+| `RAYNEWS_TOKEN_EXPIRY_SECONDS` | `2592000` | 登录 Token 有效期，单位秒 |
 
-## 自定义构建
+### 邮件配置
 
-```bash
-# 本地构建镜像
-docker compose build
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `RESEND_API_KEY` | 空 | Resend API Key，用于邀请码、注册通知、测试邮件和每日摘要 |
+| `RAYNEWS_ADMIN_EMAIL` | 首个管理员邮箱 | 接收邀请码申请和新用户注册通知 |
+| `RAYNEWS_FROM_EMAIL` | `onboarding@resend.dev` | 发件人；生产环境应使用 Resend 已验证域名 |
 
-# 或直接使用 ghcr.io 预构建镜像
-docker compose pull
-```
+### AI 与后台任务
 
-## 路线图 🗺️
+AI Endpoint、API Key、模型和供应商由用户在网页的“设置 → AI”中配置，不通过 Compose 共用。
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `AI_REQUEST_TIMEOUT_SECONDS` | `300` | AI 请求超时，单位秒 |
+| `AUTO_SUMMARY_BATCH_LIMIT` | `20` | 每轮自动生成文章摘要的文章数 |
+| `AUTO_SUMMARY_INTERVAL_SECONDS` | `30` | 自动摘要轮询间隔，单位秒 |
+| `AUTO_TRANSLATION_BATCH_LIMIT` | `5` | 每轮后台翻译文章数 |
+| `AUTO_TRANSLATION_INTERVAL_SECONDS` | `30` | 后台翻译轮询间隔，单位秒 |
+| `AUTO_TITLE_PROCESS_BATCH_LIMIT` | `20` | 每轮标题翻译或简写数量 |
+| `AUTO_TITLE_PROCESS_INTERVAL_SECONDS` | `10` | 标题后台处理间隔，单位秒 |
+| `AUTO_TITLE_PROCESS_SCAN_LIMIT` | `1000` | 每轮标题任务最大扫描数 |
+| `TITLE_SUMMARY_MAX_CHARS` | `30` | AI 短标题目标中文字符数 |
+| `TITLE_SUMMARY_MAX_TOTAL_CHARS` | `40` | 短标题允许的加权总长度 |
+| `AUTO_SOURCE_CLASSIFY_BATCH_LIMIT` | `20` | 每轮管理员 AI 分类的订阅源数量 |
+| `AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS` | `120` | 订阅源分类轮询间隔，单位秒 |
+| `TELEGRAM_EMBED_TIMEOUT_SECONDS` | `12` | 读取 Telegram 嵌入页面的超时 |
+
+每日总结还有 `AI_DAILY_*` 高级调优变量。通常保留代码默认值即可；如需使用，请将变量显式加入 Compose 的 `environment`。
+
+### 图片缓存
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `IMAGE_CACHE_ENABLED` | `true` | 启用服务端图片缓存 |
+| `IMAGE_CACHE_MAX_MB` | `5120` | 普通图片缓存容量上限，单位 MB |
+| `IMAGE_CACHE_MAX_FILE_MB` | `10` | 单张图片最大缓存大小，单位 MB |
+| `IMAGE_CACHE_PREFETCH_BODY_LIMIT` | `3` | 新文章后台预热的正文图片数量 |
+| `IMAGE_CACHE_PREFETCH_WORKERS` | `2` | 图片预热 worker 数量 |
+| `IMAGE_CACHE_PREFETCH_QUEUE_SIZE` | `3000` | 图片预热队列容量 |
+
+收藏文章图片不计入 `IMAGE_CACHE_MAX_MB` 的自动清理范围，因此实际目录占用可能超过该值。
+
+### 页面与网络
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `CUSTOM_HEAD_HTML` | 空 | 注入页面 `<head>` 的受信任 HTML，例如统计脚本 |
+| `HTTP_PROXY` | 空 | HTTP 代理 |
+| `HTTPS_PROXY` | 空 | HTTPS 代理 |
+| `NO_PROXY` | `localhost,127.0.0.1` | 不使用代理的地址 |
+
+## 权限说明
+
+| 能力 | 未登录 | 预览用户 | 普通用户 | 管理员 |
+|------|--------|----------|----------|--------|
+| 阅读首页和文章 | ✓ | ✓ | ✓ | ✓ |
+| 翻页、收藏、个人 AI 与通知设置 | — | 受限 | ✓ | ✓ |
+| 订阅源识别、分类、合并 | — | — | — | ✓ |
+| 删除订阅源和历史文章 | — | — | — | ✓ |
+| 用户管理和角色调整 | — | — | — | ✓ |
+
+订阅源标签和分类是全局设置，所有用户看到的结果以管理员维护的数据为准。
+
+## 常用接口
+
+- 健康检查：`GET /health`
+- 手动刷新：普通用户或管理员登录后使用页面刷新按钮，也可调用受保护的 `GET/POST /auth/refresh`
+- 文章列表：`GET /api/news`
+- 图片缓存：`GET /img-cache?url=<encoded-url>`
+
+## 路线图
 
 ### 短期
 
@@ -125,22 +264,23 @@ docker compose pull
 - [x] **英文标题及文章自动翻译** — 自动将英文内容翻译为中文
 - [x] **自定义 AI API** — 接入自定义 AI API，支持文章摘要和每日综述
 - [ ] **自定义可见订阅源** — 支持用户自定义可见订阅源，建立订阅源市场
-- [ ] **关注订阅源新文章通知** — 支持关注订阅源，抓取到新文章时推送通知（PWA应用）
+- [ ] **关注订阅源新文章通知** — 支持关注订阅源，抓取到新文章时推送通知（PWA 应用）
 
 ### 长期
 
 - [ ] **集成 [RSStT](https://github.com/Rongronggg9/RSS-to-Telegram-Bot)** — 用户无需额外部署 RSStT 项目，支持开箱即用
 - [ ] **关键词过滤** — 增加文章关键词过滤功能，不显示含有特定关键词的文章
-- [ ] **新闻Podcast生成** — 自动生成新闻Podcast，听新闻
+- [ ] **新闻 Podcast 生成** — 自动生成新闻 Podcast，听新闻
 - [ ] **iOS 客户端** — 原生 iOS 应用
 
 ## 技术栈
 
-- Python 3.12 (fetcher + refresh server + Flask API)
-- Nginx (静态服务 + API 反代)
-- 原生 HTML/CSS/JS (前端 SPA)
-- SQLite (数据存储)
-- BeautifulSoup (HTML 解析)
+- Python 3.12
+- Flask + Python `ThreadingHTTPServer`
+- Nginx
+- SQLite
+- 原生 HTML / CSS / JavaScript PWA
+- BeautifulSoup
 
 ## License
 

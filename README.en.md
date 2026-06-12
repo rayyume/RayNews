@@ -4,143 +4,283 @@
 
 # RayNews 📡 🤖
 
-A news aggregator that fetches messages from a Telegram channel (powered by [RSS-to-Telegram-Bot](https://github.com/Rongronggg9/RSS-to-Telegram-Bot)), automatically extracts Telegraph full articles, and serves a dark-mode news site.
+RayNews is a self-hosted news aggregator that uses a public Telegram channel as its content entry point. It incrementally fetches channel messages, extracts full articles from Telegraph, WeChat, and other pages, and provides AI summaries, translation, daily digests, source management, favorites, and persistent image caching.
 
-![screenshot](assets/screenshot.jpg)
+The responsive PWA supports system, light, and dark themes.
 
-## 🤖 AI Features
+**Demo:** [https://news.rayyu.me](https://news.rayyu.me)
 
-- **📝 Summarization** — One-click AI summary, cached in DB, no repeated API calls
-- **🌐 Translation** — Full article English-to-Chinese translation with original formatting preserved, toggle between original/translated
-- **⚡ Auto-Translate** — English articles auto-translate on open
-- **📬 Daily Digest** — Scheduled AI-generated daily summary via Markdown email
-- **🔌 Custom AI API** — OpenAI / Claude / any compatible API, your own key
+## Preview
+
+<table>
+  <tr>
+    <th width="72%">Desktop</th>
+    <th width="28%">Mobile PWA</th>
+  </tr>
+  <tr>
+    <td align="center" valign="top">
+      <img src="https://img.rayyu.me/file/1781248235309_PC.png" alt="RayNews desktop interface" width="100%">
+    </td>
+    <td align="center" valign="top">
+      <img src="https://img.rayyu.me/file/1781248235931_PWA.jpg" alt="RayNews mobile PWA interface" width="100%">
+    </td>
+  </tr>
+</table>
+
+## Features
+
+### Reading and organization
+
+- Incremental refresh from a public Telegram channel every 15 minutes, plus manual refresh
+- Full-article extraction for Telegraph, WeChat Official Accounts, and regular web pages
+- Article filtering by source and four fixed categories
+- Search across article titles, sources, and summaries
+- Account-based favorites synchronized across devices
+- Admin tools for source detection, categorization, merging, and article deletion
+- Deletion tombstones prevent removed articles from returning after a later refresh
+
+### AI
+
+- Per-user OpenAI-compatible or Claude/Anthropic API configuration
+- Manual and background article summarization
+- Automatic translation of English titles and article bodies
+- Automatic shortening of long titles for list display
+- Daily editorial selection and categorized digest generation from hundreds of articles
+- Stored AI results can be reused when permissions and feature settings allow it
+- AI source classification is admin-only and uses the administrator's own AI API
+
+### Image cache
+
+- Article images are served through the RayNews cache to reduce broken historical images and hotlink failures
+- New articles prefetch their cover and the first few body images in the background
+- Normal images are evicted according to a configurable cache limit, defaulting to `5120 MB`
+- All images belonging to a favorited article are pinned and excluded from normal eviction
+- Cached files are stored in `/app/data/image_cache`
+
+### Users and email
+
+- The first registered account becomes the administrator
+- Later registrations require an invitation code and start with the preview role
+- Administrators manage user roles, global sources, and global article deletion
+- Resend can deliver invitation codes, registration notices, test messages, and scheduled daily digests
 
 ## Architecture
 
+```text
+News sources (RSS / Web / API)
+          │
+          ▼
+RSS-to-Telegram-Bot ──push──▶ Public Telegram channel
+                                      │
+                                      ▼
+                              RayNews Fetcher
+                                      │
+                     ┌────────────────┴────────────────┐
+                     ▼                                 ▼
+              news.db / news.json              Image cache
+                     │                                 │
+                     └────────────────┬────────────────┘
+                                      ▼
+             Nginx ──▶ refresh_server.py + web_server.py
+                                      │
+                                      ▼
+                              Vanilla JavaScript SPA
 ```
-News Sources (RSS/Web/API)
-          ↓
- RSS-to-Telegram-Bot ──push──→ Telegram Channel
-                                      ↓
-                        RayNews Fetcher ──poll──→ SQLite
-                                      ↓
-                          Flask API + Nginx ──→ Frontend SPA
-```
 
-**Data flow:**
+- `refresh_server.py`: threaded article API, refresh jobs, article details, and image caching
+- `web_server.py`: authentication, users, AI, favorites, settings, email, and source management
+- `Nginx`: static files, SPA routing, and reverse proxy
+- `SQLite`: articles, users, AI results, settings, favorites, and deletion records
 
-1. **[RSS-to-Telegram-Bot](https://github.com/Rongronggg9/RSS-to-Telegram-Bot)** — subscribes to RSS feeds and pushes new articles to your Telegram channel
-2. **Telegram Channel** — acts as intermediate storage; RayNews fetches messages from the channel's public page (`t.me/s/channel_name`)
-3. **RayNews Fetcher** — Python script, incrementally fetches new messages every 15 minutes, auto-detects sources, extracts Telegraph full text
-4. **Backend** — Flask API for articles, AI, favorites, user management
-5. **Frontend** — Vanilla JS SPA, dark theme, PWA, source filtering, AI-assisted reading
-
-> **Note:** RayNews only **reads** from Telegram. You'll need another tool (like [RSS-to-Telegram-Bot](https://github.com/Rongronggg9/RSS-to-Telegram-Bot)) or manual posting to push content into the channel.
-
-## Prerequisites
-
-- A public Telegram channel
-- (Optional) [RSS-to-Telegram-Bot](https://github.com/Rongronggg9/RSS-to-Telegram-Bot) or other tools to push news to your channel
+> RayNews reads from Telegram but does not push RSS content into the channel. Use [RSS-to-Telegram-Bot](https://github.com/Rongronggg9/RSS-to-Telegram-Bot), another bot, or manual channel posts.
 
 ## Quick Start
 
-### 1. Clone
+### 1. Prerequisites
+
+- Docker and Docker Compose
+- A public Telegram channel
+- Optional: [RSS-to-Telegram-Bot](https://github.com/Rongronggg9/RSS-to-Telegram-Bot) to populate the channel
+- Optional: an AI API and a Resend account
+
+### 2. Clone
 
 ```bash
-git clone https://github.com/rayyume/RayNews-Reader.git
+git clone https://github.com/rayyume/RayNews.git
 cd RayNews
 ```
 
-### 2. Configure
+### 3. Configure
 
 ```bash
-# Copy environment template
 cp .env.example .env
-
-# Edit .env with your Telegram channel name and other settings
 ```
 
-### 3. Start
+At minimum, set:
+
+```dotenv
+TELEGRAM_CHANNEL=your_public_channel
+RAYNEWS_PUBLIC_URL=https://news.example.com
+```
+
+`RAYNEWS_PUBLIC_URL` is required for public links such as the email footer. Replace the example domain.
+
+To enable email features, also configure:
+
+```dotenv
+RESEND_API_KEY=re_xxxxxxxxx
+RAYNEWS_ADMIN_EMAIL=admin@example.com
+RAYNEWS_FROM_EMAIL=news@example.com
+```
+
+### 4. Start
 
 ```bash
 docker compose up -d
 ```
 
-The fetcher runs once on startup, then every 15 minutes.
+Open `http://<server-address>:8090`. The container fetches once at startup and refreshes every 15 minutes.
 
-### 4. Access
+The first successful registration becomes the administrator. It is recommended to use the same address as `RAYNEWS_ADMIN_EMAIL`.
 
-- Frontend: `http://<your-ip>:8090`
-- Manual refresh: `http://<your-ip>:8090/refresh`
-- Scheduler status: `http://<your-ip>:8090/scheduler/status`
+## Container Images and Updates
+
+The repository's `docker-compose.yml` uses `build: .` by default.
+
+- Stable image: comment out `build: .` and enable `image: ghcr.io/rayyume/raynews:latest`
+- Development image: use `image: ghcr.io/rayyume/raynews:dev`
+
+Update a pre-built deployment with:
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+When using Watchtower, make sure the running container was created from `ghcr.io/rayyume/raynews`, not from a Compose-generated local image name.
+
+## Persistence
+
+The default Compose mount is:
+
+```yaml
+volumes:
+  - ./data:/app/data
+```
+
+`/app/data` contains article databases, users and AI settings, the login secret, avatars, cached images, and fetch state. Preserve the complete directory when rebuilding or upgrading the container.
 
 ## Environment Variables
 
+### Required and core
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TELEGRAM_CHANNEL` | `your_channel` | Telegram channel name (required) |
+| `TELEGRAM_CHANNEL` | `your_channel` | Public Telegram channel name; replace the placeholder |
+| `RAYNEWS_PUBLIC_URL` | none | Required public URL used for public links such as the email footer |
 | `TZ` | `Asia/Shanghai` | Container timezone |
-| `RAYNEWS_SECRET` | (saved to `/app/data/raynews_secret`) | JWT signing key; can also be set manually |
-| `RAYNEWS_TOKEN_EXPIRY_SECONDS` | `2592000` | Login token lifetime in seconds, defaults to 30 days |
-| `RESEND_API_KEY` | (empty) | Resend email API key (for daily digest / test email) |
-| `RAYNEWS_ADMIN_EMAIL` | (first admin email) | Admin inbox for new-user invitation requests |
-| `RAYNEWS_FROM_EMAIL` | `onboarding@resend.dev` | Sender email address; use your verified domain address in production |
-| `HTTP_PROXY` | (empty) | HTTP proxy |
-| `HTTPS_PROXY` | (empty) | HTTPS proxy |
-| `NO_PROXY` | `localhost,127.0.0.1` | Direct connection whitelist |
-| `AI_REQUEST_TIMEOUT_SECONDS` | `300` | AI request timeout in seconds, shared by daily digest, article summaries, translation, and source classification |
-| `AUTO_SUMMARY_BATCH_LIMIT` | `20` | Number of articles processed per background auto-summary batch |
-| `AUTO_SUMMARY_INTERVAL_SECONDS` | `30` | Background auto-summary polling interval in seconds |
-| `AUTO_TRANSLATION_BATCH_LIMIT` | `5` | Number of articles processed per background auto-translation batch |
-| `AUTO_TRANSLATION_INTERVAL_SECONDS` | `30` | Background auto-translation polling interval in seconds |
-| `AUTO_SOURCE_CLASSIFY_BATCH_LIMIT` | `20` | Number of pending sources processed per background AI classification batch |
-| `AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS` | `120` | Background AI source classification polling interval in seconds |
-| `IMAGE_CACHE_ENABLED` | `true` | Enable persistent local cache for article images |
-| `IMAGE_CACHE_MAX_MB` | `5120` | Normal image cache size limit in MB; favorited article images are protected |
-| `IMAGE_CACHE_MAX_FILE_MB` | `10` | Maximum cached size per image in MB |
-| `IMAGE_CACHE_PREFETCH_BODY_LIMIT` | `3` | Number of body images to prefetch per article after refresh |
-| `IMAGE_CACHE_PREFETCH_WORKERS` | `2` | Number of background image prefetch workers |
-| `IMAGE_CACHE_PREFETCH_QUEUE_SIZE` | `3000` | Background image prefetch queue capacity |
-| `RAYNEWS_PUBLIC_URL` | (required) | Public RayNews URL used for email links and similar outbound links, e.g. `https://news.example.com` |
-| `CUSTOM_HEAD_HTML` | (empty) | Custom HTML injected into the page `<head>`, useful for analytics scripts or meta tags |
+| `DATA_DIR` | `/app/data` | Persistent data directory |
+| `RAYNEWS_SECRET` | generated | JWT signing secret; saved to `/app/data/raynews_secret` when omitted |
+| `RAYNEWS_TOKEN_EXPIRY_SECONDS` | `2592000` | Login token lifetime in seconds |
 
-## Custom Build
+### Email
 
-```bash
-# Build locally
-docker compose build
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RESEND_API_KEY` | empty | Resend key for invitations, registration notices, test email, and daily digests |
+| `RAYNEWS_ADMIN_EMAIL` | first admin email | Receives invitation requests and new-registration notices |
+| `RAYNEWS_FROM_EMAIL` | `onboarding@resend.dev` | Sender address; use a verified Resend domain in production |
 
-# Or pull pre-built image from ghcr.io
-docker compose pull
-```
+### AI and background jobs
 
-## Roadmap 🗺️
+AI endpoints, keys, models, and providers are configured per user under **Settings → AI**. They are not shared through Docker Compose.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AI_REQUEST_TIMEOUT_SECONDS` | `300` | AI request timeout in seconds |
+| `AUTO_SUMMARY_BATCH_LIMIT` | `20` | Articles per automatic summary batch |
+| `AUTO_SUMMARY_INTERVAL_SECONDS` | `30` | Automatic summary polling interval in seconds |
+| `AUTO_TRANSLATION_BATCH_LIMIT` | `5` | Articles per background translation batch |
+| `AUTO_TRANSLATION_INTERVAL_SECONDS` | `30` | Background translation polling interval in seconds |
+| `AUTO_TITLE_PROCESS_BATCH_LIMIT` | `20` | Titles processed per translation/shortening batch |
+| `AUTO_TITLE_PROCESS_INTERVAL_SECONDS` | `10` | Background title-processing interval in seconds |
+| `AUTO_TITLE_PROCESS_SCAN_LIMIT` | `1000` | Maximum titles scanned per pass |
+| `TITLE_SUMMARY_MAX_CHARS` | `30` | Target Chinese-character length for shortened titles |
+| `TITLE_SUMMARY_MAX_TOTAL_CHARS` | `40` | Maximum weighted shortened-title length |
+| `AUTO_SOURCE_CLASSIFY_BATCH_LIMIT` | `20` | Sources per administrator AI classification batch |
+| `AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS` | `120` | Source classification polling interval in seconds |
+| `TELEGRAM_EMBED_TIMEOUT_SECONDS` | `12` | Telegram embed fetch timeout |
+
+Additional `AI_DAILY_*` variables tune daily-digest candidate and output limits. Keep the built-in defaults unless needed; add any override explicitly to the Compose `environment`.
+
+### Image cache
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `IMAGE_CACHE_ENABLED` | `true` | Enable persistent server-side image caching |
+| `IMAGE_CACHE_MAX_MB` | `5120` | Normal image cache limit in MB |
+| `IMAGE_CACHE_MAX_FILE_MB` | `10` | Maximum cached size for one image in MB |
+| `IMAGE_CACHE_PREFETCH_BODY_LIMIT` | `3` | Number of body images prefetched for each new article |
+| `IMAGE_CACHE_PREFETCH_WORKERS` | `2` | Number of image prefetch workers |
+| `IMAGE_CACHE_PREFETCH_QUEUE_SIZE` | `3000` | Image prefetch queue capacity |
+
+Favorited article images are excluded from `IMAGE_CACHE_MAX_MB` eviction, so the actual directory size may exceed the configured limit.
+
+### Page and network
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CUSTOM_HEAD_HTML` | empty | Trusted HTML injected into `<head>`, such as an analytics script |
+| `HTTP_PROXY` | empty | HTTP proxy |
+| `HTTPS_PROXY` | empty | HTTPS proxy |
+| `NO_PROXY` | `localhost,127.0.0.1` | Addresses that bypass the proxy |
+
+## Permissions
+
+| Capability | Guest | Preview | User | Admin |
+|------------|-------|---------|------|-------|
+| Read the front page and articles | ✓ | ✓ | ✓ | ✓ |
+| Pagination, favorites, personal AI and notification settings | — | limited | ✓ | ✓ |
+| Detect, categorize, and merge sources | — | — | — | ✓ |
+| Delete sources and historical articles | — | — | — | ✓ |
+| Manage users and roles | — | — | — | ✓ |
+
+Source labels and categories are global. Every user sees the source structure maintained by the administrator.
+
+## Common Endpoints
+
+- Health check: `GET /health`
+- Manual refresh: signed-in users and administrators can use the refresh control or call the protected `GET/POST /auth/refresh`
+- Article list: `GET /api/news`
+- Image cache: `GET /img-cache?url=<encoded-url>`
+
+## Roadmap
 
 ### Short-term
 
-- [x] **Source Categorization** — Group and filter articles by source/tags
-- [x] **WeChat Official Account Articles** — Identify and extract full-text content from WeChat public accounts
-- [x] **Favorites** — Article bookmarking with dedicated panel
-- [x] **Auto-translate** — Automatically translate English titles and articles
-- [x] **Custom AI API** — Bring your own AI API for summaries and daily digest
-- [ ] **Custom Source Visible** — Custom visible article sources, Build source market
-- [ ] **Follow Article Source and Push** — Support subscription feeds and push notifications when new articles are fetched (PWA app)
+- [x] **Source Categorization** — Group and filter articles by source and tag
+- [x] **WeChat Official Account Articles** — Identify and extract full-text content from WeChat Official Accounts
+- [x] **Favorites** — Bookmark articles and manage them in a dedicated favorites panel
+- [x] **Automatic English Translation** — Automatically translate English titles and articles into Chinese
+- [x] **Custom AI API** — Use a custom AI API for article summaries and daily digests
+- [ ] **Custom Visible Sources** — Let users select visible sources and build a source marketplace
+- [ ] **New Article Notifications** — Follow sources and receive PWA notifications when new articles are fetched
 
 ### Long-term
 
-- [ ] **Integrate [RSStT](https://github.com/Rongronggg9/RSS-to-Telegram-Bot)** — No extra deployment needed, OOTB support
-- [ ] **Keyword Filter** — Hide articles containing specific words
-- [ ] **News Podcast** — Auto news podcast generate
-- [ ] **iOS App** — Native iOS client
+- [ ] **Integrate [RSStT](https://github.com/Rongronggg9/RSS-to-Telegram-Bot)** — Remove the need for a separate RSStT deployment
+- [ ] **Keyword Filtering** — Hide articles containing configured keywords
+- [ ] **News Podcast Generation** — Automatically generate a podcast from the news
+- [ ] **iOS Client** — Native iOS application
 
 ## Tech Stack
 
-- Python 3.12 (fetcher + refresh server + Flask API)
-- Nginx (static serving + API reverse proxy)
-- Vanilla HTML/CSS/JS (frontend SPA)
-- SQLite (data storage)
-- BeautifulSoup (HTML parsing)
+- Python 3.12
+- Flask + Python `ThreadingHTTPServer`
+- Nginx
+- SQLite
+- Vanilla HTML / CSS / JavaScript PWA
+- BeautifulSoup
 
 ## License
 
