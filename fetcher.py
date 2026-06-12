@@ -78,6 +78,15 @@ def init_db() -> sqlite3.Connection:
             summary TEXT DEFAULT ''
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS deleted_articles (
+            article_id   INTEGER PRIMARY KEY,
+            title        TEXT NOT NULL DEFAULT '',
+            source       TEXT NOT NULL DEFAULT '',
+            deleted_by   INTEGER,
+            deleted_at   TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
     ensure_article_source_columns(conn)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON articles(timestamp DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_source ON articles(source)")
@@ -93,9 +102,16 @@ def upsert_articles(conn: sqlite3.Connection, entries: list[dict]):
          has_full_content, telegraph_url, body_html, summary)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
     rows = []
+    deleted_ids = {
+        int(row[0])
+        for row in conn.execute("SELECT article_id FROM deleted_articles").fetchall()
+    }
     for e in entries:
+        article_id = int(e.get("id", 0) or 0)
+        if article_id in deleted_ids:
+            continue
         rows.append((
-            e.get("id", 0),
+            article_id,
             e.get("title", ""),
             e.get("source", ""),
             e.get("feed_source", e.get("source", "")),

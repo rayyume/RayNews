@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS user_settings (
     auto_title_summary_enabled INTEGER NOT NULL DEFAULT 0,
     auto_summary_enabled    INTEGER NOT NULL DEFAULT 0,
     daily_summary_enabled   INTEGER NOT NULL DEFAULT 0,
+    theme_preference        TEXT    NOT NULL DEFAULT 'system',
     notification_config     TEXT    NOT NULL DEFAULT '{}'
 );
 
@@ -87,6 +88,10 @@ def get_db() -> sqlite3.Connection:
             pass  # column already exists
         try:
             _db.execute("ALTER TABLE user_settings ADD COLUMN auto_title_summary_enabled INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        try:
+            _db.execute("ALTER TABLE user_settings ADD COLUMN theme_preference TEXT NOT NULL DEFAULT 'system'")
         except sqlite3.OperationalError:
             pass  # column already exists
         _db.commit()
@@ -305,7 +310,7 @@ def get_user_settings(user_id: int) -> dict | None:
     row = db.execute(
         "SELECT id, auto_translate_title, auto_translate_content, "
         "auto_title_summary_enabled, auto_summary_enabled, "
-        "daily_summary_enabled, notification_config "
+        "daily_summary_enabled, theme_preference, notification_config "
         "FROM user_settings WHERE user_id = ?",
         (user_id,),
     ).fetchone()
@@ -316,7 +321,7 @@ def set_user_settings(user_id: int, **kwargs) -> dict:
     """Upsert settings."""
     allowed = {"auto_translate_title", "auto_translate_content",
                "auto_title_summary_enabled", "auto_summary_enabled", "daily_summary_enabled",
-               "notification_config"}
+               "theme_preference", "notification_config"}
     updates = {k: v for k, v in kwargs.items() if k in allowed}
     if not updates:
         return get_user_settings(user_id) or {}

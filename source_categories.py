@@ -355,7 +355,22 @@ def ensure_article_sources(conn: sqlite3.Connection) -> int:
 
 def cleanup_stale_source_categories(conn: sqlite3.Connection) -> int:
     """Remove discovered source rows that no longer have articles."""
-    initial_sources = set(INITIAL_SOURCES)
+    table = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'source_categories'"
+    ).fetchone()
+    if not table:
+        init_source_categories(conn)
+    live_sources = {
+        (row["source"] if isinstance(row, sqlite3.Row) else row[0])
+        for row in conn.execute(
+            """
+            SELECT DISTINCT COALESCE(NULLIF(feed_source, ''), source) AS source
+            FROM articles
+            WHERE COALESCE(NULLIF(feed_source, ''), source) IS NOT NULL
+              AND TRIM(COALESCE(NULLIF(feed_source, ''), source)) != ''
+            """
+        ).fetchall()
+    }
     rows = conn.execute(
         """
         SELECT sc.source, sc.status, COUNT(a.id) AS article_count
@@ -368,21 +383,28 @@ def cleanup_stale_source_categories(conn: sqlite3.Connection) -> int:
     deleted = 0
     for row in rows:
         source = row["source"] if isinstance(row, sqlite3.Row) else row[0]
-        status = row["status"] if isinstance(row, sqlite3.Row) else row[1]
-        if source in initial_sources or status == "manual":
-            continue
-        alias_ref = conn.execute(
-            """
-            SELECT 1 FROM source_aliases
-            WHERE alias_source = ? OR target_source = ?
-            LIMIT 1
-            """,
-            (source, source),
-        ).fetchone()
-        if alias_ref:
-            continue
         cur = conn.execute("DELETE FROM source_categories WHERE source = ?", (source,))
         deleted += cur.rowcount
+    deleted += conn.execute(
+        "DELETE FROM source_aliases WHERE alias_source NOT IN ({}) OR target_source NOT IN ({})".format(
+            ",".join("?" for _ in live_sources) or "''",
+            ",".join("?" for _ in live_sources) or "''",
+        ),
+        tuple(live_sources) + tuple(live_sources),
+    ).rowcount if live_sources else conn.execute("DELETE FROM source_aliases").rowcount
+    deleted += conn.execute(
+        "DELETE FROM user_source_categories WHERE source NOT IN ({})".format(
+            ",".join("?" for _ in live_sources) or "''",
+        ),
+        tuple(live_sources),
+    ).rowcount if live_sources else conn.execute("DELETE FROM user_source_categories").rowcount
+    deleted += conn.execute(
+        "DELETE FROM user_source_aliases WHERE alias_source NOT IN ({}) OR target_source NOT IN ({})".format(
+            ",".join("?" for _ in live_sources) or "''",
+            ",".join("?" for _ in live_sources) or "''",
+        ),
+        tuple(live_sources) + tuple(live_sources),
+    ).rowcount if live_sources else conn.execute("DELETE FROM user_source_aliases").rowcount
     if deleted:
         conn.commit()
     return deleted
@@ -479,6 +501,7 @@ def merge_source(conn: sqlite3.Connection, source: str, target_source: str,
 
 def source_rows(conn: sqlite3.Connection) -> list[dict]:
     ensure_article_sources(conn)
+    cleanup_stale_source_categories(conn)
     # Include article sources not yet in source_categories (e.g. misdetected titles)
     # so they don't silently disappear from the settings page.
     unlinked = conn.execute(

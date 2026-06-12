@@ -6,6 +6,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0a0a0c" id="themeColorMeta">
 <link rel="manifest" href="/manifest.json">
 <title>RayNews</title>
 <link rel="icon" type="image/x-icon" href="/favicon.ico?v=2">
@@ -14,6 +15,19 @@
 <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=2">
 <meta name="referrer" content="no-referrer">
 <!-- {{CUSTOM_HEAD_HTML}} -->
+<script>
+(function() {
+  try {
+    var saved = localStorage.getItem('raynews_theme') || 'system';
+    var mode = saved === 'light' || saved === 'dark'
+      ? saved
+      : (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+    document.documentElement.dataset.theme = mode;
+  } catch (e) {
+    document.documentElement.dataset.theme = 'dark';
+  }
+})();
+</script>
 <style>
 /* ═══ Design Tokens ═══════════════════════════════ */
 :root {
@@ -28,8 +42,29 @@
   --accent-dim: rgba(110,142,251,0.12);
   --border: rgba(255,255,255,0.06);
   --border-hover: rgba(255,255,255,0.12);
+  --header-bg: rgba(10,10,12,0.82);
+  --overlay-bg: rgba(10,10,12,0.9);
+  --toast-bg: rgba(24,24,30,0.94);
+  --toast-shadow: 0 10px 32px rgba(0,0,0,0.32);
   --radius: 12px;
   --font: "SF Pro Display",-apple-system,"Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+}
+html[data-theme="light"] {
+  --bg: #f5f7fb;
+  --bg-card: #ffffff;
+  --bg-card-hover: #f0f3fa;
+  --bg-surface: #eef2f8;
+  --text: #171923;
+  --text-2: #5a6275;
+  --text-3: #8a93a6;
+  --accent: #4769f5;
+  --accent-dim: rgba(71,105,245,0.12);
+  --border: rgba(23,25,35,0.09);
+  --border-hover: rgba(23,25,35,0.16);
+  --header-bg: rgba(245,247,251,0.86);
+  --overlay-bg: rgba(245,247,251,0.94);
+  --toast-bg: rgba(255,255,255,0.96);
+  --toast-shadow: 0 10px 30px rgba(23,25,35,0.12);
 }
 
 /* ═══ Reset ═══════════════════════════════════════ */
@@ -47,7 +82,7 @@ a:hover{text-decoration:underline}
 .app{max-width:960px;margin:0 auto;padding:0 20px;position:relative}
 
 /* ═══ Header ══════════════════════════════════════ */
-.header{position:sticky;top:0;z-index:100;background:rgba(10,10,12,0.82);backdrop-filter:blur(20px) saturate(1.2);-webkit-backdrop-filter:blur(20px) saturate(1.2);border-bottom:1px solid var(--border);margin:0 -20px;padding:env(safe-area-inset-top,0px) 20px 0}
+.header{position:sticky;top:0;z-index:100;background:var(--header-bg);backdrop-filter:blur(20px) saturate(1.2);-webkit-backdrop-filter:blur(20px) saturate(1.2);border-bottom:1px solid var(--border);margin:0 -20px;padding:env(safe-area-inset-top,0px) 20px 0}
 .header-inner{max-width:960px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;min-height:56px;position:relative}
 .logo{display:flex;align-items:center;gap:10px;font-weight:800;font-size:18px;letter-spacing:-0.02em;cursor:pointer}
 .logo-icon{width:28px;height:28px;border-radius:8px;overflow:hidden;flex-shrink:0}
@@ -85,7 +120,7 @@ a:hover{text-decoration:underline}
 .item:hover .item-thumb img{transform:scale(1.05)}
 .item-body{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:space-between}
 .item-title{font-size:15px;font-weight:600;line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;transition:color 0.12s}
-.item:hover .item-title{color:#fff}
+.item:hover .item-title{color:var(--text)}
 .item-meta{display:flex;align-items:center;gap:10px;font-size:11px;color:var(--text-3);margin-top:8px}
 .badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:100px;font-weight:700;font-size:10px;letter-spacing:0.04em}
 .full-tag{color:var(--accent);font-size:10px;font-weight:700}
@@ -97,7 +132,7 @@ a:hover{text-decoration:underline}
 .icon-btn:hover{background:var(--bg-card);color:var(--accent)}
 .search-overlay{position:fixed;inset:0;z-index:180;background:var(--bg);display:flex;flex-direction:column;opacity:0;pointer-events:none;transform:translateY(10px);transition:opacity 0.18s,transform 0.18s;overflow:hidden}
 .search-overlay.open{opacity:1;pointer-events:auto;transform:translateY(0)}
-.search-header{flex-shrink:0;padding:env(safe-area-inset-top,0px) 20px 0;background:rgba(10,10,12,0.9);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-bottom:1px solid var(--border)}
+.search-header{flex-shrink:0;padding:env(safe-area-inset-top,0px) 20px 0;background:var(--overlay-bg);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-bottom:1px solid var(--border)}
 .search-header-inner{max-width:720px;margin:0 auto;min-height:58px;display:flex;align-items:center;gap:10px}
 .search-box{flex:1;min-width:0;display:flex;align-items:center;gap:8px;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:0 10px;height:40px}
 .search-box:focus-within{border-color:var(--accent)}
@@ -124,7 +159,7 @@ a:hover{text-decoration:underline}
 .overlay{position:fixed;inset:0;z-index:200;background:var(--bg);overflow-y:auto;transform:translateX(100%);transition:transform 0.35s cubic-bezier(0.4,0,0.2,1);touch-action:pan-y;overscroll-behavior-x:none}
 .overlay.from-source-history{z-index:560}
 .overlay.open{transform:translateX(0)}
-.overlay-header{position:sticky;top:0;z-index:10;background:rgba(10,10,12,0.85);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-bottom:1px solid var(--border);padding-top:env(safe-area-inset-top,0px)}
+.overlay-header{position:sticky;top:0;z-index:10;background:var(--header-bg);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-bottom:1px solid var(--border);padding-top:env(safe-area-inset-top,0px)}
 .overlay-header-inner{max-width:720px;margin:0 auto;display:flex;align-items:center;min-height:48px;padding:0 20px}
 .back-btn{display:flex;align-items:center;gap:6px;background:none;border:none;color:var(--accent);font-size:13px;font-weight:600;cursor:pointer;font-family:var(--font);padding:4px 0}
 .back-btn:hover{text-decoration:underline}
@@ -159,7 +194,7 @@ a:hover{text-decoration:underline}
 .lb img{max-width:92vw;max-height:92vh;border-radius:8px;object-fit:contain}
 
 /* ═══ Toast ═══════════════════════════════════════ */
-.toast{position:fixed;bottom:40px;left:50%;transform:translateX(-50%) translateY(20px);z-index:999;background:rgba(30,30,40,0.92);backdrop-filter:blur(12px);color:var(--text);padding:10px 24px;border-radius:100px;font-size:13px;font-weight:600;opacity:0;pointer-events:none;transition:all 0.3s cubic-bezier(0.4,0,0.2,1);border:1px solid var(--border)}
+.toast{position:fixed;bottom:40px;left:50%;transform:translateX(-50%) translateY(20px);z-index:999;background:var(--toast-bg);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);color:var(--text);padding:10px 24px;border-radius:100px;font-size:13px;font-weight:600;opacity:0;pointer-events:none;transition:all 0.3s cubic-bezier(0.4,0,0.2,1);border:1px solid var(--border);box-shadow:var(--toast-shadow)}
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 
 /* ═══ Scroll-to-top Button ════════════════════════ */
@@ -334,7 +369,7 @@ body.body-scroll-lock{overflow:hidden!important}
 .ai-close:hover{background:var(--bg-card-hover);color:var(--text)}
 .ai-body{overflow-y:auto;padding:20px 24px;flex:1;max-height:80vh}
 .daily-summary-content{font-size:13px;line-height:1.75;color:var(--text);padding:4px 0 2px;background:transparent}
-.daily-summary-content h1,.daily-summary-content h2,.daily-summary-content h3{margin:18px 0 12px;font-size:20px;line-height:1.25;color:#fff}
+.daily-summary-content h1,.daily-summary-content h2,.daily-summary-content h3{margin:18px 0 12px;font-size:20px;line-height:1.25;color:var(--text)}
 .daily-summary-content h1:first-child,.daily-summary-content h2:first-child,.daily-summary-content h3:first-child{margin-top:0}
 .daily-summary-content ol,.daily-summary-content ul{margin:0 0 18px 0;padding-left:26px;list-style-position:outside}
 .daily-summary-content li{padding-left:4px;margin:0 0 12px;color:var(--text);overflow:visible}
@@ -357,6 +392,12 @@ body.body-scroll-lock{overflow:hidden!important}
 .ai-save-btn:hover{opacity:0.85}
 .ai-save-btn:disabled{opacity:0.4;cursor:default}
 .ai-status{padding:8px 12px;border-radius:8px;font-size:12px;margin-top:12px}
+.settings-toast{position:sticky;top:0;z-index:4;display:none;margin:-4px 0 12px;padding:9px 12px;border-radius:10px;border:1px solid var(--border);background:var(--bg);box-shadow:0 10px 28px rgba(0,0,0,0.2);font-size:12px;line-height:1.45}
+.settings-toast.show{display:flex;align-items:flex-start;gap:8px;justify-content:space-between}
+.settings-toast.ok{border-color:rgba(34,197,94,0.35);color:#22c55e;background:rgba(34,197,94,0.08)}
+.settings-toast.err,.settings-toast.error{border-color:rgba(239,68,68,0.35);color:#ef4444;background:rgba(239,68,68,0.08)}
+.settings-toast.warn{border-color:rgba(245,158,11,0.35);color:#f59e0b;background:rgba(245,158,11,0.08)}
+.settings-toast-close{border:none;background:transparent;color:inherit;cursor:pointer;font-size:14px;line-height:1;opacity:.8}
 .ai-status.ok{background:rgba(34,197,94,0.12);color:#22c55e}
 .ai-status.err{background:rgba(239,68,68,0.12);color:#ef4444}
 
@@ -378,17 +419,25 @@ body.body-scroll-lock{overflow:hidden!important}
 .source-step:first-child{padding-top:0}
 .source-step-title{font-size:13px;font-weight:800;color:var(--text);margin-bottom:4px}
 .source-step-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
-.source-row{display:grid;grid-template-columns:minmax(100px,1.2fr) minmax(90px,.8fr) 100px 60px 34px;gap:6px;align-items:center;padding:10px 0;border-bottom:1px solid var(--border)}
+.source-row{display:grid;grid-template-columns:minmax(120px,1.2fr) minmax(100px,.8fr) 110px 58px 34px 34px;gap:6px;align-items:center;padding:10px 0;border-bottom:1px solid var(--border)}
 .source-name{font-size:12px;color:var(--text-2);line-height:1.35;word-break:break-word}
 .source-name-btn{background:none;border:none;color:var(--accent);font:inherit;font-weight:700;text-align:left;cursor:pointer;padding:0}
 .source-name-btn:hover{text-decoration:underline}
 .source-meta{font-size:11px;color:var(--text-3);margin-top:3px}
 .source-label-input,.source-cat-select{width:100%;padding:7px 9px;border:1px solid var(--border);border-radius:8px;background:var(--bg-card);color:var(--text);font-size:12px;font-family:var(--font)}
-.source-save-btn{padding:7px 10px;border-radius:8px;border:1px solid var(--accent);background:var(--accent-dim);color:var(--accent);font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font)}
+.source-row-state{font-size:11px;color:var(--text-3);text-align:center;min-width:0;white-space:nowrap}
+.source-row-state.saving{color:var(--accent)}
+.source-row-state.saved{color:#22c55e}
+.source-row-state.error{color:#ef4444}
 .source-redetect-btn{padding:6px 8px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-2);font-size:14px;cursor:pointer;font-family:var(--font);transition:all 0.12s}.source-redetect-btn:hover{background:var(--accent-dim);border-color:var(--accent);color:var(--accent)}
+.source-delete-btn{padding:6px 8px;border-radius:8px;border:1px solid rgba(239,68,68,0.35);background:rgba(239,68,68,0.08);color:#ef4444;font-size:14px;cursor:pointer;font-family:var(--font);transition:all 0.12s}.source-delete-btn:hover{background:rgba(239,68,68,0.16)}
+.source-article-toolbar{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;justify-content:space-between;padding:10px 0;margin-bottom:6px;background:var(--bg-card);border-bottom:1px solid var(--border)}
+.source-article-toolbar-left,.source-article-toolbar-right{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.source-article-check{width:18px;height:18px;flex-shrink:0}
+.source-article-delete{border:1px solid rgba(239,68,68,0.35);background:rgba(239,68,68,0.08);color:#ef4444;border-radius:8px;padding:5px 9px;font:inherit;font-size:12px;font-weight:700;cursor:pointer}
 .source-label-main{display:block;font-weight:700;line-height:1.2}
 .source-label-sub{display:block;margin-top:2px;font-size:10px;color:var(--text-3);line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-@media(max-width:640px){.source-row{grid-template-columns:1fr}.source-save-btn{width:100%}}
+@media(max-width:640px){.source-row{grid-template-columns:1fr}.source-row-state{text-align:left}.source-article-toolbar{align-items:flex-start;flex-direction:column}}
 @media(max-width:640px){
   .header-right{gap:8px}
   .icon-btn{width:30px;height:30px}
@@ -567,7 +616,9 @@ body.body-scroll-lock{overflow:hidden!important}
         <button class="settings-tab" data-tab="sources" onclick="switchSettingsTab('sources')">订阅源</button>
         <button class="settings-tab" data-tab="translate" onclick="switchSettingsTab('translate')">翻译</button>
         <button class="settings-tab" data-tab="notify" onclick="switchSettingsTab('notify')">通知</button>
+        <button class="settings-tab" data-tab="theme" onclick="switchSettingsTab('theme')">主题</button>
       </div>
+      <div id="settingsStatus" class="settings-toast" role="status" aria-live="polite"></div>
 
       <!-- AI Tab -->
       <div id="settingsTabAi">
@@ -681,6 +732,17 @@ body.body-scroll-lock{overflow:hidden!important}
         <button class="ai-save-btn" onclick="saveGeneralSettings()" style="margin-top:16px">保存翻译设置</button>
       </div>
 
+      <!-- Theme Tab -->
+      <div id="settingsTabTheme" style="display:none">
+        <label class="ai-label">外观主题</label>
+        <select class="ai-select" id="themePreference" onchange="saveThemePreference()">
+          <option value="system">跟随系统</option>
+          <option value="light">明色</option>
+          <option value="dark">暗色</option>
+        </select>
+        <p class="ai-hint" style="margin-top:8px">切换后立即生效，并在当前设备保存偏好；登录用户会同步保存到账户设置。</p>
+      </div>
+
       <!-- Account Tab -->
       <div id="settingsTabAccount" style="display:none">
         <label class="ai-label">头像</label>
@@ -693,8 +755,6 @@ body.body-scroll-lock{overflow:hidden!important}
         </div>
         <p class="ai-hint">支持 JPG/PNG/GIF/WebP，最大 500KB</p>
       </div>
-
-      <div id="settingsStatus"></div>
     </div>
   </div>
 </div>
@@ -752,8 +812,28 @@ let titleUpdateCursor = '';
 let titleUpdatePolling = false;
 let searchRequestController = null;
 let searchRequestSeq = 0;
+let settingsToastTimer = null;
+let sourceSaveTimers = {};
+let sourceArticlesState = { rowIdx: -1, items: [] };
 // User settings cache for auto-translate decisions
 let userAutoSettings = null;
+
+function resolveThemePreference(pref) {
+  const value = pref === 'light' || pref === 'dark' || pref === 'system' ? pref : 'system';
+  if (value === 'light' || value === 'dark') return value;
+  return window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+}
+
+function applyThemePreference(pref) {
+  const safe = pref === 'light' || pref === 'dark' || pref === 'system' ? pref : 'system';
+  const mode = resolveThemePreference(safe);
+  document.documentElement.dataset.theme = mode;
+  localStorage.setItem('raynews_theme', safe);
+  const meta = document.getElementById('themeColorMeta');
+  if (meta) meta.setAttribute('content', mode === 'light' ? '#f5f7fb' : '#0a0a0c');
+  const select = document.getElementById('themePreference');
+  if (select) select.value = safe;
+}
 
 // ═══ Auth State ══════════════════════════════════════════
 let authToken = null;
@@ -1403,10 +1483,10 @@ function openSettings() {
   loadSummarySettings();
   loadNotifyConfig();
   loadGeneralSettings();
+  loadThemeSettings();
   loadAccountTab();
   loadSourcesTab();
-  document.getElementById('settingsStatus').className = '';
-  document.getElementById('settingsStatus').textContent = '';
+  hideSettingsStatus();
 }
 
 function closeAISettings() {
@@ -1418,13 +1498,14 @@ function closeAISettings() {
 function switchSettingsTab(tab) {
   document.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
   document.querySelector('.settings-tab[data-tab="' + tab + '"]').classList.add('active');
-  ['account','ai','summary','sources','translate','notify'].forEach(t => {
+  ['account','ai','summary','sources','translate','notify','theme'].forEach(t => {
     document.getElementById('settingsTab' + t.charAt(0).toUpperCase() + t.slice(1)).style.display = t === tab ? '' : 'none';
   });
   setSettingsSensitiveInputsEnabled(tab === 'ai' && document.getElementById('aiOverlay').classList.contains('open'));
   // Load avatar preview when switching to account tab
   if (tab === 'account') loadAccountTab();
   if (tab === 'sources') loadSourcesTab();
+  if (tab === 'theme') loadThemeSettings();
 }
 
 function loadAccountTab() {
@@ -1446,13 +1527,21 @@ function loadAccountTab() {
 
 function showSettingsStatus(msg, type) {
   const el = document.getElementById('settingsStatus');
-  el.className = 'ai-status ' + (type || 'ok');
-  el.textContent = msg;
-  // Auto-scroll panel body to show the status
-  setTimeout(() => {
-    const body = document.querySelector('.ai-body');
-    if (body) body.scrollTop = body.scrollHeight;
-  }, 50);
+  if (!el) return;
+  clearTimeout(settingsToastTimer);
+  const kind = type === 'error' ? 'err' : (type || 'ok');
+  el.className = 'settings-toast show ' + kind;
+  el.innerHTML = `<span>${esc(msg)}</span><button class="settings-toast-close" onclick="hideSettingsStatus()" title="关闭">×</button>`;
+  const delay = kind === 'err' || kind === 'error' ? 5200 : (kind === 'warn' ? 4200 : 2600);
+  settingsToastTimer = setTimeout(hideSettingsStatus, delay);
+}
+
+function hideSettingsStatus() {
+  const el = document.getElementById('settingsStatus');
+  if (!el) return;
+  clearTimeout(settingsToastTimer);
+  el.className = 'settings-toast';
+  el.textContent = '';
 }
 
 // ─── Source Manager ─────────────────────────────────────
@@ -1534,18 +1623,35 @@ function renderSourceManager(rows) {
       : `${row.article_count || 0} 篇 · ${row.status || 'pending'}${sourceMeta}${unlinkedWarn}`;
     // Show all source names in tooltip for grouped rows
     const allSources = (row.sources || [row.source]).map(s => esc(s)).join('\n');
+    const adminDelete = authUser && authUser.role === 'admin'
+      ? `<button class="source-delete-btn" onclick="deleteSourceArticles(${origIdx})" title="删除该订阅源全部文章">🗑</button>`
+      : '<span></span>';
     return `
       <div class="source-row" data-source-idx="${origIdx}">
         <div>
           <div class="source-name"><button class="source-name-btn" onclick="openSourceArticles(${origIdx})" title="${esc(allSources)}">${displayName}</button></div>
           <div class="source-meta">${esc(meta)}</div>
         </div>
-        <input class="source-label-input" value="${label}" maxlength="20" aria-label="来源缩写">
-        <select class="source-cat-select" aria-label="来源分类">${options}</select>
-        <button class="source-save-btn" onclick="saveSourceRow(${origIdx})">保存</button>
+        <input class="source-label-input" value="${label}" maxlength="20" aria-label="来源缩写" oninput="scheduleSourceSave(${origIdx})">
+        <select class="source-cat-select" aria-label="来源分类" onchange="scheduleSourceSave(${origIdx}, true)">${options}</select>
+        <span class="source-row-state" data-source-state="${origIdx}"></span>
         <button class="source-redetect-btn" onclick="redetectSourceArticles(${origIdx})" title="重新识别该来源下所有文章的来源标签">🔄</button>
+        ${adminDelete}
       </div>`;
   }).join('');
+}
+
+function setSourceRowState(idx, text, cls) {
+  const el = document.querySelector(`[data-source-state="${idx}"]`);
+  if (!el) return;
+  el.className = 'source-row-state ' + (cls || '');
+  el.textContent = text || '';
+}
+
+function scheduleSourceSave(idx, immediate) {
+  clearTimeout(sourceSaveTimers[idx]);
+  setSourceRowState(idx, '待保存', '');
+  sourceSaveTimers[idx] = setTimeout(() => saveSourceRow(idx, { silent: true }), immediate ? 0 : 600);
 }
 
 async function openSourceArticles(idx) {
@@ -1556,6 +1662,7 @@ async function openSourceArticles(idx) {
   const body = document.getElementById('sourceArticlesBody');
   title.textContent = (row.label || row.source) + ' · 历史文章';
   body.innerHTML = '<div class="fav-empty">加载中...</div>';
+  sourceArticlesState = { rowIdx: idx, items: [] };
   overlay.classList.add('open');
   lockBodyScroll();
   try {
@@ -1567,6 +1674,7 @@ async function openSourceArticles(idx) {
       body.innerHTML = '<div class="fav-empty">加载失败</div>';
       return;
     }
+    sourceArticlesState = { rowIdx: idx, items: data.items || [] };
     renderSourceArticles(data.items || []);
   } catch (e) {
     body.innerHTML = '<div class="fav-empty">加载失败</div>';
@@ -1621,8 +1729,23 @@ function renderSourceArticles(items) {
     body.innerHTML = '<div class="fav-empty">暂无历史文章</div>';
     return;
   }
-  body.innerHTML = items.map(item => `
+  const canDelete = authUser && authUser.role === 'admin';
+  const toolbar = canDelete ? `
+    <div class="source-article-toolbar">
+      <div class="source-article-toolbar-left">
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-2)">
+          <input type="checkbox" class="source-article-check" id="sourceArticleSelectAll" onchange="toggleSourceArticleSelection(this.checked)">
+          全选当前列表
+        </label>
+        <span id="sourceArticleSelectedCount" class="ai-hint" style="margin:0">已选 0 篇</span>
+      </div>
+      <div class="source-article-toolbar-right">
+        <button class="source-article-delete" onclick="deleteSelectedSourceArticles()">删除所选</button>
+      </div>
+    </div>` : '';
+  body.innerHTML = toolbar + items.map(item => `
     <div class="fav-item" onclick="openSourceHistoryArticle(${item.id})">
+      ${canDelete ? `<input type="checkbox" class="source-article-check" data-article-id="${item.id}" onclick="event.stopPropagation();updateSourceArticleSelectedCount()">` : ''}
       ${item.thumb ? `<div class="fav-item-thumb"><img src="${proxyImgSrc(item.thumb)}" alt="" loading="lazy" decoding="async"></div>` : ''}
       <div class="fav-item-body">
         <div class="fav-item-title">${esc(item.title)}</div>
@@ -1631,16 +1754,22 @@ function renderSourceArticles(items) {
           <span>${formatTime(item.date, item.time)}</span>
         </div>
       </div>
+      ${canDelete ? `<button class="source-article-delete" onclick="event.stopPropagation();deleteSourceArticle(${item.id})">删除</button>` : ''}
     </div>
   `).join('');
 }
 
-async function saveSourceRow(idx) {
+async function saveSourceRow(idx, opts = {}) {
   const row = sourceRows[idx];
   const el = document.querySelector(`.source-row[data-source-idx="${idx}"]`);
   if (!row || !el) return;
   const label = el.querySelector('.source-label-input').value.trim();
   const category = el.querySelector('.source-cat-select').value;
+  if (!label) {
+    setSourceRowState(idx, '标签必填', 'error');
+    return;
+  }
+  setSourceRowState(idx, '保存中', 'saving');
   try {
     const sources = row.sources && row.sources.length ? row.sources : [row.source];
     let mergedCount = 0;
@@ -1653,15 +1782,144 @@ async function saveSourceRow(idx) {
       if (data && data.error) throw new Error(data.error);
       if (data && data.merged) mergedCount++;
     }
-    showSettingsStatus(
-      sources.length > 1
-        ? `已保存 ${sources.length} 个来源变体${mergedCount ? `，合并 ${mergedCount} 个` : ''}`
-        : '订阅源已保存',
-      'ok'
-    );
-    await refreshSourceDependentViews({ refreshSettings: true });
+    row.label = label;
+    row.category = category;
+    row.status = 'manual';
+    setSourceRowState(idx, '已保存', 'saved');
+    setTimeout(() => setSourceRowState(idx, '', ''), 1400);
+    if (!opts.silent) {
+      showSettingsStatus(
+        sources.length > 1
+          ? `已保存 ${sources.length} 个来源变体${mergedCount ? `，合并 ${mergedCount} 个` : ''}`
+          : '订阅源已保存',
+        'ok'
+      );
+    }
+    if (mergedCount) {
+      await refreshSourceDependentViews({ refreshSettings: true });
+    } else {
+      await loadSourceCategories();
+      renderFilters();
+      renderList();
+    }
   } catch (e) {
+    setSourceRowState(idx, '失败', 'error');
     showSettingsStatus('保存失败: ' + e.message, 'error');
+  }
+}
+
+function selectedSourceArticleIds() {
+  return Array.from(document.querySelectorAll('#sourceArticlesBody input[data-article-id]:checked'))
+    .map(input => Number(input.dataset.articleId))
+    .filter(Boolean);
+}
+
+function updateSourceArticleSelectedCount() {
+  const count = selectedSourceArticleIds().length;
+  const el = document.getElementById('sourceArticleSelectedCount');
+  if (el) el.textContent = `已选 ${count} 篇`;
+  const all = document.getElementById('sourceArticleSelectAll');
+  if (all) {
+    const boxes = Array.from(document.querySelectorAll('#sourceArticlesBody input[data-article-id]'));
+    all.checked = boxes.length > 0 && boxes.every(box => box.checked);
+  }
+}
+
+function toggleSourceArticleSelection(checked) {
+  document.querySelectorAll('#sourceArticlesBody input[data-article-id]').forEach(input => {
+    input.checked = checked;
+  });
+  updateSourceArticleSelectedCount();
+}
+
+async function deleteArticlesByIds(ids) {
+  if (!ids.length) {
+    showSettingsStatus('请先选择要删除的文章', 'warn');
+    return false;
+  }
+  const resp = await fetch('/articles', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
+    body: JSON.stringify({ ids }),
+  });
+  const data = await parseJsonResponse(resp);
+  if (data.error) throw new Error(data.error);
+  const deleted = data.deleted || 0;
+  news = news.filter(item => !ids.includes(Number(item.id)));
+  for (const id of ids) {
+    delete articleBodyCache[id];
+    delete articleBodyPromises[id];
+  }
+  document.getElementById('count').textContent = news.length + ' 条新闻';
+  if (sourceArticlesState.items.length) {
+    sourceArticlesState.items = sourceArticlesState.items.filter(item => !ids.includes(Number(item.id)));
+    renderSourceArticles(sourceArticlesState.items);
+  }
+  await refreshSourceDependentViews({ refreshSettings: true });
+  showSettingsStatus(`已删除 ${deleted} 篇文章`, 'ok');
+  return true;
+}
+
+async function deleteSourceArticle(articleId) {
+  if (!authUser || authUser.role !== 'admin') return;
+  if (!confirm('确定删除这篇文章？删除后所有用户都不可见。')) return;
+  try {
+    await deleteArticlesByIds([Number(articleId)]);
+  } catch (e) {
+    showSettingsStatus('删除失败: ' + e.message, 'error');
+  }
+}
+
+async function deleteSelectedSourceArticles() {
+  if (!authUser || authUser.role !== 'admin') return;
+  const ids = selectedSourceArticleIds();
+  if (!ids.length) {
+    showSettingsStatus('请先选择要删除的文章', 'warn');
+    return;
+  }
+  const message = ids.length >= 20
+    ? `将删除 ${ids.length} 篇文章。请输入“删除”确认。`
+    : `确定删除选中的 ${ids.length} 篇文章？删除后所有用户都不可见。`;
+  if (ids.length >= 20) {
+    if (prompt(message) !== '删除') return;
+  } else if (!confirm(message)) {
+    return;
+  }
+  try {
+    await deleteArticlesByIds(ids);
+  } catch (e) {
+    showSettingsStatus('删除失败: ' + e.message, 'error');
+  }
+}
+
+async function deleteSourceArticles(idx) {
+  if (!authUser || authUser.role !== 'admin') return;
+  const row = sourceRows[idx];
+  if (!row) return;
+  const label = row.label || row.source;
+  const count = row.article_count || 0;
+  if (!count) return;
+  const confirmText = count >= 20
+    ? prompt(`将删除「${label}」下 ${count} 篇文章。请输入订阅源名称“${label}”确认。`)
+    : (confirm(`确定删除「${label}」下 ${count} 篇文章？删除后所有用户都不可见。`) ? label : '');
+  if (confirmText !== label) return;
+  try {
+    const sources = row.sources && row.sources.length ? row.sources : [row.alias_target || row.source];
+    const resp = await fetch('/sources/articles', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
+      body: JSON.stringify({ sources }),
+    });
+    const data = await parseJsonResponse(resp);
+    if (data.error) throw new Error(data.error);
+    const deletedIds = new Set((sourceArticlesState.items || []).map(item => Number(item.id)));
+    news = news.filter(item => !sources.includes(feedSourceOf(item)) && !deletedIds.has(Number(item.id)));
+    document.getElementById('count').textContent = news.length + ' 条新闻';
+    if (sourceArticlesState.rowIdx === idx) renderSourceArticles([]);
+    await refreshSourceDependentViews({ refreshSettings: true });
+    showSettingsStatus(`已删除「${label}」下 ${data.deleted || 0} 篇文章`, 'ok');
+  } catch (e) {
+    showSettingsStatus('删除失败: ' + e.message, 'error');
   }
 }
 
@@ -1838,9 +2096,7 @@ async function loadAIConfig() {
 }
 
 async function saveAIConfig() {
-  const statusEl = document.getElementById('settingsStatus');
-  statusEl.className = 'ai-status ok';
-  statusEl.textContent = '⏳ 保存中...';
+  showSettingsStatus('⏳ 保存中...', 'ok');
   try {
     const payload = {
       provider: document.getElementById('aiProvider').value,
@@ -1882,9 +2138,7 @@ async function saveAIConfig() {
 }
 
 async function testAIConnection() {
-  const statusEl = document.getElementById('settingsStatus');
-  statusEl.className = 'ai-status ok';
-  statusEl.textContent = '⏳ 测试中...';
+  showSettingsStatus('⏳ 测试中...', 'ok');
   try {
     // Trigger a quick test call (expects saved config on server)
     const testResp = await fetch('/ai/test-connection', {
@@ -2003,7 +2257,9 @@ async function loadUserSettings() {
       auto_translate_title: !!data.auto_translate_title,
       auto_translate_content: !!data.auto_translate_content,
       auto_summary_enabled: !!data.auto_summary_enabled,
+      theme_preference: data.theme_preference || 'system',
     };
+    applyThemePreference(userAutoSettings.theme_preference);
   } catch (e) {}
 }
 
@@ -2014,6 +2270,38 @@ async function loadGeneralSettings() {
   // Apply to UI
   document.getElementById('autoTranslateTitle').checked = !!userAutoSettings?.auto_translate_title;
   document.getElementById('autoTranslateContent').checked = !!userAutoSettings?.auto_translate_content;
+}
+
+async function loadThemeSettings() {
+  try {
+    const data = authToken ? await apiFetch('/settings') : null;
+    const pref = (data && data.theme_preference) || localStorage.getItem('raynews_theme') || 'system';
+    applyThemePreference(pref);
+  } catch (e) {
+    applyThemePreference(localStorage.getItem('raynews_theme') || 'system');
+  }
+}
+
+async function saveThemePreference() {
+  const pref = document.getElementById('themePreference').value || 'system';
+  applyThemePreference(pref);
+  if (!authToken) return;
+  try {
+    const resp = await fetch('/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
+      body: JSON.stringify({ theme_preference: pref }),
+    });
+    const data = await resp.json();
+    if (data.error) {
+      showSettingsStatus('❌ ' + data.error, 'err');
+      return;
+    }
+    userAutoSettings = { ...(userAutoSettings || {}), theme_preference: pref };
+    showSettingsStatus('✅ 主题已保存');
+  } catch (e) {
+    showSettingsStatus('❌ 主题保存失败', 'err');
+  }
 }
 
 async function saveGeneralSettings() {
@@ -2272,9 +2560,7 @@ async function triggerDailySummary() {
     if (!data) { showSettingsStatus('❌ 请求失败', 'err'); return; }
     if (data.error) { showSettingsStatus('❌ ' + data.error, 'err'); return; }
     // Show result in a scrollable area
-    const el = document.getElementById('settingsStatus');
-    el.className = 'ai-status ok';
-    el.innerHTML = '✅ 基于 ' + data.article_count + ' 篇文章生成：<br><br><div style="max-height:300px;overflow-y:auto;font-size:12px;line-height:1.6;padding:8px;background:var(--bg);border-radius:6px;margin-top:4px">' + renderMarkdown(data.summary) + '</div>';
+    showSettingsStatus('✅ 每日摘要已生成，可在首页摘要弹窗查看');
   } catch (e) { showSettingsStatus('❌ 生成失败: ' + (e.message || ''), 'err'); }
 }
 
@@ -3847,6 +4133,12 @@ function badgeStyle(src) {
   return s;
 }
 // Initial load
+applyThemePreference(localStorage.getItem('raynews_theme') || 'system');
+if (window.matchMedia) {
+  window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => {
+    if ((localStorage.getItem('raynews_theme') || 'system') === 'system') applyThemePreference('system');
+  });
+}
 loadAuth();
 loadDataWithRetry();
 // Restore sidebar preference

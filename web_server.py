@@ -93,6 +93,52 @@ if not SECRET_KEY:
 init_auth(SECRET_KEY)
 
 
+def _admin_email_address() -> str:
+    return (os.environ.get("RAYNEWS_ADMIN_EMAIL") or get_first_admin_email() or "").strip()
+
+
+def _send_registration_notice(user: dict) -> bool:
+    """Notify the admin after a user successfully registers. Never blocks registration."""
+    api_key = os.environ.get("RESEND_API_KEY", "")
+    admin_email = _admin_email_address()
+    if not api_key or not admin_email:
+        return False
+    from_email = os.environ.get("RAYNEWS_FROM_EMAIL") or "onboarding@resend.dev"
+    nickname = user.get("nickname") or "未设置"
+    try:
+        from notifier import send_email
+        html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#0a0a0c;color:#e8e8ed;padding:20px;max-width:560px;margin:0 auto}}
+h1{{color:#6e8efb;font-size:18px}}
+.box{{background:#111114;border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:16px;margin:16px 0}}
+.row{{margin:8px 0;color:#c9c9d4}}
+.label{{display:inline-block;width:80px;color:#8b8b9e}}
+.footer{{font-size:12px;color:#55556a;margin-top:20px}}
+</style></head><body>
+<h1>RayNews 新用户已注册</h1>
+<div class="box">
+  <div class="row"><span class="label">邮箱</span>{user.get("email", "")}</div>
+  <div class="row"><span class="label">昵称</span>{nickname}</div>
+  <div class="row"><span class="label">角色</span>{user.get("role", "")}</div>
+  <div class="row"><span class="label">时间</span>{user.get("created_at", "")}</div>
+</div>
+<p class="footer">此邮件仅用于管理员获知注册结果，不包含密码、验证码或令牌。</p>
+</body></html>"""
+        send_email(
+            api_key,
+            admin_email,
+            f"RayNews 新用户注册 — {user.get('email', '')}",
+            html,
+            from_name="RayNews",
+            from_email=from_email,
+        )
+        return True
+    except Exception as exc:
+        print(f"[web] Failed to send registration notice: {exc}")
+        return False
+
+
 # ─── Auth Routes ──────────────────────────────────────────────
 
 @app.route("/auth/register", methods=["POST"])
@@ -127,8 +173,10 @@ def register():
     if invite_code:
         use_invitation_code(invite_code)
 
+    admin_notified = _send_registration_notice(user) if role != "admin" else False
+
     token = create_token(user["id"], user["role"])
-    return jsonify({"token": token, "user": user}), 201
+    return jsonify({"token": token, "user": user, "admin_notified": admin_notified}), 201
 
 
 @app.route("/auth/request-invite", methods=["POST"])
@@ -325,6 +373,24 @@ def admin_set_role(user_id):
 NEWS_DB = os.path.join(DATA_DIR, "news.db")
 
 
+def _ensure_deleted_articles_table(conn: sqlite3.Connection) -> None:
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS deleted_articles (
+            article_id   INTEGER PRIMARY KEY,
+            title        TEXT NOT NULL DEFAULT '',
+            source       TEXT NOT NULL DEFAULT '',
+            deleted_by   INTEGER,
+            deleted_at   TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
+
+
+def _ensure_news_schema(conn: sqlite3.Connection) -> None:
+    ensure_article_source_columns(conn)
+    _ensure_deleted_articles_table(conn)
+    conn.commit()
+
+
 def _get_article_meta(article_id: int) -> dict | None:
     """Fetch article title/source/date/thumb from news.db by id."""
     if not os.path.exists(NEWS_DB):
@@ -332,7 +398,7 @@ def _get_article_meta(article_id: int) -> dict | None:
     try:
         conn = sqlite3.connect(NEWS_DB)
         conn.row_factory = sqlite3.Row
-        ensure_article_source_columns(conn)
+        _ensure_news_schema(conn)
         row = conn.execute(
             "SELECT id, title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
             "       COALESCE(NULLIF(feed_source, ''), source) AS feed_source, origin_source, "
@@ -355,7 +421,7 @@ def _get_news_db():
     if _news_conn is None and os.path.exists(NEWS_DB):
         _news_conn = sqlite3.connect(NEWS_DB, check_same_thread=False)
         _news_conn.row_factory = sqlite3.Row
-        ensure_article_source_columns(_news_conn)
+        _ensure_news_schema(_news_conn)
     return _news_conn
 
 
@@ -2279,6 +2345,110 @@ def list_source_articles():
     })
 
 
+def _delete_article_ids(article_ids: list[int], deleted_by: int | None = None) -> dict:
+    ids = sorted({int(article_id) for article_id in article_ids if int(article_id) > 0})
+    if not ids:
+        return {"deleted": 0, "deleted_sources": 0}
+    conn = _get_news_db()
+    if not conn:
+        raise FileNotFoundError("news db not found")
+    _ensure_news_schema(conn)
+    placeholders = ",".join("?" * len(ids))
+    existing = conn.execute(
+        f"SELECT id, title, COALESCE(NULLIF(feed_source, ''), source) AS source FROM articles WHERE id IN ({placeholders})",
+        ids,
+    ).fetchall()
+    if not existing:
+        return {"deleted": 0, "deleted_sources": cleanup_stale_source_categories(conn)}
+    for row in existing:
+        conn.execute(
+            """
+            INSERT INTO deleted_articles (article_id, title, source, deleted_by, deleted_at)
+            VALUES (?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(article_id) DO UPDATE SET
+                title = excluded.title,
+                source = excluded.source,
+                deleted_by = excluded.deleted_by,
+                deleted_at = excluded.deleted_at
+            """,
+            (row["id"], row["title"] or "", row["source"] or "", deleted_by),
+        )
+    existing_ids = [int(row["id"]) for row in existing]
+    existing_placeholders = ",".join("?" * len(existing_ids))
+    cur = conn.execute(f"DELETE FROM articles WHERE id IN ({existing_placeholders})", existing_ids)
+    try:
+        conn.execute(f"DELETE FROM ai_results WHERE article_id IN ({existing_placeholders})", existing_ids)
+    except sqlite3.OperationalError:
+        pass
+    conn.commit()
+    deleted_sources = cleanup_stale_source_categories(conn)
+
+    # Favorites live in raynews.db; remove global references to deleted articles.
+    app_db = get_db()
+    app_db.execute(f"DELETE FROM favorites WHERE article_id IN ({existing_placeholders})", existing_ids)
+    app_db.commit()
+    for article_id in existing_ids:
+        threading.Thread(target=unpin_article_images, args=(article_id,), daemon=True).start()
+    return {"deleted": cur.rowcount, "deleted_sources": deleted_sources}
+
+
+@app.route("/articles", methods=["DELETE"])
+@require_role("admin")
+def delete_articles():
+    data = request.get_json(silent=True) or {}
+    raw_ids = data.get("ids") or data.get("article_ids") or []
+    if not isinstance(raw_ids, list):
+        return jsonify({"error": "ids must be a list"}), 400
+    try:
+        result = _delete_article_ids([int(item) for item in raw_ids], deleted_by=g.user_id)
+    except FileNotFoundError:
+        return jsonify({"error": "news db not found"}), 404
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid article id"}), 400
+    return jsonify({"ok": True, **result})
+
+
+@app.route("/articles/<int:article_id>", methods=["DELETE"])
+@require_role("admin")
+def delete_article(article_id):
+    try:
+        result = _delete_article_ids([article_id], deleted_by=g.user_id)
+    except FileNotFoundError:
+        return jsonify({"error": "news db not found"}), 404
+    return jsonify({"ok": True, **result})
+
+
+@app.route("/sources/articles", methods=["DELETE"])
+@require_role("admin")
+def delete_source_articles():
+    conn = _get_news_db()
+    if not conn:
+        return jsonify({"error": "news db not found"}), 404
+    data = request.get_json(silent=True) or {}
+    base_sources = []
+    if isinstance(data.get("sources"), list):
+        base_sources = [str(item).strip() for item in data.get("sources") if str(item).strip()]
+    else:
+        source = (data.get("source") or "").strip()
+        if source:
+            base_sources = [source]
+    base_sources = base_sources[:100]
+    if not base_sources:
+        return jsonify({"error": "source required"}), 400
+    sources = []
+    for source in base_sources:
+        sources.append(source)
+        sources.extend(source_aliases_for_target(conn, g.user_id, source))
+    sources = list(dict.fromkeys(sources))
+    placeholders = ",".join("?" * len(sources))
+    rows = conn.execute(
+        f"SELECT id FROM articles WHERE COALESCE(NULLIF(feed_source, ''), source) IN ({placeholders})",
+        sources,
+    ).fetchall()
+    result = _delete_article_ids([int(row["id"]) for row in rows], deleted_by=g.user_id)
+    return jsonify({"ok": True, "sources": sources, **result})
+
+
 @app.route("/sources", methods=["PUT"])
 @require_auth
 def save_source():
@@ -2715,6 +2885,7 @@ def get_settings():
             "auto_title_summary_enabled": False,
             "auto_summary_enabled": False,
             "daily_summary_enabled": False,
+            "theme_preference": "system",
             "notification_config": {},
         })
     # Parse notification_config JSON
@@ -2737,6 +2908,9 @@ def update_settings():
     if "notification_config" in data:
         nc = data["notification_config"]
         data["notification_config"] = json.dumps(nc) if isinstance(nc, dict) else nc
+    if "theme_preference" in data:
+        theme = str(data.get("theme_preference") or "system").strip().lower()
+        data["theme_preference"] = theme if theme in {"system", "light", "dark"} else "system"
     needs_ai_config = any(
         _is_enabled_value(data.get(key))
         for key in (
