@@ -478,7 +478,7 @@ body.body-scroll-lock{overflow:hidden!important}
         <button class="icon-btn daily-summary-btn" id="dailySummaryBtn" onclick="showDailySummary()" title="每日总结" aria-label="每日总结">✨</button>
         <span class="status-text"><span class="status-dot"></span>实时更新</span>
         <span class="hide-m" id="count"></span>
-        <button class="refresh-btn" id="refreshBtn" onclick="triggerRefresh()"><span>刷新</span></button>
+        <button class="refresh-btn" id="refreshBtn" onclick="refreshFromHeader()"><span>刷新</span></button>
       </div>
     </div>
     <div class="user-menu" id="userMenu">
@@ -3477,9 +3477,9 @@ function flushPendingListUpdate() {
   if (document.getElementById('searchOverlay').classList.contains('open')) renderSearchResults();
 }
 
-async function triggerRefresh() {
+async function triggerRefresh({ silentStart = false } = {}) {
   if (refreshInProgress) {
-    showToast('🔄 正在刷新，请稍候');
+    if (!silentStart) showToast('🔄 正在刷新，请稍候');
     return;
   }
   // Unauthenticated users cannot refresh
@@ -3507,7 +3507,7 @@ async function triggerRefresh() {
 
   let refreshError = '';
 
-  showToast('🔄 正在后台抓取...');
+  if (!silentStart) showToast('🔄 正在后台抓取...');
 
   try {
     const resp = await fetch(refreshUrl, fetchOpts);
@@ -3743,6 +3743,57 @@ async function loadNewsPage(page = 1, {
   } finally {
     if (requestSeq === pageRequestSequence && showPageProgress) setPageLoading(false);
   }
+}
+
+function applyPageCalibrationWhenActive(data, page, activeFilter, requestSeq) {
+  const startedAt = performance.now();
+  const check = () => {
+    if (requestSeq !== pageRequestSequence) return;
+    if (currentPage === page && filter === activeFilter) {
+      applyNewsPage(data, page, activeFilter, { preserveDom: true });
+      scheduleAdjacentPagePrefetch(page, activeFilter, Number(data.total || 0));
+      return;
+    }
+    if (performance.now() - startedAt < 2000) requestAnimationFrame(check);
+  };
+  requestAnimationFrame(check);
+}
+
+async function preparePageNavigation(page, activeFilter) {
+  const requestSeq = ++pageRequestSequence;
+  if (pageRequestController) pageRequestController.abort();
+  pageRequestController = new AbortController();
+  const controller = pageRequestController;
+  const timeout = setTimeout(() => controller.abort(), 12000);
+  const cachedPromise = readCachedNewsPage(page, activeFilter);
+  const networkPromise = fetchNewsPage(page, activeFilter, controller.signal)
+    .then(async data => {
+      clearTimeout(timeout);
+      await writeCachedNewsPage(page, activeFilter, data);
+      return { data, error: null };
+    })
+    .catch(error => {
+      clearTimeout(timeout);
+      return { data: null, error };
+    });
+
+  const cached = await cachedPromise;
+  if (cached && requestSeq === pageRequestSequence) {
+    networkPromise
+      .then(result => {
+        if (result.data) {
+          applyPageCalibrationWhenActive(result.data, page, activeFilter, requestSeq);
+        }
+      });
+    return cached;
+  }
+
+  const result = await networkPromise;
+  if (requestSeq !== pageRequestSequence) return null;
+  if (result.data) return result.data;
+  const error = result.error || new Error('load failed');
+  showToast(error.name === 'AbortError' ? '连接超时，请稍后重试' : '加载失败，请检查网络');
+  return null;
 }
 
 // Full snapshot compatibility wrapper used after admin mutations and explicit recovery.
@@ -4214,17 +4265,67 @@ async function goToPage(page) {
   if (authUser && authUser.role === 'preview') return;
   const totalPages = Math.max(1, Math.ceil(currentTotal / PAGE_SIZE));
   if (page < 1 || page > totalPages) return;
-  const loaded = await loadNewsPage(page, {
-    activeFilter: filter,
+  const activeFilter = filter;
+  const pagePromise = preparePageNavigation(page, filter);
+  programmaticScrollUntil = Date.now() + 1000;
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+  await waitForScrollTop();
+  const data = await pagePromise;
+  if (!data || activeFilter !== filter) return;
+  applyNewsPage(data, page, activeFilter, { animate: true });
+  scheduleAdjacentPagePrefetch(page, activeFilter, Number(data.total || 0));
+}
+
+function waitForScrollTop(timeout = 700) {
+  if (window.scrollY <= 4) return Promise.resolve();
+  return new Promise(resolve => {
+    const startedAt = performance.now();
+    const check = () => {
+      if (window.scrollY <= 4 || performance.now() - startedAt >= timeout) {
+        resolve();
+        return;
+      }
+      requestAnimationFrame(check);
+    };
+    requestAnimationFrame(check);
+  });
+}
+
+async function showHomepageAfterScroll() {
+  if (filter === 'all' && currentPage === 1) return true;
+  const previousFilter = filter;
+  const previousPage = currentPage;
+  filter = 'all';
+  currentPage = 1;
+  if (pendingLatestPage) {
+    applyNewsPage(pendingLatestPage, 1, 'all', { animate: true });
+    pendingLatestPage = null;
+    pendingNewArticleCount = 0;
+    return true;
+  }
+  const loaded = await loadNewsPage(1, {
+    activeFilter: 'all',
     useCache: true,
     userInitiated: true,
     animate: true,
   });
-  if (loaded) scrollToCurrentTop();
+  if (!loaded) {
+    filter = previousFilter;
+    currentPage = previousPage;
+    renderFilters();
+  }
+  return loaded;
 }
 
-function scrollToCurrentTop() {
+async function refreshFromHeader() {
+  if (!authToken || (authUser && authUser.role === 'preview')) {
+    triggerRefresh();
+    return;
+  }
+  programmaticScrollUntil = Date.now() + 1000;
   window.scrollTo({ top: 0, behavior: 'smooth' });
+  await waitForScrollTop();
+  triggerRefresh();
 }
 
 async function goHome() {
@@ -4232,8 +4333,11 @@ async function goHome() {
     showToast('🔒 请先登录后使用');
     return;
   }
-  await selectFilter('all');
+  programmaticScrollUntil = Date.now() + 1000;
   window.scrollTo({ top: 0, behavior: 'smooth' });
+  await waitForScrollTop();
+  await showHomepageAfterScroll();
+  triggerRefresh({ silentStart: true });
 }
 
 function articleDetailErrorText(e) {
@@ -4284,6 +4388,10 @@ function syncArticleHistory(id, date) {
       history.replaceState({ raynewsHome: true }, '', window.location.pathname + window.location.search);
       history.pushState({ raynewsArticle: true }, '', articleHash);
     }
+    return;
+  }
+  if (history.state && history.state.raynewsArticle) {
+    history.replaceState({ raynewsArticle: true }, '', articleHash);
     return;
   }
   history.pushState({ raynewsArticle: true }, '', articleHash);
@@ -4529,11 +4637,11 @@ function shareArticle() {
 
 let _closingOverlay = false;
 
-function closeArticle(fromHistoryNavigation = false) {
+function closeArticle(fromHistoryNavigation = false, forceInAppNavigation = false) {
   if (_closingOverlay) return;
   const overlay = document.getElementById('overlay');
   if (!overlay.classList.contains('open')) return;
-  const mobileNavigation = usesMobileArticleNavigation();
+  const mobileNavigation = forceInAppNavigation || usesMobileArticleNavigation();
   if (
     !mobileNavigation
     && !fromHistoryNavigation
@@ -4559,6 +4667,10 @@ function closeArticle(fromHistoryNavigation = false) {
   _closingOverlay = false;
 }
 
+function closeArticleFromButton() {
+  closeArticle(false, navigator.maxTouchPoints > 0);
+}
+
 // Handle hash-based article links
 function handleHash() {
   const match = location.hash.match(/^#\/article\/(\d{2}-\d{2}-\d{2})-(\d+)$/);
@@ -4582,7 +4694,7 @@ document.addEventListener('click', e => {
   }
 });
 
-document.getElementById('backBtn').addEventListener('click', closeArticle);
+document.getElementById('backBtn').addEventListener('click', closeArticleFromButton);
 document.getElementById('lb').addEventListener('click', closeLightbox);
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {

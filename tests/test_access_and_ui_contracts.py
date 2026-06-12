@@ -130,11 +130,11 @@ def test_article_navigation_splits_mobile_and_desktop_history_modes():
     assert "history.replaceState({ raynewsMobileArticle: true }" in sync_block
     assert "history.pushState({ raynewsArticle: true }" in html
     assert "history.replaceState({ raynewsHome: true }" in html
-    assert "function closeArticle(fromHistoryNavigation = false)" in html
-    close_start = html.index("function closeArticle(fromHistoryNavigation = false)")
+    assert "function closeArticle(fromHistoryNavigation = false, forceInAppNavigation = false)" in html
+    close_start = html.index("function closeArticle(fromHistoryNavigation = false, forceInAppNavigation = false)")
     close_end = html.index("// Handle hash-based article links", close_start)
     close_block = html[close_start:close_end]
-    assert "const mobileNavigation = usesMobileArticleNavigation();" in close_block
+    assert "const mobileNavigation = forceInAppNavigation || usesMobileArticleNavigation();" in close_block
     assert "!mobileNavigation" in close_block
     assert "history.state.raynewsArticle" in close_block
     assert "history.back();" in close_block
@@ -159,10 +159,10 @@ def test_mobile_edge_swipe_claims_navigation_at_touch_start():
 
 def test_article_back_and_refresh_do_not_replace_the_whole_list():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
-    close_start = html.index("function closeArticle(fromHistoryNavigation = false)")
+    close_start = html.index("function closeArticle(fromHistoryNavigation = false, forceInAppNavigation = false)")
     close_end = html.index("// Handle hash-based article links", close_start)
     close_block = html[close_start:close_end]
-    refresh_start = html.index("async function triggerRefresh()")
+    refresh_start = html.index("async function triggerRefresh(")
     refresh_end = html.index("function setRefreshRunning", refresh_start)
     refresh_block = html[refresh_start:refresh_end]
 
@@ -280,6 +280,64 @@ def test_cached_page_background_calibration_reuses_existing_cards():
     assert "reconcileVisibleArticles();" in apply_block
     assert "preserveDom: cacheApplied" in load_block
     assert "const showPageProgress = !cacheApplied && userInitiated;" in load_block
+
+
+def test_home_controls_scroll_immediately_then_use_shared_background_refresh():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    start = html.index("async function goHome()")
+    end = html.index("function articleDetailErrorText", start)
+    block = html[start:end]
+    assert "window.scrollTo({ top: 0, behavior: 'smooth' });" in block
+    assert block.index("window.scrollTo({ top: 0, behavior: 'smooth' });") < block.index("await waitForScrollTop()")
+    assert "await showHomepageAfterScroll();" in block
+    assert "triggerRefresh({ silentStart: true });" in block
+    assert "await selectFilter('all');" not in block
+    assert "async function showHomepageAfterScroll()" in html
+    assert "function waitForScrollTop(" in html
+
+
+def test_header_refresh_scrolls_first_without_changing_the_active_page():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert 'id="refreshBtn" onclick="refreshFromHeader()"' in html
+    start = html.index("async function refreshFromHeader()")
+    end = html.index("async function goHome()", start)
+    block = html[start:end]
+    assert "window.scrollTo({ top: 0, behavior: 'smooth' });" in block
+    assert block.index("window.scrollTo({ top: 0, behavior: 'smooth' });") < block.index("await waitForScrollTop()")
+    wait_index = block.index("await waitForScrollTop()")
+    assert block.index("triggerRefresh();", wait_index) > wait_index
+    assert "showHomepageAfterScroll" not in block
+
+
+def test_pagination_scrolls_immediately_and_switches_only_after_reaching_top():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    start = html.index("async function goToPage(page)")
+    end = html.index("function waitForScrollTop(", start)
+    block = html[start:end]
+    assert "window.scrollTo({ top: 0, behavior: 'smooth' });" in block
+    assert "const pagePromise = preparePageNavigation(page, filter);" in block
+    assert block.index("window.scrollTo({ top: 0, behavior: 'smooth' });") < block.index("await waitForScrollTop()")
+    assert "const data = await pagePromise;" in block
+    assert block.index("await waitForScrollTop()") < block.index("applyNewsPage(data")
+    assert "async function preparePageNavigation(" in html
+
+
+def test_article_history_keeps_only_one_desktop_article_entry():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    start = html.index("function syncArticleHistory(id, date)")
+    end = html.index("function openArticle(id)", start)
+    block = html[start:end]
+    assert "history.state && history.state.raynewsArticle" in block
+    assert "history.replaceState({ raynewsArticle: true }, '', articleHash);" in block
+    assert "history.pushState({ raynewsArticle: true }, '', articleHash);" in block
+
+
+def test_article_back_button_does_not_pass_click_event_as_history_state():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert "function closeArticleFromButton()" in html
+    assert "closeArticle(false, navigator.maxTouchPoints > 0);" in html
+    assert "addEventListener('click', closeArticleFromButton)" in html
+    assert "addEventListener('click', closeArticle);" not in html
 
 
 def test_legacy_admin_source_promotion_is_guarded_after_success():
