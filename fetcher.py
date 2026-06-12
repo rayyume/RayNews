@@ -23,6 +23,7 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
+from news_schema import ensure_deleted_articles_table
 from source_categories import (
     ensure_article_sources, init_source_categories,
     ensure_article_source_columns,
@@ -78,15 +79,7 @@ def init_db() -> sqlite3.Connection:
             summary TEXT DEFAULT ''
         )
     """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS deleted_articles (
-            article_id   INTEGER PRIMARY KEY,
-            title        TEXT NOT NULL DEFAULT '',
-            source       TEXT NOT NULL DEFAULT '',
-            deleted_by   INTEGER,
-            deleted_at   TEXT NOT NULL DEFAULT (datetime('now'))
-        )
-    """)
+    ensure_deleted_articles_table(conn)
     ensure_article_source_columns(conn)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON articles(timestamp DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_source ON articles(source)")

@@ -1912,11 +1912,8 @@ async function deleteSourceArticles(idx) {
     });
     const data = await parseJsonResponse(resp);
     if (data.error) throw new Error(data.error);
-    const deletedIds = new Set((sourceArticlesState.items || []).map(item => Number(item.id)));
-    news = news.filter(item => !sources.includes(feedSourceOf(item)) && !deletedIds.has(Number(item.id)));
-    document.getElementById('count').textContent = news.length + ' 条新闻';
     if (sourceArticlesState.rowIdx === idx) renderSourceArticles([]);
-    await refreshSourceDependentViews({ refreshSettings: true });
+    await refreshSourceDependentViews({ refreshSettings: true, reloadNews: true });
     showSettingsStatus(`已删除「${label}」下 ${data.deleted || 0} 篇文章`, 'ok');
   } catch (e) {
     showSettingsStatus('删除失败: ' + e.message, 'error');

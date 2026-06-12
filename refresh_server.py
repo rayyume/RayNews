@@ -19,6 +19,7 @@ from image_cache import (
     fetch_remote_image,
     get_cached_image,
 )
+from news_schema import ensure_deleted_articles_table
 from source_categories import (
     CATEGORY_NAMES, CATEGORY_ORDER, cleanup_stale_source_categories,
     ensure_article_source_columns, source_rows,
@@ -66,18 +67,6 @@ def ensure_article_title_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE articles ADD COLUMN title_updated_at TEXT")
     if "title_source" not in cols:
         conn.execute("ALTER TABLE articles ADD COLUMN title_source TEXT")
-
-
-def ensure_deleted_articles_table(conn: sqlite3.Connection) -> None:
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS deleted_articles (
-            article_id   INTEGER PRIMARY KEY,
-            title        TEXT NOT NULL DEFAULT '',
-            source       TEXT NOT NULL DEFAULT '',
-            deleted_by   INTEGER,
-            deleted_at   TEXT NOT NULL DEFAULT (datetime('now'))
-        )
-    """)
 
 
 def get_db() -> sqlite3.Connection:
@@ -449,18 +438,10 @@ def api_news_detail(article_id: int) -> bytes:
             with _article_cache_lock:
                 _article_cache.pop(article_id, None)
             return json.dumps({"error": "not found"}).encode()
-    except Exception:
-        pass
-    finally:
-        if conn:
-            conn.close()
-    with _article_cache_lock:
-        cached = _article_cache.get(article_id)
-        if cached is not None:
-            return cached
-    conn = None
-    try:
-        conn = get_db()
+        with _article_cache_lock:
+            cached = _article_cache.get(article_id)
+            if cached is not None:
+                return cached
         row = conn.execute(
             "SELECT * FROM articles WHERE id = ?", (article_id,)
         ).fetchone()

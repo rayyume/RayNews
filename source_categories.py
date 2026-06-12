@@ -385,26 +385,35 @@ def cleanup_stale_source_categories(conn: sqlite3.Connection) -> int:
         source = row["source"] if isinstance(row, sqlite3.Row) else row[0]
         cur = conn.execute("DELETE FROM source_categories WHERE source = ?", (source,))
         deleted += cur.rowcount
+
+    # The article table can be temporarily empty during first sync or recovery.
+    # Keep user-authored categories and aliases until live sources exist again.
+    if not live_sources:
+        if deleted:
+            conn.commit()
+        return deleted
+
+    placeholders = ",".join("?" for _ in live_sources)
     deleted += conn.execute(
         "DELETE FROM source_aliases WHERE alias_source NOT IN ({}) OR target_source NOT IN ({})".format(
-            ",".join("?" for _ in live_sources) or "''",
-            ",".join("?" for _ in live_sources) or "''",
+            placeholders,
+            placeholders,
         ),
         tuple(live_sources) + tuple(live_sources),
-    ).rowcount if live_sources else conn.execute("DELETE FROM source_aliases").rowcount
+    ).rowcount
     deleted += conn.execute(
         "DELETE FROM user_source_categories WHERE source NOT IN ({})".format(
-            ",".join("?" for _ in live_sources) or "''",
+            placeholders,
         ),
         tuple(live_sources),
-    ).rowcount if live_sources else conn.execute("DELETE FROM user_source_categories").rowcount
+    ).rowcount
     deleted += conn.execute(
         "DELETE FROM user_source_aliases WHERE alias_source NOT IN ({}) OR target_source NOT IN ({})".format(
-            ",".join("?" for _ in live_sources) or "''",
-            ",".join("?" for _ in live_sources) or "''",
+            placeholders,
+            placeholders,
         ),
         tuple(live_sources) + tuple(live_sources),
-    ).rowcount if live_sources else conn.execute("DELETE FROM user_source_aliases").rowcount
+    ).rowcount
     if deleted:
         conn.commit()
     return deleted

@@ -1,0 +1,85 @@
+import sqlite3
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from news_schema import ensure_deleted_articles_table
+from source_categories import cleanup_stale_source_categories, init_source_categories
+
+
+def _table_count(conn: sqlite3.Connection, table: str) -> int:
+    return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+
+
+def test_deleted_articles_table_is_created_by_shared_helper():
+    conn = sqlite3.connect(":memory:")
+
+    ensure_deleted_articles_table(conn)
+
+    columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(deleted_articles)").fetchall()
+    }
+    assert columns == {"article_id", "title", "source", "deleted_by", "deleted_at"}
+
+
+def test_empty_article_table_preserves_user_source_metadata():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE articles (
+            id INTEGER PRIMARY KEY,
+            source TEXT NOT NULL DEFAULT '',
+            feed_source TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    init_source_categories(conn)
+    conn.execute(
+        "INSERT INTO user_source_categories "
+        "(user_id, source, category, label, updated_at) "
+        "VALUES (1, 'Old Feed', 'Tech', 'Old Feed', datetime('now'))"
+    )
+    conn.execute(
+        "INSERT INTO user_source_aliases "
+        "(user_id, alias_source, target_source, created_at) "
+        "VALUES (1, 'Old Feed Alias', 'Old Feed', datetime('now'))"
+    )
+    conn.commit()
+
+    cleanup_stale_source_categories(conn)
+
+    assert _table_count(conn, "user_source_categories") == 1
+    assert _table_count(conn, "user_source_aliases") == 1
+
+
+def test_nonempty_article_table_removes_only_stale_user_source_metadata():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE articles (
+            id INTEGER PRIMARY KEY,
+            source TEXT NOT NULL DEFAULT '',
+            feed_source TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO articles (id, source, feed_source) VALUES (1, 'Live Feed', 'Live Feed')"
+    )
+    init_source_categories(conn)
+    for source in ("Live Feed", "Stale Feed"):
+        conn.execute(
+            "INSERT INTO user_source_categories "
+            "(user_id, source, category, label, updated_at) "
+            "VALUES (1, ?, 'Tech', ?, datetime('now'))",
+            (source, source),
+        )
+    conn.commit()
+
+    cleanup_stale_source_categories(conn)
+
+    rows = conn.execute(
+        "SELECT source FROM user_source_categories ORDER BY source"
+    ).fetchall()
+    assert rows == [("Live Feed",)]

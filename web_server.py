@@ -29,6 +29,7 @@ from models import (
 from auth import init_auth, create_token, require_auth, require_role
 from ai_service import AIService
 from image_cache import enqueue_article_image_prefetch, unpin_article_images
+from news_schema import ensure_deleted_articles_table
 from source_categories import (
     CATEGORY_NAMES, CATEGORY_ORDER, cleanup_stale_source_categories,
     clamp_weighted, ensure_article_source_columns, ensure_article_sources,
@@ -373,21 +374,9 @@ def admin_set_role(user_id):
 NEWS_DB = os.path.join(DATA_DIR, "news.db")
 
 
-def _ensure_deleted_articles_table(conn: sqlite3.Connection) -> None:
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS deleted_articles (
-            article_id   INTEGER PRIMARY KEY,
-            title        TEXT NOT NULL DEFAULT '',
-            source       TEXT NOT NULL DEFAULT '',
-            deleted_by   INTEGER,
-            deleted_at   TEXT NOT NULL DEFAULT (datetime('now'))
-        )
-    """)
-
-
 def _ensure_news_schema(conn: sqlite3.Connection) -> None:
     ensure_article_source_columns(conn)
-    _ensure_deleted_articles_table(conn)
+    ensure_deleted_articles_table(conn)
     conn.commit()
 
 
