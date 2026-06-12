@@ -3949,10 +3949,24 @@ function retryArticleDetail(id) {
   openArticle(id);
 }
 
+function usesMobileArticleNavigation() {
+  if (!window.matchMedia) return navigator.maxTouchPoints > 0;
+  const coarseTouch = window.matchMedia('(hover: none) and (pointer: coarse)').matches;
+  const standaloneTouch = (
+    window.matchMedia('(display-mode: standalone)').matches
+    && navigator.maxTouchPoints > 0
+  );
+  return coarseTouch || standaloneTouch;
+}
+
 function syncArticleHistory(id, date) {
   const shortDate = date ? date.slice(2) : '';
   if (!shortDate) return;
   const articleHash = '#/article/' + shortDate + '-' + id;
+  if (usesMobileArticleNavigation()) {
+    history.replaceState({ raynewsMobileArticle: true }, '', articleHash);
+    return;
+  }
   if (location.hash === articleHash) {
     if (!(history.state && history.state.raynewsArticle)) {
       history.replaceState({ raynewsHome: true }, '', window.location.pathname + window.location.search);
@@ -4207,8 +4221,10 @@ function closeArticle(fromHistoryNavigation = false) {
   if (_closingOverlay) return;
   const overlay = document.getElementById('overlay');
   if (!overlay.classList.contains('open')) return;
+  const mobileNavigation = usesMobileArticleNavigation();
   if (
-    !fromHistoryNavigation
+    !mobileNavigation
+    && !fromHistoryNavigation
     && history.state
     && history.state.raynewsArticle
   ) {
@@ -4220,8 +4236,11 @@ function closeArticle(fromHistoryNavigation = false) {
   overlay.classList.remove('open');
   overlay.classList.remove('from-source-history');
   unlockBodyScroll();
-  if (!fromHistoryNavigation && location.hash) {
-    history.replaceState(null, '', window.location.pathname + window.location.search);
+  const homeUrl = window.location.pathname + window.location.search;
+  if (mobileNavigation) {
+    history.replaceState({ raynewsHome: true }, '', homeUrl);
+  } else if (!fromHistoryNavigation && location.hash) {
+    history.replaceState({ raynewsHome: true }, '', homeUrl);
   }
   // Apply queued changes by reusing existing cards; never blank the homepage on return.
   flushPendingListUpdate();
@@ -4390,22 +4409,38 @@ setInterval(function() {
 // ═══ Mobile: swipe-to-go-back on article overlay ════════
 (function() {
   const overlay = document.getElementById('overlay');
-  let sx = 0, sy = 0, swiping = false;
+  let sx = 0, sy = 0, swiping = false, edgeCandidate = false;
+
+  function resetArticleSwipe() {
+    overlay.style.transition = '';
+    overlay.style.transform = '';
+    overlay.style.opacity = '';
+    swiping = false;
+    edgeCandidate = false;
+  }
 
   overlay.addEventListener('touchstart', e => {
+    if (!usesMobileArticleNavigation()) return;
     if (document.getElementById('lb').classList.contains('open')) return;
+    if (!overlay.classList.contains('open')) return;
     sx = e.touches[0].clientX;
     sy = e.touches[0].clientY;
     swiping = false;
+    edgeCandidate = sx < 50;
+    if (edgeCandidate) e.preventDefault();
   }, { passive: false });
 
   overlay.addEventListener('touchmove', e => {
-    if (!overlay.classList.contains('open')) return;
+    if (!edgeCandidate || !overlay.classList.contains('open')) return;
     const dx = e.touches[0].clientX - sx;
     const dy = e.touches[0].clientY - sy;
-    if (sx < 50 && dx > 40 && Math.abs(dy) < Math.abs(dx) * 1.5) {
+    if (!swiping && Math.abs(dy) > Math.abs(dx) * 1.25) {
+      edgeCandidate = false;
+      return;
+    }
+    if (dx > 12 && Math.abs(dy) < Math.abs(dx) * 1.5) {
       swiping = true;
-      e.preventDefault(); // prevent native back-swipe only when actually swiping
+      e.preventDefault();
       const t = Math.min(dx / 250, 1);
       overlay.style.transition = 'none';
       overlay.style.transform = `translateX(${dx * 0.5}px)`;
@@ -4422,9 +4457,17 @@ setInterval(function() {
       void overlay.getBoundingClientRect(); // flush style changes
       overlay.style.transition = ''; // restore CSS transition for close animation
       closeArticle();
-      swiping = false;
+    } else if (edgeCandidate) {
+      overlay.style.transition = 'transform .18s ease, opacity .18s ease';
+      overlay.style.transform = '';
+      overlay.style.opacity = '';
+      setTimeout(resetArticleSwipe, 200);
     }
+    swiping = false;
+    edgeCandidate = false;
   }, { passive: true });
+
+  overlay.addEventListener('touchcancel', resetArticleSwipe, { passive: true });
 })();
 
 // ═══ Mobile: pull-to-refresh on homepage ═════════════════

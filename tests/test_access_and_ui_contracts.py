@@ -117,14 +117,44 @@ def test_source_mutation_routes_are_admin_only_and_shared():
     assert "user_id=g.user_id" not in server[server.index("def save_source"):server.index("def classify_sources")]
 
 
-def test_article_navigation_uses_browser_history_for_back():
+def test_article_navigation_splits_mobile_and_desktop_history_modes():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert "function usesMobileArticleNavigation()" in html
+    assert "(hover: none) and (pointer: coarse)" in html
+    assert "(display-mode: standalone)" in html
+    assert "navigator.maxTouchPoints > 0" in html
+    sync_start = html.index("function syncArticleHistory(id, date)")
+    sync_end = html.index("function openArticle(id)", sync_start)
+    sync_block = html[sync_start:sync_end]
+    assert "if (usesMobileArticleNavigation())" in sync_block
+    assert "history.replaceState({ raynewsMobileArticle: true }" in sync_block
     assert "history.pushState({ raynewsArticle: true }" in html
     assert "history.replaceState({ raynewsHome: true }" in html
     assert "function closeArticle(fromHistoryNavigation = false)" in html
-    assert "history.state.raynewsArticle" in html
+    close_start = html.index("function closeArticle(fromHistoryNavigation = false)")
+    close_end = html.index("// Handle hash-based article links", close_start)
+    close_block = html[close_start:close_end]
+    assert "const mobileNavigation = usesMobileArticleNavigation();" in close_block
+    assert "!mobileNavigation" in close_block
+    assert "history.state.raynewsArticle" in close_block
+    assert "history.back();" in close_block
+    assert "history.replaceState({ raynewsHome: true }" in close_block
     assert "if (!overlay.classList.contains('open')) return;" in html
     assert "closeArticle(true)" in html
+
+
+def test_mobile_edge_swipe_claims_navigation_at_touch_start():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    swipe_marker = html.index("let sx = 0, sy = 0, swiping = false")
+    swipe_start = html.rindex("(function() {", 0, swipe_marker)
+    swipe_end = html.index("(function() {", swipe_marker + 1)
+    swipe_block = html[swipe_start:swipe_end]
+
+    assert "if (!usesMobileArticleNavigation()) return;" in swipe_block
+    assert "edgeCandidate = sx < 50;" in swipe_block
+    assert "if (edgeCandidate) e.preventDefault();" in swipe_block
+    assert "overlay.addEventListener('touchcancel'" in swipe_block
+    assert "closeArticle();" in swipe_block
 
 
 def test_article_back_and_refresh_do_not_replace_the_whole_list():
