@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" id="appleStatusBarMeta">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0a0a0c" id="themeColorMeta">
 <link rel="manifest" href="/manifest.json">
@@ -46,6 +46,7 @@
   --overlay-bg: rgba(10,10,12,0.9);
   --toast-bg: rgba(24,24,30,0.94);
   --toast-shadow: 0 10px 32px rgba(0,0,0,0.32);
+  --scrollbar-thumb: rgba(255,255,255,0.1);
   --radius: 12px;
   --font: "SF Pro Display",-apple-system,"Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
 }
@@ -65,6 +66,7 @@ html[data-theme="light"] {
   --overlay-bg: rgba(245,247,251,0.94);
   --toast-bg: rgba(255,255,255,0.96);
   --toast-shadow: 0 10px 30px rgba(23,25,35,0.12);
+  --scrollbar-thumb: rgba(23,25,35,0.16);
 }
 
 /* ═══ Reset ═══════════════════════════════════════ */
@@ -76,7 +78,7 @@ a:hover{text-decoration:underline}
 ::selection{background:var(--accent-dim);color:var(--text)}
 ::-webkit-scrollbar{width:6px}
 ::-webkit-scrollbar-track{background:transparent}
-::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.1);border-radius:3px}
+::-webkit-scrollbar-thumb{background:var(--scrollbar-thumb);border-radius:3px}
 
 /* ═══ Layout ══════════════════════════════════════ */
 .app{max-width:960px;margin:0 auto;padding:0 20px;position:relative}
@@ -343,6 +345,11 @@ body.body-scroll-lock{overflow:hidden!important}
 .fav-overlay.open{opacity:1;pointer-events:auto}
 #sourceArticlesOverlay{z-index:520}
 .fav-panel{position:relative;z-index:1;background:var(--bg-card);border:1px solid var(--border);border-radius:16px;width:520px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.4)}
+.source-articles-toast{position:absolute;z-index:5;top:68px;left:20px;right:20px;display:none;align-items:flex-start;justify-content:space-between;gap:8px;padding:9px 12px;border:1px solid var(--border);border-radius:10px;background:var(--toast-bg);color:var(--text);box-shadow:var(--toast-shadow);font-size:12px;line-height:1.45}
+.source-articles-toast.show{display:flex}
+.source-articles-toast.ok{border-color:rgba(34,197,94,0.35);color:#16a34a}
+.source-articles-toast.err,.source-articles-toast.error{border-color:rgba(239,68,68,0.35);color:#ef4444}
+.source-articles-toast.warn{border-color:rgba(245,158,11,0.35);color:#d97706}
 .fav-header{display:flex;align-items:center;justify-content:space-between;padding:20px 24px;border-bottom:1px solid var(--border);flex-shrink:0}
 .fav-header h2{margin:0;font-size:18px;font-weight:700}
 .fav-close{background:none;border:none;color:var(--text-3);font-size:18px;cursor:pointer;padding:4px 8px;border-radius:6px;transition:all 0.15s}
@@ -406,6 +413,9 @@ body.body-scroll-lock{overflow:hidden!important}
 .ai-action-btn{padding:6px 14px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-2);font-size:12px;font-weight:600;cursor:pointer;font-family:var(--font);transition:all 0.15s;display:flex;align-items:center;gap:6px}
 .ai-action-btn:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-dim)}
 .ai-action-btn:disabled{opacity:0.4;cursor:default;border-color:var(--border);color:var(--text-3);background:var(--bg-card)}
+.article-ai-btn{border:1px solid var(--border);background:var(--bg-surface);color:var(--accent);font-size:11px;font-weight:700;cursor:pointer;padding:3px 10px;border-radius:100px;font-family:var(--font);transition:background .15s,border-color .15s,color .15s}
+.article-ai-btn:hover{background:var(--accent-dim);border-color:var(--accent)}
+.article-ai-btn:disabled{opacity:.45;cursor:default}
 .ai-result{margin-top:12px;padding:14px 16px;background:var(--bg);border-radius:10px;font-size:13px;line-height:1.7;color:var(--text);border:1px solid var(--border);max-height:400px;overflow-y:auto;white-space:pre-wrap;word-break:break-word}
 .ai-hidden{display:none}
 
@@ -425,6 +435,7 @@ body.body-scroll-lock{overflow:hidden!important}
 .source-name-btn:hover{text-decoration:underline}
 .source-meta{font-size:11px;color:var(--text-3);margin-top:3px}
 .source-label-input,.source-cat-select{width:100%;padding:7px 9px;border:1px solid var(--border);border-radius:8px;background:var(--bg-card);color:var(--text);font-size:12px;font-family:var(--font)}
+.source-label-input:disabled,.source-cat-select:disabled{opacity:.72;cursor:not-allowed;background:var(--bg-surface);color:var(--text-2)}
 .source-row-state{font-size:11px;color:var(--text-3);text-align:center;min-width:0;white-space:nowrap}
 .source-row-state.saving{color:var(--accent)}
 .source-row-state.saved{color:#22c55e}
@@ -591,6 +602,7 @@ body.body-scroll-lock{overflow:hidden!important}
       <h2 id="sourceArticlesTitle">订阅源文章</h2>
       <button class="fav-close" onclick="closeSourceArticles()">✕</button>
     </div>
+    <div id="sourceArticlesStatus" class="source-articles-toast" role="status" aria-live="polite"></div>
     <div class="fav-body" id="sourceArticlesBody">
       <div class="fav-empty">加载中...</div>
     </div>
@@ -674,7 +686,7 @@ body.body-scroll-lock{overflow:hidden!important}
         <div class="source-step">
           <div class="source-step-title">1. 识别文章来源标签</div>
           <p class="ai-hint">从文章底部最后一个 via 链接重新识别真正来源，用于修复历史文章中误识别的来源。</p>
-          <div class="source-step-actions">
+          <div class="source-step-actions source-admin-only">
             <button class="ai-save-btn" id="sourceRedetectBtn" onclick="redetectArticleSources()" style="display:none;margin:0;width:auto;padding:8px 12px">重新识别来源</button>
             <button class="ai-save-btn" id="sourceReinitBtn" onclick="reinitializeSourceLabels()" style="display:none;margin:0;width:auto;padding:8px 12px;background:var(--bg-card);color:var(--text);border:1px solid var(--border)">初始化订阅源标签</button>
             <span class="ai-hint" id="sourceRedetectHint" style="display:none;align-self:center;margin:0">仅管理员可执行全局来源重识别。</span>
@@ -683,7 +695,7 @@ body.body-scroll-lock{overflow:hidden!important}
         <div class="source-step">
           <div class="source-step-title">2. 订阅源分类与合并</div>
           <p class="ai-hint">AI 会将已识别的来源缩写并归入四个分类；手动保存和合并优先，不会被 AI 覆盖。</p>
-          <div class="source-step-actions">
+          <div class="source-step-actions source-admin-only">
             <button class="ai-save-btn" onclick="classifySources(false)" style="margin:0;width:auto;padding:8px 12px">AI处理待分类</button>
             <button class="ai-save-btn" onclick="classifySourcesAll(false)" style="margin:0;width:auto;padding:8px 12px">后台处理全部</button>
             <button class="ai-save-btn" onclick="classifySources(true)" style="margin:0;width:auto;padding:8px 12px;background:var(--bg-card);color:var(--text);border:1px solid var(--border)">重新分类非手动来源</button>
@@ -813,6 +825,7 @@ let titleUpdatePolling = false;
 let searchRequestController = null;
 let searchRequestSeq = 0;
 let settingsToastTimer = null;
+let sourceArticlesToastTimer = null;
 let sourceSaveTimers = {};
 let sourceArticlesState = { rowIdx: -1, items: [] };
 // User settings cache for auto-translate decisions
@@ -831,6 +844,8 @@ function applyThemePreference(pref) {
   localStorage.setItem('raynews_theme', safe);
   const meta = document.getElementById('themeColorMeta');
   if (meta) meta.setAttribute('content', mode === 'light' ? '#f5f7fb' : '#0a0a0c');
+  const statusMeta = document.getElementById('appleStatusBarMeta');
+  if (statusMeta) statusMeta.setAttribute('content', mode === 'light' ? 'default' : 'black-translucent');
   const select = document.getElementById('themePreference');
   if (select) select.value = safe;
 }
@@ -1308,10 +1323,21 @@ function toggleAuthMode() {
   document.getElementById('authError').textContent = '';
 }
 
+function isValidEmailInput(value) {
+  const email = (value || '').trim();
+  return email.length <= 254
+    && !email.includes('..')
+    && /^[^\s@]+@[^\s@]+\.[A-Za-z]{2,63}$/.test(email);
+}
+
 async function requestInvite() {
   const email = document.getElementById('authLogin').value.trim();
   if (!email) {
     document.getElementById('authError').textContent = '请先输入邮箱地址';
+    return;
+  }
+  if (!isValidEmailInput(email)) {
+    document.getElementById('authError').textContent = '请输入有效的邮箱地址';
     return;
   }
   const btn = document.getElementById('authSubmitBtn');
@@ -1347,6 +1373,10 @@ async function submitAuth() {
   const errEl = document.getElementById('authError');
 
   if (!loginVal || !password) { errEl.textContent = '请填写邮箱/用户名和密码'; return; }
+  if (authMode === 'register' && !isValidEmailInput(loginVal)) {
+    errEl.textContent = '请输入有效的邮箱地址';
+    return;
+  }
   btn.disabled = true;
   btn.textContent = authMode === 'login' ? '登录中...' : '注册中...';
   errEl.textContent = '';
@@ -1425,6 +1455,9 @@ function updateUserUI() {
     if (sourceReinitBtn) sourceReinitBtn.style.display = authUser.role === 'admin' ? '' : 'none';
     const sourceRedetectHint = document.getElementById('sourceRedetectHint');
     if (sourceRedetectHint) sourceRedetectHint.style.display = authUser.role === 'admin' ? 'none' : '';
+    document.querySelectorAll('.source-admin-only').forEach(el => {
+      el.style.display = authUser.role === 'admin' ? '' : 'none';
+    });
 
     // Preview users: hide refresh button
     const refreshBtn = document.getElementById('refreshBtn');
@@ -1439,6 +1472,9 @@ function updateUserUI() {
     if (sourceReinitBtn) sourceReinitBtn.style.display = 'none';
     const sourceRedetectHint = document.getElementById('sourceRedetectHint');
     if (sourceRedetectHint) sourceRedetectHint.style.display = 'none';
+    document.querySelectorAll('.source-admin-only').forEach(el => {
+      el.style.display = 'none';
+    });
     const btn = document.createElement('button');
     btn.id = 'loginBtn';
     btn.className = 'refresh-btn';
@@ -1544,6 +1580,27 @@ function hideSettingsStatus() {
   el.textContent = '';
 }
 
+function showSourceArticlesStatus(msg, type) {
+  const el = document.getElementById('sourceArticlesStatus');
+  if (!el) return;
+  clearTimeout(sourceArticlesToastTimer);
+  const kind = type === 'error' ? 'err' : (type || 'ok');
+  el.className = 'source-articles-toast show ' + kind;
+  el.innerHTML = `<span>${esc(msg)}</span><button class="settings-toast-close" onclick="hideSourceArticlesStatus()" title="关闭">×</button>`;
+  sourceArticlesToastTimer = setTimeout(
+    hideSourceArticlesStatus,
+    kind === 'err' ? 5200 : (kind === 'warn' ? 4200 : 2600),
+  );
+}
+
+function hideSourceArticlesStatus() {
+  const el = document.getElementById('sourceArticlesStatus');
+  if (!el) return;
+  clearTimeout(sourceArticlesToastTimer);
+  el.className = 'source-articles-toast';
+  el.textContent = '';
+}
+
 // ─── Source Manager ─────────────────────────────────────
 
 async function loadSourcesTab() {
@@ -1579,6 +1636,7 @@ function renderSourceManager(rows) {
   const list = document.getElementById('sourceManagerList');
   const status = document.getElementById('sourceManagerStatus');
   if (!list) return;
+  const canManageSources = !!(authUser && authUser.role === 'admin');
 
   // Search filter
   const searchInput = document.getElementById('sourceSearchInput');
@@ -1598,9 +1656,11 @@ function renderSourceManager(rows) {
 
   const pending = rows.filter(r => r.status === 'pending' || r.status === 'failed').length;
   const shown = filtered.length;
-  if (status) status.textContent = query
-    ? `匹配 ${shown}/${rows.length} 个来源 · ${pending} 个待 AI 处理`
-    : (pending ? `${pending} 个来源待 AI 处理` : '所有来源已处理');
+  if (status) status.textContent = canManageSources
+    ? (query
+      ? `匹配 ${shown}/${rows.length} 个来源 · ${pending} 个待 AI 处理`
+      : (pending ? `${pending} 个来源待 AI 处理` : '所有来源已处理'))
+    : '订阅源标签与分类由管理员统一维护';
   if (!filtered.length) {
     list.innerHTML = '<div class="fav-empty">' + (query ? '无匹配来源' : '暂无订阅源') + '</div>';
     return;
@@ -1623,8 +1683,14 @@ function renderSourceManager(rows) {
       : `${row.article_count || 0} 篇 · ${row.status || 'pending'}${sourceMeta}${unlinkedWarn}`;
     // Show all source names in tooltip for grouped rows
     const allSources = (row.sources || [row.source]).map(s => esc(s)).join('\n');
-    const adminDelete = authUser && authUser.role === 'admin'
+    const adminDelete = canManageSources
       ? `<button class="source-delete-btn" onclick="deleteSourceArticles(${origIdx})" title="删除该订阅源全部文章">🗑</button>`
+      : '<span></span>';
+    const editAttrs = canManageSources ? '' : 'disabled aria-readonly="true"';
+    const labelHandler = canManageSources ? `oninput="scheduleSourceSave(${origIdx})"` : '';
+    const categoryHandler = canManageSources ? `onchange="scheduleSourceSave(${origIdx}, true)"` : '';
+    const redetectButton = canManageSources
+      ? `<button class="source-redetect-btn" onclick="redetectSourceArticles(${origIdx})" title="重新识别该来源下所有文章的来源标签">🔄</button>`
       : '<span></span>';
     return `
       <div class="source-row" data-source-idx="${origIdx}">
@@ -1632,10 +1698,10 @@ function renderSourceManager(rows) {
           <div class="source-name"><button class="source-name-btn" onclick="openSourceArticles(${origIdx})" title="${esc(allSources)}">${displayName}</button></div>
           <div class="source-meta">${esc(meta)}</div>
         </div>
-        <input class="source-label-input" value="${label}" maxlength="20" aria-label="来源缩写" oninput="scheduleSourceSave(${origIdx})">
-        <select class="source-cat-select" aria-label="来源分类" onchange="scheduleSourceSave(${origIdx}, true)">${options}</select>
+        <input class="source-label-input" value="${label}" maxlength="20" aria-label="来源缩写" ${editAttrs} ${labelHandler}>
+        <select class="source-cat-select" aria-label="来源分类" ${editAttrs} ${categoryHandler}>${options}</select>
         <span class="source-row-state" data-source-state="${origIdx}"></span>
-        <button class="source-redetect-btn" onclick="redetectSourceArticles(${origIdx})" title="重新识别该来源下所有文章的来源标签">🔄</button>
+        ${redetectButton}
         ${adminDelete}
       </div>`;
   }).join('');
@@ -1649,6 +1715,7 @@ function setSourceRowState(idx, text, cls) {
 }
 
 function scheduleSourceSave(idx, immediate) {
+  if (!authUser || authUser.role !== 'admin') return;
   clearTimeout(sourceSaveTimers[idx]);
   setSourceRowState(idx, '待保存', '');
   sourceSaveTimers[idx] = setTimeout(() => saveSourceRow(idx, { silent: true }), immediate ? 0 : 600);
@@ -1663,6 +1730,7 @@ async function openSourceArticles(idx) {
   title.textContent = (row.label || row.source) + ' · 历史文章';
   body.innerHTML = '<div class="fav-empty">加载中...</div>';
   sourceArticlesState = { rowIdx: idx, items: [] };
+  hideSourceArticlesStatus();
   overlay.classList.add('open');
   lockBodyScroll();
   try {
@@ -1714,6 +1782,7 @@ async function redetectSourceArticles(idx) {
 }
 
 function closeSourceArticles() {
+  hideSourceArticlesStatus();
   document.getElementById('sourceArticlesOverlay').classList.remove('open');
   unlockBodyScroll();
 }
@@ -1760,6 +1829,7 @@ function renderSourceArticles(items) {
 }
 
 async function saveSourceRow(idx, opts = {}) {
+  if (!authUser || authUser.role !== 'admin') return;
   const row = sourceRows[idx];
   const el = document.querySelector(`.source-row[data-source-idx="${idx}"]`);
   if (!row || !el) return;
@@ -1834,7 +1904,7 @@ function toggleSourceArticleSelection(checked) {
 
 async function deleteArticlesByIds(ids) {
   if (!ids.length) {
-    showSettingsStatus('请先选择要删除的文章', 'warn');
+    showSourceArticlesStatus('请先选择要删除的文章', 'warn');
     return false;
   }
   const resp = await fetch('/articles', {
@@ -1855,8 +1925,8 @@ async function deleteArticlesByIds(ids) {
     sourceArticlesState.items = sourceArticlesState.items.filter(item => !ids.includes(Number(item.id)));
     renderSourceArticles(sourceArticlesState.items);
   }
-  await refreshSourceDependentViews({ refreshSettings: true });
-  showSettingsStatus(`已删除 ${deleted} 篇文章`, 'ok');
+  await refreshSourceDependentViews({ refreshSettings: true, reloadNews: true });
+  showSourceArticlesStatus(`已删除 ${deleted} 篇文章`, 'ok');
   return true;
 }
 
@@ -1866,7 +1936,7 @@ async function deleteSourceArticle(articleId) {
   try {
     await deleteArticlesByIds([Number(articleId)]);
   } catch (e) {
-    showSettingsStatus('删除失败: ' + e.message, 'error');
+    showSourceArticlesStatus('删除失败: ' + e.message, 'error');
   }
 }
 
@@ -1874,7 +1944,7 @@ async function deleteSelectedSourceArticles() {
   if (!authUser || authUser.role !== 'admin') return;
   const ids = selectedSourceArticleIds();
   if (!ids.length) {
-    showSettingsStatus('请先选择要删除的文章', 'warn');
+    showSourceArticlesStatus('请先选择要删除的文章', 'warn');
     return;
   }
   const message = ids.length >= 20
@@ -1888,7 +1958,7 @@ async function deleteSelectedSourceArticles() {
   try {
     await deleteArticlesByIds(ids);
   } catch (e) {
-    showSettingsStatus('删除失败: ' + e.message, 'error');
+    showSourceArticlesStatus('删除失败: ' + e.message, 'error');
   }
 }
 
@@ -3749,6 +3819,15 @@ function retryArticleDetail(id) {
   openArticle(id);
 }
 
+function syncArticleHistory(id, date) {
+  const shortDate = date ? date.slice(2) : '';
+  if (!shortDate) return;
+  const articleHash = '#/article/' + shortDate + '-' + id;
+  if (location.hash !== articleHash) {
+    history.pushState({ raynewsArticle: true }, '', articleHash);
+  }
+}
+
 function openArticle(id) {
   const n = news.find(x => x.id === id);
   const wrap = document.getElementById('articleWrap');
@@ -3784,8 +3863,8 @@ function openArticle(id) {
           <span class="badge" style="${badgeStyle(displaySourceForArticle(feedSourceOf(data)))}" title="${esc(sourceBadgeTitle(feedSourceOf(data)))}">${esc(sourceLabel(displaySourceForArticle(feedSourceOf(data))))}</span>
           <span>${formatTime(data.date || '', data.time || '')}</span>
           <span style="margin-left:auto;display:flex;gap:8px;align-items:center" id="aiActions" data-article-id="${id}">
-            <button class="ai-summarize-btn" onclick="aiSummarize(${id})" style="background:#161a2a;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:3px 10px;border-radius:100px;font-family:var(--font)">摘要</button>
-            <button class="ai-translate-btn" onclick="aiTranslate(${id})" style="background:#161a2a;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:3px 10px;border-radius:100px;font-family:var(--font)">翻译</button>
+            <button class="article-ai-btn ai-summarize-btn" onclick="aiSummarize(${id})">摘要</button>
+            <button class="article-ai-btn ai-translate-btn" onclick="aiTranslate(${id})">翻译</button>
           </span>
         </div>
         ${coverImg}
@@ -3796,6 +3875,7 @@ function openArticle(id) {
       renderArticleBody(wrap, data, id);
       autoDisplaySummary(id);
       if (authToken) checkFavoriteStatus(id);
+      syncArticleHistory(id, data.date || '');
     };
     fetchArticleDetail(id)
       .then(data => {
@@ -3824,8 +3904,8 @@ function openArticle(id) {
       <span class="badge" style="${badgeStyle(displaySourceForArticle(feedSourceOf(n)))}" title="${esc(sourceBadgeTitle(feedSourceOf(n)))}">${esc(sourceLabel(displaySourceForArticle(feedSourceOf(n))))}</span>
       <span>${formatTime(n.date, n.time)}</span>
       <span style="margin-left:auto;display:flex;gap:8px;align-items:center" id="aiActions" data-article-id="${id}">
-        <button class="ai-summarize-btn" onclick="aiSummarize(${id})" style="background:#161a2a;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:3px 10px;border-radius:100px;font-family:var(--font)">摘要</button>
-        <button class="ai-translate-btn" onclick="aiTranslate(${id})" style="background:#161a2a;border:none;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer;padding:3px 10px;border-radius:100px;font-family:var(--font)">翻译</button>
+        <button class="article-ai-btn ai-summarize-btn" onclick="aiSummarize(${id})">摘要</button>
+        <button class="article-ai-btn ai-translate-btn" onclick="aiTranslate(${id})">翻译</button>
       </span>
     </div>
     ${coverImg}
@@ -3842,11 +3922,7 @@ function openArticle(id) {
   document.getElementById('overlay').dataset.articleId = id;
   // Check favorite status
   if (authToken) checkFavoriteStatus(id);
-  const shortDate = n.date ? n.date.slice(2) : '';
-  const articleHash = '#/article/' + shortDate + '-' + n.id;
-  if (location.hash !== articleHash) {
-    history.replaceState(null, '', articleHash);
-  }
+  syncArticleHistory(n.id, n.date);
 
   // Fetch full article body from API
   const requestId = ++activeArticleRequestId;
@@ -3992,15 +4068,26 @@ function shareArticle() {
 
 let _closingOverlay = false;
 
-function closeArticle() {
+function closeArticle(fromHistoryNavigation = false) {
   if (_closingOverlay) return;
+  const overlay = document.getElementById('overlay');
+  if (!overlay.classList.contains('open')) return;
+  if (
+    !fromHistoryNavigation
+    && history.state
+    && history.state.raynewsArticle
+  ) {
+    history.back();
+    return;
+  }
   _closingOverlay = true;
   activeArticleRequestId++;
-  const overlay = document.getElementById('overlay');
   overlay.classList.remove('open');
   overlay.classList.remove('from-source-history');
   unlockBodyScroll();
-  history.replaceState(null, '', window.location.pathname + window.location.search);
+  if (!fromHistoryNavigation && location.hash) {
+    history.replaceState(null, '', window.location.pathname + window.location.search);
+  }
   // If new articles arrived while reading, refresh the list now
   if (_pendingUpdate) {
     _pendingUpdate = false;
@@ -4150,7 +4237,7 @@ try {
 window.addEventListener('hashchange', () => {
   const match = location.hash.match(/^#\/article\/\d{2}-\d{2}-\d{2}-\d+$/);
   if (match) handleHash();
-  else closeArticle();
+  else closeArticle(true);
 });
 window.addEventListener('keydown', e => {
   if (e.key === 'Escape' && document.getElementById('searchOverlay').classList.contains('open')) {

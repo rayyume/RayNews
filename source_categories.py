@@ -395,11 +395,10 @@ def cleanup_stale_source_categories(conn: sqlite3.Connection) -> int:
 
     placeholders = ",".join("?" for _ in live_sources)
     deleted += conn.execute(
-        "DELETE FROM source_aliases WHERE alias_source NOT IN ({}) OR target_source NOT IN ({})".format(
-            placeholders,
+        "DELETE FROM source_aliases WHERE target_source NOT IN ({})".format(
             placeholders,
         ),
-        tuple(live_sources) + tuple(live_sources),
+        tuple(live_sources),
     ).rowcount
     deleted += conn.execute(
         "DELETE FROM user_source_categories WHERE source NOT IN ({})".format(
@@ -408,11 +407,10 @@ def cleanup_stale_source_categories(conn: sqlite3.Connection) -> int:
         tuple(live_sources),
     ).rowcount
     deleted += conn.execute(
-        "DELETE FROM user_source_aliases WHERE alias_source NOT IN ({}) OR target_source NOT IN ({})".format(
-            placeholders,
+        "DELETE FROM user_source_aliases WHERE target_source NOT IN ({})".format(
             placeholders,
         ),
-        tuple(live_sources) + tuple(live_sources),
+        tuple(live_sources),
     ).rowcount
     if deleted:
         conn.commit()
@@ -462,6 +460,60 @@ def find_user_merge_target(conn: sqlite3.Connection, user_id: int, source: str, 
         row.get("source") or "",
     ))
     return candidates[0]["source"] if candidates else None
+
+
+def promote_user_source_settings(conn: sqlite3.Connection, user_id: int) -> dict:
+    """Promote legacy per-user source settings into shared administrator settings."""
+    category_rows = conn.execute(
+        """
+        SELECT source, category, label
+        FROM user_source_categories
+        WHERE user_id = ?
+        ORDER BY updated_at ASC
+        """,
+        (user_id,),
+    ).fetchall()
+    alias_rows = conn.execute(
+        """
+        SELECT alias_source, target_source
+        FROM user_source_aliases
+        WHERE user_id = ?
+        ORDER BY created_at ASC
+        """,
+        (user_id,),
+    ).fetchall()
+
+    promoted_categories = 0
+    for row in category_rows:
+        source = row["source"] if isinstance(row, sqlite3.Row) else row[0]
+        category = row["category"] if isinstance(row, sqlite3.Row) else row[1]
+        label = row["label"] if isinstance(row, sqlite3.Row) else row[2]
+        update_source_category(
+            conn,
+            source,
+            category,
+            label,
+            status="manual",
+            reason="administrator edited",
+        )
+        promoted_categories += 1
+
+    promoted_aliases = 0
+    for row in alias_rows:
+        alias = row["alias_source"] if isinstance(row, sqlite3.Row) else row[0]
+        target = row["target_source"] if isinstance(row, sqlite3.Row) else row[1]
+        target_exists = conn.execute(
+            "SELECT 1 FROM source_categories WHERE source = ?",
+            (target,),
+        ).fetchone()
+        if alias != target and target_exists:
+            merge_source(conn, alias, target)
+            promoted_aliases += 1
+
+    conn.execute("DELETE FROM user_source_categories WHERE user_id = ?", (user_id,))
+    conn.execute("DELETE FROM user_source_aliases WHERE user_id = ?", (user_id,))
+    conn.commit()
+    return {"categories": promoted_categories, "aliases": promoted_aliases}
 
 
 def merge_source(conn: sqlite3.Connection, source: str, target_source: str,
@@ -611,11 +663,21 @@ def effective_source_rows(conn: sqlite3.Connection, user_id: int | None = None) 
     return sorted(by_source.values(), key=lambda row: (-(row.get("article_count") or 0), row.get("source") or ""))
 
 
-def source_aliases_for_target(conn: sqlite3.Connection, user_id: int, target_source: str) -> list[str]:
-    rows = conn.execute(
-        "SELECT alias_source FROM user_source_aliases WHERE user_id = ? AND target_source = ?",
-        (user_id, target_source),
-    ).fetchall()
+def source_aliases_for_target(
+    conn: sqlite3.Connection,
+    target_source: str,
+    user_id: int | None = None,
+) -> list[str]:
+    if user_id is None:
+        rows = conn.execute(
+            "SELECT alias_source FROM source_aliases WHERE target_source = ?",
+            (target_source,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT alias_source FROM user_source_aliases WHERE user_id = ? AND target_source = ?",
+            (user_id, target_source),
+        ).fetchall()
     return [row["alias_source"] if isinstance(row, sqlite3.Row) else row[0] for row in rows]
 
 

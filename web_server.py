@@ -27,13 +27,14 @@ from models import (
     create_invitation_code, validate_invitation_code, use_invitation_code,
 )
 from auth import init_auth, create_token, require_auth, require_role
+from auth_validation import is_valid_email
 from ai_service import AIService
 from image_cache import enqueue_article_image_prefetch, unpin_article_images
 from news_schema import ensure_deleted_articles_table
 from source_categories import (
     CATEGORY_NAMES, CATEGORY_ORDER, cleanup_stale_source_categories,
     clamp_weighted, ensure_article_source_columns, ensure_article_sources,
-    effective_source_rows, find_user_merge_target, merge_source,
+    find_merge_target, merge_source, promote_user_source_settings,
     recent_titles_for_source, source_aliases_for_target, source_rows,
     update_source_category, extract_domains_from_html,
 )
@@ -152,6 +153,8 @@ def register():
 
     if not email or not password:
         return jsonify({"error": "email and password required"}), 400
+    if not is_valid_email(email):
+        return jsonify({"error": "invalid email format"}), 400
     if len(password) < 6:
         return jsonify({"error": "password must be at least 6 characters"}), 400
 
@@ -187,6 +190,8 @@ def request_invite():
     email = (data.get("email") or "").strip().lower()
     if not email:
         return jsonify({"error": "email required"}), 400
+    if not is_valid_email(email):
+        return jsonify({"error": "invalid email format"}), 400
 
     # Check if already registered
     if get_user_by_email(email):
@@ -1687,14 +1692,15 @@ def _auto_title_process_loop():
 
 
 def _get_source_classification_config() -> dict | None:
-    """Return the first user AI config available for fallback callers."""
+    """Return the first enabled administrator AI config."""
     try:
         db = get_db()
         row = db.execute(
             "SELECT c.user_id, c.endpoint, c.model, c.api_key, c.provider_type, c.enabled "
-            "FROM ai_configs c "
+            "FROM ai_configs c JOIN users u ON u.id = c.user_id "
             "WHERE c.enabled = 1 "
             "AND c.api_key != '' "
+            "AND u.role = 'admin' "
             "ORDER BY c.user_id ASC LIMIT 1"
         ).fetchone()
         return dict(row) if row else None
@@ -1704,15 +1710,16 @@ def _get_source_classification_config() -> dict | None:
 
 
 def _get_source_classification_users() -> list[dict]:
-    """Users whose own AI config can classify sources for their view."""
+    """Return one administrator AI config for shared source classification."""
     try:
         db = get_db()
         rows = db.execute(
-            "SELECT user_id, endpoint, model, api_key, provider_type, enabled "
-            "FROM ai_configs "
-            "WHERE enabled = 1 "
-            "AND api_key != '' "
-            "ORDER BY user_id ASC"
+            "SELECT c.user_id, c.endpoint, c.model, c.api_key, c.provider_type, c.enabled "
+            "FROM ai_configs c JOIN users u ON u.id = c.user_id "
+            "WHERE c.enabled = 1 "
+            "AND c.api_key != '' "
+            "AND u.role = 'admin' "
+            "ORDER BY c.user_id ASC LIMIT 1"
         ).fetchall()
         return [dict(r) for r in rows]
     except Exception as e:
@@ -1725,9 +1732,8 @@ def _classify_source_batch(config: dict, limit: int = AUTO_SOURCE_CLASSIFY_BATCH
     conn = _get_news_db()
     if not conn:
         return {"processed": [], "failed": [], "remaining": 0}
-    user_id = config.get("user_id")
     ensure_article_sources(conn)
-    rows = effective_source_rows(conn, user_id) if user_id else source_rows(conn)
+    rows = source_rows(conn)
     candidates = [
         row for row in rows
         if row.get("source")
@@ -1786,7 +1792,7 @@ def _classify_source_batch(config: dict, limit: int = AUTO_SOURCE_CLASSIFY_BATCH
             failed.append({"source": source, "error": str(e)})
 
     remaining = [
-        row for row in (effective_source_rows(conn, user_id) if user_id else source_rows(conn))
+        row for row in source_rows(conn)
         if not row.get("alias_target")
         and not row.get("user_override")
         and row.get("status") in ("pending", "failed")
@@ -2274,16 +2280,29 @@ def ai_get_result(article_id):
 
 # ─── Source Categories ─────────────────────────────────────
 
+def _promote_legacy_admin_source_settings(conn: sqlite3.Connection) -> None:
+    """Migrate the first administrator's old private source overrides once."""
+    try:
+        admin = get_db().execute(
+            "SELECT id FROM users WHERE role = 'admin' ORDER BY id LIMIT 1"
+        ).fetchone()
+        if admin:
+            promote_user_source_settings(conn, int(admin["id"]))
+    except Exception as exc:
+        print(f"[sources] Failed to promote legacy administrator settings: {exc}")
+
+
 @app.route("/sources", methods=["GET"])
 @require_auth
 def list_sources():
     conn = _get_news_db()
     if not conn:
         return jsonify({"error": "news db not found"}), 404
+    _promote_legacy_admin_source_settings(conn)
     return jsonify({
         "categories": CATEGORY_ORDER,
         "category_names": CATEGORY_NAMES,
-        "sources": effective_source_rows(conn, g.user_id),
+        "sources": source_rows(conn),
     })
 
 
@@ -2316,7 +2335,7 @@ def list_source_articles():
     sources = []
     for source in base_sources:
         sources.append(source)
-        sources.extend(source_aliases_for_target(conn, g.user_id, source))
+        sources.extend(source_aliases_for_target(conn, source))
     sources = list(dict.fromkeys(sources))
     placeholders = ",".join("?" * len(sources))
     rows = conn.execute(
@@ -2427,7 +2446,7 @@ def delete_source_articles():
     sources = []
     for source in base_sources:
         sources.append(source)
-        sources.extend(source_aliases_for_target(conn, g.user_id, source))
+        sources.extend(source_aliases_for_target(conn, source))
     sources = list(dict.fromkeys(sources))
     placeholders = ",".join("?" * len(sources))
     rows = conn.execute(
@@ -2439,7 +2458,7 @@ def delete_source_articles():
 
 
 @app.route("/sources", methods=["PUT"])
-@require_auth
+@require_role("admin")
 def save_source():
     conn = _get_news_db()
     if not conn:
@@ -2456,9 +2475,9 @@ def save_source():
         return jsonify({"error": "label required"}), 400
     label = clamp_weighted(label, 20)
     try:
-        target_source = find_user_merge_target(conn, g.user_id, source, label)
+        target_source = find_merge_target(conn, source, label)
         if target_source:
-            target = merge_source(conn, source, target_source, user_id=g.user_id)
+            target = merge_source(conn, source, target_source)
             return jsonify({
                 **target,
                 "merged": True,
@@ -2467,7 +2486,6 @@ def save_source():
             })
         row = update_source_category(
             conn, source, category, label, status="manual", reason="user edited",
-            user_id=g.user_id,
         )
         return jsonify(row)
     except ValueError as e:
@@ -2475,7 +2493,7 @@ def save_source():
 
 
 @app.route("/sources/classify", methods=["POST"])
-@require_auth
+@require_role("admin")
 def classify_sources():
     conn = _get_news_db()
     if not conn:
@@ -2500,9 +2518,11 @@ def reinitialize_sources():
         return jsonify({"error": "news db not found"}), 404
     data = request.get_json(silent=True) or {}
     preserve_manual = data.get("preserve_manual", True) is not False
-    conn.execute("DELETE FROM source_categories")
-    conn.execute("DELETE FROM source_aliases")
-    if not preserve_manual:
+    if preserve_manual:
+        conn.execute("DELETE FROM source_categories WHERE status != 'manual'")
+    else:
+        conn.execute("DELETE FROM source_categories")
+        conn.execute("DELETE FROM source_aliases")
         conn.execute("DELETE FROM user_source_categories")
         conn.execute("DELETE FROM user_source_aliases")
     ensure_article_sources(conn)
@@ -2513,7 +2533,7 @@ def reinitialize_sources():
 
 
 @app.route("/sources/classify-job", methods=["POST"])
-@require_auth
+@require_role("admin")
 def classify_sources_job():
     conn = _get_news_db()
     if not conn:
@@ -2550,7 +2570,7 @@ def classify_sources_job():
 
 
 @app.route("/sources/classify-job/<job_id>", methods=["GET"])
-@require_auth
+@require_role("admin")
 def classify_sources_job_status(job_id):
     with _source_classify_jobs_lock:
         job = _source_classify_jobs.get(job_id)
@@ -2796,7 +2816,7 @@ def source_redetect_status(job_id):
 
 
 @app.route("/sources/redetect-single", methods=["POST"])
-@require_auth
+@require_role("admin")
 def redetect_single_source():
     """Re-detect source for all articles matching a given source name."""
     conn = _get_news_db()
