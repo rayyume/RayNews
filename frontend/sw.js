@@ -14,6 +14,18 @@ const PRECACHE = [
   '/apple-touch-icon.png?v=2',
 ];
 
+function normalizedApiRequest(request) {
+  const url = new URL(request.url);
+  url.searchParams.delete('t');
+  return new Request(url.toString(), {
+    method: request.method,
+    headers: request.headers,
+    mode: request.mode,
+    credentials: request.credentials,
+    redirect: request.redirect,
+  });
+}
+
 self.addEventListener('install', event => {
   event.waitUntil(
     caches.open(CACHE).then(cache => {
@@ -50,14 +62,15 @@ self.addEventListener('fetch', event => {
 
   // ── API list: network-first + background cache (no cold-start delay) ──
   if (url.pathname.startsWith('/api/')) {
+    const cacheRequest = normalizedApiRequest(event.request);
     // Article detail: stale-while-revalidate (fast re-opens via SW cache)
     if (/^\/api\/news\/\d+$/.test(url.pathname)) {
       event.respondWith(
         caches.open(API_CACHE).then(cache => {
-          return cache.match(event.request).then(cached => {
+          return cache.match(cacheRequest).then(cached => {
             const fetchPromise = fetch(event.request).then(network => {
               if (network.ok) {
-                cache.put(event.request, network.clone());
+                cache.put(cacheRequest, network.clone());
               }
               return network;
             }).catch(() => cached);
@@ -71,11 +84,11 @@ self.addEventListener('fetch', event => {
     event.respondWith(
       fetch(event.request).then(network => {
         if (network.ok) {
-          caches.open(API_CACHE).then(cache => cache.put(event.request, network.clone()));
+          caches.open(API_CACHE).then(cache => cache.put(cacheRequest, network.clone()));
         }
         return network;
       }).catch(() => {
-        return caches.open(API_CACHE).then(cache => cache.match(event.request));
+        return caches.open(API_CACHE).then(cache => cache.match(cacheRequest));
       })
     );
     return;

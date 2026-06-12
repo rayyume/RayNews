@@ -170,21 +170,116 @@ def test_article_back_and_refresh_do_not_replace_the_whole_list():
     assert "function flushPendingListUpdate()" in html
     assert "flushPendingListUpdate();" in close_block
     assert "renderList();" not in close_block
-    assert "const refreshCursor = latestNewsTimestamp();" in refresh_block
+    assert "const refreshCursor = latestKnownTimestamp || latestNewsTimestamp();" in refresh_block
     assert "await loadSince(refreshCursor, { forceApply: true });" in refresh_block
     assert "const listResp = await fetch('/api/news?size='" not in refresh_block
 
 
 def test_blocking_list_loading_is_only_used_when_no_articles_are_available():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
-    load_start = html.index("async function loadData(")
-    load_end = html.index("async function loadSince", load_start)
+    load_start = html.index("async function loadNewsPage(")
+    load_end = html.index("function renderFilters()", load_start)
     load_block = html[load_start:load_end]
 
-    assert "const showBlockingLoader = news.length === 0;" in load_block
-    assert "if (showBlockingLoader)" in load_block
-    assert "reconcileVisibleArticles();" in load_block
+    assert "if (!cacheApplied && !news.length) renderColdStartSkeleton();" in load_block
+    assert "if (!cacheApplied && !news.length) renderColdStartError(message);" in load_block
+    assert "list.innerHTML =" not in load_block
     assert "indicator.innerHTML = '<span class=\"spin\"></span>刷新中...';" in html
+
+
+def test_news_list_uses_paged_cache_first_loading_without_full_history_requests():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert "const INITIAL_LOAD_SIZE = 99999" not in html
+    assert "size=99999" not in html
+    assert "const PAGE_SIZE = 30;" in html
+    assert "function openNewsCache()" in html
+    assert "async function readCachedNewsPage" in html
+    assert "async function writeCachedNewsPage" in html
+    assert "async function loadNewsPage(" in html
+    assert "await readCachedNewsPage" in html
+    assert "pageRequestController.abort()" in html
+    assert "if (data.error) throw new Error(data.error);" in html
+    load_start = html.index("async function loadNewsPage(")
+    load_end = html.index("function renderFilters()", load_start)
+    assert "list.innerHTML =" not in html[load_start:load_end]
+
+
+def test_idle_refresh_only_returns_to_latest_after_five_minutes_and_new_articles():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert "const IDLE_LATEST_DELAY_MS = 5 * 60 * 1000;" in html
+    assert "function markUserActivity()" in html
+    assert "function hasBlockingOverlayOpen()" in html
+    assert "async function showLatestAfterIdle()" in html
+    idle_start = html.index("async function showLatestAfterIdle()")
+    idle_end = html.index("function scheduleAdjacentPagePrefetch", idle_start)
+    idle_block = html[idle_start:idle_end]
+    assert "pendingNewArticleCount" in idle_block
+    assert "hasBlockingOverlayOpen()" in idle_block
+    assert "window.scrollTo({ top: 0, behavior: 'smooth' });" in idle_block
+    assert "currentPage = 1;" in idle_block
+    assert "filter = 'all';" in idle_block
+    assert "document.addEventListener('visibilitychange'" in html
+    assert "loadDataWithRetry();" not in html
+
+
+def test_service_worker_normalizes_api_cache_keys():
+    sw = (ROOT / "frontend" / "sw.js").read_text(encoding="utf-8")
+    assert "function normalizedApiRequest(request)" in sw
+    assert "url.searchParams.delete('t');" in sw
+    assert "cache.match(cacheRequest)" in sw
+    assert "cache.put(cacheRequest, network.clone())" in sw
+
+
+def test_search_uses_server_side_pagination_without_limiting_database_scope():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert "let searchPage = 1;" in html
+    assert "let searchTotal = 0;" in html
+    assert "async function fetchServerSearchResults(query, page = 1" in html
+    assert "async function loadMoreSearchResults()" in html
+    assert "params.set('q', query);" in html
+    assert "params.set('page', String(page));" in html
+    assert "params.set('size', String(PAGE_SIZE));" in html
+    assert "加载更多" in html
+
+
+def test_paged_list_mutations_keep_server_total_and_new_article_prompt():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    delete_start = html.index("async function deleteArticlesByIds(ids)")
+    delete_end = html.index("async function deleteSourceArticle", delete_start)
+    delete_block = html[delete_start:delete_end]
+    since_start = html.index("async function loadSince(")
+    since_end = html.index("function renderFilters()", since_start)
+    since_block = html[since_start:since_end]
+    assert "currentTotal = Math.max(0, currentTotal - deleted);" in delete_block
+    assert "document.getElementById('count').textContent = currentTotal + ' 条新闻';" in delete_block
+    assert "有 ' + pendingNewArticleCount + ' 篇新文章" in since_block
+
+
+def test_filter_switch_rolls_back_when_target_page_cannot_load():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    start = html.index("async function selectFilter(value)")
+    end = html.index("function filteredNews()", start)
+    block = html[start:end]
+    assert "const previousFilter = filter;" in block
+    assert "const previousPage = currentPage;" in block
+    assert "const loaded = await loadNewsPage" in block
+    assert "filter = previousFilter;" in block
+    assert "currentPage = previousPage;" in block
+
+
+def test_cached_page_background_calibration_reuses_existing_cards():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    apply_start = html.index("function applyNewsPage(")
+    apply_end = html.index("async function fetchNewsPage", apply_start)
+    apply_block = html[apply_start:apply_end]
+    load_start = html.index("async function loadNewsPage(")
+    load_end = html.index("// Full snapshot compatibility wrapper", load_start)
+    load_block = html[load_start:load_end]
+    assert "preserveDom = false" in apply_block
+    assert "if (preserveDom" in apply_block
+    assert "reconcileVisibleArticles();" in apply_block
+    assert "preserveDom: cacheApplied" in load_block
+    assert "const showPageProgress = !cacheApplied && userInitiated;" in load_block
 
 
 def test_legacy_admin_source_promotion_is_guarded_after_success():
