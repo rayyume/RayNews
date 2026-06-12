@@ -140,3 +140,11 @@ def test_sources_settings_tab_is_admin_only():
     assert "sourcesSettingsTab.style.display = authUser.role === 'admin' ? '' : 'none';" in html
     assert "if (tab === 'sources' && (!authUser || authUser.role !== 'admin')) tab = 'account';" in html
     assert "if (authUser && authUser.role === 'admin') loadSourcesTab();" in html
+
+
+def test_header_avatar_search_and_summary_controls_are_aligned():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert ".header-right{display:flex;align-items:center;gap:10px;" in html
+    assert ".daily-summary-btn{position:relative;width:32px;height:32px;" in html
+    assert 'class="icon-btn daily-summary-btn"' in html
+    assert ".header-right .header-avatar .user-avatar{width:30px!important;height:30px!important}" in html
