@@ -11,6 +11,7 @@ import os
 import sqlite3
 import re
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from image_cache import (
@@ -217,6 +218,53 @@ def enqueue_new_article_images(existing_article_ids: set[int]) -> None:
     finally:
         if conn:
             conn.close()
+
+
+def enqueue_today_wsrv_article_images() -> dict[str, int]:
+    """Queue all images for today's articles containing wsrv URLs."""
+    result = {"articles": 0, "queued": 0}
+    if not DB_FILE.exists():
+        log.info("Startup wsrv image scan skipped: news db not found")
+        return result
+
+    conn = None
+    try:
+        today = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+        conn = sqlite3.connect(str(DB_FILE), timeout=30)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT id, thumb, body_html
+            FROM articles
+            WHERE date = ?
+              AND (
+                LOWER(COALESCE(thumb, '')) LIKE '%wsrv.nl%'
+                OR LOWER(COALESCE(body_html, '')) LIKE '%wsrv.nl%'
+              )
+            ORDER BY timestamp DESC
+            """,
+            (today,),
+        ).fetchall()
+        result["articles"] = len(rows)
+        for row in rows:
+            result["queued"] += enqueue_article_image_prefetch(
+                row["id"],
+                row["body_html"],
+                row["thumb"],
+                body_limit=None,
+            )
+        log.info(
+            "Startup wsrv image scan: articles=%s queued=%s date=%s",
+            result["articles"],
+            result["queued"],
+            today,
+        )
+    except Exception as exc:
+        log.warning(f"Startup wsrv image scan failed: {exc}")
+    finally:
+        if conn:
+            conn.close()
+    return result
 
 
 def periodic_refresh():
@@ -612,4 +660,9 @@ if __name__ == "__main__":
     threading.Timer(REFRESH_INTERVAL, periodic_refresh).start()
     server = RayNewsThreadingHTTPServer(("127.0.0.1", port), Handler)
     log.info(f"Refresh + API server listening on {port} (auto-refresh every {REFRESH_INTERVAL}s)")
+    threading.Thread(
+        target=enqueue_today_wsrv_article_images,
+        name="startup-wsrv-image-scan",
+        daemon=True,
+    ).start()
     server.serve_forever()

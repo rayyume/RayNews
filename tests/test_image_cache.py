@@ -1,0 +1,149 @@
+import sqlite3
+import sys
+import unittest
+import uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import image_cache
+import refresh_server
+
+
+SSPAI_INNER = (
+    "https://cdnfile.sspai.com/6/12/2026/article/"
+    "e88eb0d5-16e0-8817-03f2-a79df52905cc.jpg"
+)
+SSPAI_WSRV = "https://wsrv.nl/?url=" + SSPAI_INNER
+
+
+class RemoteImageCandidateTests(unittest.TestCase):
+    def test_sspai_wsrv_falls_back_to_rssfile_then_original(self):
+        candidates = image_cache._remote_image_candidates(SSPAI_WSRV)
+
+        self.assertEqual(candidates[0], SSPAI_WSRV)
+        self.assertEqual(
+            candidates[1],
+            SSPAI_INNER.replace("cdnfile.sspai.com", "rssfile.sspai.com"),
+        )
+        self.assertEqual(candidates[2], SSPAI_INNER)
+
+    def test_non_sspai_wsrv_only_unwraps_original(self):
+        inner = "https://example.com/path/image.jpg"
+        wrapped = "https://wsrv.nl/?url=" + inner
+
+        self.assertEqual(
+            image_cache._remote_image_candidates(wrapped),
+            [wrapped, inner],
+        )
+
+    def test_invalid_wsrv_inner_url_is_ignored(self):
+        wrapped = "https://wsrv.nl/?url=file%3A%2F%2F%2Fetc%2Fpasswd"
+
+        self.assertEqual(image_cache._remote_image_candidates(wrapped), [wrapped])
+
+    def test_fetch_uses_sspai_fallback_after_wsrv_failure(self):
+        failed = mock.Mock()
+        failed.raise_for_status.side_effect = RuntimeError("404")
+        succeeded = mock.Mock()
+        succeeded.headers = {"Content-Type": "image/jpeg"}
+        succeeded.raise_for_status.return_value = None
+        succeeded.iter_content.return_value = [b"jpeg"]
+
+        with mock.patch.object(
+            image_cache.requests,
+            "get",
+            side_effect=[failed, succeeded],
+        ) as request_get:
+            body, content_type = image_cache.fetch_remote_image(SSPAI_WSRV)
+
+        self.assertEqual(body, b"jpeg")
+        self.assertEqual(content_type, "image/jpeg")
+        self.assertEqual(
+            request_get.call_args_list[1].args[0],
+            SSPAI_INNER.replace("cdnfile.sspai.com", "rssfile.sspai.com"),
+        )
+
+    def test_fetch_uses_referer_for_sspai_cdn_after_rssfile_failure(self):
+        failed_wsrv = mock.Mock()
+        failed_wsrv.raise_for_status.side_effect = RuntimeError("wsrv 404")
+        failed_rss = mock.Mock()
+        failed_rss.raise_for_status.side_effect = RuntimeError("rss 404")
+        succeeded = mock.Mock()
+        succeeded.headers = {"Content-Type": "image/jpeg"}
+        succeeded.raise_for_status.return_value = None
+        succeeded.iter_content.return_value = [b"jpeg"]
+
+        with mock.patch.object(
+            image_cache.requests,
+            "get",
+            side_effect=[failed_wsrv, failed_rss, succeeded],
+        ) as request_get:
+            body, content_type = image_cache.fetch_remote_image(SSPAI_WSRV)
+
+        self.assertEqual((body, content_type), (b"jpeg", "image/jpeg"))
+        final_call = request_get.call_args_list[2]
+        self.assertEqual(final_call.args[0], SSPAI_INNER)
+        self.assertEqual(
+            final_call.kwargs["headers"]["Referer"],
+            "https://cdnfile.sspai.com/",
+        )
+
+
+class StartupWarmupTests(unittest.TestCase):
+    def test_startup_warmup_only_queues_today_articles_with_wsrv_images(self):
+        beijing = timezone(timedelta(hours=8))
+        today = datetime.now(beijing).strftime("%Y-%m-%d")
+        yesterday = (datetime.now(beijing) - timedelta(days=1)).strftime("%Y-%m-%d")
+
+        db_path = ROOT / f"tmp-image-cache-test-{uuid.uuid4().hex}.db"
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                """
+                CREATE TABLE articles (
+                    id INTEGER PRIMARY KEY,
+                    date TEXT,
+                    thumb TEXT,
+                    body_html TEXT,
+                    timestamp INTEGER DEFAULT 0
+                )
+                """
+            )
+            conn.executemany(
+                "INSERT INTO articles (id, date, thumb, body_html) VALUES (?, ?, ?, ?)",
+                [
+                    (1, today, SSPAI_WSRV, "<p>today cover</p>"),
+                    (2, today, "", f'<img src="{SSPAI_WSRV}"><img src="https://example.com/other.jpg">'),
+                    (3, today, "https://example.com/ok.jpg", "<p>no wsrv</p>"),
+                    (4, yesterday, SSPAI_WSRV, "<p>old</p>"),
+                ],
+            )
+            conn.commit()
+            conn.close()
+
+            with (
+                mock.patch.object(refresh_server, "DB_FILE", db_path),
+                mock.patch.object(
+                    refresh_server,
+                    "enqueue_article_image_prefetch",
+                    return_value=2,
+                ) as enqueue,
+            ):
+                result = refresh_server.enqueue_today_wsrv_article_images()
+        finally:
+            for suffix in ("", "-journal", "-wal", "-shm"):
+                Path(str(db_path) + suffix).unlink(missing_ok=True)
+
+        self.assertEqual(result, {"articles": 2, "queued": 4})
+        self.assertEqual([call.args[0] for call in enqueue.call_args_list], [1, 2])
+        for call in enqueue.call_args_list:
+            self.assertIsNone(call.kwargs["body_limit"])
+
+
+if __name__ == "__main__":
+    unittest.main()

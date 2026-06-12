@@ -111,9 +111,19 @@ def _valid_remote_url(url: str) -> bool:
 def _remote_image_candidates(url: str) -> list[str]:
     parsed = urllib.parse.urlparse(url)
     candidates = [url]
-    if parsed.hostname and parsed.hostname.lower() != "wsrv.nl":
+    hostname = (parsed.hostname or "").lower()
+    if hostname == "wsrv.nl":
+        inner_values = urllib.parse.parse_qs(parsed.query).get("url") or []
+        inner_url = normalize_image_url(inner_values[0]) if inner_values else ""
+        if _valid_remote_url(inner_url):
+            inner_parsed = urllib.parse.urlparse(inner_url)
+            if (inner_parsed.hostname or "").lower() == "cdnfile.sspai.com":
+                rss_parsed = inner_parsed._replace(netloc="rssfile.sspai.com")
+                candidates.append(urllib.parse.urlunparse(rss_parsed))
+            candidates.append(inner_url)
+    elif hostname:
         candidates.append("https://wsrv.nl/?url=" + urllib.parse.quote(url, safe=""))
-    return candidates
+    return list(dict.fromkeys(candidates))
 
 
 def fetch_remote_image(url: str) -> tuple[bytes, str]:
