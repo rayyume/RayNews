@@ -120,7 +120,15 @@ def test_source_mutation_routes_are_admin_only_and_shared():
 def test_article_navigation_uses_browser_history_for_back():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     assert "history.pushState({ raynewsArticle: true }" in html
+    assert "history.replaceState({ raynewsHome: true }" in html
     assert "function closeArticle(fromHistoryNavigation = false)" in html
     assert "history.state.raynewsArticle" in html
     assert "if (!overlay.classList.contains('open')) return;" in html
     assert "closeArticle(true)" in html
+
+
+def test_legacy_admin_source_promotion_is_guarded_after_success():
+    server = (ROOT / "web_server.py").read_text(encoding="utf-8")
+    assert "_legacy_admin_source_settings_promoted = False" in server
+    assert "global _legacy_admin_source_settings_promoted" in server
+    assert "if _legacy_admin_source_settings_promoted:" in server

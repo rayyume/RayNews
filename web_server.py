@@ -1047,6 +1047,8 @@ _auto_summary_lock = threading.Lock()
 _auto_translation_lock = threading.Lock()
 _auto_title_process_lock = threading.Lock()
 _auto_source_classify_lock = threading.Lock()
+_legacy_admin_source_settings_lock = threading.Lock()
+_legacy_admin_source_settings_promoted = False
 
 
 def _send_daily_summaries():
@@ -2282,12 +2284,20 @@ def ai_get_result(article_id):
 
 def _promote_legacy_admin_source_settings(conn: sqlite3.Connection) -> None:
     """Migrate the first administrator's old private source overrides once."""
+    global _legacy_admin_source_settings_promoted
+    if _legacy_admin_source_settings_promoted:
+        return
     try:
-        admin = get_db().execute(
-            "SELECT id FROM users WHERE role = 'admin' ORDER BY id LIMIT 1"
-        ).fetchone()
-        if admin:
+        with _legacy_admin_source_settings_lock:
+            if _legacy_admin_source_settings_promoted:
+                return
+            admin = get_db().execute(
+                "SELECT id FROM users WHERE role = 'admin' ORDER BY id LIMIT 1"
+            ).fetchone()
+            if not admin:
+                return
             promote_user_source_settings(conn, int(admin["id"]))
+            _legacy_admin_source_settings_promoted = True
     except Exception as exc:
         print(f"[sources] Failed to promote legacy administrator settings: {exc}")
 

@@ -3823,9 +3823,14 @@ function syncArticleHistory(id, date) {
   const shortDate = date ? date.slice(2) : '';
   if (!shortDate) return;
   const articleHash = '#/article/' + shortDate + '-' + id;
-  if (location.hash !== articleHash) {
-    history.pushState({ raynewsArticle: true }, '', articleHash);
+  if (location.hash === articleHash) {
+    if (!(history.state && history.state.raynewsArticle)) {
+      history.replaceState({ raynewsHome: true }, '', window.location.pathname + window.location.search);
+      history.pushState({ raynewsArticle: true }, '', articleHash);
+    }
+    return;
   }
+  history.pushState({ raynewsArticle: true }, '', articleHash);
 }
 
 function openArticle(id) {
@@ -4100,9 +4105,10 @@ function closeArticle(fromHistoryNavigation = false) {
 
 // Handle hash-based article links
 function handleHash() {
-  const match = location.hash.match(/^#\/article\/\d{2}-\d{2}-\d{2}-(\d+)$/);
+  const match = location.hash.match(/^#\/article\/(\d{2}-\d{2}-\d{2})-(\d+)$/);
   if (match) {
-    const id = parseInt(match[1]);
+    const id = parseInt(match[2]);
+    syncArticleHistory(id, '20' + match[1]);
     openArticle(id);
   }
 }
