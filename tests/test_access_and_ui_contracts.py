@@ -493,7 +493,7 @@ def test_mobile_sidebar_and_header_touch_targets_are_explicit():
     assert "@media(min-width:769px)" in html
     assert ".sidebar-backdrop{display:none}" in html
     assert ".header-right .icon-btn,.header-right .header-avatar{width:44px;height:44px" in html
-    assert ".header-right .refresh-btn{width:30px;height:30px;padding:0;font-size:10px;display:inline-flex;align-items:center;justify-content:center;border-radius:50%}" in html
+    assert ".header-right .refresh-btn{padding:3px 8px;font-size:10px}" in html
 
 
 def test_article_back_button_does_not_pass_click_event_as_history_state():
