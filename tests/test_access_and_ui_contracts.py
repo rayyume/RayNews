@@ -127,7 +127,7 @@ def test_article_navigation_splits_mobile_and_desktop_history_modes():
     sync_end = html.index("function openArticle(id)", sync_start)
     sync_block = html[sync_start:sync_end]
     assert "if (usesMobileArticleNavigation())" in sync_block
-    assert "history.replaceState({ raynewsMobileArticle: true }" in sync_block
+    assert "history.pushState({ raynewsMobileArticle: true }" in sync_block
     assert "history.pushState({ raynewsArticle: true }" in html
     assert "history.replaceState({ raynewsHome: true }" in html
     assert "function closeArticle(fromHistoryNavigation = false, forceInAppNavigation = false)" in html
@@ -135,8 +135,8 @@ def test_article_navigation_splits_mobile_and_desktop_history_modes():
     close_end = html.index("// Handle hash-based article links", close_start)
     close_block = html[close_start:close_end]
     assert "const mobileNavigation = forceInAppNavigation || usesMobileArticleNavigation();" in close_block
-    assert "!mobileNavigation" in close_block
     assert "history.state.raynewsArticle" in close_block
+    assert "history.state.raynewsMobileArticle" in close_block
     assert "history.back();" in close_block
     assert "history.replaceState({ raynewsHome: true }" in close_block
     assert "if (!overlay.classList.contains('open')) return;" in html
@@ -180,7 +180,7 @@ def test_article_back_and_refresh_do_not_replace_the_whole_list():
     refresh_end = html.index("function setRefreshRunning", refresh_start)
     refresh_block = html[refresh_start:refresh_end]
 
-    assert "function reconcileVisibleArticles()" in html
+    assert "function reconcileVisibleArticles({ animate = false } = {})" in html
     assert "function flushPendingListUpdate()" in html
     assert "flushPendingListUpdate();" in close_block
     assert "renderList();" not in close_block
@@ -220,7 +220,7 @@ def test_news_list_uses_paged_cache_first_loading_without_full_history_requests(
 def test_idle_refresh_only_returns_to_latest_after_five_minutes_and_new_articles():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     assert "const IDLE_LATEST_DELAY_MS = 5 * 60 * 1000;" in html
-    assert "function markUserActivity()" in html
+    assert "function markUserActivity(event)" in html
     assert "function hasBlockingOverlayOpen()" in html
     assert "async function showLatestAfterIdle()" in html
     idle_start = html.index("async function showLatestAfterIdle()")
@@ -228,7 +228,8 @@ def test_idle_refresh_only_returns_to_latest_after_five_minutes_and_new_articles
     idle_block = html[idle_start:idle_end]
     assert "pendingNewArticleCount" in idle_block
     assert "hasBlockingOverlayOpen()" in idle_block
-    assert "window.scrollTo({ top: 0, behavior: 'smooth' });" in idle_block
+    assert "scrollPageToTop({ onNearTop: applyLatest, auto: true })" in idle_block
+    assert "if (!completed) return;" in idle_block
     assert "currentPage = 1;" in idle_block
     assert "filter = 'all';" in idle_block
     assert "document.addEventListener('visibilitychange'" in html
@@ -265,7 +266,7 @@ def test_paged_list_mutations_keep_server_total_and_new_article_prompt():
     since_block = html[since_start:since_end]
     assert "currentTotal = Math.max(0, currentTotal - deleted);" in delete_block
     assert "document.getElementById('count').textContent = currentTotal + ' 条新闻';" in delete_block
-    assert "有 ' + pendingNewArticleCount + ' 篇新文章" in since_block
+    assert "showNewArticlesPrompt();" in since_block
 
 
 def test_filter_switch_rolls_back_when_target_page_cannot_load():
@@ -290,7 +291,7 @@ def test_cached_page_background_calibration_reuses_existing_cards():
     load_block = html[load_start:load_end]
     assert "preserveDom = false" in apply_block
     assert "if (preserveDom" in apply_block
-    assert "reconcileVisibleArticles();" in apply_block
+    assert "reconcileVisibleArticles({ animate });" in apply_block
     assert "preserveDom: cacheApplied" in load_block
     assert "const showPageProgress = !cacheApplied && userInitiated;" in load_block
 
@@ -303,11 +304,11 @@ def test_all_home_refresh_controls_use_one_shared_first_page_flow():
     start = html.index("async function refreshHomepage()")
     end = html.index("function articleDetailErrorText", start)
     block = html[start:end]
-    assert "await scrollPageToTop();" in block
-    assert "await showHomepageAfterScroll();" in block
-    assert "triggerRefresh();" in block
-    assert "async function showHomepageAfterScroll()" in html
-    assert "function waitForScrollTop(" in html
+    assert "setRefreshRunning(true);" in block
+    assert "preparePageNavigation(1, 'all')" in block
+    assert "scrollPageToTop({" in block
+    assert "applyNewsPage(targetData, 1, 'all', { animate: true, preserveDom: true });" in block
+    assert "await triggerRefresh({ stateAlreadySet: true, showStart: false });" in block
 
 
 def test_manual_refresh_has_no_unused_silent_start_mode():
@@ -315,9 +316,9 @@ def test_manual_refresh_has_no_unused_silent_start_mode():
     start = html.index("async function triggerRefresh(")
     end = html.index("function setRefreshRunning(", start)
     block = html[start:end]
-    assert "async function triggerRefresh()" in block
+    assert "async function triggerRefresh({ stateAlreadySet = false, showStart = true } = {})" in block
     assert "silentStart" not in block
-    assert "showToast('🔄 正在后台抓取...');" in block
+    assert "if (showStart) showToast('🔄 正在后台抓取...');" in block
 
 
 def test_pagination_uses_double_buffer_and_switches_during_scroll():
@@ -343,7 +344,7 @@ def test_adjacent_pages_are_buffered_immediately_and_cover_images_are_warmed():
     assert "function rememberBufferedPage(" in html
     assert "function warmPageCoverImages(" in html
     prefetch_start = html.index("async function prefetchNewsPage(")
-    prefetch_end = html.index("function markUserActivity()", prefetch_start)
+    prefetch_end = html.index("function cancelActiveAutoMotion()", prefetch_start)
     prefetch_block = html[prefetch_start:prefetch_end]
     assert "pagePrefetchPromises.get(key)" in prefetch_block
     assert "pagePrefetchPromises.set(key, task)" in prefetch_block
@@ -368,15 +369,12 @@ def test_scroll_to_top_exposes_a_single_near_top_page_swap():
     end = html.index("function stabilizePageTop()", start)
     block = html[start:end]
     assert "onNearTop" in block
-    assert "progress >= 0.8" in block
+    assert "progress >= 0.75" in block
     assert "remaining <= PAGE_SWITCH_TOP_THRESHOLD" in block
     assert "nearTopApplied" in block
     assert "applyNearTop();" in block
-    assert (
-        "if (performance.now() - startedAt >= 900) {\n"
-        "          window.scrollTo(0, 0);\n"
-        "          applyNearTop();"
-    ) in block
+    assert "const duration = Math.min(640, Math.max(340" in block
+    assert "motion.cancelled" in block
 
 
 def test_page_swap_locks_list_height_and_disables_scroll_anchoring():
@@ -421,8 +419,8 @@ def test_desktop_scroll_to_top_uses_duration_controlled_animation():
     end = html.index("async function showHomepageAfterScroll()", start)
     block = html[start:end]
     assert "requestAnimationFrame(step)" in block
-    assert "Math.min(700, Math.max(480" in block
-    assert "usesMobileArticleNavigation()" in block
+    assert "Math.min(640, Math.max(340" in block
+    assert "startY * 0.055" in block
     assert "prefers-reduced-motion" in block
 
 
@@ -434,6 +432,68 @@ def test_article_history_keeps_only_one_desktop_article_entry():
     assert "history.state && history.state.raynewsArticle" in block
     assert "history.replaceState({ raynewsArticle: true }, '', articleHash);" in block
     assert "history.pushState({ raynewsArticle: true }, '', articleHash);" in block
+
+
+def test_list_motion_reuses_cards_and_animates_insertions():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert "function captureArticleRects(list)" in html
+    assert "function animateArticleLayout(list, previousRects, newIds = new Set())" in html
+    assert "cubic-bezier(.22,.61,.36,1)" in html
+    assert "delay: Math.min(index, 6) * 40" in html
+    assert "prefersReducedMotion()" in html
+    assert "preserveDom: true" in html
+
+
+def test_new_article_prompt_and_idle_motion_are_cancellable():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert 'id="newArticlesPrompt"' in html
+    assert "function showNewArticlesPrompt()" in html
+    assert "function revealPendingLatest()" in html
+    assert "function cancelActiveAutoMotion()" in html
+    assert "if (!activeScrollMotion || !activeScrollMotion.auto) return;" in html
+    assert "if (!completed) return;" in html
+    assert "const atLatestTop = filter === 'all'" in html
+
+
+def test_list_filter_and_page_are_encoded_in_history_url():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert "function listUrlForState(activeFilter = filter, page = currentPage)" in html
+    assert "url.searchParams.set('category'" in html
+    assert "url.searchParams.set('source', group.label);" in html
+    assert "url.searchParams.set('page'" in html
+    assert "function restoreListStateFromUrl({ restoreScroll = false } = {})" in html
+    assert "window.addEventListener('popstate'" in html
+    assert "syncListUrl({ push: true });" in html
+
+
+def test_article_return_uses_card_anchor_and_preserves_search_scroll():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert "function rememberArticleReturnState(id)" in html
+    assert "cardTop: card ? card.getBoundingClientRect().top : null" in html
+    assert "searchScrollTop: document.getElementById('searchBody').scrollTop" in html
+    assert "function restoreArticleReturnState()" in html
+    assert "card.getBoundingClientRect().top - state.cardTop" in html
+    assert "restoreArticleReturnState();" in html
+
+
+def test_search_login_context_and_result_progress_are_explicit():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert "showAuth('search');" in html
+    assert "登录后才能搜索文章" in html
+    assert "context === 'search' ? 'none' : ''" in html
+    assert "if (nextAction === 'search') openSearch();" in html
+    assert "已显示 ${searchItems.length} / ${searchTotal} 条" in html
+
+
+def test_mobile_sidebar_and_header_touch_targets_are_explicit():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert 'id="sidebarBackdrop"' in html
+    assert "document.getElementById('sidebarBackdrop').classList.toggle('open', isOpen);" in html
+    assert "window.matchMedia('(max-width: 768px)').matches" in html
+    assert "@media(min-width:769px)" in html
+    assert ".sidebar-backdrop{display:none}" in html
+    assert ".header-right .icon-btn,.header-right .header-avatar{width:44px;height:44px" in html
+    assert ".header-right .refresh-btn{width:44px;height:44px" in html
 
 
 def test_article_back_button_does_not_pass_click_event_as_history_state():
