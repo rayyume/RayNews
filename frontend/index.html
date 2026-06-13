@@ -3471,9 +3471,9 @@ function flushPendingListUpdate() {
   if (document.getElementById('searchOverlay').classList.contains('open')) renderSearchResults();
 }
 
-async function triggerRefresh({ silentStart = false } = {}) {
+async function triggerRefresh() {
   if (refreshInProgress) {
-    if (!silentStart) showToast('🔄 正在刷新，请稍候');
+    showToast('🔄 正在刷新，请稍候');
     return;
   }
   // Unauthenticated users cannot refresh
@@ -3499,7 +3499,7 @@ async function triggerRefresh({ silentStart = false } = {}) {
 
   let refreshError = '';
 
-  if (!silentStart) showToast('🔄 正在后台抓取...');
+  showToast('🔄 正在后台抓取...');
 
   try {
     const resp = await fetch(refreshUrl, fetchOpts);

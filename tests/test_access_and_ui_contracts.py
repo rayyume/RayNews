@@ -310,6 +310,16 @@ def test_all_home_refresh_controls_use_one_shared_first_page_flow():
     assert "function waitForScrollTop(" in html
 
 
+def test_manual_refresh_has_no_unused_silent_start_mode():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    start = html.index("async function triggerRefresh(")
+    end = html.index("function setRefreshRunning(", start)
+    block = html[start:end]
+    assert "async function triggerRefresh()" in block
+    assert "silentStart" not in block
+    assert "showToast('🔄 正在后台抓取...');" in block
+
+
 def test_pagination_scrolls_immediately_and_switches_only_after_reaching_top():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     start = html.index("async function goToPage(page)")
