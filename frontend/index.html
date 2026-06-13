@@ -5387,13 +5387,17 @@ document.addEventListener('visibilitychange', () => {
 
   overlay.addEventListener('touchend', () => {
     if (swiping) {
-      // Kill transition first to prevent snap-back animation (拖影修复)
-      overlay.style.transition = 'none';
-      overlay.style.transform = '';
-      overlay.style.opacity = '';
-      void overlay.getBoundingClientRect(); // flush style changes
-      overlay.style.transition = ''; // restore CSS transition for close animation
-      closeArticle();
+      // Smooth exit: animate from drag position to closed, no snap-back jitter
+      overlay.style.transition = 'transform .28s cubic-bezier(.22,.61,.36,1), opacity .2s ease';
+      overlay.style.transform = 'translateX(100%)';
+      overlay.style.opacity = '0';
+      overlay.addEventListener('transitionend', () => {
+        overlay.style.transition = '';
+        overlay.style.transform = '';
+        overlay.style.opacity = '';
+        closeArticle();
+        resetArticleSwipe();
+      }, { once: true });
     } else if (edgeCandidate) {
       overlay.style.transition = 'transform .18s ease, opacity .18s ease';
       overlay.style.transform = '';
