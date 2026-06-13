@@ -86,7 +86,8 @@ a:hover{text-decoration:underline}
 /* ═══ Header ══════════════════════════════════════ */
 .header{position:sticky;top:0;z-index:100;background:var(--header-bg);backdrop-filter:blur(20px) saturate(1.2);-webkit-backdrop-filter:blur(20px) saturate(1.2);border-bottom:1px solid var(--border);margin:0 -20px;padding:env(safe-area-inset-top,0px) 20px 0}
 .header-inner{max-width:960px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;min-height:56px;position:relative}
-.logo{display:flex;align-items:center;gap:10px;font-weight:800;font-size:18px;letter-spacing:-0.02em;cursor:pointer}
+.logo{display:flex;align-items:center;gap:10px;font-weight:800;font-size:18px;letter-spacing:-0.02em;cursor:pointer;border-radius:8px}
+.logo.refresh-locked{pointer-events:none;opacity:.72}
 .logo-icon{width:28px;height:28px;border-radius:8px;overflow:hidden;flex-shrink:0}
 .logo-icon img{width:100%;height:100%;object-fit:cover}
 .header-right{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--text-3)}
@@ -116,8 +117,12 @@ a:hover{text-decoration:underline}
 /* ═══ News List ═══════════════════════════════════ */
 .list{display:flex;flex-direction:column;gap:1px;background:var(--border);border-radius:var(--radius);overflow:hidden;margin-bottom:40px;position:relative}
 .list.manual-refreshing::before{content:'';position:absolute;z-index:4;left:0;top:0;width:36%;height:2px;background:linear-gradient(90deg,transparent,var(--accent),transparent);pointer-events:none;animation:listRefreshSweep 1.15s ease-in-out infinite}
+.list.page-loading::before{content:'';position:absolute;z-index:4;left:0;top:0;width:28%;height:2px;background:linear-gradient(90deg,transparent,var(--accent),transparent);pointer-events:none;animation:listRefreshSweep 1.15s ease-in-out infinite}
+.list.page-transitioning{overflow-anchor:none}
+.list.page-switching .item{animation:pageFadeIn .28s cubic-bezier(.22,.61,.36,1) both;animation-delay:calc(var(--motion-index,0) * 40ms)}
 @keyframes listRefreshSweep{0%{transform:translateX(-110%);opacity:.35}50%{opacity:.9}100%{transform:translateX(385%);opacity:.35}}
-.item{display:flex;gap:16px;padding:18px 20px;background:var(--bg-card);cursor:pointer;transition:background 0.12s;position:relative}
+@keyframes pageFadeIn{from{opacity:0;transform:translateY(-12px)}to{opacity:1;transform:translateY(0)}}
+.item{display:flex;gap:16px;padding:18px 20px;background:var(--bg-card);cursor:pointer;transition:background 0.12s;position:relative;will-change:transform,opacity}
 .item:hover{background:var(--bg-card-hover)}
 .item-thumb{width:120px;height:80px;border-radius:6px;overflow:hidden;flex-shrink:0;background:var(--bg-surface)}
 .item-thumb img{width:100%;height:100%;object-fit:cover;transition:transform 0.3s}
@@ -165,7 +170,7 @@ a:hover{text-decoration:underline}
 .overlay.open{transform:translateX(0)}
 .overlay-header{position:sticky;top:0;z-index:10;background:var(--header-bg);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-bottom:1px solid var(--border);padding-top:env(safe-area-inset-top,0px)}
 .overlay-header-inner{max-width:720px;margin:0 auto;display:flex;align-items:center;min-height:48px;padding:0 20px}
-.back-btn{display:flex;align-items:center;gap:6px;background:none;border:none;color:var(--accent);font-size:13px;font-weight:600;cursor:pointer;font-family:var(--font);padding:4px 0}
+.back-btn{display:flex;align-items:center;gap:6px;min-height:44px;background:none;border:none;color:var(--accent);font-size:13px;font-weight:600;cursor:pointer;font-family:var(--font);padding:0 8px 0 0;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
 .back-btn:hover{text-decoration:underline}
 .share-btn{display:flex;align-items:center;gap:6px;background:none;border:none;color:var(--text-2);font-size:13px;font-weight:600;cursor:pointer;font-family:var(--font);padding:4px 12px;border-radius:6px;transition:all 0.15s}
 .share-btn:hover{background:var(--bg-card);color:var(--accent)}
@@ -200,6 +205,8 @@ a:hover{text-decoration:underline}
 /* ═══ Toast ═══════════════════════════════════════ */
 .toast{position:fixed;bottom:40px;left:50%;transform:translateX(-50%) translateY(20px);z-index:999;background:var(--toast-bg);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);color:var(--text);padding:10px 24px;border-radius:100px;font-size:13px;font-weight:600;opacity:0;pointer-events:none;transition:all 0.3s cubic-bezier(0.4,0,0.2,1);border:1px solid var(--border);box-shadow:var(--toast-shadow)}
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.new-articles-prompt{position:fixed;top:calc(68px + env(safe-area-inset-top,0px));left:50%;transform:translate(-50%,-12px);z-index:140;border:1px solid var(--accent);background:var(--bg-card);color:var(--accent);padding:8px 14px;border-radius:999px;font:inherit;font-size:12px;font-weight:700;box-shadow:var(--toast-shadow);opacity:0;pointer-events:none;transition:opacity .2s ease,transform .28s cubic-bezier(.22,.61,.36,1)}
+.new-articles-prompt.show{opacity:1;pointer-events:auto;transform:translate(-50%,0)}
 
 /* ═══ Scroll-to-top Button ════════════════════════ */
 .scroll-top-btn{position:fixed;bottom:32px;right:24px;z-index:50;width:44px;height:44px;border-radius:50%;background:var(--bg-card);border:1px solid var(--border);color:var(--text-2);font-size:20px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.2s;box-shadow:0 4px 12px rgba(0,0,0,0.3);font-family:var(--font)}
@@ -230,6 +237,8 @@ a:hover{text-decoration:underline}
 .sidebar-toggle.open{left:200px}
 .sidebar{position:fixed;left:0;top:56px;bottom:0;z-index:40;width:200px;background:var(--bg-card);border-right:1px solid var(--border);transform:translateX(-100%);transition:transform 0.25s cubic-bezier(0.4,0,0.2,1);overflow-y:auto;padding:16px 12px}
 .sidebar.open{transform:translateX(0);box-shadow:4px 0 20px rgba(0,0,0,0.3)}
+.sidebar-backdrop{position:fixed;inset:0;z-index:35;background:rgba(0,0,0,.32);opacity:0;pointer-events:none;transition:opacity .22s ease}
+.sidebar-backdrop.open{opacity:1;pointer-events:auto}
 .sidebar-header{font-size:12px;font-weight:700;color:var(--text-3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid var(--border)}
 .sidebar .filters{display:flex;flex-direction:column;gap:4px;padding:0;overflow:visible}
 .cat-header{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;margin:2px 0;border-radius:6px;font-size:12px;font-weight:700;color:var(--text-3);cursor:pointer;transition:all 0.12s;user-select:none;letter-spacing:0.03em}
@@ -246,11 +255,9 @@ a:hover{text-decoration:underline}
   .sidebar{width:180px}
   .sidebar-toggle.open{left:180px}
 }
-
-/* ═══ Pull-to-refresh indicator ════════════════ */
-.pull-indicator{position:absolute;left:0;right:0;top:-40px;height:40px;display:flex;align-items:center;justify-content:center;font-size:13px;color:var(--text-3);font-weight:600;transition:opacity 0.2s;pointer-events:none}
-.pull-indicator .spin{display:inline-block;width:16px;height:16px;border:2px solid var(--text-3);border-top-color:var(--accent);border-radius:50%;margin-right:8px;animation:ptr-spin 0.6s linear infinite}
-@keyframes ptr-spin{to{transform:rotate(360deg)}}
+@media(min-width:769px){
+  .sidebar-backdrop{display:none}
+}
 
 /* ═══ Responsive ══════════════════════════════════ */
 @media(max-width:640px){
@@ -260,11 +267,23 @@ a:hover{text-decoration:underline}
   .item-arrow{display:none}
   .article-wrap h1{font-size:20px}
   .hide-m{display:none}
-  .header-right{gap:8px}
+  .header-right{gap:2px}
   .header-right .refresh-btn{padding:3px 8px;font-size:10px}
+  .header-right .icon-btn,.header-right .header-avatar{width:44px;height:44px;display:inline-flex;align-items:center;justify-content:center}
+  .header-inner{min-height:56px}
+  .logo{min-height:44px}
   .header-right .status-text{display:none}
   .header-right a svg{width:15px;height:15px}
   .header-right .header-avatar .user-avatar{width:30px!important;height:30px!important}
+  .item-meta{gap:7px;flex-wrap:wrap;line-height:1.35}
+  .item-meta>[data-role="time"],.full-tag{white-space:nowrap}
+  .app{padding-left:20px;padding-right:26px}
+  .scroll-top-btn{right:12px;bottom:calc(18px + env(safe-area-inset-bottom,0px))}
+  .sidebar-toggle{z-index:55}
+}
+@media(prefers-reduced-motion:reduce){
+  html{scroll-behavior:auto!important}
+  .item,.search-overlay,.overlay,.sidebar,.sidebar-backdrop{animation:none!important;transition:none!important}
 }
 
 /* ═══ Body Scroll Lock ══════════════════════════ */
@@ -454,7 +473,7 @@ body.body-scroll-lock{overflow:hidden!important}
 @media(max-width:640px){.source-row{grid-template-columns:1fr}.source-row-state{text-align:left}.source-article-toolbar{align-items:flex-start;flex-direction:column}}
 @media(max-width:640px){
   .header-right{gap:8px}
-  .icon-btn{width:30px;height:30px}
+  .icon-btn{width:44px;height:44px}
   .search-header{padding-left:12px;padding-right:12px}
   .search-header-inner{min-height:54px;gap:8px}
   .search-body{padding:12px 12px calc(24px + env(safe-area-inset-bottom,0px))}
@@ -466,7 +485,7 @@ body.body-scroll-lock{overflow:hidden!important}
 <div class="app">
   <header class="header">
     <div class="header-inner">
-      <div class="logo" onclick="goHome()" title="回到首页并刷新">
+      <div class="logo" onclick="refreshHomepage()" title="回到首页并刷新">
         <div class="logo-icon"><img src="/favicon-32x32.png?v=2" alt="RayNews"></div>
         <span>RayNews</span>
       </div>
@@ -475,7 +494,7 @@ body.body-scroll-lock{overflow:hidden!important}
         <button class="icon-btn daily-summary-btn" id="dailySummaryBtn" onclick="showDailySummary()" title="每日总结" aria-label="每日总结">✨</button>
         <span class="status-text"><span class="status-dot"></span>实时更新</span>
         <span class="hide-m" id="count"></span>
-        <button class="refresh-btn" id="refreshBtn" onclick="triggerRefresh()"><span>刷新</span></button>
+        <button class="refresh-btn" id="refreshBtn" onclick="refreshHomepage()"><span>刷新</span></button>
       </div>
     </div>
     <div class="user-menu" id="userMenu">
@@ -501,6 +520,7 @@ body.body-scroll-lock{overflow:hidden!important}
   </header>
 
   <button class="sidebar-toggle" id="sidebarToggle" onclick="toggleSidebar()" title="分类与来源">☰</button>
+  <div class="sidebar-backdrop" id="sidebarBackdrop" onclick="closeSidebar()" aria-hidden="true"></div>
   <div class="sidebar" id="sidebar">
     <div class="sidebar-header">分类与来源</div>
     <div class="filters" id="filters"></div>
@@ -513,7 +533,6 @@ body.body-scroll-lock{overflow:hidden!important}
   </div>
   <div class="pagination" id="pagination"></div>
   <div class="footer">RayNews - 👀open eyes to see the world. · 每 15 分钟更新 · {{FULL_BUILD_VERSION}} · <a href="https://github.com/rayyume/RayNews-Reader" target="_blank" rel="noopener" style="color:var(--text-3)">GitHub</a></div>
-  <div class="pull-indicator" id="pullIndicator"><span class="spin"></span>刷新中...</div>
 </div>
 
 <div class="search-overlay" id="searchOverlay" aria-hidden="true">
@@ -562,7 +581,7 @@ body.body-scroll-lock{overflow:hidden!important}
         <p id="authError" class="auth-error"></p>
         <button class="auth-btn" id="authSubmitBtn" onclick="submitAuth()">登录</button>
         <p class="auth-switch" id="authSwitch">没有账号？<a href="#" onclick="toggleAuthMode()">注册</a></p>
-        <p class="auth-skip"><a href="#" onclick="closeAuth()">跳过，先浏览</a></p>
+        <p class="auth-skip" id="authSkip"><a href="#" onclick="closeAuth()">跳过，先浏览</a></p>
       </div>
     </div>
   </div>
@@ -613,6 +632,7 @@ body.body-scroll-lock{overflow:hidden!important}
 </div>
 
 <div class="toast" id="toast"></div>
+<button class="new-articles-prompt" id="newArticlesPrompt" onclick="revealPendingLatest()" aria-live="polite"></button>
 
 <!-- ═══ Settings Panel ═════════════════════════════════ -->
 <div class="ai-overlay" id="aiOverlay">
@@ -791,11 +811,19 @@ body.body-scroll-lock{overflow:hidden!important}
   </div>
 </div>
 
-<button class="scroll-top-btn" id="scrollTopBtn" onclick="goHome()" title="回到首页并刷新">↑</button>
+<button class="scroll-top-btn" id="scrollTopBtn" onclick="refreshHomepage()" title="回到首页并刷新">↑</button>
 
 <script>
 const PAGE_SIZE = 30;
-const INITIAL_LOAD_SIZE = 99999;  // Load all articles for client-side pagination
+const INCREMENTAL_FETCH_LIMIT = 200;
+const NEWS_CACHE_DB = 'raynews-news-cache-v1';
+const NEWS_CACHE_STORE = 'entries';
+const NEWS_CACHE_MAX_PAGES = 60;
+const NEWS_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const IDLE_LATEST_DELAY_MS = 5 * 60 * 1000;
+const PAGE_MEMORY_BUFFER_LIMIT = 3;
+const PAGE_COVER_PRELOAD_LIMIT = 8;
+const PAGE_SWITCH_TOP_THRESHOLD = 120;
 
 // Source category mapping. Seeded here as a fallback; normally loaded from /api/sources.
 let CATEGORY_MAP = {
@@ -816,8 +844,26 @@ let lastNewsDiagnostics = null;
 let news = [];
 let filter = 'all';
 let currentPage = 1;
+let currentTotal = 0;
+let todayArticleCount = null;
+let latestKnownTimestamp = 0;
+let pageRequestController = null;
+let pageRequestSequence = 0;
+let pageNavigationSequence = 0;
+let pageNavigationPending = false;
+const pageMemoryBuffer = new Map();
+const pagePrefetchPromises = new Map();
+let pendingNewArticleCount = 0;
+let pendingLatestPage = null;
+let lastUserActivityAt = Date.now();
+let pageVisibleSince = Date.now();
+let programmaticScrollUntil = 0;
 let _pendingUpdate = false;
 let refreshInProgress = false;
+let activeScrollMotion = null;
+let pendingAuthAction = '';
+let savedArticleListState = null;
+let restoringListHistory = false;
 // In-memory cache for article bodies — avoids re-fetching on re-open
 let articleBodyCache = {};
 let articleBodyPromises = {};
@@ -827,6 +873,10 @@ let titleUpdateCursor = '';
 let titleUpdatePolling = false;
 let searchRequestController = null;
 let searchRequestSeq = 0;
+let searchPage = 1;
+let searchTotal = 0;
+let searchItems = [];
+let searchQuery = '';
 let settingsToastTimer = null;
 let sourceArticlesToastTimer = null;
 let sourceSaveTimers = {};
@@ -1215,17 +1265,125 @@ function buildSourceGroups(rows) {
   }).sort((a, b) => (-(a.article_count || 0) + (b.article_count || 0)) || (a.label || '').localeCompare(b.label || '', 'zh-CN'));
 }
 
+function openNewsCache() {
+  return new Promise((resolve, reject) => {
+    if (!window.indexedDB) {
+      reject(new Error('IndexedDB unavailable'));
+      return;
+    }
+    const request = indexedDB.open(NEWS_CACHE_DB, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(NEWS_CACHE_STORE)) {
+        const store = db.createObjectStore(NEWS_CACHE_STORE, { keyPath: 'key' });
+        store.createIndex('kind', 'kind', { unique: false });
+        store.createIndex('updatedAt', 'updatedAt', { unique: false });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('IndexedDB open failed'));
+  });
+}
+
+function newsPageCacheKey(page = currentPage, activeFilter = filter) {
+  return `page:${activeFilter}:${page}:${PAGE_SIZE}`;
+}
+
+async function readNewsCacheEntry(key) {
+  try {
+    const db = await openNewsCache();
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(NEWS_CACHE_STORE, 'readonly');
+      const request = tx.objectStore(NEWS_CACHE_STORE).get(key);
+      request.onsuccess = () => resolve(request.result || null);
+      request.onerror = () => reject(request.error);
+      tx.oncomplete = () => db.close();
+    });
+  } catch (e) {
+    return null;
+  }
+}
+
+async function writeNewsCacheEntry(record) {
+  try {
+    const db = await openNewsCache();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(NEWS_CACHE_STORE, 'readwrite');
+      tx.objectStore(NEWS_CACHE_STORE).put(record);
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+    db.close();
+    cleanupNewsCache();
+  } catch (e) {
+    // Browser caching is an optimization; network data remains authoritative.
+  }
+}
+
+async function readCachedNewsPage(page = currentPage, activeFilter = filter) {
+  const record = await readNewsCacheEntry(newsPageCacheKey(page, activeFilter));
+  if (!record || !record.data || Date.now() - record.updatedAt > NEWS_CACHE_MAX_AGE_MS) return null;
+  return record.data;
+}
+
+async function writeCachedNewsPage(page, activeFilter, data) {
+  await writeNewsCacheEntry({
+    key: newsPageCacheKey(page, activeFilter),
+    kind: 'page',
+    updatedAt: Date.now(),
+    data,
+  });
+}
+
+async function cleanupNewsCache() {
+  try {
+    const db = await openNewsCache();
+    const records = await new Promise((resolve, reject) => {
+      const tx = db.transaction(NEWS_CACHE_STORE, 'readonly');
+      const request = tx.objectStore(NEWS_CACHE_STORE).getAll();
+      request.onsuccess = () => resolve(request.result || []);
+      request.onerror = () => reject(request.error);
+    });
+    const expired = records.filter(item => Date.now() - item.updatedAt > NEWS_CACHE_MAX_AGE_MS);
+    const pages = records
+      .filter(item => item.kind === 'page' && !expired.includes(item))
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+    const remove = expired.concat(pages.slice(NEWS_CACHE_MAX_PAGES));
+    if (remove.length) {
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(NEWS_CACHE_STORE, 'readwrite');
+        const store = tx.objectStore(NEWS_CACHE_STORE);
+        remove.forEach(item => store.delete(item.key));
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+      });
+    }
+    db.close();
+  } catch (e) {}
+}
+
 async function loadSourceCategories() {
+  const cached = await readNewsCacheEntry('source-metadata');
+  if (cached && cached.data && Array.isArray(cached.data.sources)) {
+    rebuildCategoryMap(cached.data.sources);
+  }
   try {
     let data;
     if (authToken) {
       data = await apiFetch('/sources');
     } else {
-      const resp = await fetch('/api/sources?t=' + Date.now());
+      const resp = await fetch('/api/sources');
       data = await resp.json();
     }
     if (data && Array.isArray(data.sources)) {
       rebuildCategoryMap(data.sources);
+      writeNewsCacheEntry({
+        key: 'source-metadata',
+        kind: 'metadata',
+        updatedAt: Date.now(),
+        data,
+      });
     }
   } catch (e) {
     // Keep the built-in fallback CATEGORY_MAP.
@@ -1294,8 +1452,10 @@ function setAuthInputsEnabled(enabled) {
   });
 }
 
-function showAuth() {
+function showAuth(context = '') {
+  pendingAuthAction = context;
   document.getElementById('authModal').classList.add('open');
+  document.getElementById('authSkip').style.display = context === 'search' ? 'none' : '';
   setAuthInputsEnabled(true);
   lockBodyScroll();
   document.getElementById('authLogin').value = '';
@@ -1306,10 +1466,11 @@ function showAuth() {
   document.getElementById('authSubmitBtn').textContent = '登录';
 }
 
-function closeAuth() {
+function closeAuth({ preservePending = false } = {}) {
   document.getElementById('authModal').classList.remove('open');
   setAuthInputsEnabled(false);
   unlockBodyScroll();
+  if (!preservePending) pendingAuthAction = '';
 }
 
 function toggleAuthMode() {
@@ -1405,10 +1566,13 @@ async function submitAuth() {
     if (data.error) { errEl.textContent = data.error; btn.disabled = false; btn.textContent = '重试'; return; }
     if (data.token) {
       saveAuth(data.token, data.user);
-      closeAuth();
+      const nextAction = pendingAuthAction;
+      closeAuth({ preservePending: true });
+      pendingAuthAction = '';
       showToast(authMode === 'login' ? '✅ 登录成功' : '✅ 注册成功');
       loadUserSettings();
       syncDailySummaryToday();
+      if (nextAction === 'search') openSearch();
     }
   } catch (e) {
     errEl.textContent = '网络错误: ' + (e.message || '未知错误');
@@ -1486,7 +1650,7 @@ function updateUserUI() {
     btn.id = 'loginBtn';
     btn.className = 'refresh-btn';
     btn.textContent = '登录';
-    btn.onclick = showAuth;
+    btn.onclick = () => showAuth();
     headerRight.prepend(btn);
   }
 }
@@ -1924,11 +2088,12 @@ async function deleteArticlesByIds(ids) {
   if (data.error) throw new Error(data.error);
   const deleted = data.deleted || 0;
   news = news.filter(item => !ids.includes(Number(item.id)));
+  currentTotal = Math.max(0, currentTotal - deleted);
   for (const id of ids) {
     delete articleBodyCache[id];
     delete articleBodyPromises[id];
   }
-  document.getElementById('count').textContent = news.length + ' 条新闻';
+  document.getElementById('count').textContent = currentTotal + ' 条新闻';
   if (sourceArticlesState.items.length) {
     sourceArticlesState.items = sourceArticlesState.items.filter(item => !ids.includes(Number(item.id)));
     renderSourceArticles(sourceArticlesState.items);
@@ -2401,13 +2566,34 @@ async function saveGeneralSettings() {
   } catch (e) { showSettingsStatus('❌ 保存失败', 'err'); }
 }
 
+function beijingDateString() {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
 function countTodayArticles() {
-  const today = new Date();
-  const y = today.getFullYear();
-  const m = String(today.getMonth() + 1).padStart(2, '0');
-  const d = String(today.getDate()).padStart(2, '0');
-  const todayStr = `${y}-${m}-${d}`;
+  if (Number.isFinite(todayArticleCount)) return todayArticleCount;
+  const todayStr = beijingDateString();
   return news.filter(n => n.date === todayStr).length;
+}
+
+async function refreshTodayArticleCount() {
+  const date = beijingDateString();
+  try {
+    const params = new URLSearchParams({ page: '1', size: '1', date });
+    const resp = await fetch('/api/news?' + params.toString());
+    if (!resp.ok) return countTodayArticles();
+    const data = await resp.json();
+    if (data.error) return countTodayArticles();
+    todayArticleCount = Number(data.total || 0);
+  } catch (e) {}
+  return countTodayArticles();
 }
 
 let dailySummaryState = {
@@ -2621,6 +2807,7 @@ async function syncDailySummaryToday() {
 // ─── Daily Summary ───────────────────────────────────────
 
 async function triggerDailySummary() {
+  await refreshTodayArticleCount();
   const count = countTodayArticles();
   showSettingsStatus(`📊 正在汇集今日共 ${count} 条新闻生成摘要，请耐心等待。`);
   try {
@@ -2661,6 +2848,7 @@ function closeDailySummary() {
 
 async function generateDailySummary() {
   const body = document.getElementById('dailySummaryBody');
+  await refreshTodayArticleCount();
   const count = countTodayArticles();
   if (dailySummaryState.status === 'running') {
     renderDailySummaryBody();
@@ -2689,6 +2877,7 @@ function closeSidebar() {
   const sidebar = document.getElementById('sidebar');
   const toggle = document.getElementById('sidebarToggle');
   sidebar.classList.remove('open');
+  document.getElementById('sidebarBackdrop').classList.remove('open');
   toggle.classList.remove('open');
   toggle.textContent = '☰';
   try { localStorage.setItem('raynews_sidebar', '0'); } catch(e) {}
@@ -3252,20 +3441,61 @@ function updateArticleElement(node, item) {
   if (time) time.textContent = formatTime(item.date, item.time);
 }
 
-function reconcileVisibleArticles() {
-  let filtered = filteredNews();
-  if (!filtered.length && news.length && filter !== 'all') {
-    filter = 'all';
-    filtered = news;
-    renderFilters();
-  }
+function prefersReducedMotion() {
+  return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+function captureArticleRects(list) {
+  return new Map(Array.from(list.querySelectorAll('.item[data-id]')).map(node => [
+    Number(node.dataset.id),
+    node.getBoundingClientRect(),
+  ]));
+}
+
+function animateArticleLayout(list, previousRects, newIds = new Set()) {
+  if (prefersReducedMotion() || !Element.prototype.animate) return;
+  Array.from(list.querySelectorAll('.item[data-id]')).forEach((node, index) => {
+    const id = Number(node.dataset.id);
+    const previous = previousRects.get(id);
+    const current = node.getBoundingClientRect();
+    if (previous) {
+      const deltaY = previous.top - current.top;
+      if (Math.abs(deltaY) > 0.5) {
+        node.animate(
+          [{ transform: `translateY(${deltaY}px)` }, { transform: 'translateY(0)' }],
+          { duration: 360, easing: 'cubic-bezier(.22,.61,.36,1)' },
+        );
+      }
+      return;
+    }
+    node.style.setProperty('--motion-index', String(Math.min(index, 6)));
+    if (newIds.has(id)) {
+      node.animate(
+        [
+          { opacity: 0, transform: 'translateY(-12px)' },
+          { opacity: 1, transform: 'translateY(0)' },
+        ],
+        {
+          duration: 320,
+          delay: Math.min(index, 6) * 40,
+          easing: 'cubic-bezier(.22,.61,.36,1)',
+          fill: 'both',
+        },
+      );
+    }
+  });
+}
+
+function reconcileVisibleArticles({ animate = false } = {}) {
+  const filtered = filteredNews();
   if (!authToken) currentPage = 1;
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const totalPages = Math.max(1, Math.ceil(currentTotal / PAGE_SIZE));
   if (currentPage > totalPages) currentPage = totalPages;
-  const start = (currentPage - 1) * PAGE_SIZE;
-  const items = filtered.slice(start, start + PAGE_SIZE);
+  const items = filtered;
   const list = document.getElementById('list');
-  document.getElementById('count').textContent = filtered.length + ' 条新闻';
+  const previousRects = animate ? captureArticleRects(list) : new Map();
+  const newIds = new Set();
+  document.getElementById('count').textContent = currentTotal + ' 条新闻';
 
   if (!items.length || !list.querySelector('.item[data-id]')) {
     renderList();
@@ -3278,7 +3508,9 @@ function reconcileVisibleArticles() {
     currentCards.map(node => [Number(node.dataset.id), node]),
   );
   const desiredIds = new Set(items.map(item => Number(item.id)));
-  const anchor = Array.from(existing.values()).find(node => node.getBoundingClientRect().bottom > 0);
+  const anchor = window.scrollY > 4
+    ? Array.from(existing.values()).find(node => node.getBoundingClientRect().bottom > 0)
+    : null;
   const anchorId = anchor ? Number(anchor.dataset.id) : 0;
   const anchorTop = anchor ? anchor.getBoundingClientRect().top : 0;
 
@@ -3292,6 +3524,7 @@ function reconcileVisibleArticles() {
     let node = existing.get(id);
     if (!node) {
       node = createArticleElement(item);
+      newIds.add(id);
     } else {
       updateArticleElement(node, item);
     }
@@ -3313,36 +3546,41 @@ function reconcileVisibleArticles() {
       if (Math.abs(delta) > 0.5) window.scrollBy(0, delta);
     }
   }
+  if (animate) animateArticleLayout(list, previousRects, newIds);
 }
 
 function flushPendingListUpdate() {
   if (!_pendingUpdate) return;
   _pendingUpdate = false;
+  if (pendingLatestPage && filter === 'all' && currentPage === 1) {
+    applyNewsPage(pendingLatestPage, 1, 'all', { animate: true, preserveDom: true });
+    pendingLatestPage = null;
+    pendingNewArticleCount = 0;
+    hideNewArticlesPrompt();
+    return;
+  }
   renderFilters();
   reconcileVisibleArticles();
   if (document.getElementById('searchOverlay').classList.contains('open')) renderSearchResults();
 }
 
-async function triggerRefresh() {
-  if (refreshInProgress) {
-    showToast('🔄 正在刷新，请稍候');
+async function triggerRefresh({ stateAlreadySet = false, showStart = true } = {}) {
+  if (refreshInProgress && !stateAlreadySet) {
     return;
   }
   // Unauthenticated users cannot refresh
   if (!authToken) {
     showToast('🔒 请先登录');
-    resetPullIndicator();
     return;
   }
   // Preview users cannot refresh
   if (authUser && authUser.role === 'preview') {
     showToast('🔒 预览用户无此权限');
-    resetPullIndicator();
     return;
   }
 
-  setRefreshRunning(true);
-  const refreshCursor = latestNewsTimestamp();
+  if (!stateAlreadySet) setRefreshRunning(true);
+  const refreshCursor = latestKnownTimestamp || latestNewsTimestamp();
 
   let refreshUrl = '/refresh';
   let fetchOpts = { cache: 'no-store' };
@@ -3351,10 +3589,9 @@ async function triggerRefresh() {
     fetchOpts = { method: 'POST', headers: { 'Authorization': 'Bearer ' + authToken } };
   }
 
-  const beforeCount = news.length;
   let refreshError = '';
 
-  showToast('🔄 正在后台抓取...');
+  if (showStart) showToast('🔄 正在后台抓取...');
 
   try {
     const resp = await fetch(refreshUrl, fetchOpts);
@@ -3366,9 +3603,15 @@ async function triggerRefresh() {
     let added = 0;
     if (news.length) {
       added = await loadSince(refreshCursor, { forceApply: true });
+      if (!(filter === 'all' && currentPage === 1 && added > 0)) {
+        await loadNewsPage(currentPage, {
+          activeFilter: filter,
+          useCache: false,
+          forceNetwork: true,
+        });
+      }
     } else {
       await loadData();
-      added = Math.max(0, news.length - beforeCount);
     }
 
     showToast(added > 0 ? '✅ 已更新 ' + added + ' 篇文章' : '✅ 刷新完成');
@@ -3377,150 +3620,517 @@ async function triggerRefresh() {
     showToast('❌ 刷新失败: ' + refreshError);
   } finally {
     setRefreshRunning(false);
-    resetPullIndicator();
   }
 }
 
 function setRefreshRunning(isRunning) {
   refreshInProgress = isRunning;
   const btn = document.getElementById('refreshBtn');
-  if (!btn) return;
-  btn.classList.toggle('refresh-running', isRunning);
-  btn.disabled = isRunning;
-  const label = btn.querySelector('span') || btn;
-  label.textContent = isRunning ? '刷新中' : '刷新';
+  if (btn) {
+    btn.classList.toggle('refresh-running', isRunning);
+    btn.disabled = isRunning;
+    const label = btn.querySelector('span') || btn;
+    label.textContent = isRunning ? '刷新中' : '刷新';
+  }
+  const logo = document.querySelector('.logo');
+  if (logo) {
+    logo.classList.toggle('refresh-locked', isRunning);
+    logo.setAttribute('aria-disabled', isRunning ? 'true' : 'false');
+  }
+  const scrollTopBtn = document.getElementById('scrollTopBtn');
+  if (scrollTopBtn) scrollTopBtn.disabled = isRunning;
   const list = document.getElementById('list');
   if (list) list.classList.toggle('manual-refreshing', isRunning);
 }
 
-function resetPullIndicator() {
-  const indicator = document.getElementById('pullIndicator');
-  if (indicator) {
-    indicator.style.transition = 'top 0.25s, opacity 0.25s';
-    indicator.style.top = '-40px';
-    indicator.style.opacity = '0';
-    setTimeout(() => { indicator.style.transition = ''; }, 300);
+function buildNewsPageParams(page = currentPage, activeFilter = filter) {
+  const params = new URLSearchParams();
+  params.set('page', String(page));
+  params.set('size', String(PAGE_SIZE));
+  if (activeFilter.startsWith('cat:')) {
+    params.set('category', activeFilter.slice(4));
+  } else if (activeFilter !== 'all') {
+    const group = sourceFilterGroups[activeFilter];
+    (group ? group.sources : []).forEach(source => params.append('source', source));
+  }
+  return params;
+}
+
+function listUrlForState(activeFilter = filter, page = currentPage) {
+  const url = new URL(window.location.pathname, window.location.origin);
+  if (activeFilter.startsWith('cat:')) {
+    url.searchParams.set('category', activeFilter.slice(4));
+  } else if (activeFilter !== 'all') {
+    const group = sourceFilterGroups[activeFilter];
+    if (group) url.searchParams.set('source', group.label);
+  }
+  url.searchParams.set('page', String(Math.max(1, Number(page) || 1)));
+  return url.pathname + url.search;
+}
+
+function syncListUrl({ push = false, replace = false } = {}) {
+  if (restoringListHistory || location.hash) return;
+  const url = listUrlForState();
+  const state = {
+    raynewsHome: true,
+    filter,
+    page: currentPage,
+    scrollY: Math.round(window.scrollY || 0),
+  };
+  if (push) history.pushState(state, '', url);
+  else if (replace || location.pathname + location.search !== url) history.replaceState(state, '', url);
+}
+
+function rememberCurrentListHistory() {
+  if (location.hash) return;
+  history.replaceState({
+    raynewsHome: true,
+    filter,
+    page: currentPage,
+    scrollY: Math.round(window.scrollY || 0),
+  }, '', location.pathname + location.search);
+}
+
+function listStateFromUrl() {
+  const params = new URLSearchParams(location.search);
+  let activeFilter = 'all';
+  const category = params.get('category');
+  const source = params.get('source');
+  if (category && CATEGORY_ORDER.includes(category)) {
+    activeFilter = 'cat:' + category;
+  } else if (source) {
+    const group = Object.values(sourceFilterGroups).find(item => item.label === source);
+    if (group) activeFilter = group.key;
+  }
+  const requestedPage = Math.max(1, Number.parseInt(params.get('page') || '1', 10) || 1);
+  return { activeFilter, page: requestedPage };
+}
+
+async function restoreListStateFromUrl({ restoreScroll = false } = {}) {
+  const state = listStateFromUrl();
+  restoringListHistory = true;
+  filter = state.activeFilter;
+  currentPage = state.page;
+  const loaded = await loadNewsPage(state.page, {
+    activeFilter: state.activeFilter,
+    useCache: true,
+    userInitiated: true,
+    animate: true,
+  });
+  if (!loaded && (state.activeFilter !== 'all' || state.page !== 1)) {
+    filter = 'all';
+    currentPage = 1;
+    await loadNewsPage(1, { activeFilter: 'all', useCache: true, animate: true });
+  }
+  if (restoreScroll) {
+    const targetY = Number(history.state && history.state.scrollY) || 0;
+    requestAnimationFrame(() => window.scrollTo(0, targetY));
+  }
+  restoringListHistory = false;
+  syncListUrl({ replace: true });
+}
+
+function setPageLoading(isLoading) {
+  const list = document.getElementById('list');
+  if (list) list.classList.toggle('page-loading', isLoading);
+}
+
+function renderColdStartSkeleton() {
+  const list = document.getElementById('list');
+  if (!list || news.length || list.querySelector('.item[data-id]')) return;
+  list.innerHTML = `<div class="skeleton-item"><div class="skeleton-thumb"></div><div class="skeleton-lines"><div class="skeleton-line"></div><div class="skeleton-line"></div></div></div>`.repeat(3);
+}
+
+function renderColdStartError(message) {
+  const list = document.getElementById('list');
+  if (!list || news.length || list.querySelector('.item[data-id]')) return;
+  list.innerHTML = '<div class="empty"><div class="empty-icon">📡</div><p>' + esc(message) + '</p><button class="refresh-btn" onclick="loadData()" style="margin-top:12px">重试</button></div>';
+}
+
+function applyNewsPage(data, page, activeFilter, { animate = false, preserveDom = false } = {}) {
+  news = Array.isArray(data.items) ? data.items : [];
+  currentPage = Number(data.page || page || 1);
+  currentTotal = Number(data.total || 0);
+  lastNewsDiagnostics = data.diagnostics || null;
+  if (activeFilter === 'all' && currentPage === 1) {
+    latestKnownTimestamp = latestNewsTimestamp();
+  }
+  document.getElementById('count').textContent = currentTotal + ' 条新闻';
+  renderFilters();
+  if (preserveDom && document.querySelector('#list .item[data-id]')) {
+    reconcileVisibleArticles({ animate });
+  } else {
+    renderList();
+    if (animate) {
+      const list = document.getElementById('list');
+      Array.from(list.querySelectorAll('.item[data-id]')).forEach((node, index) => {
+        node.style.setProperty('--motion-index', String(Math.min(index, 6)));
+      });
+      list.classList.add('page-switching');
+      setTimeout(() => list.classList.remove('page-switching'), 620);
+    }
+  }
+  pollTitleUpdates();
+}
+
+async function fetchNewsPage(page, activeFilter, signal) {
+  const params = buildNewsPageParams(page, activeFilter);
+  const resp = await fetch('/api/news?' + params.toString(), { signal });
+  if (!resp.ok) throw new Error('HTTP ' + resp.status);
+  const data = await resp.json();
+  if (data.error) throw new Error(data.error);
+  return data;
+}
+
+function warmPageCoverImages(data) {
+  const items = Array.isArray(data && data.items) ? data.items : [];
+  items.slice(0, PAGE_COVER_PRELOAD_LIMIT).forEach(item => {
+    if (!item || !item.thumb) return;
+    const image = new Image();
+    image.decoding = 'async';
+    image.src = proxyImgSrc(item.thumb);
+    if (typeof image.decode === 'function') image.decode().catch(() => {});
+  });
+}
+
+function rememberBufferedPage(page, activeFilter, data) {
+  if (!data || !Array.isArray(data.items)) return data;
+  const key = newsPageCacheKey(page, activeFilter);
+  pageMemoryBuffer.delete(key);
+  pageMemoryBuffer.set(key, data);
+  while (pageMemoryBuffer.size > PAGE_MEMORY_BUFFER_LIMIT) {
+    pageMemoryBuffer.delete(pageMemoryBuffer.keys().next().value);
+  }
+  warmPageCoverImages(data);
+  return data;
+}
+
+function readBufferedPage(page, activeFilter) {
+  const key = newsPageCacheKey(page, activeFilter);
+  const data = pageMemoryBuffer.get(key);
+  if (!data) return null;
+  pageMemoryBuffer.delete(key);
+  pageMemoryBuffer.set(key, data);
+  return data;
+}
+
+async function prefetchNewsPage(page, activeFilter) {
+  if (page < 1) return;
+  const key = newsPageCacheKey(page, activeFilter);
+  const existing = pagePrefetchPromises.get(key);
+  if (existing) return existing;
+  const task = (async () => {
+    const buffered = readBufferedPage(page, activeFilter);
+    if (buffered) return buffered;
+    const cached = await readCachedNewsPage(page, activeFilter);
+    if (cached) return rememberBufferedPage(page, activeFilter, cached);
+    try {
+      const data = await fetchNewsPage(page, activeFilter);
+      await writeCachedNewsPage(page, activeFilter, data);
+      return rememberBufferedPage(page, activeFilter, data);
+    } catch (e) {
+      return null;
+    }
+  })();
+  pagePrefetchPromises.set(key, task);
+  try {
+    return await task;
+  } finally {
+    if (pagePrefetchPromises.get(key) === task) pagePrefetchPromises.delete(key);
   }
 }
 
-// Full snapshot: reserved for cold start, explicit recovery, and admin mutations.
-// When articles already exist, reconcile the snapshot without clearing the list.
-async function loadData() {
-  const list = document.getElementById('list');
-  const showBlockingLoader = news.length === 0;
-  if (showBlockingLoader) {
-    list.innerHTML = `<div class="skeleton-item"><div class="skeleton-thumb"></div><div class="skeleton-lines"><div class="skeleton-line"></div><div class="skeleton-line"></div></div></div>`.repeat(3);
+function cancelActiveAutoMotion() {
+  if (!activeScrollMotion || !activeScrollMotion.auto) return;
+  activeScrollMotion.cancelled = true;
+}
+
+function markUserActivity(event) {
+  if (event && event.type !== 'scroll' && event.isTrusted) cancelActiveAutoMotion();
+  if (Date.now() < programmaticScrollUntil) return;
+  lastUserActivityAt = Date.now();
+}
+
+function hasBlockingOverlayOpen() {
+  return [
+    'overlay',
+    'searchOverlay',
+    'aiOverlay',
+    'dailySummaryOverlay',
+    'favOverlay',
+    'adminOverlay',
+    'sourceArticlesOverlay',
+    'authModal',
+    'lb',
+  ].some(id => {
+    const element = document.getElementById(id);
+    return element && (element.classList.contains('open') || element.classList.contains('show'));
+  });
+}
+
+function showNewArticlesPrompt() {
+  const prompt = document.getElementById('newArticlesPrompt');
+  if (!prompt || !pendingNewArticleCount) return;
+  prompt.textContent = `有 ${pendingNewArticleCount} 篇新文章，点击查看`;
+  prompt.classList.add('show');
+}
+
+function hideNewArticlesPrompt() {
+  const prompt = document.getElementById('newArticlesPrompt');
+  if (prompt) prompt.classList.remove('show');
+}
+
+async function revealPendingLatest() {
+  if (!pendingLatestPage || hasBlockingOverlayOpen()) return;
+  programmaticScrollUntil = Date.now() + 800;
+  let applied = false;
+  const applyLatest = () => {
+    if (applied) return;
+    applied = true;
+    filter = 'all';
+    currentPage = 1;
+    applyNewsPage(pendingLatestPage, 1, 'all', { animate: true, preserveDom: true });
+    pendingLatestPage = null;
+    pendingNewArticleCount = 0;
+    hideNewArticlesPrompt();
+    syncListUrl({ replace: true });
+  };
+  await scrollPageToTop({ onNearTop: applyLatest });
+  applyLatest();
+  stabilizePageTop();
+}
+
+async function showLatestAfterIdle() {
+  if (!pendingNewArticleCount) return;
+  if (document.hidden || hasBlockingOverlayOpen()) return;
+  if (Date.now() - lastUserActivityAt < IDLE_LATEST_DELAY_MS) return;
+  if (!pendingLatestPage) {
+    try {
+      pendingLatestPage = await fetchNewsPage(1, 'all');
+      await writeCachedNewsPage(1, 'all', pendingLatestPage);
+    } catch (e) {
+      return;
+    }
+  }
+  const latestPage = pendingLatestPage;
+  let pageApplied = false;
+  const applyLatest = () => {
+    if (pageApplied || hasBlockingOverlayOpen()) return;
+    pageApplied = true;
+    filter = 'all';
+    currentPage = 1;
+    applyNewsPage(latestPage, 1, 'all', { animate: true, preserveDom: true });
+    syncListUrl({ replace: true });
+  };
+  programmaticScrollUntil = Date.now() + 800;
+  const completed = await scrollPageToTop({ onNearTop: applyLatest, auto: true });
+  if (!completed) return;
+  applyLatest();
+  if (!pageApplied) return;
+  pendingLatestPage = null;
+  pendingNewArticleCount = 0;
+  hideNewArticlesPrompt();
+  lastUserActivityAt = Date.now();
+}
+
+function scheduleAdjacentPagePrefetch(page = currentPage, activeFilter = filter, total = currentTotal) {
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  if (page > 1) prefetchNewsPage(page - 1, activeFilter);
+  if (page < totalPages) prefetchNewsPage(page + 1, activeFilter);
+}
+
+async function loadNewsPage(page = 1, {
+  activeFilter = filter,
+  useCache = true,
+  forceNetwork = false,
+  userInitiated = false,
+  animate = false,
+} = {}) {
+  const requestSeq = ++pageRequestSequence;
+  let cacheApplied = false;
+  if (useCache) {
+    const cached = await readCachedNewsPage(page, activeFilter);
+    if (cached && requestSeq === pageRequestSequence) {
+      rememberBufferedPage(page, activeFilter, cached);
+      applyNewsPage(cached, page, activeFilter, { animate });
+      cacheApplied = true;
+    }
   }
 
+  if (!forceNetwork && cacheApplied) {
+    scheduleAdjacentPagePrefetch(page, activeFilter, currentTotal);
+  }
+  if (!cacheApplied && !news.length) renderColdStartSkeleton();
+  if (pageRequestController) pageRequestController.abort();
+  pageRequestController = new AbortController();
+  const controller = pageRequestController;
+  const timeout = setTimeout(() => controller.abort(), 12000);
+  const showPageProgress = !cacheApplied && userInitiated;
+  setPageLoading(showPageProgress);
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
-    const resp = await fetch('/api/news?size=' + INITIAL_LOAD_SIZE + '&t=' + Date.now(), { signal: controller.signal });
-    await loadSourceCategories();
+    const data = await fetchNewsPage(page, activeFilter, controller.signal);
     clearTimeout(timeout);
-    const data = await resp.json();
-    news = data.items || [];
-    lastNewsDiagnostics = data.diagnostics || null;
-    document.getElementById('count').textContent = data.total + ' 条新闻';
-    if (document.getElementById('overlay').classList.contains('open')) {
+    await writeCachedNewsPage(page, activeFilter, data);
+    rememberBufferedPage(page, activeFilter, data);
+    if (requestSeq !== pageRequestSequence) return false;
+    if (document.getElementById('overlay').classList.contains('open') && !userInitiated) {
+      pendingLatestPage = activeFilter === 'all' && page === 1 ? data : pendingLatestPage;
       _pendingUpdate = true;
     } else {
-      renderFilters();
-      if (showBlockingLoader) renderList();
-      else reconcileVisibleArticles();
-      if (document.getElementById('searchOverlay').classList.contains('open')) renderSearchResults();
+      applyNewsPage(data, page, activeFilter, {
+        animate: animate && !cacheApplied,
+        preserveDom: cacheApplied || (!userInitiated && news.length > 0),
+      });
     }
-    pollTitleUpdates();
+    scheduleAdjacentPagePrefetch(page, activeFilter, Number(data.total || 0));
+    return true;
   } catch (e) {
-    const msg = e.name === 'AbortError' ? '连接超时，轻触重试或检查网络' : '加载失败，点击重试';
-    if (showBlockingLoader) {
-      list.innerHTML = '<div class="empty"><div class="empty-icon">📡</div><p>' + msg + '</p><button class="refresh-btn" onclick="loadData()" style="margin-top:12px">重试</button></div>';
-    } else {
-      showToast('后台同步失败: ' + msg);
-    }
+    clearTimeout(timeout);
+    if (e.name === 'AbortError' && requestSeq !== pageRequestSequence) return false;
+    const message = e.name === 'AbortError' ? '连接超时，请稍后重试' : '加载失败，请检查网络';
+    if (!cacheApplied && !news.length) renderColdStartError(message);
+    else if (userInitiated) showToast(message);
+    return cacheApplied;
+  } finally {
+    if (requestSeq === pageRequestSequence && showPageProgress) setPageLoading(false);
   }
 }
 
-// Routine refresh path: merge only changed/new rows and preserve existing DOM nodes.
+function applyPageCalibrationWhenActive(data, page, activeFilter, requestSeq) {
+  const startedAt = performance.now();
+  const check = () => {
+    if (requestSeq !== pageRequestSequence) return;
+    if (currentPage === page && filter === activeFilter) {
+      applyNewsPage(data, page, activeFilter, { preserveDom: true });
+      scheduleAdjacentPagePrefetch(page, activeFilter, Number(data.total || 0));
+      return;
+    }
+    if (performance.now() - startedAt < 2000) requestAnimationFrame(check);
+  };
+  requestAnimationFrame(check);
+}
+
+async function preparePageNavigation(page, activeFilter) {
+  const requestSeq = ++pageRequestSequence;
+  if (pageRequestController) pageRequestController.abort();
+  const key = newsPageCacheKey(page, activeFilter);
+  const buffered = readBufferedPage(page, activeFilter);
+  const pendingPrefetch = pagePrefetchPromises.get(key);
+  if (!buffered && pendingPrefetch) {
+    const prefetched = await pendingPrefetch;
+    if (requestSeq !== pageRequestSequence) return null;
+    if (prefetched) return prefetched;
+  }
+  pageRequestController = new AbortController();
+  const controller = pageRequestController;
+  const timeout = setTimeout(() => controller.abort(), 12000);
+  const cachedPromise = readCachedNewsPage(page, activeFilter);
+  const networkPromise = fetchNewsPage(page, activeFilter, controller.signal)
+    .then(async data => {
+      clearTimeout(timeout);
+      await writeCachedNewsPage(page, activeFilter, data);
+      rememberBufferedPage(page, activeFilter, data);
+      return { data, error: null };
+    })
+    .catch(error => {
+      clearTimeout(timeout);
+      return { data: null, error };
+    });
+
+  if (buffered && requestSeq === pageRequestSequence) {
+    networkPromise.then(result => {
+      if (result.data) applyPageCalibrationWhenActive(result.data, page, activeFilter, requestSeq);
+    });
+    return buffered;
+  }
+
+  const cached = await cachedPromise;
+  if (cached && requestSeq === pageRequestSequence) {
+    rememberBufferedPage(page, activeFilter, cached);
+    networkPromise
+      .then(result => {
+        if (result.data) {
+          applyPageCalibrationWhenActive(result.data, page, activeFilter, requestSeq);
+        }
+      });
+    return cached;
+  }
+
+  const result = await networkPromise;
+  if (requestSeq !== pageRequestSequence) return null;
+  if (result.data) return result.data;
+  const error = result.error || new Error('load failed');
+  showToast(error.name === 'AbortError' ? '连接超时，请稍后重试' : '加载失败，请检查网络');
+  return null;
+}
+
+// Full snapshot compatibility wrapper used after admin mutations and explicit recovery.
+async function loadData() {
+  await loadSourceCategories();
+  await loadNewsPage(currentPage, { activeFilter: filter, forceNetwork: true });
+}
+
+// Routine refresh path: detect only changed/new rows and prepare the latest first page.
 async function loadSince(timestamp, { forceApply = false } = {}) {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 8000);
-    const resp = await fetch('/api/news?since=' + timestamp + '&size=' + INITIAL_LOAD_SIZE + '&t=' + Date.now(), { signal: controller.signal });
+    const params = new URLSearchParams({
+      since: String(timestamp || 0),
+      size: String(INCREMENTAL_FETCH_LIMIT),
+    });
+    const resp = await fetch('/api/news?' + params.toString(), { signal: controller.signal });
     clearTimeout(timeout);
     const data = await resp.json();
-    const newItems = data.items || [];
-    if (newItems.length === 0) {
-      if (forceApply && !document.getElementById('overlay').classList.contains('open')) {
-        flushPendingListUpdate();
-      }
-      return 0;
-    }
-    const added = mergeNewsItems(newItems);
-    if (added === 0) return 0;
+    if (data.error) throw new Error(data.error);
+    const knownIds = new Set(news.map(item => Number(item.id)));
+    const newItems = (data.items || []).filter(item => {
+      const itemTs = Number(item.timestamp || 0);
+      return itemTs > Number(timestamp || 0) || !knownIds.has(Number(item.id));
+    });
+    const added = newItems.length;
+    if (!added) return 0;
+    latestKnownTimestamp = Math.max(latestKnownTimestamp, ...newItems.map(item => Number(item.timestamp) || 0));
+    pendingNewArticleCount += added;
+    refreshTodayArticleCount();
     await loadSourceCategories();
-    document.getElementById('count').textContent = news.length + ' 条新闻';
-    // If overlay (article reader) is open, defer DOM refresh until user closes it
-    if (document.getElementById('overlay').classList.contains('open')) {
-      _pendingUpdate = true;
-      return added;
+    const latestData = await fetchNewsPage(1, 'all');
+    pendingLatestPage = latestData;
+    await writeCachedNewsPage(1, 'all', latestData);
+    const atLatestTop = filter === 'all'
+      && currentPage === 1
+      && window.scrollY <= 4
+      && !hasBlockingOverlayOpen();
+    if ((forceApply || atLatestTop) && filter === 'all' && currentPage === 1 && !hasBlockingOverlayOpen()) {
+      applyNewsPage(latestData, 1, 'all', { animate: true, preserveDom: true });
+      pendingLatestPage = null;
+      pendingNewArticleCount = 0;
+      hideNewArticlesPrompt();
+    } else if (Date.now() - lastUserActivityAt >= IDLE_LATEST_DELAY_MS) {
+      showLatestAfterIdle();
+    } else if (!forceApply) {
+      showNewArticlesPrompt();
     }
-    renderFilters();
-    reconcileVisibleArticles();
-    if (document.getElementById('searchOverlay').classList.contains('open')) renderSearchResults();
     return added;
   } catch (e) {
-    // Silently ignore incremental fetch errors
+    // Incremental checks never replace or hide the currently visible page.
     return 0;
   }
 }
 
-async function loadDataWithRetry(retries, delay) {
-  if (!retries) retries = 3;
-  if (!delay) delay = 2000;
-  for (let i = 0; i < retries; i++) {
-    const list = document.getElementById('list');
-    if (i > 0) {
-      list.innerHTML = '<div class="empty"><span class="blocking-load-spinner"></span><p>正在重新连接 (' + i + '/' + (retries-1) + ')...</p></div>';
-      await new Promise(r => setTimeout(r, delay));
-    }
-    try {
-      const controller = new AbortController();
-      const to = setTimeout(function() { controller.abort(); }, 8000);
-      const resp = await fetch('/api/news?size=' + INITIAL_LOAD_SIZE + '&t=' + Date.now(), { signal: controller.signal });
-      await loadSourceCategories();
-      clearTimeout(to);
-    const data = await resp.json();
-    news = data.items || [];
-    lastNewsDiagnostics = data.diagnostics || null;
-    articleBodyCache = {};
-      document.getElementById('count').textContent = data.total + ' 条新闻';
-      renderFilters();
-      renderList();
-      if (document.getElementById('searchOverlay').classList.contains('open')) renderSearchResults();
-      return;
-    } catch (e) {
-      if (i === retries - 1) {
-        const msg = e.name === 'AbortError' ? '连接超时，轻触重试或检查网络' : '加载失败，点击重试';
-        list.innerHTML = '<div class="empty"><div class="empty-icon">📡</div><p>' + msg + '</p><button class="refresh-btn" onclick="loadData()" style="margin-top:12px">重试</button></div>';
-      }
-    }
-  }
-}
-
 function renderFilters() {
-  const sources = [...new Set(news.map(n => canonicalSource(feedSourceOf(n))))];
   const el = document.getElementById('filters');
   sourceFilterGroups = {};
   sourceToFilterGroup = {};
-  for (const source of sources) {
-    const label = (sourceLabel(source) || source || '').trim();
+  for (const row of sourceRows) {
+    const sources = Array.isArray(row.sources) && row.sources.length ? row.sources : [row.source];
+    const label = (row.label || sourceLabel(row.source) || row.source || '').trim();
     const key = sourceGroupKey(label);
     if (!sourceFilterGroups[key]) {
       sourceFilterGroups[key] = { key, label, sources: [], rows: [] };
     }
-    sourceFilterGroups[key].sources.push(source);
-    if (sourceMeta[source]) sourceFilterGroups[key].rows.push(sourceMeta[source]);
+    sourceFilterGroups[key].sources.push(...sources);
+    sourceFilterGroups[key].rows.push(...(row.raw_rows || [row]));
   }
   const groups = Object.values(sourceFilterGroups).map(group => {
     group.sources = [...new Set(group.sources)];
@@ -3578,14 +4188,16 @@ function renderFilters() {
   };
 }
 
-function selectFilter(value) {
+async function selectFilter(value) {
   const el = document.getElementById('filters');
+  rememberCurrentListHistory();
+  const previousFilter = filter;
+  const previousPage = currentPage;
   // Clear ALL selection classes from ALL elements
   el.querySelectorAll('.fbtn').forEach(b => b.classList.remove('active'));
   el.querySelectorAll('.cat-header').forEach(h => h.classList.remove('active'));
   filter = value;
   currentPage = 1;
-  renderList();
 
   // Determine which category to expand (if any)
   let activeCat = '';
@@ -3620,27 +4232,23 @@ function selectFilter(value) {
     const btn = [...el.querySelectorAll('.fbtn')].find(b => b.dataset.f === value);
     if (btn) btn.classList.add('active');
   }
+  const loaded = await loadNewsPage(1, {
+    activeFilter: value,
+    useCache: true,
+    userInitiated: true,
+    animate: true,
+  });
+  if (!loaded) {
+    filter = previousFilter;
+    currentPage = previousPage;
+    renderFilters();
+  } else {
+    syncListUrl({ push: true });
+    if (window.matchMedia && window.matchMedia('(max-width: 768px)').matches) closeSidebar();
+  }
 }
 
 function filteredNews() {
-  if (filter === 'all') {
-    return news;
-  }
-  if (filter.startsWith('cat:')) {
-    const cat = filter.replace('cat:', '');
-    return news.filter(n => {
-      const source = canonicalSource(feedSourceOf(n));
-      const groupKey = sourceToFilterGroup[source];
-      const group = groupKey ? sourceFilterGroups[groupKey] : null;
-      return (group && group.baseCategory === cat) || sourceCategory(source) === cat;
-    });
-  }
-  const group = sourceFilterGroups[filter];
-  if (group) {
-    const sourceSet = new Set(group.sources);
-    return news.filter(n => sourceSet.has(canonicalSource(feedSourceOf(n))));
-  }
-  filter = 'all';
   return news;
 }
 
@@ -3667,6 +4275,8 @@ function syncArticleTitle(articleId, translatedTitle) {
   if (!translatedTitle) return;
   const newsItem = news.find(n => n.id === articleId);
   if (newsItem) newsItem.title = translatedTitle;
+  const searchItem = searchItems.find(n => n.id === articleId);
+  if (searchItem) searchItem.title = translatedTitle;
   document.querySelectorAll(`.item[data-id="${articleId}"] .item-title`).forEach(el => {
     el.textContent = translatedTitle;
   });
@@ -3715,8 +4325,8 @@ function articleItemHtml(n) {
 
 function openSearch() {
   if (!authToken) {
-    showToast('请先登录后使用搜索');
-    showAuth();
+    showToast('🔒 登录后才能搜索文章');
+    showAuth('search');
     return;
   }
   const overlay = document.getElementById('searchOverlay');
@@ -3749,6 +4359,10 @@ function clearArticleSearch() {
   searchRequestSeq++;
   if (searchRequestController) searchRequestController.abort();
   input.value = '';
+  searchPage = 1;
+  searchTotal = 0;
+  searchItems = [];
+  searchQuery = '';
   focusSearchInput();
   renderSearchResults();
 }
@@ -3768,7 +4382,11 @@ function scheduleSearchRender() {
   const query = (document.getElementById('articleSearchInput').value || '').trim();
   if (searchRequestController) searchRequestController.abort();
   if (!query) return;
-  searchDebounceTimer = setTimeout(() => fetchServerSearchResults(query), 260);
+  searchPage = 1;
+  searchTotal = 0;
+  searchItems = [];
+  searchQuery = query;
+  searchDebounceTimer = setTimeout(() => fetchServerSearchResults(query, 1), 260);
 }
 
 function renderSearchResults() {
@@ -3780,61 +4398,93 @@ function renderSearchResults() {
   clearBtn.style.visibility = query ? 'visible' : 'hidden';
 
   if (!query) {
-    status.textContent = news.length ? `${news.length} 条新闻可搜索` : '';
+    status.textContent = '搜索全部历史文章';
     resultsEl.className = '';
     resultsEl.innerHTML = '<div class="search-empty"><div class="search-empty-icon">⌕</div><p>输入关键词搜索标题、来源或摘要</p></div>';
     return;
   }
 
-  const matches = searchArticles(query);
-  status.textContent = `找到 ${matches.length} 条与「${query}」相关的新闻`;
-  if (!matches.length) {
+  if (searchQuery !== query || !searchItems.length) {
+    const matches = searchArticles(query);
+    status.textContent = `当前页找到 ${matches.length} 条，正在搜索全部文章...`;
+    if (matches.length) {
+      resultsEl.className = 'search-results';
+      resultsEl.innerHTML = matches.map(articleItemHtml).join('');
+    } else {
+      resultsEl.className = '';
+      resultsEl.innerHTML = '<div class="search-empty"><div class="search-empty-icon">⌕</div><p>正在搜索...</p></div>';
+    }
+    return;
+  }
+  renderServerSearchItems();
+}
+
+function renderServerSearchItems() {
+  const status = document.getElementById('searchStatus');
+  const resultsEl = document.getElementById('searchResults');
+  status.textContent = `已显示 ${searchItems.length} / ${searchTotal} 条与「${searchQuery}」相关的新闻`;
+  if (!searchItems.length) {
     resultsEl.className = '';
     resultsEl.innerHTML = '<div class="search-empty"><div class="search-empty-icon">⌕</div><p>未找到相关文章</p></div>';
     return;
   }
   resultsEl.className = 'search-results';
-  resultsEl.innerHTML = matches.map(articleItemHtml).join('');
+  const more = searchItems.length < searchTotal
+    ? '<div style="display:flex;justify-content:center;padding:16px"><button class="page-btn" onclick="loadMoreSearchResults()">加载更多</button></div>'
+    : '';
+  resultsEl.innerHTML = searchItems.map(articleItemHtml).join('') + more;
 }
 
-async function fetchServerSearchResults(query) {
+async function fetchServerSearchResults(query, page = 1, { append = false } = {}) {
   const currentInput = document.getElementById('articleSearchInput');
   const status = document.getElementById('searchStatus');
-  const resultsEl = document.getElementById('searchResults');
   const requestSeq = ++searchRequestSeq;
   if (searchRequestController) searchRequestController.abort();
   searchRequestController = new AbortController();
   const localMatches = searchArticles(query);
-  status.textContent = `本地找到 ${localMatches.length} 条，正在搜索完整结果...`;
+  status.textContent = append
+    ? `正在加载更多结果...`
+    : `当前页找到 ${localMatches.length} 条，正在搜索全部文章...`;
   try {
-    const url = '/api/news?q=' + encodeURIComponent(query) + '&size=' + INITIAL_LOAD_SIZE + '&t=' + Date.now();
-    const resp = await fetch(url, { signal: searchRequestController.signal });
+    const params = new URLSearchParams();
+    params.set('q', query);
+    params.set('page', String(page));
+    params.set('size', String(PAGE_SIZE));
+    const resp = await fetch('/api/news?' + params.toString(), { signal: searchRequestController.signal });
     if (!resp.ok) throw new Error('search failed');
     const data = await resp.json();
+    if (data.error) throw new Error(data.error);
     const activeQuery = (currentInput.value || '').trim();
     if (requestSeq !== searchRequestSeq || activeQuery !== query) return;
     const items = data.items || [];
-    status.textContent = `找到 ${data.total ?? items.length} 条与「${query}」相关的新闻`;
-    if (!items.length) {
-      resultsEl.className = '';
-      resultsEl.innerHTML = '<div class="search-empty"><div class="search-empty-icon">⌕</div><p>未找到相关文章</p></div>';
-      return;
-    }
-    resultsEl.className = 'search-results';
-    resultsEl.innerHTML = items.map(articleItemHtml).join('');
+    searchQuery = query;
+    searchPage = page;
+    searchTotal = Number(data.total ?? items.length);
+    searchItems = append
+      ? searchItems.concat(items.filter(item => !searchItems.some(existing => existing.id === item.id)))
+      : items;
+    renderServerSearchItems();
   } catch (e) {
     if (e.name === 'AbortError') return;
     const activeQuery = (currentInput.value || '').trim();
     if (activeQuery === query) {
-      status.textContent = `本地找到 ${localMatches.length} 条与「${query}」相关的新闻`;
+      status.textContent = searchItems.length
+        ? `已显示 ${searchItems.length} 条结果，加载更多失败`
+        : `当前页找到 ${localMatches.length} 条，完整搜索暂时不可用`;
     }
   }
+}
+
+async function loadMoreSearchResults() {
+  if (!searchQuery || searchItems.length >= searchTotal) return;
+  await fetchServerSearchResults(searchQuery, searchPage + 1, { append: true });
 }
 
 function toggleSidebar() {
   const sidebar = document.getElementById('sidebar');
   const toggle = document.getElementById('sidebarToggle');
   const isOpen = sidebar.classList.toggle('open');
+  document.getElementById('sidebarBackdrop').classList.toggle('open', isOpen);
   toggle.classList.toggle('open', isOpen);
   toggle.textContent = isOpen ? '✕' : '☰';
   // Save preference
@@ -3842,22 +4492,13 @@ function toggleSidebar() {
 }
 
 function renderList() {
-  let filtered = filteredNews();
-  if (!filtered.length && news.length && filter !== 'all') {
-    filter = 'all';
-    filtered = news;
-    setTimeout(() => renderFilters(), 0);
-  }
+  const items = filteredNews();
   if (!authToken) currentPage = 1;
   const el = document.getElementById('list');
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const totalPages = Math.max(1, Math.ceil(currentTotal / PAGE_SIZE));
   if (currentPage > totalPages) currentPage = totalPages;
 
-  // Slice to current page
-  const start = (currentPage - 1) * PAGE_SIZE;
-  const items = filtered.slice(start, start + PAGE_SIZE);
-
-  document.getElementById('count').textContent = filtered.length + ' 条新闻';
+  document.getElementById('count').textContent = currentTotal + ' 条新闻';
 
   if (!items.length) {
     if (!news.length && lastNewsDiagnostics) {
@@ -3886,13 +4527,38 @@ function renderPagination(totalPages) {
   const el = document.getElementById('pagination');
   if (totalPages <= 1) { el.innerHTML = ''; return; }
   el.innerHTML = `
-    <button class="page-btn" onclick="goToPage(${currentPage - 1})" ${currentPage <= 1 ? 'disabled' : ''}>上一页</button>
+    <button class="page-btn" onclick="goToPage(${currentPage - 1})" ${currentPage <= 1 || pageNavigationPending ? 'disabled' : ''}>上一页</button>
     <span class="page-info">${currentPage} / ${totalPages}</span>
-    <button class="page-btn" onclick="goToPage(${currentPage + 1})" ${currentPage >= totalPages ? 'disabled' : ''}>下一页</button>
+    <button class="page-btn" onclick="goToPage(${currentPage + 1})" ${currentPage >= totalPages || pageNavigationPending ? 'disabled' : ''}>下一页</button>
   `;
 }
 
-function goToPage(page) {
+function setPageNavigationPending(isPending) {
+  pageNavigationPending = isPending;
+  const totalPages = Math.max(1, Math.ceil(currentTotal / PAGE_SIZE));
+  renderPagination(totalPages);
+}
+
+function releasePageTransitionLock(list) {
+  if (!list) return;
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      list.style.minHeight = '';
+      list.classList.remove('page-transitioning');
+    });
+  });
+}
+
+function applyPageDuringScroll(data, page, activeFilter) {
+  const list = document.getElementById('list');
+  if (!list) return null;
+  list.style.minHeight = Math.ceil(list.getBoundingClientRect().height) + 'px';
+  list.classList.add('page-transitioning');
+  applyNewsPage(data, page, activeFilter, { animate: true, preserveDom: true });
+  return list;
+}
+
+async function goToPage(page) {
   if (!authToken) {
     showToast('请先登录');
     showAuth();
@@ -3900,28 +4566,180 @@ function goToPage(page) {
   }
   // Preview users: no pagination
   if (authUser && authUser.role === 'preview') return;
-  const filtered = filteredNews();
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const totalPages = Math.max(1, Math.ceil(currentTotal / PAGE_SIZE));
   if (page < 1 || page > totalPages) return;
-  currentPage = page;
-  renderList();
-  scrollToCurrentTop();
+  rememberCurrentListHistory();
+  const activeFilter = filter;
+  const navigationSeq = ++pageNavigationSequence;
+  let transitionList = null;
+  setPageNavigationPending(true);
+  try {
+    const data = await preparePageNavigation(page, activeFilter);
+    if (!data || navigationSeq !== pageNavigationSequence || activeFilter !== filter) return;
+    let pageApplied = false;
+    programmaticScrollUntil = Date.now() + 1200;
+    await scrollPageToTop({
+      onNearTop: () => {
+        if (pageApplied || navigationSeq !== pageNavigationSequence || activeFilter !== filter) return;
+        pageApplied = true;
+        transitionList = applyPageDuringScroll(data, page, activeFilter);
+      },
+    });
+    if (!pageApplied || navigationSeq !== pageNavigationSequence || activeFilter !== filter) return;
+    stabilizePageTop();
+    syncListUrl({ push: true });
+    scheduleAdjacentPagePrefetch(page, activeFilter, Number(data.total || 0));
+  } finally {
+    if (navigationSeq === pageNavigationSequence) setPageNavigationPending(false);
+    releasePageTransitionLock(transitionList);
+  }
 }
 
-function scrollToCurrentTop() {
-  window.scrollTo({ top: 0, behavior: 'smooth' });
+function waitForScrollTop(timeout = 700) {
+  if (window.scrollY <= 4) return Promise.resolve();
+  return new Promise(resolve => {
+    const startedAt = performance.now();
+    const check = () => {
+      if (window.scrollY <= 4 || performance.now() - startedAt >= timeout) {
+        resolve();
+        return;
+      }
+      requestAnimationFrame(check);
+    };
+    requestAnimationFrame(check);
+  });
 }
 
-async function goHome() {
+function scrollPageToTop({ onNearTop, auto = false } = {}) {
+  const startY = window.scrollY || document.documentElement.scrollTop || 0;
+  let nearTopApplied = false;
+  const applyNearTop = () => {
+    if (nearTopApplied) return;
+    nearTopApplied = true;
+    if (typeof onNearTop === 'function') onNearTop();
+  };
+  if (startY <= 4) {
+    applyNearTop();
+    return Promise.resolve(true);
+  }
+  const reduceMotion = window.matchMedia
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduceMotion) {
+    window.scrollTo(0, 0);
+    applyNearTop();
+    return Promise.resolve(true);
+  }
+  if (activeScrollMotion) activeScrollMotion.cancelled = true;
+  const motion = { auto, cancelled: false };
+  activeScrollMotion = motion;
+  const duration = Math.min(640, Math.max(340, 300 + startY * 0.055));
+  return new Promise(resolve => {
+    const startedAt = performance.now();
+    const step = now => {
+      if (motion.cancelled) {
+        if (activeScrollMotion === motion) activeScrollMotion = null;
+        resolve(false);
+        return;
+      }
+      const progress = Math.min(1, (now - startedAt) / duration);
+      const eased = 1 - Math.pow(1 - progress, 4);
+      const remaining = Math.round(startY * (1 - eased));
+      window.scrollTo(0, remaining);
+      if (progress >= 0.75 || remaining <= PAGE_SWITCH_TOP_THRESHOLD) applyNearTop();
+      if (progress < 1) {
+        requestAnimationFrame(step);
+      } else {
+        applyNearTop();
+        window.scrollTo(0, 0);
+        if (activeScrollMotion === motion) activeScrollMotion = null;
+        resolve(true);
+      }
+    };
+    requestAnimationFrame(step);
+  });
+}
+
+function stabilizePageTop() {
+  window.scrollTo(0, 0);
+  requestAnimationFrame(() => {
+    window.scrollTo(0, 0);
+    requestAnimationFrame(() => window.scrollTo(0, 0));
+  });
+}
+
+async function showHomepageAfterScroll() {
+  if (filter === 'all' && currentPage === 1) return true;
+  const previousFilter = filter;
+  const previousPage = currentPage;
+  filter = 'all';
+  currentPage = 1;
+  if (pendingLatestPage) {
+    applyNewsPage(pendingLatestPage, 1, 'all', { animate: true, preserveDom: true });
+    pendingLatestPage = null;
+    pendingNewArticleCount = 0;
+    return true;
+  }
+  const loaded = await loadNewsPage(1, {
+    activeFilter: 'all',
+    useCache: true,
+    userInitiated: true,
+    animate: true,
+  });
+  if (!loaded) {
+    filter = previousFilter;
+    currentPage = previousPage;
+    renderFilters();
+  }
+  return loaded;
+}
+
+async function refreshHomepage() {
   if (!authToken || (authUser && authUser.role === 'preview')) {
-    showToast('🔒 请先登录后使用');
+    triggerRefresh();
     return;
   }
-  currentPage = 1;
-  selectFilter('all');
-  // Fire refresh asynchronously — don't block scrollTo
-  triggerRefresh();
-  window.scrollTo({ top: 0, behavior: 'smooth' });
+  if (refreshInProgress) return;
+  setRefreshRunning(true);
+  showToast('🔄 正在后台抓取...');
+  programmaticScrollUntil = Date.now() + 800;
+  let targetData = null;
+  let nearTop = false;
+  let applied = false;
+  const applyTarget = () => {
+    if (applied || !nearTop || !targetData) return;
+    applied = true;
+    filter = 'all';
+    currentPage = 1;
+    applyNewsPage(targetData, 1, 'all', { animate: true, preserveDom: true });
+    pendingLatestPage = null;
+    pendingNewArticleCount = 0;
+    hideNewArticlesPrompt();
+    syncListUrl({ replace: true });
+  };
+  const targetPromise = (pendingLatestPage
+    ? Promise.resolve(pendingLatestPage)
+    : preparePageNavigation(1, 'all'))
+    .then(data => {
+      targetData = data;
+      applyTarget();
+      return data;
+    });
+  const scrollPromise = scrollPageToTop({
+    onNearTop: () => {
+      nearTop = true;
+      applyTarget();
+    },
+  });
+  const [targetDataResult] = await Promise.all([targetPromise, scrollPromise]);
+  nearTop = true;
+  applyTarget();
+  if (!targetDataResult || !applied) {
+    setRefreshRunning(false);
+    showToast('❌ 刷新失败，请稍后重试');
+    return;
+  }
+  stabilizePageTop();
+  await triggerRefresh({ stateAlreadySet: true, showStart: false });
 }
 
 function articleDetailErrorText(e) {
@@ -3964,7 +4782,16 @@ function syncArticleHistory(id, date) {
   if (!shortDate) return;
   const articleHash = '#/article/' + shortDate + '-' + id;
   if (usesMobileArticleNavigation()) {
-    history.replaceState({ raynewsMobileArticle: true }, '', articleHash);
+    if (location.hash === articleHash) {
+      if (history.state && history.state.raynewsMobileArticle) {
+        history.replaceState({ raynewsMobileArticle: true }, '', articleHash);
+      } else {
+        history.replaceState({ raynewsHome: true }, '', window.location.pathname + window.location.search);
+        history.pushState({ raynewsMobileArticle: true }, '', articleHash);
+      }
+    } else {
+      history.pushState({ raynewsMobileArticle: true }, '', articleHash);
+    }
     return;
   }
   if (location.hash === articleHash) {
@@ -3974,12 +4801,55 @@ function syncArticleHistory(id, date) {
     }
     return;
   }
+  if (history.state && history.state.raynewsArticle) {
+    history.replaceState({ raynewsArticle: true }, '', articleHash);
+    return;
+  }
   history.pushState({ raynewsArticle: true }, '', articleHash);
+}
+
+function rememberArticleReturnState(id) {
+  const searchOpen = document.getElementById('searchOverlay').classList.contains('open');
+  const card = document.querySelector(`#list .item[data-id="${id}"]`);
+  savedArticleListState = {
+    id: Number(id),
+    scrollY: Math.round(window.scrollY || 0),
+    cardTop: card ? card.getBoundingClientRect().top : null,
+    fromSearch: searchOpen,
+    searchScrollTop: document.getElementById('searchBody').scrollTop,
+  };
+  if (!searchOpen) rememberCurrentListHistory();
+}
+
+function restoreArticleReturnState() {
+  const state = savedArticleListState;
+  savedArticleListState = null;
+  if (!state) return;
+  if (state.fromSearch && document.getElementById('searchOverlay').classList.contains('open')) {
+    requestAnimationFrame(() => {
+      document.getElementById('searchBody').scrollTop = state.searchScrollTop;
+    });
+    return;
+  }
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      const card = document.querySelector(`#list .item[data-id="${state.id}"]`);
+      if (card && state.cardTop !== null) {
+        window.scrollBy(0, card.getBoundingClientRect().top - state.cardTop);
+      } else {
+        window.scrollTo(0, state.scrollY);
+      }
+      rememberCurrentListHistory();
+    });
+  });
 }
 
 function openArticle(id) {
   const n = news.find(x => x.id === id);
   const wrap = document.getElementById('articleWrap');
+  if (!document.getElementById('overlay').classList.contains('open')) {
+    rememberArticleReturnState(id);
+  }
 
   // Reset favorite button
   const favBtn = document.getElementById('favBtn');
@@ -4217,16 +5087,15 @@ function shareArticle() {
 
 let _closingOverlay = false;
 
-function closeArticle(fromHistoryNavigation = false) {
+function closeArticle(fromHistoryNavigation = false, forceInAppNavigation = false) {
   if (_closingOverlay) return;
   const overlay = document.getElementById('overlay');
   if (!overlay.classList.contains('open')) return;
-  const mobileNavigation = usesMobileArticleNavigation();
+  const mobileNavigation = forceInAppNavigation || usesMobileArticleNavigation();
   if (
-    !mobileNavigation
-    && !fromHistoryNavigation
+    !fromHistoryNavigation
     && history.state
-    && history.state.raynewsArticle
+    && (history.state.raynewsArticle || history.state.raynewsMobileArticle)
   ) {
     history.back();
     return;
@@ -4244,8 +5113,34 @@ function closeArticle(fromHistoryNavigation = false) {
   }
   // Apply queued changes by reusing existing cards; never blank the homepage on return.
   flushPendingListUpdate();
+  restoreArticleReturnState();
   _closingOverlay = false;
 }
+
+function closeArticleFromButton() {
+  closeArticle(false, navigator.maxTouchPoints > 0);
+}
+
+let articleBackTouchStart = null;
+const backBtn = document.getElementById('backBtn');
+backBtn.addEventListener('touchstart', e => {
+  const touch = e.changedTouches[0];
+  articleBackTouchStart = touch ? { x: touch.clientX, y: touch.clientY } : null;
+  e.stopPropagation();
+}, { passive: true });
+backBtn.addEventListener('touchend', e => {
+  e.stopPropagation();
+  const touch = e.changedTouches[0];
+  const start = articleBackTouchStart;
+  articleBackTouchStart = null;
+  if (!touch || !start) return;
+  if (Math.abs(touch.clientX - start.x) > 12 || Math.abs(touch.clientY - start.y) > 12) return;
+  e.preventDefault();
+  closeArticleFromButton();
+}, { passive: false });
+backBtn.addEventListener('touchcancel', () => {
+  articleBackTouchStart = null;
+}, { passive: true });
 
 // Handle hash-based article links
 function handleHash() {
@@ -4263,14 +5158,11 @@ document.addEventListener('click', e => {
   const toggle = document.getElementById('sidebarToggle');
   if (!sidebar.classList.contains('open')) return;
   if (!sidebar.contains(e.target) && !toggle.contains(e.target)) {
-    sidebar.classList.remove('open');
-    toggle.classList.remove('open');
-    toggle.textContent = '☰';
-    try { localStorage.setItem('raynews_sidebar', '0'); } catch(e) {}
+    closeSidebar();
   }
 });
 
-document.getElementById('backBtn').addEventListener('click', closeArticle);
+document.getElementById('backBtn').addEventListener('click', closeArticleFromButton);
 document.getElementById('lb').addEventListener('click', closeLightbox);
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
@@ -4366,6 +5258,31 @@ function badgeStyle(src) {
   BADGE_CACHE[src] = s;
   return s;
 }
+
+function resetMobileColdStartScroll() {
+  if (!usesMobileArticleNavigation()) return;
+  if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+  stabilizePageTop();
+}
+
+async function bootstrapNews() {
+  await loadSourceCategories();
+  renderFilters();
+  const todayCountPromise = refreshTodayArticleCount();
+  const initialState = listStateFromUrl();
+  filter = initialState.activeFilter;
+  currentPage = initialState.page;
+  await loadNewsPage(initialState.page, {
+    activeFilter: initialState.activeFilter,
+    useCache: true,
+    forceNetwork: true,
+  });
+  await todayCountPromise;
+  renderFilters();
+  syncListUrl({ replace: true });
+  resetMobileColdStartScroll();
+}
+
 // Initial load
 applyThemePreference(localStorage.getItem('raynews_theme') || 'system');
 if (window.matchMedia) {
@@ -4374,11 +5291,13 @@ if (window.matchMedia) {
   });
 }
 loadAuth();
-loadDataWithRetry();
+resetMobileColdStartScroll();
+bootstrapNews();
 // Restore sidebar preference
 try {
   if (localStorage.getItem('raynews_sidebar') === '1') {
     document.getElementById('sidebar').classList.add('open');
+    document.getElementById('sidebarBackdrop').classList.add('open');
     document.getElementById('sidebarToggle').classList.add('open');
     document.getElementById('sidebarToggle').textContent = '✕';
   }
@@ -4389,6 +5308,11 @@ window.addEventListener('hashchange', () => {
   if (match) handleHash();
   else closeArticle(true);
 });
+window.addEventListener('popstate', () => {
+  if (location.hash) return;
+  closeArticle(true);
+  restoreListStateFromUrl({ restoreScroll: true });
+});
 window.addEventListener('keydown', e => {
   if (e.key === 'Escape' && document.getElementById('searchOverlay').classList.contains('open')) {
     closeSearch();
@@ -4398,14 +5322,26 @@ window.addEventListener('keydown', e => {
 setTimeout(handleHash, 200);
 // Auto-refresh: check for new articles every 60 seconds (incremental)
 setInterval(function() {
-  if (news.length > 0) {
-    const maxTs = Math.max(...news.map(n => n.timestamp));
-    loadSince(maxTs);
-  }
+  const cursor = latestKnownTimestamp || latestNewsTimestamp();
+  if (cursor > 0) loadSince(cursor);
 }, 60000);
+setInterval(showLatestAfterIdle, 15000);
 setInterval(function() {
   if (news.length > 0) pollTitleUpdates();
 }, 12000);
+
+['pointerdown', 'touchstart', 'keydown', 'wheel'].forEach(eventName => {
+  window.addEventListener(eventName, markUserActivity, { passive: true });
+});
+window.addEventListener('scroll', markUserActivity, { passive: true });
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) {
+    pageVisibleSince = Date.now();
+    lastUserActivityAt = Date.now();
+    const cursor = latestKnownTimestamp || latestNewsTimestamp();
+    if (cursor > 0) loadSince(cursor);
+  }
+});
 // ═══ Mobile: swipe-to-go-back on article overlay ════════
 (function() {
   const overlay = document.getElementById('overlay');
@@ -4423,6 +5359,7 @@ setInterval(function() {
     if (!usesMobileArticleNavigation()) return;
     if (document.getElementById('lb').classList.contains('open')) return;
     if (!overlay.classList.contains('open')) return;
+    if (e.target.closest('#backBtn')) return;
     sx = e.touches[0].clientX;
     sy = e.touches[0].clientY;
     swiping = false;
@@ -4450,13 +5387,17 @@ setInterval(function() {
 
   overlay.addEventListener('touchend', () => {
     if (swiping) {
-      // Kill transition first to prevent snap-back animation (拖影修复)
-      overlay.style.transition = 'none';
-      overlay.style.transform = '';
-      overlay.style.opacity = '';
-      void overlay.getBoundingClientRect(); // flush style changes
-      overlay.style.transition = ''; // restore CSS transition for close animation
-      closeArticle();
+      // Smooth exit: animate from drag position to closed, no snap-back jitter
+      overlay.style.transition = 'transform .28s cubic-bezier(.22,.61,.36,1), opacity .28s cubic-bezier(.22,.61,.36,1)';
+      overlay.style.transform = 'translateX(100%)';
+      overlay.style.opacity = '0';
+      overlay.addEventListener('transitionend', () => {
+        overlay.style.transition = '';
+        overlay.style.transform = '';
+        overlay.style.opacity = '';
+        closeArticle();
+        resetArticleSwipe();
+      }, { once: true });
     } else if (edgeCandidate) {
       overlay.style.transition = 'transform .18s ease, opacity .18s ease';
       overlay.style.transform = '';
@@ -4470,54 +5411,6 @@ setInterval(function() {
   overlay.addEventListener('touchcancel', resetArticleSwipe, { passive: true });
 })();
 
-// ═══ Mobile: pull-to-refresh on homepage ═════════════════
-(function() {
-  const indicator = document.getElementById('pullIndicator');
-  let startY = 0, pulling = false, released = false;
-  let pullDist = 0;
-
-  document.addEventListener('touchstart', e => {
-    if (document.getElementById('overlay').classList.contains('open')) return;
-    if (document.getElementById('searchOverlay').classList.contains('open')) return;
-    if (window.scrollY > 0) return;
-    if (authUser && authUser.role === 'preview') return;
-    if (e.target.closest('.sidebar') || e.target.closest('.sidebar-toggle') || e.target.closest('.refresh-btn') || e.target.closest('.page-btn')) return;
-    startY = e.touches[0].clientY;
-    pulling = true;
-    released = false;
-    pullDist = 0;
-  }, { passive: true });
-
-  document.addEventListener('touchmove', e => {
-    if (!pulling || released) return;
-    const dy = e.touches[0].clientY - startY;
-    pullDist = dy;
-    if (dy > 0 && window.scrollY === 0) {
-      const pullPx = Math.min(dy * 0.4, 25);
-      indicator.style.top = (pullPx - 40) + 'px';
-      indicator.style.opacity = Math.min(dy / 100, 0.8);
-      indicator.innerHTML = dy > 50 ? '↓ 释放刷新' : '↓ 下拉刷新';
-    }
-  }, { passive: true });
-
-  document.addEventListener('touchend', () => {
-    if (pulling && !released) {
-      indicator.style.transition = 'top 0.25s, opacity 0.25s';
-      indicator.style.top = '-40px';
-      indicator.style.opacity = '0';
-      setTimeout(() => { indicator.style.transition = ''; }, 300);
-      pulling = false;
-      if (pullDist > 60) {
-        released = true;
-        indicator.innerHTML = '<span class="spin"></span>刷新中...';
-        indicator.style.top = '0';
-        indicator.style.opacity = '1';
-        indicator.style.transition = 'top 0.2s, opacity 0.2s';
-        triggerRefresh();
-      }
-    }
-  }, { passive: true });
-})();
 </script>
 <script>if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js',{scope:'/'})}</script>
 </body>

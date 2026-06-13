@@ -127,16 +127,16 @@ def test_article_navigation_splits_mobile_and_desktop_history_modes():
     sync_end = html.index("function openArticle(id)", sync_start)
     sync_block = html[sync_start:sync_end]
     assert "if (usesMobileArticleNavigation())" in sync_block
-    assert "history.replaceState({ raynewsMobileArticle: true }" in sync_block
+    assert "history.pushState({ raynewsMobileArticle: true }" in sync_block
     assert "history.pushState({ raynewsArticle: true }" in html
     assert "history.replaceState({ raynewsHome: true }" in html
-    assert "function closeArticle(fromHistoryNavigation = false)" in html
-    close_start = html.index("function closeArticle(fromHistoryNavigation = false)")
+    assert "function closeArticle(fromHistoryNavigation = false, forceInAppNavigation = false)" in html
+    close_start = html.index("function closeArticle(fromHistoryNavigation = false, forceInAppNavigation = false)")
     close_end = html.index("// Handle hash-based article links", close_start)
     close_block = html[close_start:close_end]
-    assert "const mobileNavigation = usesMobileArticleNavigation();" in close_block
-    assert "!mobileNavigation" in close_block
+    assert "const mobileNavigation = forceInAppNavigation || usesMobileArticleNavigation();" in close_block
     assert "history.state.raynewsArticle" in close_block
+    assert "history.state.raynewsMobileArticle" in close_block
     assert "history.back();" in close_block
     assert "history.replaceState({ raynewsHome: true }" in close_block
     assert "if (!overlay.classList.contains('open')) return;" in html
@@ -147,7 +147,7 @@ def test_mobile_edge_swipe_claims_navigation_at_touch_start():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     swipe_marker = html.index("let sx = 0, sy = 0, swiping = false")
     swipe_start = html.rindex("(function() {", 0, swipe_marker)
-    swipe_end = html.index("(function() {", swipe_marker + 1)
+    swipe_end = html.index("</script>", swipe_marker)
     swipe_block = html[swipe_start:swipe_end]
 
     assert "if (!usesMobileArticleNavigation()) return;" in swipe_block
@@ -157,34 +157,351 @@ def test_mobile_edge_swipe_claims_navigation_at_touch_start():
     assert "closeArticle();" in swipe_block
 
 
+def test_mobile_back_button_is_excluded_from_edge_swipe_and_handles_touch_directly():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    swipe_marker = html.index("let sx = 0, sy = 0, swiping = false")
+    swipe_start = html.rindex("(function() {", 0, swipe_marker)
+    swipe_end = html.index("</script>", swipe_marker)
+    swipe_block = html[swipe_start:swipe_end]
+    assert "if (e.target.closest('#backBtn')) return;" in swipe_block
+    assert "backBtn.addEventListener('touchstart'" in html
+    assert "backBtn.addEventListener('touchend'" in html
+    assert "backBtn.addEventListener('touchcancel'" in html
+    assert "articleBackTouchStart = null;" in html
+    assert "e.stopPropagation();" in html
+
+
 def test_article_back_and_refresh_do_not_replace_the_whole_list():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
-    close_start = html.index("function closeArticle(fromHistoryNavigation = false)")
+    close_start = html.index("function closeArticle(fromHistoryNavigation = false, forceInAppNavigation = false)")
     close_end = html.index("// Handle hash-based article links", close_start)
     close_block = html[close_start:close_end]
-    refresh_start = html.index("async function triggerRefresh()")
+    refresh_start = html.index("async function triggerRefresh(")
     refresh_end = html.index("function setRefreshRunning", refresh_start)
     refresh_block = html[refresh_start:refresh_end]
 
-    assert "function reconcileVisibleArticles()" in html
+    assert "function reconcileVisibleArticles({ animate = false } = {})" in html
     assert "function flushPendingListUpdate()" in html
     assert "flushPendingListUpdate();" in close_block
     assert "renderList();" not in close_block
-    assert "const refreshCursor = latestNewsTimestamp();" in refresh_block
+    assert "const refreshCursor = latestKnownTimestamp || latestNewsTimestamp();" in refresh_block
     assert "await loadSince(refreshCursor, { forceApply: true });" in refresh_block
     assert "const listResp = await fetch('/api/news?size='" not in refresh_block
 
 
 def test_blocking_list_loading_is_only_used_when_no_articles_are_available():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
-    load_start = html.index("async function loadData(")
-    load_end = html.index("async function loadSince", load_start)
+    load_start = html.index("async function loadNewsPage(")
+    load_end = html.index("function renderFilters()", load_start)
     load_block = html[load_start:load_end]
 
-    assert "const showBlockingLoader = news.length === 0;" in load_block
-    assert "if (showBlockingLoader)" in load_block
-    assert "reconcileVisibleArticles();" in load_block
-    assert "indicator.innerHTML = '<span class=\"spin\"></span>刷新中...';" in html
+    assert "if (!cacheApplied && !news.length) renderColdStartSkeleton();" in load_block
+    assert "if (!cacheApplied && !news.length) renderColdStartError(message);" in load_block
+    assert "list.innerHTML =" not in load_block
+
+
+def test_news_list_uses_paged_cache_first_loading_without_full_history_requests():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert "const INITIAL_LOAD_SIZE = 99999" not in html
+    assert "size=99999" not in html
+    assert "const PAGE_SIZE = 30;" in html
+    assert "function openNewsCache()" in html
+    assert "async function readCachedNewsPage" in html
+    assert "async function writeCachedNewsPage" in html
+    assert "async function loadNewsPage(" in html
+    assert "await readCachedNewsPage" in html
+    assert "pageRequestController.abort()" in html
+    assert "if (data.error) throw new Error(data.error);" in html
+    load_start = html.index("async function loadNewsPage(")
+    load_end = html.index("function renderFilters()", load_start)
+    assert "list.innerHTML =" not in html[load_start:load_end]
+
+
+def test_idle_refresh_only_returns_to_latest_after_five_minutes_and_new_articles():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert "const IDLE_LATEST_DELAY_MS = 5 * 60 * 1000;" in html
+    assert "function markUserActivity(event)" in html
+    assert "function hasBlockingOverlayOpen()" in html
+    assert "async function showLatestAfterIdle()" in html
+    idle_start = html.index("async function showLatestAfterIdle()")
+    idle_end = html.index("function scheduleAdjacentPagePrefetch", idle_start)
+    idle_block = html[idle_start:idle_end]
+    assert "pendingNewArticleCount" in idle_block
+    assert "hasBlockingOverlayOpen()" in idle_block
+    assert "scrollPageToTop({ onNearTop: applyLatest, auto: true })" in idle_block
+    assert "if (!completed) return;" in idle_block
+    assert "currentPage = 1;" in idle_block
+    assert "filter = 'all';" in idle_block
+    assert "document.addEventListener('visibilitychange'" in html
+    assert "loadDataWithRetry();" not in html
+
+
+def test_service_worker_normalizes_api_cache_keys():
+    sw = (ROOT / "frontend" / "sw.js").read_text(encoding="utf-8")
+    assert "function normalizedApiRequest(request)" in sw
+    assert "url.searchParams.delete('t');" in sw
+    assert "cache.match(cacheRequest)" in sw
+    assert "cache.put(cacheRequest, network.clone())" in sw
+
+
+def test_search_uses_server_side_pagination_without_limiting_database_scope():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert "let searchPage = 1;" in html
+    assert "let searchTotal = 0;" in html
+    assert "async function fetchServerSearchResults(query, page = 1" in html
+    assert "async function loadMoreSearchResults()" in html
+    assert "params.set('q', query);" in html
+    assert "params.set('page', String(page));" in html
+    assert "params.set('size', String(PAGE_SIZE));" in html
+    assert "加载更多" in html
+
+
+def test_paged_list_mutations_keep_server_total_and_new_article_prompt():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    delete_start = html.index("async function deleteArticlesByIds(ids)")
+    delete_end = html.index("async function deleteSourceArticle", delete_start)
+    delete_block = html[delete_start:delete_end]
+    since_start = html.index("async function loadSince(")
+    since_end = html.index("function renderFilters()", since_start)
+    since_block = html[since_start:since_end]
+    assert "currentTotal = Math.max(0, currentTotal - deleted);" in delete_block
+    assert "document.getElementById('count').textContent = currentTotal + ' 条新闻';" in delete_block
+    assert "showNewArticlesPrompt();" in since_block
+
+
+def test_filter_switch_rolls_back_when_target_page_cannot_load():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    start = html.index("async function selectFilter(value)")
+    end = html.index("function filteredNews()", start)
+    block = html[start:end]
+    assert "const previousFilter = filter;" in block
+    assert "const previousPage = currentPage;" in block
+    assert "const loaded = await loadNewsPage" in block
+    assert "filter = previousFilter;" in block
+    assert "currentPage = previousPage;" in block
+
+
+def test_cached_page_background_calibration_reuses_existing_cards():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    apply_start = html.index("function applyNewsPage(")
+    apply_end = html.index("async function fetchNewsPage", apply_start)
+    apply_block = html[apply_start:apply_end]
+    load_start = html.index("async function loadNewsPage(")
+    load_end = html.index("// Full snapshot compatibility wrapper", load_start)
+    load_block = html[load_start:load_end]
+    assert "preserveDom = false" in apply_block
+    assert "if (preserveDom" in apply_block
+    assert "reconcileVisibleArticles({ animate });" in apply_block
+    assert "preserveDom: cacheApplied" in load_block
+    assert "const showPageProgress = !cacheApplied && userInitiated;" in load_block
+
+
+def test_all_home_refresh_controls_use_one_shared_first_page_flow():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert 'class="logo" onclick="refreshHomepage()"' in html
+    assert 'id="refreshBtn" onclick="refreshHomepage()"' in html
+    assert 'id="scrollTopBtn" onclick="refreshHomepage()"' in html
+    start = html.index("async function refreshHomepage()")
+    end = html.index("function articleDetailErrorText", start)
+    block = html[start:end]
+    assert "setRefreshRunning(true);" in block
+    assert "preparePageNavigation(1, 'all')" in block
+    assert "scrollPageToTop({" in block
+    assert "applyNewsPage(targetData, 1, 'all', { animate: true, preserveDom: true });" in block
+    assert "await triggerRefresh({ stateAlreadySet: true, showStart: false });" in block
+
+
+def test_manual_refresh_has_no_unused_silent_start_mode():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    start = html.index("async function triggerRefresh(")
+    end = html.index("function setRefreshRunning(", start)
+    block = html[start:end]
+    assert "async function triggerRefresh({ stateAlreadySet = false, showStart = true } = {})" in block
+    assert "silentStart" not in block
+    assert "if (showStart) showToast('🔄 正在后台抓取...');" in block
+
+
+def test_pagination_uses_double_buffer_and_switches_during_scroll():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    start = html.index("async function goToPage(page)")
+    end = html.index("function waitForScrollTop(", start)
+    block = html[start:end]
+    assert "const data = await preparePageNavigation(page, activeFilter);" in block
+    assert block.index("const data = await preparePageNavigation") < block.index("scrollPageToTop(")
+    assert "onNearTop:" in block
+    assert "applyPageDuringScroll(data, page, activeFilter)" in block
+    assert "setPageNavigationPending(true);" in block
+    assert "setPageNavigationPending(false);" in block
+    assert "async function preparePageNavigation(" in html
+
+
+def test_adjacent_pages_are_buffered_immediately_and_cover_images_are_warmed():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert "const PAGE_MEMORY_BUFFER_LIMIT = 3;" in html
+    assert "const PAGE_COVER_PRELOAD_LIMIT = 8;" in html
+    assert "const pageMemoryBuffer = new Map();" in html
+    assert "const pagePrefetchPromises = new Map();" in html
+    assert "function rememberBufferedPage(" in html
+    assert "function warmPageCoverImages(" in html
+    prefetch_start = html.index("async function prefetchNewsPage(")
+    prefetch_end = html.index("function cancelActiveAutoMotion()", prefetch_start)
+    prefetch_block = html[prefetch_start:prefetch_end]
+    assert "pagePrefetchPromises.get(key)" in prefetch_block
+    assert "pagePrefetchPromises.set(key, task)" in prefetch_block
+    assert "pagePrefetchPromises.delete(key)" in prefetch_block
+    prepare_start = html.index("async function preparePageNavigation(")
+    prepare_end = html.index("// Full snapshot compatibility wrapper", prepare_start)
+    prepare_block = html[prepare_start:prepare_end]
+    assert "const pendingPrefetch = pagePrefetchPromises.get(key);" in prepare_block
+    assert "const prefetched = await pendingPrefetch;" in prepare_block
+    start = html.index("function scheduleAdjacentPagePrefetch(")
+    end = html.index("async function loadNewsPage(", start)
+    block = html[start:end]
+    assert "prefetchNewsPage(page - 1, activeFilter);" in block
+    assert "prefetchNewsPage(page + 1, activeFilter);" in block
+    assert "requestIdleCallback" not in block
+    assert "setTimeout(run" not in block
+
+
+def test_scroll_to_top_exposes_a_single_near_top_page_swap():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    start = html.index("function scrollPageToTop(")
+    end = html.index("function stabilizePageTop()", start)
+    block = html[start:end]
+    assert "onNearTop" in block
+    assert "progress >= 0.75" in block
+    assert "remaining <= PAGE_SWITCH_TOP_THRESHOLD" in block
+    assert "nearTopApplied" in block
+    assert "applyNearTop();" in block
+    assert "const duration = Math.min(640, Math.max(340" in block
+    assert "motion.cancelled" in block
+
+
+def test_page_swap_locks_list_height_and_disables_scroll_anchoring():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert ".list.page-transitioning{overflow-anchor:none" in html
+    start = html.index("function applyPageDuringScroll(")
+    end = html.index("async function goToPage(", start)
+    block = html[start:end]
+    assert "list.style.minHeight" in block
+    assert "list.classList.add('page-transitioning')" in block
+    assert "applyNewsPage(data, page, activeFilter" in block
+    go_start = html.index("async function goToPage(", end)
+    go_end = html.index("function waitForScrollTop(", go_start)
+    assert "releasePageTransitionLock(transitionList);" in html[go_start:go_end]
+
+
+def test_mobile_pull_to_refresh_is_not_registered():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert 'id="pullIndicator"' not in html
+    assert "Mobile: pull-to-refresh on homepage" not in html
+    assert "function resetPullIndicator()" not in html
+
+
+def test_mobile_cold_start_resets_scroll_before_and_after_bootstrap():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert "function resetMobileColdStartScroll()" in html
+    start = html.index("async function bootstrapNews()")
+    end = html.index("// Initial load", start)
+    block = html[start:end]
+    assert "resetMobileColdStartScroll();" in block
+    initial_start = html.index("// Initial load")
+    initial_end = html.index("// Restore sidebar preference", initial_start)
+    initial_block = html[initial_start:initial_end]
+    assert initial_block.index("resetMobileColdStartScroll();") < initial_block.index("bootstrapNews();")
+    assert "history.scrollRestoration = 'manual';" in html
+    assert "pageshow" not in initial_block
+
+
+def test_desktop_scroll_to_top_uses_duration_controlled_animation():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    start = html.index("function scrollPageToTop(")
+    end = html.index("async function showHomepageAfterScroll()", start)
+    block = html[start:end]
+    assert "requestAnimationFrame(step)" in block
+    assert "Math.min(640, Math.max(340" in block
+    assert "startY * 0.055" in block
+    assert "prefers-reduced-motion" in block
+
+
+def test_article_history_keeps_only_one_desktop_article_entry():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    start = html.index("function syncArticleHistory(id, date)")
+    end = html.index("function openArticle(id)", start)
+    block = html[start:end]
+    assert "history.state && history.state.raynewsArticle" in block
+    assert "history.replaceState({ raynewsArticle: true }, '', articleHash);" in block
+    assert "history.pushState({ raynewsArticle: true }, '', articleHash);" in block
+
+
+def test_list_motion_reuses_cards_and_animates_insertions():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert "function captureArticleRects(list)" in html
+    assert "function animateArticleLayout(list, previousRects, newIds = new Set())" in html
+    assert "cubic-bezier(.22,.61,.36,1)" in html
+    assert "delay: Math.min(index, 6) * 40" in html
+    assert "prefersReducedMotion()" in html
+    assert "preserveDom: true" in html
+
+
+def test_new_article_prompt_and_idle_motion_are_cancellable():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert 'id="newArticlesPrompt"' in html
+    assert "function showNewArticlesPrompt()" in html
+    assert "function revealPendingLatest()" in html
+    assert "function cancelActiveAutoMotion()" in html
+    assert "if (!activeScrollMotion || !activeScrollMotion.auto) return;" in html
+    assert "if (!completed) return;" in html
+    assert "const atLatestTop = filter === 'all'" in html
+
+
+def test_list_filter_and_page_are_encoded_in_history_url():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert "function listUrlForState(activeFilter = filter, page = currentPage)" in html
+    assert "url.searchParams.set('category'" in html
+    assert "url.searchParams.set('source', group.label);" in html
+    assert "url.searchParams.set('page'" in html
+    assert "function restoreListStateFromUrl({ restoreScroll = false } = {})" in html
+    assert "window.addEventListener('popstate'" in html
+    assert "syncListUrl({ push: true });" in html
+
+
+def test_article_return_uses_card_anchor_and_preserves_search_scroll():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert "function rememberArticleReturnState(id)" in html
+    assert "cardTop: card ? card.getBoundingClientRect().top : null" in html
+    assert "searchScrollTop: document.getElementById('searchBody').scrollTop" in html
+    assert "function restoreArticleReturnState()" in html
+    assert "card.getBoundingClientRect().top - state.cardTop" in html
+    assert "restoreArticleReturnState();" in html
+
+
+def test_search_login_context_and_result_progress_are_explicit():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert "showAuth('search');" in html
+    assert "登录后才能搜索文章" in html
+    assert "context === 'search' ? 'none' : ''" in html
+    assert "if (nextAction === 'search') openSearch();" in html
+    assert "已显示 ${searchItems.length} / ${searchTotal} 条" in html
+
+
+def test_mobile_sidebar_and_header_touch_targets_are_explicit():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert 'id="sidebarBackdrop"' in html
+    assert "document.getElementById('sidebarBackdrop').classList.toggle('open', isOpen);" in html
+    assert "window.matchMedia('(max-width: 768px)').matches" in html
+    assert "@media(min-width:769px)" in html
+    assert ".sidebar-backdrop{display:none}" in html
+    assert ".header-right .icon-btn,.header-right .header-avatar{width:44px;height:44px" in html
+    assert ".header-right .refresh-btn{padding:3px 8px;font-size:10px}" in html
+
+
+def test_article_back_button_does_not_pass_click_event_as_history_state():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert "function closeArticleFromButton()" in html
+    assert "closeArticle(false, navigator.maxTouchPoints > 0);" in html
+    assert "addEventListener('click', closeArticleFromButton)" in html
+    assert "addEventListener('click', closeArticle);" not in html
 
 
 def test_legacy_admin_source_promotion_is_guarded_after_success():
