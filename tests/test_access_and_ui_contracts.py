@@ -147,7 +147,7 @@ def test_mobile_edge_swipe_claims_navigation_at_touch_start():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     swipe_marker = html.index("let sx = 0, sy = 0, swiping = false")
     swipe_start = html.rindex("(function() {", 0, swipe_marker)
-    swipe_end = html.index("(function() {", swipe_marker + 1)
+    swipe_end = html.index("</script>", swipe_marker)
     swipe_block = html[swipe_start:swipe_end]
 
     assert "if (!usesMobileArticleNavigation()) return;" in swipe_block
@@ -161,7 +161,7 @@ def test_mobile_back_button_is_excluded_from_edge_swipe_and_handles_touch_direct
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     swipe_marker = html.index("let sx = 0, sy = 0, swiping = false")
     swipe_start = html.rindex("(function() {", 0, swipe_marker)
-    swipe_end = html.index("(function() {", swipe_marker + 1)
+    swipe_end = html.index("</script>", swipe_marker)
     swipe_block = html[swipe_start:swipe_end]
     assert "if (e.target.closest('#backBtn')) return;" in swipe_block
     assert "backBtn.addEventListener('touchstart'" in html
@@ -196,7 +196,6 @@ def test_blocking_list_loading_is_only_used_when_no_articles_are_available():
     assert "if (!cacheApplied && !news.length) renderColdStartSkeleton();" in load_block
     assert "if (!cacheApplied && !news.length) renderColdStartError(message);" in load_block
     assert "list.innerHTML =" not in load_block
-    assert "indicator.innerHTML = '<span class=\"spin\"></span>刷新中...';" in html
 
 
 def test_news_list_uses_paged_cache_first_loading_without_full_history_requests():
@@ -294,29 +293,19 @@ def test_cached_page_background_calibration_reuses_existing_cards():
     assert "const showPageProgress = !cacheApplied && userInitiated;" in load_block
 
 
-def test_home_controls_scroll_immediately_then_use_shared_background_refresh():
+def test_all_home_refresh_controls_use_one_shared_first_page_flow():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
-    start = html.index("async function goHome()")
+    assert 'class="logo" onclick="refreshHomepage()"' in html
+    assert 'id="refreshBtn" onclick="refreshHomepage()"' in html
+    assert 'id="scrollTopBtn" onclick="refreshHomepage()"' in html
+    start = html.index("async function refreshHomepage()")
     end = html.index("function articleDetailErrorText", start)
     block = html[start:end]
     assert "await scrollPageToTop();" in block
     assert "await showHomepageAfterScroll();" in block
-    assert "triggerRefresh({ silentStart: true });" in block
-    assert "await selectFilter('all');" not in block
+    assert "triggerRefresh();" in block
     assert "async function showHomepageAfterScroll()" in html
     assert "function waitForScrollTop(" in html
-
-
-def test_header_refresh_scrolls_first_without_changing_the_active_page():
-    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
-    assert 'id="refreshBtn" onclick="refreshFromHeader()"' in html
-    start = html.index("async function refreshFromHeader()")
-    end = html.index("async function goHome()", start)
-    block = html[start:end]
-    assert "await scrollPageToTop();" in block
-    scroll_index = block.index("await scrollPageToTop();")
-    assert block.index("triggerRefresh();", scroll_index) > scroll_index
-    assert "showHomepageAfterScroll" not in block
 
 
 def test_pagination_scrolls_immediately_and_switches_only_after_reaching_top():
@@ -328,7 +317,30 @@ def test_pagination_scrolls_immediately_and_switches_only_after_reaching_top():
     assert "await scrollPageToTop();" in block
     assert "const data = await pagePromise;" in block
     assert block.index("await scrollPageToTop()") < block.index("applyNewsPage(data")
+    assert block.index("applyNewsPage(data") < block.index("stabilizePageTop();")
     assert "async function preparePageNavigation(" in html
+
+
+def test_mobile_pull_to_refresh_is_not_registered():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert 'id="pullIndicator"' not in html
+    assert "Mobile: pull-to-refresh on homepage" not in html
+    assert "function resetPullIndicator()" not in html
+
+
+def test_mobile_cold_start_resets_scroll_before_and_after_bootstrap():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert "function resetMobileColdStartScroll()" in html
+    start = html.index("async function bootstrapNews()")
+    end = html.index("// Initial load", start)
+    block = html[start:end]
+    assert "resetMobileColdStartScroll();" in block
+    initial_start = html.index("// Initial load")
+    initial_end = html.index("// Restore sidebar preference", initial_start)
+    initial_block = html[initial_start:initial_end]
+    assert initial_block.index("resetMobileColdStartScroll();") < initial_block.index("bootstrapNews();")
+    assert "history.scrollRestoration = 'manual';" in html
+    assert "pageshow" not in initial_block
 
 
 def test_desktop_scroll_to_top_uses_duration_controlled_animation():

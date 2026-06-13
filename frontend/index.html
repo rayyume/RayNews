@@ -250,11 +250,6 @@ a:hover{text-decoration:underline}
   .sidebar-toggle.open{left:180px}
 }
 
-/* ═══ Pull-to-refresh indicator ════════════════ */
-.pull-indicator{position:absolute;left:0;right:0;top:-40px;height:40px;display:flex;align-items:center;justify-content:center;font-size:13px;color:var(--text-3);font-weight:600;transition:opacity 0.2s;pointer-events:none}
-.pull-indicator .spin{display:inline-block;width:16px;height:16px;border:2px solid var(--text-3);border-top-color:var(--accent);border-radius:50%;margin-right:8px;animation:ptr-spin 0.6s linear infinite}
-@keyframes ptr-spin{to{transform:rotate(360deg)}}
-
 /* ═══ Responsive ══════════════════════════════════ */
 @media(max-width:640px){
   .item{padding:14px 16px}
@@ -469,7 +464,7 @@ body.body-scroll-lock{overflow:hidden!important}
 <div class="app">
   <header class="header">
     <div class="header-inner">
-      <div class="logo" onclick="goHome()" title="回到首页并刷新">
+      <div class="logo" onclick="refreshHomepage()" title="回到首页并刷新">
         <div class="logo-icon"><img src="/favicon-32x32.png?v=2" alt="RayNews"></div>
         <span>RayNews</span>
       </div>
@@ -478,7 +473,7 @@ body.body-scroll-lock{overflow:hidden!important}
         <button class="icon-btn daily-summary-btn" id="dailySummaryBtn" onclick="showDailySummary()" title="每日总结" aria-label="每日总结">✨</button>
         <span class="status-text"><span class="status-dot"></span>实时更新</span>
         <span class="hide-m" id="count"></span>
-        <button class="refresh-btn" id="refreshBtn" onclick="refreshFromHeader()"><span>刷新</span></button>
+        <button class="refresh-btn" id="refreshBtn" onclick="refreshHomepage()"><span>刷新</span></button>
       </div>
     </div>
     <div class="user-menu" id="userMenu">
@@ -516,7 +511,6 @@ body.body-scroll-lock{overflow:hidden!important}
   </div>
   <div class="pagination" id="pagination"></div>
   <div class="footer">RayNews - 👀open eyes to see the world. · 每 15 分钟更新 · {{FULL_BUILD_VERSION}} · <a href="https://github.com/rayyume/RayNews-Reader" target="_blank" rel="noopener" style="color:var(--text-3)">GitHub</a></div>
-  <div class="pull-indicator" id="pullIndicator"><span class="spin"></span>刷新中...</div>
 </div>
 
 <div class="search-overlay" id="searchOverlay" aria-hidden="true">
@@ -794,7 +788,7 @@ body.body-scroll-lock{overflow:hidden!important}
   </div>
 </div>
 
-<button class="scroll-top-btn" id="scrollTopBtn" onclick="goHome()" title="回到首页并刷新">↑</button>
+<button class="scroll-top-btn" id="scrollTopBtn" onclick="refreshHomepage()" title="回到首页并刷新">↑</button>
 
 <script>
 const PAGE_SIZE = 30;
@@ -3485,13 +3479,11 @@ async function triggerRefresh({ silentStart = false } = {}) {
   // Unauthenticated users cannot refresh
   if (!authToken) {
     showToast('🔒 请先登录');
-    resetPullIndicator();
     return;
   }
   // Preview users cannot refresh
   if (authUser && authUser.role === 'preview') {
     showToast('🔒 预览用户无此权限');
-    resetPullIndicator();
     return;
   }
 
@@ -3536,7 +3528,6 @@ async function triggerRefresh({ silentStart = false } = {}) {
     showToast('❌ 刷新失败: ' + refreshError);
   } finally {
     setRefreshRunning(false);
-    resetPullIndicator();
   }
 }
 
@@ -3550,16 +3541,6 @@ function setRefreshRunning(isRunning) {
   label.textContent = isRunning ? '刷新中' : '刷新';
   const list = document.getElementById('list');
   if (list) list.classList.toggle('manual-refreshing', isRunning);
-}
-
-function resetPullIndicator() {
-  const indicator = document.getElementById('pullIndicator');
-  if (indicator) {
-    indicator.style.transition = 'top 0.25s, opacity 0.25s';
-    indicator.style.top = '-40px';
-    indicator.style.opacity = '0';
-    setTimeout(() => { indicator.style.transition = ''; }, 300);
-  }
 }
 
 function buildNewsPageParams(page = currentPage, activeFilter = filter) {
@@ -4272,6 +4253,7 @@ async function goToPage(page) {
   const data = await pagePromise;
   if (!data || activeFilter !== filter) return;
   applyNewsPage(data, page, activeFilter, { animate: true });
+  stabilizePageTop();
   scheduleAdjacentPagePrefetch(page, activeFilter, Number(data.total || 0));
 }
 
@@ -4319,6 +4301,14 @@ function scrollPageToTop() {
   });
 }
 
+function stabilizePageTop() {
+  window.scrollTo(0, 0);
+  requestAnimationFrame(() => {
+    window.scrollTo(0, 0);
+    requestAnimationFrame(() => window.scrollTo(0, 0));
+  });
+}
+
 async function showHomepageAfterScroll() {
   if (filter === 'all' && currentPage === 1) return true;
   const previousFilter = filter;
@@ -4345,25 +4335,17 @@ async function showHomepageAfterScroll() {
   return loaded;
 }
 
-async function refreshFromHeader() {
+async function refreshHomepage() {
   if (!authToken || (authUser && authUser.role === 'preview')) {
     triggerRefresh();
     return;
   }
   programmaticScrollUntil = Date.now() + 1000;
   await scrollPageToTop();
+  const loaded = await showHomepageAfterScroll();
+  if (!loaded) return;
+  stabilizePageTop();
   triggerRefresh();
-}
-
-async function goHome() {
-  if (!authToken || (authUser && authUser.role === 'preview')) {
-    showToast('🔒 请先登录后使用');
-    return;
-  }
-  programmaticScrollUntil = Date.now() + 1000;
-  await scrollPageToTop();
-  await showHomepageAfterScroll();
-  triggerRefresh({ silentStart: true });
 }
 
 function articleDetailErrorText(e) {
@@ -4834,6 +4816,13 @@ function badgeStyle(src) {
   BADGE_CACHE[src] = s;
   return s;
 }
+
+function resetMobileColdStartScroll() {
+  if (!usesMobileArticleNavigation()) return;
+  if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+  stabilizePageTop();
+}
+
 async function bootstrapNews() {
   const sourcesPromise = loadSourceCategories();
   const todayCountPromise = refreshTodayArticleCount();
@@ -4844,6 +4833,7 @@ async function bootstrapNews() {
   });
   await Promise.all([sourcesPromise, todayCountPromise]);
   renderFilters();
+  resetMobileColdStartScroll();
 }
 
 // Initial load
@@ -4854,6 +4844,7 @@ if (window.matchMedia) {
   });
 }
 loadAuth();
+resetMobileColdStartScroll();
 bootstrapNews();
 // Restore sidebar preference
 try {
@@ -4963,54 +4954,6 @@ document.addEventListener('visibilitychange', () => {
   overlay.addEventListener('touchcancel', resetArticleSwipe, { passive: true });
 })();
 
-// ═══ Mobile: pull-to-refresh on homepage ═════════════════
-(function() {
-  const indicator = document.getElementById('pullIndicator');
-  let startY = 0, pulling = false, released = false;
-  let pullDist = 0;
-
-  document.addEventListener('touchstart', e => {
-    if (document.getElementById('overlay').classList.contains('open')) return;
-    if (document.getElementById('searchOverlay').classList.contains('open')) return;
-    if (window.scrollY > 0) return;
-    if (authUser && authUser.role === 'preview') return;
-    if (e.target.closest('.sidebar') || e.target.closest('.sidebar-toggle') || e.target.closest('.refresh-btn') || e.target.closest('.page-btn')) return;
-    startY = e.touches[0].clientY;
-    pulling = true;
-    released = false;
-    pullDist = 0;
-  }, { passive: true });
-
-  document.addEventListener('touchmove', e => {
-    if (!pulling || released) return;
-    const dy = e.touches[0].clientY - startY;
-    pullDist = dy;
-    if (dy > 0 && window.scrollY === 0) {
-      const pullPx = Math.min(dy * 0.4, 25);
-      indicator.style.top = (pullPx - 40) + 'px';
-      indicator.style.opacity = Math.min(dy / 100, 0.8);
-      indicator.innerHTML = dy > 50 ? '↓ 释放刷新' : '↓ 下拉刷新';
-    }
-  }, { passive: true });
-
-  document.addEventListener('touchend', () => {
-    if (pulling && !released) {
-      indicator.style.transition = 'top 0.25s, opacity 0.25s';
-      indicator.style.top = '-40px';
-      indicator.style.opacity = '0';
-      setTimeout(() => { indicator.style.transition = ''; }, 300);
-      pulling = false;
-      if (pullDist > 60) {
-        released = true;
-        indicator.innerHTML = '<span class="spin"></span>刷新中...';
-        indicator.style.top = '0';
-        indicator.style.opacity = '1';
-        indicator.style.transition = 'top 0.2s, opacity 0.2s';
-        triggerRefresh();
-      }
-    }
-  }, { passive: true });
-})();
 </script>
 <script>if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js',{scope:'/'})}</script>
 </body>
