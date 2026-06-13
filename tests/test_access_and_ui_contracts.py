@@ -166,6 +166,8 @@ def test_mobile_back_button_is_excluded_from_edge_swipe_and_handles_touch_direct
     assert "if (e.target.closest('#backBtn')) return;" in swipe_block
     assert "backBtn.addEventListener('touchstart'" in html
     assert "backBtn.addEventListener('touchend'" in html
+    assert "backBtn.addEventListener('touchcancel'" in html
+    assert "articleBackTouchStart = null;" in html
     assert "e.stopPropagation();" in html
 
 

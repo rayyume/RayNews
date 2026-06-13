@@ -4696,6 +4696,9 @@ backBtn.addEventListener('touchend', e => {
   e.preventDefault();
   closeArticleFromButton();
 }, { passive: false });
+backBtn.addEventListener('touchcancel', () => {
+  articleBackTouchStart = null;
+}, { passive: true });
 
 // Handle hash-based article links
 function handleHash() {
