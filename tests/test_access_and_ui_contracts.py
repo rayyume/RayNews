@@ -320,17 +320,77 @@ def test_manual_refresh_has_no_unused_silent_start_mode():
     assert "showToast('🔄 正在后台抓取...');" in block
 
 
-def test_pagination_scrolls_immediately_and_switches_only_after_reaching_top():
+def test_pagination_uses_double_buffer_and_switches_during_scroll():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     start = html.index("async function goToPage(page)")
     end = html.index("function waitForScrollTop(", start)
     block = html[start:end]
-    assert "const pagePromise = preparePageNavigation(page, filter);" in block
-    assert "await scrollPageToTop();" in block
-    assert "const data = await pagePromise;" in block
-    assert block.index("await scrollPageToTop()") < block.index("applyNewsPage(data")
-    assert block.index("applyNewsPage(data") < block.index("stabilizePageTop();")
+    assert "const data = await preparePageNavigation(page, activeFilter);" in block
+    assert block.index("const data = await preparePageNavigation") < block.index("scrollPageToTop(")
+    assert "onNearTop:" in block
+    assert "applyPageDuringScroll(data, page, activeFilter)" in block
+    assert "setPageNavigationPending(true);" in block
+    assert "setPageNavigationPending(false);" in block
     assert "async function preparePageNavigation(" in html
+
+
+def test_adjacent_pages_are_buffered_immediately_and_cover_images_are_warmed():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert "const PAGE_MEMORY_BUFFER_LIMIT = 3;" in html
+    assert "const PAGE_COVER_PRELOAD_LIMIT = 8;" in html
+    assert "const pageMemoryBuffer = new Map();" in html
+    assert "const pagePrefetchPromises = new Map();" in html
+    assert "function rememberBufferedPage(" in html
+    assert "function warmPageCoverImages(" in html
+    prefetch_start = html.index("async function prefetchNewsPage(")
+    prefetch_end = html.index("function markUserActivity()", prefetch_start)
+    prefetch_block = html[prefetch_start:prefetch_end]
+    assert "pagePrefetchPromises.get(key)" in prefetch_block
+    assert "pagePrefetchPromises.set(key, task)" in prefetch_block
+    assert "pagePrefetchPromises.delete(key)" in prefetch_block
+    prepare_start = html.index("async function preparePageNavigation(")
+    prepare_end = html.index("// Full snapshot compatibility wrapper", prepare_start)
+    prepare_block = html[prepare_start:prepare_end]
+    assert "const pendingPrefetch = pagePrefetchPromises.get(key);" in prepare_block
+    assert "const prefetched = await pendingPrefetch;" in prepare_block
+    start = html.index("function scheduleAdjacentPagePrefetch(")
+    end = html.index("async function loadNewsPage(", start)
+    block = html[start:end]
+    assert "prefetchNewsPage(page - 1, activeFilter);" in block
+    assert "prefetchNewsPage(page + 1, activeFilter);" in block
+    assert "requestIdleCallback" not in block
+    assert "setTimeout(run" not in block
+
+
+def test_scroll_to_top_exposes_a_single_near_top_page_swap():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    start = html.index("function scrollPageToTop(")
+    end = html.index("function stabilizePageTop()", start)
+    block = html[start:end]
+    assert "onNearTop" in block
+    assert "progress >= 0.8" in block
+    assert "remaining <= PAGE_SWITCH_TOP_THRESHOLD" in block
+    assert "nearTopApplied" in block
+    assert "applyNearTop();" in block
+    assert (
+        "if (performance.now() - startedAt >= 900) {\n"
+        "          window.scrollTo(0, 0);\n"
+        "          applyNearTop();"
+    ) in block
+
+
+def test_page_swap_locks_list_height_and_disables_scroll_anchoring():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert ".list.page-transitioning{overflow-anchor:none" in html
+    start = html.index("function applyPageDuringScroll(")
+    end = html.index("async function goToPage(", start)
+    block = html[start:end]
+    assert "list.style.minHeight" in block
+    assert "list.classList.add('page-transitioning')" in block
+    assert "applyNewsPage(data, page, activeFilter" in block
+    go_start = html.index("async function goToPage(", end)
+    go_end = html.index("function waitForScrollTop(", go_start)
+    assert "releasePageTransitionLock(transitionList);" in html[go_start:go_end]
 
 
 def test_mobile_pull_to_refresh_is_not_registered():

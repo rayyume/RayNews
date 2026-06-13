@@ -117,9 +117,10 @@ a:hover{text-decoration:underline}
 .list{display:flex;flex-direction:column;gap:1px;background:var(--border);border-radius:var(--radius);overflow:hidden;margin-bottom:40px;position:relative}
 .list.manual-refreshing::before{content:'';position:absolute;z-index:4;left:0;top:0;width:36%;height:2px;background:linear-gradient(90deg,transparent,var(--accent),transparent);pointer-events:none;animation:listRefreshSweep 1.15s ease-in-out infinite}
 .list.page-loading::before{content:'';position:absolute;z-index:4;left:0;top:0;width:28%;height:2px;background:linear-gradient(90deg,transparent,var(--accent),transparent);pointer-events:none;animation:listRefreshSweep 1.15s ease-in-out infinite}
-.list.page-switching .item{animation:pageFadeIn .18s ease-out}
+.list.page-transitioning{overflow-anchor:none}
+.list.page-switching .item{animation:pageFadeIn .12s ease-out}
 @keyframes listRefreshSweep{0%{transform:translateX(-110%);opacity:.35}50%{opacity:.9}100%{transform:translateX(385%);opacity:.35}}
-@keyframes pageFadeIn{from{opacity:.72}to{opacity:1}}
+@keyframes pageFadeIn{from{opacity:.84}to{opacity:1}}
 .item{display:flex;gap:16px;padding:18px 20px;background:var(--bg-card);cursor:pointer;transition:background 0.12s;position:relative}
 .item:hover{background:var(--bg-card-hover)}
 .item-thumb{width:120px;height:80px;border-radius:6px;overflow:hidden;flex-shrink:0;background:var(--bg-surface)}
@@ -798,6 +799,9 @@ const NEWS_CACHE_STORE = 'entries';
 const NEWS_CACHE_MAX_PAGES = 60;
 const NEWS_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const IDLE_LATEST_DELAY_MS = 5 * 60 * 1000;
+const PAGE_MEMORY_BUFFER_LIMIT = 3;
+const PAGE_COVER_PRELOAD_LIMIT = 8;
+const PAGE_SWITCH_TOP_THRESHOLD = 120;
 
 // Source category mapping. Seeded here as a fallback; normally loaded from /api/sources.
 let CATEGORY_MAP = {
@@ -823,6 +827,10 @@ let todayArticleCount = null;
 let latestKnownTimestamp = 0;
 let pageRequestController = null;
 let pageRequestSequence = 0;
+let pageNavigationSequence = 0;
+let pageNavigationPending = false;
+const pageMemoryBuffer = new Map();
+const pagePrefetchPromises = new Map();
 let pendingNewArticleCount = 0;
 let pendingLatestPage = null;
 let lastUserActivityAt = Date.now();
@@ -3605,14 +3613,62 @@ async function fetchNewsPage(page, activeFilter, signal) {
   return data;
 }
 
+function warmPageCoverImages(data) {
+  const items = Array.isArray(data && data.items) ? data.items : [];
+  items.slice(0, PAGE_COVER_PRELOAD_LIMIT).forEach(item => {
+    if (!item || !item.thumb) return;
+    const image = new Image();
+    image.decoding = 'async';
+    image.src = proxyImgSrc(item.thumb);
+    if (typeof image.decode === 'function') image.decode().catch(() => {});
+  });
+}
+
+function rememberBufferedPage(page, activeFilter, data) {
+  if (!data || !Array.isArray(data.items)) return data;
+  const key = newsPageCacheKey(page, activeFilter);
+  pageMemoryBuffer.delete(key);
+  pageMemoryBuffer.set(key, data);
+  while (pageMemoryBuffer.size > PAGE_MEMORY_BUFFER_LIMIT) {
+    pageMemoryBuffer.delete(pageMemoryBuffer.keys().next().value);
+  }
+  warmPageCoverImages(data);
+  return data;
+}
+
+function readBufferedPage(page, activeFilter) {
+  const key = newsPageCacheKey(page, activeFilter);
+  const data = pageMemoryBuffer.get(key);
+  if (!data) return null;
+  pageMemoryBuffer.delete(key);
+  pageMemoryBuffer.set(key, data);
+  return data;
+}
+
 async function prefetchNewsPage(page, activeFilter) {
   if (page < 1) return;
-  const cached = await readCachedNewsPage(page, activeFilter);
-  if (cached) return;
+  const key = newsPageCacheKey(page, activeFilter);
+  const existing = pagePrefetchPromises.get(key);
+  if (existing) return existing;
+  const task = (async () => {
+    const buffered = readBufferedPage(page, activeFilter);
+    if (buffered) return buffered;
+    const cached = await readCachedNewsPage(page, activeFilter);
+    if (cached) return rememberBufferedPage(page, activeFilter, cached);
+    try {
+      const data = await fetchNewsPage(page, activeFilter);
+      await writeCachedNewsPage(page, activeFilter, data);
+      return rememberBufferedPage(page, activeFilter, data);
+    } catch (e) {
+      return null;
+    }
+  })();
+  pagePrefetchPromises.set(key, task);
   try {
-    const data = await fetchNewsPage(page, activeFilter);
-    await writeCachedNewsPage(page, activeFilter, data);
-  } catch (e) {}
+    return await task;
+  } finally {
+    if (pagePrefetchPromises.get(key) === task) pagePrefetchPromises.delete(key);
+  }
 }
 
 function markUserActivity() {
@@ -3663,12 +3719,8 @@ async function showLatestAfterIdle() {
 
 function scheduleAdjacentPagePrefetch(page = currentPage, activeFilter = filter, total = currentTotal) {
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const run = () => {
-    if (page > 1) prefetchNewsPage(page - 1, activeFilter);
-    if (page < totalPages) prefetchNewsPage(page + 1, activeFilter);
-  };
-  if ('requestIdleCallback' in window) requestIdleCallback(run, { timeout: 1800 });
-  else setTimeout(run, 250);
+  if (page > 1) prefetchNewsPage(page - 1, activeFilter);
+  if (page < totalPages) prefetchNewsPage(page + 1, activeFilter);
 }
 
 async function loadNewsPage(page = 1, {
@@ -3683,6 +3735,7 @@ async function loadNewsPage(page = 1, {
   if (useCache) {
     const cached = await readCachedNewsPage(page, activeFilter);
     if (cached && requestSeq === pageRequestSequence) {
+      rememberBufferedPage(page, activeFilter, cached);
       applyNewsPage(cached, page, activeFilter, { animate });
       cacheApplied = true;
     }
@@ -3702,6 +3755,7 @@ async function loadNewsPage(page = 1, {
     const data = await fetchNewsPage(page, activeFilter, controller.signal);
     clearTimeout(timeout);
     await writeCachedNewsPage(page, activeFilter, data);
+    rememberBufferedPage(page, activeFilter, data);
     if (requestSeq !== pageRequestSequence) return false;
     if (document.getElementById('overlay').classList.contains('open') && !userInitiated) {
       pendingLatestPage = activeFilter === 'all' && page === 1 ? data : pendingLatestPage;
@@ -3743,6 +3797,14 @@ function applyPageCalibrationWhenActive(data, page, activeFilter, requestSeq) {
 async function preparePageNavigation(page, activeFilter) {
   const requestSeq = ++pageRequestSequence;
   if (pageRequestController) pageRequestController.abort();
+  const key = newsPageCacheKey(page, activeFilter);
+  const buffered = readBufferedPage(page, activeFilter);
+  const pendingPrefetch = pagePrefetchPromises.get(key);
+  if (!buffered && pendingPrefetch) {
+    const prefetched = await pendingPrefetch;
+    if (requestSeq !== pageRequestSequence) return null;
+    if (prefetched) return prefetched;
+  }
   pageRequestController = new AbortController();
   const controller = pageRequestController;
   const timeout = setTimeout(() => controller.abort(), 12000);
@@ -3751,6 +3813,7 @@ async function preparePageNavigation(page, activeFilter) {
     .then(async data => {
       clearTimeout(timeout);
       await writeCachedNewsPage(page, activeFilter, data);
+      rememberBufferedPage(page, activeFilter, data);
       return { data, error: null };
     })
     .catch(error => {
@@ -3758,8 +3821,16 @@ async function preparePageNavigation(page, activeFilter) {
       return { data: null, error };
     });
 
+  if (buffered && requestSeq === pageRequestSequence) {
+    networkPromise.then(result => {
+      if (result.data) applyPageCalibrationWhenActive(result.data, page, activeFilter, requestSeq);
+    });
+    return buffered;
+  }
+
   const cached = await cachedPromise;
   if (cached && requestSeq === pageRequestSequence) {
+    rememberBufferedPage(page, activeFilter, cached);
     networkPromise
       .then(result => {
         if (result.data) {
@@ -4230,10 +4301,35 @@ function renderPagination(totalPages) {
   const el = document.getElementById('pagination');
   if (totalPages <= 1) { el.innerHTML = ''; return; }
   el.innerHTML = `
-    <button class="page-btn" onclick="goToPage(${currentPage - 1})" ${currentPage <= 1 ? 'disabled' : ''}>上一页</button>
+    <button class="page-btn" onclick="goToPage(${currentPage - 1})" ${currentPage <= 1 || pageNavigationPending ? 'disabled' : ''}>上一页</button>
     <span class="page-info">${currentPage} / ${totalPages}</span>
-    <button class="page-btn" onclick="goToPage(${currentPage + 1})" ${currentPage >= totalPages ? 'disabled' : ''}>下一页</button>
+    <button class="page-btn" onclick="goToPage(${currentPage + 1})" ${currentPage >= totalPages || pageNavigationPending ? 'disabled' : ''}>下一页</button>
   `;
+}
+
+function setPageNavigationPending(isPending) {
+  pageNavigationPending = isPending;
+  const totalPages = Math.max(1, Math.ceil(currentTotal / PAGE_SIZE));
+  renderPagination(totalPages);
+}
+
+function releasePageTransitionLock(list) {
+  if (!list) return;
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      list.style.minHeight = '';
+      list.classList.remove('page-transitioning');
+    });
+  });
+}
+
+function applyPageDuringScroll(data, page, activeFilter) {
+  const list = document.getElementById('list');
+  if (!list) return null;
+  list.style.minHeight = Math.ceil(list.getBoundingClientRect().height) + 'px';
+  list.classList.add('page-transitioning');
+  applyNewsPage(data, page, activeFilter, { animate: true });
+  return list;
 }
 
 async function goToPage(page) {
@@ -4247,14 +4343,28 @@ async function goToPage(page) {
   const totalPages = Math.max(1, Math.ceil(currentTotal / PAGE_SIZE));
   if (page < 1 || page > totalPages) return;
   const activeFilter = filter;
-  const pagePromise = preparePageNavigation(page, filter);
-  programmaticScrollUntil = Date.now() + 1000;
-  await scrollPageToTop();
-  const data = await pagePromise;
-  if (!data || activeFilter !== filter) return;
-  applyNewsPage(data, page, activeFilter, { animate: true });
-  stabilizePageTop();
-  scheduleAdjacentPagePrefetch(page, activeFilter, Number(data.total || 0));
+  const navigationSeq = ++pageNavigationSequence;
+  let transitionList = null;
+  setPageNavigationPending(true);
+  try {
+    const data = await preparePageNavigation(page, activeFilter);
+    if (!data || navigationSeq !== pageNavigationSequence || activeFilter !== filter) return;
+    let pageApplied = false;
+    programmaticScrollUntil = Date.now() + 1200;
+    await scrollPageToTop({
+      onNearTop: () => {
+        if (pageApplied || navigationSeq !== pageNavigationSequence || activeFilter !== filter) return;
+        pageApplied = true;
+        transitionList = applyPageDuringScroll(data, page, activeFilter);
+      },
+    });
+    if (!pageApplied || navigationSeq !== pageNavigationSequence || activeFilter !== filter) return;
+    stabilizePageTop();
+    scheduleAdjacentPagePrefetch(page, activeFilter, Number(data.total || 0));
+  } finally {
+    if (navigationSeq === pageNavigationSequence) setPageNavigationPending(false);
+    releasePageTransitionLock(transitionList);
+  }
 }
 
 function waitForScrollTop(timeout = 700) {
@@ -4272,14 +4382,43 @@ function waitForScrollTop(timeout = 700) {
   });
 }
 
-function scrollPageToTop() {
+function scrollPageToTop({ onNearTop } = {}) {
   const startY = window.scrollY || document.documentElement.scrollTop || 0;
-  if (startY <= 4) return Promise.resolve();
+  let nearTopApplied = false;
+  const applyNearTop = () => {
+    if (nearTopApplied) return;
+    nearTopApplied = true;
+    if (typeof onNearTop === 'function') onNearTop();
+  };
+  if (startY <= 4) {
+    applyNearTop();
+    return Promise.resolve();
+  }
   const reduceMotion = window.matchMedia
     && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   if (usesMobileArticleNavigation() || reduceMotion) {
     window.scrollTo({ top: 0, behavior: reduceMotion ? 'auto' : 'smooth' });
-    return waitForScrollTop(900);
+    return new Promise(resolve => {
+      const startedAt = performance.now();
+      const check = () => {
+        const remaining = window.scrollY || document.documentElement.scrollTop || 0;
+        const progress = Math.max(0, Math.min(1, 1 - remaining / startY));
+        if (progress >= 0.8 || remaining <= PAGE_SWITCH_TOP_THRESHOLD) applyNearTop();
+        if (remaining <= 4) {
+          applyNearTop();
+          resolve();
+          return;
+        }
+        if (performance.now() - startedAt >= 900) {
+          window.scrollTo(0, 0);
+          applyNearTop();
+          resolve();
+          return;
+        }
+        requestAnimationFrame(check);
+      };
+      requestAnimationFrame(check);
+    });
   }
   const duration = Math.min(700, Math.max(480, startY * 0.16));
   return new Promise(resolve => {
@@ -4289,10 +4428,13 @@ function scrollPageToTop() {
       const eased = progress < 0.5
         ? 4 * progress * progress * progress
         : 1 - Math.pow(-2 * progress + 2, 3) / 2;
-      window.scrollTo(0, Math.round(startY * (1 - eased)));
+      const remaining = Math.round(startY * (1 - eased));
+      window.scrollTo(0, remaining);
+      if (progress >= 0.8 || remaining <= PAGE_SWITCH_TOP_THRESHOLD) applyNearTop();
       if (progress < 1) {
         requestAnimationFrame(step);
       } else {
+        applyNearTop();
         window.scrollTo(0, 0);
         resolve();
       }
