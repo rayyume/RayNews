@@ -5388,7 +5388,7 @@ document.addEventListener('visibilitychange', () => {
   overlay.addEventListener('touchend', () => {
     if (swiping) {
       // Smooth exit: animate from drag position to closed, no snap-back jitter
-      overlay.style.transition = 'transform .28s cubic-bezier(.22,.61,.36,1), opacity .2s ease';
+      overlay.style.transition = 'transform .28s cubic-bezier(.22,.61,.36,1), opacity .28s cubic-bezier(.22,.61,.36,1)';
       overlay.style.transform = 'translateX(100%)';
       overlay.style.opacity = '0';
       overlay.addEventListener('transitionend', () => {
