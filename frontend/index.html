@@ -81,7 +81,7 @@ a:hover{text-decoration:underline}
 ::-webkit-scrollbar-thumb{background:var(--scrollbar-thumb);border-radius:3px}
 
 /* ═══ Layout ══════════════════════════════════════ */
-.app{width:100%;max-width:960px;margin:0 auto;padding:0 20px;position:relative;overflow-x:clip}
+.app{width:100%;max-width:960px;margin:0 auto;padding:0 20px;position:relative}
 
 /* ═══ Header ══════════════════════════════════════ */
 .header{position:sticky;top:0;z-index:100;background:var(--header-bg);backdrop-filter:blur(20px) saturate(1.2);-webkit-backdrop-filter:blur(20px) saturate(1.2);border-bottom:1px solid var(--border);margin:0 -20px;padding:env(safe-area-inset-top,0px) 20px 0}
@@ -257,7 +257,9 @@ a:hover{text-decoration:underline}
 .cat-header.active{background:var(--accent-dim);color:var(--accent);border-radius:6px}
 .cat-header.active .arrow{color:var(--accent)}
 @media(max-width:768px){
-  .sidebar{width:180px}
+  .header{position:fixed;top:0;left:0;right:0;margin:0;padding:env(safe-area-inset-top,0px) 20px 0}
+  .app{padding-top:calc(56px + env(safe-area-inset-top,0px))}
+  .sidebar{top:calc(56px + env(safe-area-inset-top,0px));width:180px}
   .sidebar-toggle.open{left:180px}
 }
 @media(min-width:769px){

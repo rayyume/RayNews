@@ -512,6 +512,17 @@ def test_mobile_layout_and_article_content_cannot_create_horizontal_scroll():
     assert "overflow-x:hidden;overflow-y:auto;padding:16px 12px" in html
 
 
+def test_mobile_header_is_fixed_and_content_respects_safe_area():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    mobile_start = html.index("@media(max-width:768px)")
+    mobile_end = html.index("@media(min-width:769px)", mobile_start)
+    mobile_block = html[mobile_start:mobile_end]
+    assert ".header{position:fixed;top:0;left:0;right:0;margin:0;" in mobile_block
+    assert ".app{padding-top:calc(56px + env(safe-area-inset-top,0px))}" in mobile_block
+    assert ".sidebar{top:calc(56px + env(safe-area-inset-top,0px));width:180px}" in mobile_block
+    assert "overflow-x:clip" not in html
+
+
 def test_article_back_button_does_not_pass_click_event_as_history_state():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     assert "function closeArticleFromButton()" in html
