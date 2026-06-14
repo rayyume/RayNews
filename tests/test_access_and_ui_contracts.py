@@ -496,6 +496,22 @@ def test_mobile_sidebar_and_header_touch_targets_are_explicit():
     assert ".header-right .refresh-btn{padding:3px 8px;font-size:10px}" in html
 
 
+def test_mobile_layout_and_article_content_cannot_create_horizontal_scroll():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert "html{font-size:16px;scroll-behavior:smooth;-webkit-font-smoothing:antialiased;max-width:100%;overflow-x:hidden}" in html
+    assert ".app{width:100%;max-width:960px;" in html
+    assert ".overlay{position:fixed;inset:0;z-index:200;background:var(--bg);overflow-x:hidden;overflow-y:auto;" in html
+    assert ".article-wrap{width:100%;max-width:720px;min-width:0;" in html
+    assert ".article-body{width:100%;min-width:0;max-width:100%;overflow-x:hidden;" in html
+    assert ".article-body *{min-width:0;max-width:100%;overflow-wrap:anywhere;word-break:break-word}" in html
+    assert ".article-body pre,.article-body code{white-space:pre-wrap;" in html
+    assert ".article-body table{display:table;width:100%!important;max-width:100%!important;table-layout:fixed;" in html
+    assert ".article-body iframe,.article-body embed,.article-body object,.article-body svg,.article-body canvas{max-width:100%!important}" in html
+    assert ".search-body{flex:1;min-height:0;overflow-x:hidden;overflow-y:auto;" in html
+    assert ".sidebar{position:fixed;left:0;top:56px;bottom:0;z-index:40;width:200px;" in html
+    assert "overflow-x:hidden;overflow-y:auto;padding:16px 12px" in html
+
+
 def test_article_back_button_does_not_pass_click_event_as_history_state():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     assert "function closeArticleFromButton()" in html
@@ -521,7 +537,7 @@ def test_sources_settings_tab_is_admin_only():
 
 def test_header_avatar_search_and_summary_controls_are_aligned():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
-    assert ".header-right{display:flex;align-items:center;gap:10px;" in html
+    assert ".header-right{display:flex;min-width:0;align-items:center;gap:10px;" in html
     assert ".daily-summary-btn{position:relative;width:32px;height:32px;" in html
     assert 'class="icon-btn daily-summary-btn"' in html
     assert ".header-right .header-avatar .user-avatar{width:30px!important;height:30px!important}" in html
