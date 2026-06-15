@@ -4096,8 +4096,12 @@ async function loadSince(timestamp, { forceApply = false } = {}) {
     const newItems = (data.items || []).filter(item => {
       const id = Number(item.id);
       if (!id || seenArticleIds.has(id)) return false;
-      seenArticleIds.add(id);
-      return true;
+      const itemTs = Number(item.timestamp || 0);
+      if (itemTs > Number(timestamp || 0)) {
+        seenArticleIds.add(id);
+        return true;
+      }
+      return false;
     });
     const added = newItems.length;
     if (!added) return 0;
