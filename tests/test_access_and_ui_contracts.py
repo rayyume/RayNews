@@ -457,7 +457,13 @@ def test_new_article_prompt_and_idle_motion_are_cancellable():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     assert 'id="newArticlesPrompt"' in html
     assert "function showNewArticlesPrompt()" in html
-    assert "function revealPendingLatest()" in html
+    assert "async function revealPendingLatest()" in html
+    prompt_start = html.index("async function revealPendingLatest()")
+    prompt_end = html.index("function scheduleAdjacentPagePrefetch", prompt_start)
+    prompt_block = html[prompt_start:prompt_end]
+    assert "if (!pendingLatestPage && !pendingNewArticleCount) return;" in prompt_block
+    assert "if (!pendingLatestPage) {" in prompt_block
+    assert "pendingLatestPage = await fetchNewsPage(1, 'all');" in prompt_block
     assert "function cancelActiveAutoMotion()" in html
     assert "if (!activeScrollMotion || !activeScrollMotion.auto) return;" in html
     assert "if (!completed) return;" in html
