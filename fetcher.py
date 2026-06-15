@@ -959,13 +959,16 @@ def run():
 
     # Process new messages with thread pool
     new_entries = []
+    any_failed = False
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(process_message, msg, msg["id"]): msg for msg in messages}
         for future in as_completed(futures):
             try:
                 new_entries.append(future.result())
             except Exception as e:
-                log.error(f"Message processing failed: {e}")
+                any_failed = True
+                msg_id = futures[future].get("id", "?")
+                log.error(f"Message processing failed (ID={msg_id}): {e}")
 
     # Merge with existing data (accumulate)
     existing_data = {"items": []}
@@ -1006,10 +1009,18 @@ def run():
     log.info(f"Wrote {len(all_items)} entries to {OUTPUT_FILE} (added {len(new_entries)} new)")
 
     # Update state with latest message ID
-    max_id = max(m["id"] for m in messages)
-    state["last_seen_id"] = max(state.get("last_seen_id", 0), max_id)
-    save_state(state)
-    log.info(f"Updated state: last_seen_id = {state['last_seen_id']}")
+    # Only advance last_seen_id if ALL messages processed successfully,
+    # otherwise failed messages would be permanently skipped on next run.
+    if any_failed:
+        log.warning(
+            f"{any_failed} message(s) failed — keeping last_seen_id={state.get('last_seen_id')} "
+            "so they can be retried on next fetch"
+        )
+    else:
+        max_id = max(m["id"] for m in messages)
+        state["last_seen_id"] = max(state.get("last_seen_id", 0), max_id)
+        save_state(state)
+        log.info(f"Updated state: last_seen_id = {state['last_seen_id']}")
 
     # ── SQLite sync ──
     try:

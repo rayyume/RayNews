@@ -18,7 +18,7 @@ function normalizedApiRequest(request) {
   const url = new URL(request.url);
   url.searchParams.delete('t');
   return new Request(url.toString(), {
-    method: request.method,
+    method: 'GET',
     headers: request.headers,
     mode: request.mode,
     credentials: request.credentials,
@@ -71,7 +71,9 @@ self.addEventListener('fetch', event => {
             const fetchPromise = fetch(event.request).then(network => {
               if (network.ok) {
                 const cloned = network.clone();
-                cache.put(cacheRequest, cloned);
+                cache.put(cacheRequest, cloned).catch(err => {
+                  console.warn('SW: article cache.put failed', err);
+                });
               }
               return network;
             }).catch(() => cached);
@@ -86,7 +88,11 @@ self.addEventListener('fetch', event => {
       fetch(event.request).then(network => {
         if (network.ok) {
           const cloned = network.clone();
-          caches.open(API_CACHE).then(cache => cache.put(cacheRequest, cloned));
+          caches.open(API_CACHE).then(cache => {
+            cache.put(cacheRequest, cloned).catch(err => {
+              console.warn('SW: cache.put failed', err);
+            });
+          });
         }
         return network;
       }).catch(() => {
@@ -102,7 +108,10 @@ self.addEventListener('fetch', event => {
       caches.open(CACHE).then(cache => {
         return cache.match(event.request).then(cached => {
           return cached || fetch(event.request).then(network => {
-            cache.put(event.request, network.clone());
+            const cloned = network.clone();
+            cache.put(event.request, cloned).catch(err => {
+              console.warn('SW: asset cache.put failed', err);
+            });
             return network;
           });
         });
@@ -115,8 +124,11 @@ self.addEventListener('fetch', event => {
   if (event.request.mode === 'navigate' || url.pathname === '/' || url.pathname === '/index.html') {
     event.respondWith(
       fetch(event.request).then(network => {
+        const cloned = network.clone();
         return caches.open(CACHE).then(cache => {
-          cache.put(event.request, network.clone());
+          cache.put(event.request, cloned).catch(err => {
+            console.warn('SW: nav cache.put failed', err);
+          });
           return network;
         });
       }).catch(() => {
