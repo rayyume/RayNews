@@ -859,6 +859,7 @@ let pageNavigationPending = false;
 const pageMemoryBuffer = new Map();
 const pagePrefetchPromises = new Map();
 let pendingNewArticleCount = 0;
+let seenArticleIds = new Set();
 let pendingLatestPage = null;
 let lastUserActivityAt = Date.now();
 let pageVisibleSince = Date.now();
@@ -3886,6 +3887,7 @@ async function revealPendingLatest() {
   // Clear pending state
   pendingLatestPage = null;
   pendingNewArticleCount = 0;
+  seenArticleIds = new Set();
   hideNewArticlesPrompt();
   // Scroll to top, then fresh load from network
   await scrollPageToTop();
@@ -3931,6 +3933,7 @@ async function showLatestAfterIdle() {
   if (!pageApplied) return;
   pendingLatestPage = null;
   pendingNewArticleCount = 0;
+  seenArticleIds = new Set();
   hideNewArticlesPrompt();
   lastUserActivityAt = Date.now();
 }
@@ -4090,10 +4093,11 @@ async function loadSince(timestamp, { forceApply = false } = {}) {
     clearTimeout(timeout);
     const data = await resp.json();
     if (data.error) throw new Error(data.error);
-    const knownIds = new Set(news.map(item => Number(item.id)));
     const newItems = (data.items || []).filter(item => {
-      const itemTs = Number(item.timestamp || 0);
-      return itemTs > Number(timestamp || 0) || !knownIds.has(Number(item.id));
+      const id = Number(item.id);
+      if (!id || seenArticleIds.has(id)) return false;
+      seenArticleIds.add(id);
+      return true;
     });
     const added = newItems.length;
     if (!added) return 0;
@@ -4112,6 +4116,7 @@ async function loadSince(timestamp, { forceApply = false } = {}) {
       applyNewsPage(latestData, 1, 'all', { animate: true, preserveDom: true });
       pendingLatestPage = null;
       pendingNewArticleCount = 0;
+      seenArticleIds = new Set();
       hideNewArticlesPrompt();
     } else if (Date.now() - lastUserActivityAt >= IDLE_LATEST_DELAY_MS) {
       showLatestAfterIdle();
@@ -4684,6 +4689,7 @@ async function showHomepageAfterScroll() {
     applyNewsPage(pendingLatestPage, 1, 'all', { animate: true, preserveDom: true });
     pendingLatestPage = null;
     pendingNewArticleCount = 0;
+    seenArticleIds = new Set();
     return true;
   }
   const loaded = await loadNewsPage(1, {
@@ -4720,6 +4726,7 @@ async function refreshHomepage() {
     applyNewsPage(targetData, 1, 'all', { animate: true, preserveDom: true });
     pendingLatestPage = null;
     pendingNewArticleCount = 0;
+    seenArticleIds = new Set();
     hideNewArticlesPrompt();
     syncListUrl({ replace: true });
   };
@@ -5280,8 +5287,8 @@ async function bootstrapNews() {
   const todayCountPromise = refreshTodayArticleCount();
   const initialState = listStateFromUrl();
   filter = initialState.activeFilter;
-  currentPage = initialState.page;
-  await loadNewsPage(initialState.page, {
+  currentPage = 1;  // always start at page 1 on fresh load
+  await loadNewsPage(1, {
     activeFilter: initialState.activeFilter,
     useCache: false,
     forceNetwork: true,
