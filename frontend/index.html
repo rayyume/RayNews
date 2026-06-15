@@ -3882,22 +3882,25 @@ function hideNewArticlesPrompt() {
 }
 
 async function revealPendingLatest() {
-  if (!pendingLatestPage || hasBlockingOverlayOpen()) return;
+  if (!pendingNewArticleCount) return;
+  if (hasBlockingOverlayOpen()) return;
   programmaticScrollUntil = Date.now() + 800;
-  let applied = false;
-  const applyLatest = () => {
-    if (applied) return;
-    applied = true;
-    filter = 'all';
-    currentPage = 1;
-    applyNewsPage(pendingLatestPage, 1, 'all', { animate: true, preserveDom: true });
-    pendingLatestPage = null;
-    pendingNewArticleCount = 0;
-    hideNewArticlesPrompt();
-    syncListUrl({ replace: true });
-  };
-  await scrollPageToTop({ onNearTop: applyLatest });
-  applyLatest();
+  // Clear pending state
+  pendingLatestPage = null;
+  pendingNewArticleCount = 0;
+  hideNewArticlesPrompt();
+  // Scroll to top, then fresh load from network
+  await scrollPageToTop();
+  filter = 'all';
+  currentPage = 1;
+  const loaded = await loadNewsPage(1, {
+    activeFilter: 'all',
+    useCache: false,
+    forceNetwork: true,
+    userInitiated: true,
+    animate: true,
+  });
+  if (loaded) syncListUrl({ replace: true });
   stabilizePageTop();
 }
 
