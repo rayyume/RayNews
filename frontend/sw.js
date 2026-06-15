@@ -70,7 +70,8 @@ self.addEventListener('fetch', event => {
           return cache.match(cacheRequest).then(cached => {
             const fetchPromise = fetch(event.request).then(network => {
               if (network.ok) {
-                cache.put(cacheRequest, network.clone());
+                const cloned = network.clone();
+                cache.put(cacheRequest, cloned);
               }
               return network;
             }).catch(() => cached);
@@ -84,7 +85,8 @@ self.addEventListener('fetch', event => {
     event.respondWith(
       fetch(event.request).then(network => {
         if (network.ok) {
-          caches.open(API_CACHE).then(cache => cache.put(cacheRequest, network.clone()));
+          const cloned = network.clone();
+          caches.open(API_CACHE).then(cache => cache.put(cacheRequest, cloned));
         }
         return network;
       }).catch(() => {
