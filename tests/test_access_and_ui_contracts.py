@@ -461,6 +461,7 @@ def test_cold_start_bootstrap_has_loading_animation():
     assert "loadNewsPage(initialState.page, {" in boot_block
     assert "userInitiated: true," in boot_block
     assert "animate: true," in boot_block
+    assert "useCache: false," in boot_block
     assert "resetMobileColdStartScroll" in boot_block
 
 

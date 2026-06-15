@@ -5283,7 +5283,7 @@ async function bootstrapNews() {
   currentPage = initialState.page;
   await loadNewsPage(initialState.page, {
     activeFilter: initialState.activeFilter,
-    useCache: true,
+    useCache: false,
     forceNetwork: true,
     userInitiated: true,
     animate: true,
