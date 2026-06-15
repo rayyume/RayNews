@@ -90,7 +90,7 @@ a:hover{text-decoration:underline}
 .logo.refresh-locked{pointer-events:none;opacity:.72}
 .logo-icon{width:28px;height:28px;border-radius:8px;overflow:hidden;flex-shrink:0}
 .logo-icon img{width:100%;height:100%;object-fit:cover}
-.header-right{display:flex;min-width:0;align-items:center;gap:10px;font-size:12px;color:var(--text-3)}
+.header-right{display:flex;min-width:0;align-items:center;gap:10px;font-size:12px;color:var(--text-3);position:relative}
 .status-dot{width:6px;height:6px;background:#22c55e;border-radius:50%;display:inline-block;margin-right:4px;animation:pulse 2s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
 .refresh-btn{background:none;border:1px solid var(--border);color:var(--text-2);padding:4px 12px;border-radius:100px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font);transition:all 0.15s}
@@ -500,9 +500,7 @@ body.body-scroll-lock{overflow:hidden!important}
         <span class="status-text"><span class="status-dot"></span>实时更新</span>
         <span class="hide-m" id="count"></span>
         <button class="refresh-btn" id="refreshBtn" onclick="refreshHomepage()"><span>刷新</span></button>
-      </div>
-    </div>
-    <div class="user-menu" id="userMenu">
+        <div class="user-menu" id="userMenu">
       <div class="user-menu-inner">
         <div class="user-menu-header">
           <div class="user-avatar" id="userAvatarBtn" onclick="toggleUserMenu()">
@@ -522,6 +520,8 @@ body.body-scroll-lock{overflow:hidden!important}
         </div>
       </div>
     </div>
+      </div>
+    </div>
   </header>
 
   <button class="sidebar-toggle" id="sidebarToggle" onclick="toggleSidebar()" title="分类与来源">☰</button>
@@ -531,7 +531,7 @@ body.body-scroll-lock{overflow:hidden!important}
     <div class="filters" id="filters"></div>
   </div>
 
-  <div class="list" id="list">
+  <div class="list page-loading" id="list">
     <div class="skeleton-item" style="border-bottom:1px solid var(--border)"><div class="skeleton-thumb"></div><div class="skeleton-lines"><div class="skeleton-line"></div><div class="skeleton-line"></div></div></div>
     <div class="skeleton-item" style="border-bottom:1px solid var(--border)"><div class="skeleton-thumb"></div><div class="skeleton-lines"><div class="skeleton-line"></div><div class="skeleton-line"></div></div></div>
     <div class="skeleton-item"><div class="skeleton-thumb"></div><div class="skeleton-lines"><div class="skeleton-line"></div><div class="skeleton-line"></div></div></div>
