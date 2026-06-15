@@ -3579,47 +3579,18 @@ async function triggerRefresh({ stateAlreadySet = false, showStart = true } = {}
   }
 
   if (!stateAlreadySet) setRefreshRunning(true);
-  const refreshCursor = latestKnownTimestamp || latestNewsTimestamp();
-
-  let refreshUrl = '/refresh';
-  let fetchOpts = { cache: 'no-store' };
-  if (authToken) {
-    refreshUrl = '/auth/refresh';
-    fetchOpts = { method: 'POST', headers: { 'Authorization': 'Bearer ' + authToken } };
-  }
-
-  let refreshError = '';
-
   if (showStart) showToast('🔄 正在后台抓取...');
 
-  try {
-    const resp = await fetch(refreshUrl, fetchOpts);
-    const text = await resp.text();
-    let data = {};
-    try { data = text ? JSON.parse(text) : {}; } catch {}
-    if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
-
-    let added = 0;
-    if (news.length) {
-      added = await loadSince(refreshCursor, { forceApply: true });
-      if (!(filter === 'all' && currentPage === 1 && added > 0)) {
-        await loadNewsPage(currentPage, {
-          activeFilter: filter,
-          useCache: false,
-          forceNetwork: true,
-        });
-      }
-    } else {
-      await loadData();
-    }
-
-    showToast(added > 0 ? '✅ 已更新 ' + added + ' 篇文章' : '✅ 刷新完成');
-  } catch (e) {
-    refreshError = e.message || '刷新失败';
-    showToast('❌ 刷新失败: ' + refreshError);
-  } finally {
-    setRefreshRunning(false);
-  }
+  // Fire refresh request asynchronously — don't block the UI.
+  // Backend fetches in background; new articles appear on next auto-refresh cycle.
+  fetch('/auth/refresh', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + authToken },
+    cache: 'no-store',
+  })
+    .then(() => showToast('✅ 刷新完成'))
+    .catch(e => showToast('❌ 刷新失败: ' + (e.message || '网络错误')))
+    .finally(() => setRefreshRunning(false));
 }
 
 function setRefreshRunning(isRunning) {
