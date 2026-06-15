@@ -127,7 +127,11 @@ def test_article_navigation_splits_mobile_and_desktop_history_modes():
     sync_end = html.index("function openArticle(id)", sync_start)
     sync_block = html[sync_start:sync_end]
     assert "if (usesMobileArticleNavigation())" in sync_block
-    assert "history.pushState({ raynewsMobileArticle: true }" in sync_block
+    mobile_start = sync_block.index("if (usesMobileArticleNavigation())")
+    mobile_end = sync_block.index("history.pushState({ raynewsArticle: true }")
+    mobile_block = sync_block[mobile_start:mobile_end]
+    assert "history.replaceState({ raynewsMobileArticle: true }" in mobile_block
+    assert "history.pushState({ raynewsMobileArticle: true }" not in mobile_block
     assert "history.pushState({ raynewsArticle: true }" in html
     assert "history.replaceState({ raynewsHome: true }" in html
     assert "function closeArticle(fromHistoryNavigation = false, forceInAppNavigation = false)" in html
@@ -136,8 +140,13 @@ def test_article_navigation_splits_mobile_and_desktop_history_modes():
     close_block = html[close_start:close_end]
     assert "const mobileNavigation = forceInAppNavigation || usesMobileArticleNavigation();" in close_block
     assert "history.state.raynewsArticle" in close_block
-    assert "history.state.raynewsMobileArticle" in close_block
     assert "history.back();" in close_block
+    mobile_close_start = close_block.index("if (!fromHistoryNavigation && mobileNavigation)")
+    history_back_pos = close_block.index("history.back();")
+    assert mobile_close_start < history_back_pos
+    mobile_close_block = close_block[mobile_close_start:history_back_pos]
+    assert "finishArticleClose(true);" in mobile_close_block
+    assert "history.back();" not in mobile_close_block
     assert "history.replaceState({ raynewsHome: true }" in close_block
     assert "if (!overlay.classList.contains('open')) return;" in html
     assert "closeArticle(true)" in html
@@ -154,7 +163,7 @@ def test_mobile_edge_swipe_claims_navigation_at_touch_start():
     assert "edgeCandidate = sx < 50;" in swipe_block
     assert "if (edgeCandidate) e.preventDefault();" in swipe_block
     assert "overlay.addEventListener('touchcancel'" in swipe_block
-    assert "closeArticle();" in swipe_block
+    assert "closeArticle(false, true);" in swipe_block
 
 
 def test_mobile_back_button_is_excluded_from_edge_swipe_and_handles_touch_directly():
@@ -181,8 +190,8 @@ def test_article_back_and_refresh_do_not_replace_the_whole_list():
     refresh_block = html[refresh_start:refresh_end]
 
     assert "function reconcileVisibleArticles({ animate = false } = {})" in html
-    assert "function flushPendingListUpdate()" in html
-    assert "flushPendingListUpdate();" in close_block
+    assert "function flushPendingListUpdate()" not in html
+    assert "flushPendingListUpdate();" not in close_block
     assert "renderList();" not in close_block
     assert "const refreshCursor = latestKnownTimestamp || latestNewsTimestamp();" in refresh_block
     assert "await loadSince(refreshCursor, { forceApply: true });" in refresh_block
@@ -466,14 +475,50 @@ def test_list_filter_and_page_are_encoded_in_history_url():
     assert "syncListUrl({ push: true });" in html
 
 
-def test_article_return_uses_card_anchor_and_preserves_search_scroll():
+def test_article_return_has_one_scroll_owner_and_preserves_search_scroll():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     assert "function rememberArticleReturnState(id)" in html
     assert "cardTop: card ? card.getBoundingClientRect().top : null" in html
     assert "searchScrollTop: document.getElementById('searchBody').scrollTop" in html
-    assert "function restoreArticleReturnState()" in html
-    assert "card.getBoundingClientRect().top - state.cardTop" in html
-    assert "restoreArticleReturnState();" in html
+    assert "function restoreArticleReturnState(onComplete)" in html
+    restore_start = html.index("function restoreArticleReturnState(onComplete)")
+    restore_end = html.index("function openArticle(id)", restore_start)
+    restore_block = html[restore_start:restore_end]
+    assert "window.scrollTo(0, state.scrollY);" in restore_block
+    assert "requestAnimationFrame(() => {\n    requestAnimationFrame" not in restore_block
+    assert "window.scrollBy" not in restore_block
+    assert "restoreArticleReturnState(() => {" in html
+
+    popstate_start = html.index("window.addEventListener('popstate'")
+    popstate_end = html.index("window.addEventListener('keydown'", popstate_start)
+    popstate_block = html[popstate_start:popstate_end]
+    assert "document.getElementById('overlay').classList.contains('open')" in popstate_block
+    assert "closeArticle(true);" in popstate_block
+    assert "return;" in popstate_block
+    assert popstate_block.index("return;") < popstate_block.index(
+        "restoreListStateFromUrl({ restoreScroll: true });"
+    )
+
+
+def test_article_return_does_not_flush_or_animate_homepage():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    close_start = html.index("function finishArticleClose(mobileNavigation)")
+    close_end = html.index("// Handle hash-based article links", close_start)
+    close_block = html[close_start:close_end]
+
+    assert "articleReturnInProgress = true;" in close_block
+    assert "flushPendingListUpdate();" not in close_block
+    assert "showNewArticlesPrompt();" in close_block
+    assert "articleReturnInProgress = false;" in close_block
+
+
+def test_mobile_article_overlay_does_not_lock_homepage_body():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert "function lockArticleBackground()" in html
+    assert "function unlockArticleBackground()" in html
+    assert "if (!usesMobileArticleNavigation()) lockBodyScroll();" in html
+    assert "if (!usesMobileArticleNavigation()) unlockBodyScroll();" in html
+    assert "overscroll-behavior-y:contain" in html
 
 
 def test_search_login_context_and_result_progress_are_explicit():
@@ -526,7 +571,8 @@ def test_mobile_header_is_fixed_and_content_respects_safe_area():
 def test_article_back_button_does_not_pass_click_event_as_history_state():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     assert "function closeArticleFromButton()" in html
-    assert "closeArticle(false, navigator.maxTouchPoints > 0);" in html
+    assert "closeArticle();" in html
+    assert "closeArticle(false, navigator.maxTouchPoints > 0);" not in html
     assert "addEventListener('click', closeArticleFromButton)" in html
     assert "addEventListener('click', closeArticle);" not in html
 

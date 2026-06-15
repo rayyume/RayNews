@@ -165,7 +165,7 @@ a:hover{text-decoration:underline}
 .empty p{font-size:14px}
 
 /* ═══ Article Overlay ═════════════════════════════ */
-.overlay{position:fixed;inset:0;z-index:200;background:var(--bg);overflow-x:hidden;overflow-y:auto;transform:translateX(100%);transition:transform 0.35s cubic-bezier(0.4,0,0.2,1);touch-action:pan-y;overscroll-behavior-x:none}
+.overlay{position:fixed;inset:0;z-index:200;background:var(--bg);overflow-x:hidden;overflow-y:auto;transform:translateX(100%);transition:transform 0.35s cubic-bezier(0.4,0,0.2,1);touch-action:pan-y;overscroll-behavior-x:none;overscroll-behavior-y:contain}
 .overlay.from-source-history{z-index:560}
 .overlay.open{transform:translateX(0)}
 .overlay-header{position:sticky;top:0;z-index:10;background:var(--header-bg);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-bottom:1px solid var(--border);padding-top:env(safe-area-inset-top,0px)}
@@ -865,12 +865,12 @@ let pendingLatestPage = null;
 let lastUserActivityAt = Date.now();
 let pageVisibleSince = Date.now();
 let programmaticScrollUntil = 0;
-let _pendingUpdate = false;
 let refreshInProgress = false;
 let activeScrollMotion = null;
 let pendingAuthAction = '';
 let savedArticleListState = null;
 let restoringListHistory = false;
+let articleReturnInProgress = false;
 // In-memory cache for article bodies — avoids re-fetching on re-open
 let articleBodyCache = {};
 let articleBodyPromises = {};
@@ -1449,6 +1449,14 @@ function lockBodyScroll() {
 function unlockBodyScroll() {
   _scrollLockCount = Math.max(0, _scrollLockCount - 1);
   if (_scrollLockCount === 0) document.body.style.overflow = '';
+}
+
+function lockArticleBackground() {
+  if (!usesMobileArticleNavigation()) lockBodyScroll();
+}
+
+function unlockArticleBackground() {
+  if (!usesMobileArticleNavigation()) unlockBodyScroll();
 }
 
 // ═══ Auth Modal ══════════════════════════════════════════
@@ -3556,21 +3564,6 @@ function reconcileVisibleArticles({ animate = false } = {}) {
   if (animate) animateArticleLayout(list, previousRects, newIds);
 }
 
-function flushPendingListUpdate() {
-  if (!_pendingUpdate) return;
-  _pendingUpdate = false;
-  if (pendingLatestPage && filter === 'all' && currentPage === 1) {
-    applyNewsPage(pendingLatestPage, 1, 'all', { animate: true, preserveDom: true });
-    pendingLatestPage = null;
-    pendingNewArticleCount = 0;
-    hideNewArticlesPrompt();
-    return;
-  }
-  renderFilters();
-  reconcileVisibleArticles();
-  if (document.getElementById('searchOverlay').classList.contains('open')) renderSearchResults();
-}
-
 async function triggerRefresh({ stateAlreadySet = false, showStart = true } = {}) {
   if (refreshInProgress && !stateAlreadySet) {
     return;
@@ -3859,6 +3852,7 @@ function markUserActivity(event) {
 }
 
 function hasBlockingOverlayOpen() {
+  if (articleReturnInProgress) return true;
   return [
     'overlay',
     'searchOverlay',
@@ -3980,9 +3974,14 @@ async function loadNewsPage(page = 1, {
     await writeCachedNewsPage(page, activeFilter, data);
     rememberBufferedPage(page, activeFilter, data);
     if (requestSeq !== pageRequestSequence) return false;
-    if (document.getElementById('overlay').classList.contains('open') && !userInitiated) {
+    if (
+      (
+        document.getElementById('overlay').classList.contains('open')
+        || articleReturnInProgress
+      )
+      && !userInitiated
+    ) {
       pendingLatestPage = activeFilter === 'all' && page === 1 ? data : pendingLatestPage;
-      _pendingUpdate = true;
     } else {
       applyNewsPage(data, page, activeFilter, {
         animate: animate && !cacheApplied,
@@ -4789,16 +4788,7 @@ function syncArticleHistory(id, date) {
   if (!shortDate) return;
   const articleHash = '#/article/' + shortDate + '-' + id;
   if (usesMobileArticleNavigation()) {
-    if (location.hash === articleHash) {
-      if (history.state && history.state.raynewsMobileArticle) {
-        history.replaceState({ raynewsMobileArticle: true }, '', articleHash);
-      } else {
-        history.replaceState({ raynewsHome: true }, '', window.location.pathname + window.location.search);
-        history.pushState({ raynewsMobileArticle: true }, '', articleHash);
-      }
-    } else {
-      history.pushState({ raynewsMobileArticle: true }, '', articleHash);
-    }
+    history.replaceState({ raynewsMobileArticle: true }, '', articleHash);
     return;
   }
   if (location.hash === articleHash) {
@@ -4828,26 +4818,24 @@ function rememberArticleReturnState(id) {
   if (!searchOpen) rememberCurrentListHistory();
 }
 
-function restoreArticleReturnState() {
+function restoreArticleReturnState(onComplete) {
   const state = savedArticleListState;
   savedArticleListState = null;
-  if (!state) return;
+  if (!state) {
+    if (onComplete) onComplete();
+    return;
+  }
   if (state.fromSearch && document.getElementById('searchOverlay').classList.contains('open')) {
     requestAnimationFrame(() => {
       document.getElementById('searchBody').scrollTop = state.searchScrollTop;
+      if (onComplete) onComplete();
     });
     return;
   }
   requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      const card = document.querySelector(`#list .item[data-id="${state.id}"]`);
-      if (card && state.cardTop !== null) {
-        window.scrollBy(0, card.getBoundingClientRect().top - state.cardTop);
-      } else {
-        window.scrollTo(0, state.scrollY);
-      }
-      rememberCurrentListHistory();
-    });
+    window.scrollTo(0, state.scrollY);
+    rememberCurrentListHistory();
+    if (onComplete) onComplete();
   });
 }
 
@@ -4870,7 +4858,7 @@ function openArticle(id) {
   if (!n) {
     document.getElementById('overlay').classList.add('open');
     document.getElementById('overlay').scrollTop = 0;
-    lockBodyScroll();
+    lockArticleBackground();
     document.getElementById('overlay').dataset.articleId = id;
     // Check favorite status
     if (authToken) checkFavoriteStatus(id);
@@ -4944,7 +4932,7 @@ function openArticle(id) {
 
   document.getElementById('overlay').classList.add('open');
   document.getElementById('overlay').scrollTop = 0;
-  lockBodyScroll();
+  lockArticleBackground();
   document.getElementById('overlay').dataset.articleId = id;
   // Check favorite status
   if (authToken) checkFavoriteStatus(id);
@@ -5094,38 +5082,51 @@ function shareArticle() {
 
 let _closingOverlay = false;
 
+function finishArticleClose(mobileNavigation) {
+  _closingOverlay = true;
+  articleReturnInProgress = true;
+  activeArticleRequestId++;
+  const overlay = document.getElementById('overlay');
+  overlay.classList.remove('open');
+  overlay.classList.remove('from-source-history');
+  unlockArticleBackground();
+  if (mobileNavigation) {
+    const homeUrl = window.location.pathname + window.location.search;
+    history.replaceState({ raynewsHome: true }, '', homeUrl);
+  }
+  if (pendingNewArticleCount > 0) showNewArticlesPrompt();
+  restoreArticleReturnState(() => {
+    articleReturnInProgress = false;
+    _closingOverlay = false;
+  });
+}
+
 function closeArticle(fromHistoryNavigation = false, forceInAppNavigation = false) {
   if (_closingOverlay) return;
   const overlay = document.getElementById('overlay');
   if (!overlay.classList.contains('open')) return;
   const mobileNavigation = forceInAppNavigation || usesMobileArticleNavigation();
+  if (!fromHistoryNavigation && mobileNavigation) {
+    finishArticleClose(true);
+    return;
+  }
   if (
     !fromHistoryNavigation
     && history.state
-    && (history.state.raynewsArticle || history.state.raynewsMobileArticle)
+    && history.state.raynewsArticle
   ) {
     history.back();
     return;
   }
-  _closingOverlay = true;
-  activeArticleRequestId++;
-  overlay.classList.remove('open');
-  overlay.classList.remove('from-source-history');
-  unlockBodyScroll();
-  const homeUrl = window.location.pathname + window.location.search;
-  if (mobileNavigation) {
-    history.replaceState({ raynewsHome: true }, '', homeUrl);
-  } else if (!fromHistoryNavigation && location.hash) {
+  if (!fromHistoryNavigation && location.hash) {
+    const homeUrl = window.location.pathname + window.location.search;
     history.replaceState({ raynewsHome: true }, '', homeUrl);
   }
-  // Apply queued changes by reusing existing cards; never blank the homepage on return.
-  flushPendingListUpdate();
-  restoreArticleReturnState();
-  _closingOverlay = false;
+  finishArticleClose(mobileNavigation);
 }
 
 function closeArticleFromButton() {
-  closeArticle(false, navigator.maxTouchPoints > 0);
+  closeArticle();
 }
 
 let articleBackTouchStart = null;
@@ -5317,7 +5318,13 @@ window.addEventListener('hashchange', () => {
 });
 window.addEventListener('popstate', () => {
   if (location.hash) return;
-  closeArticle(true);
+  if (
+    articleReturnInProgress
+    || document.getElementById('overlay').classList.contains('open')
+  ) {
+    closeArticle(true);
+    return;
+  }
   restoreListStateFromUrl({ restoreScroll: true });
 });
 window.addEventListener('keydown', e => {
@@ -5399,10 +5406,7 @@ document.addEventListener('visibilitychange', () => {
       overlay.style.transform = 'translateX(100%)';
       overlay.style.opacity = '0';
       overlay.addEventListener('transitionend', () => {
-        overlay.style.transition = '';
-        overlay.style.transform = '';
-        overlay.style.opacity = '';
-        closeArticle();
+        closeArticle(false, true);
         resetArticleSwipe();
       }, { once: true });
     } else if (edgeCandidate) {
