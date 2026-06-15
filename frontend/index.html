@@ -5287,6 +5287,8 @@ async function bootstrapNews() {
     activeFilter: initialState.activeFilter,
     useCache: true,
     forceNetwork: true,
+    userInitiated: true,
+    animate: true,
   });
   await todayCountPromise;
   renderFilters();

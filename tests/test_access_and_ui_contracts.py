@@ -453,6 +453,17 @@ def test_list_motion_reuses_cards_and_animates_insertions():
     assert "preserveDom: true" in html
 
 
+def test_cold_start_bootstrap_has_loading_animation():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    boot_start = html.index("async function bootstrapNews()")
+    boot_end = html.index("// Initial load", boot_start)
+    boot_block = html[boot_start:boot_end]
+    assert "loadNewsPage(initialState.page, {" in boot_block
+    assert "userInitiated: true," in boot_block
+    assert "animate: true," in boot_block
+    assert "resetMobileColdStartScroll" in boot_block
+
+
 def test_new_article_prompt_and_idle_motion_are_cancellable():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     assert 'id="newArticlesPrompt"' in html
