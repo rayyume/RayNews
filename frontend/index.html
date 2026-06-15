@@ -3882,16 +3882,7 @@ function hideNewArticlesPrompt() {
 }
 
 async function revealPendingLatest() {
-  if (!pendingLatestPage && !pendingNewArticleCount) return;
-  if (hasBlockingOverlayOpen()) return;
-  if (!pendingLatestPage) {
-    try {
-      pendingLatestPage = await fetchNewsPage(1, 'all');
-      await writeCachedNewsPage(1, 'all', pendingLatestPage);
-    } catch (e) {
-      return;
-    }
-  }
+  if (!pendingLatestPage || hasBlockingOverlayOpen()) return;
   programmaticScrollUntil = Date.now() + 800;
   let applied = false;
   const applyLatest = () => {
