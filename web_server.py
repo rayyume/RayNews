@@ -3011,7 +3011,7 @@ def protected_refresh():
     """Trigger fetcher refresh. Protected from preview users."""
     import requests as http_req
     try:
-        resp = http_req.get("http://127.0.0.1:8081/refresh", timeout=30)
+        resp = http_req.get("http://127.0.0.1:8081/refresh", timeout=150)
         return jsonify(resp.json()), resp.status_code
     except Exception as e:
         return jsonify({"error": str(e)}), 502

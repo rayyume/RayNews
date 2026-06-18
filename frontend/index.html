@@ -1134,6 +1134,71 @@ async function parseJsonResponse(resp) {
   return data;
 }
 
+function compactRefreshDetail(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+}
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function refreshErrorMessage(errorOrData, status = 0) {
+  const data = (errorOrData && typeof errorOrData === 'object' && !(errorOrData instanceof Error))
+    ? errorOrData
+    : null;
+  const rawMessage = data
+    ? [data.error, data.stderr, data.stdout].filter(Boolean).join(' ')
+    : ((errorOrData && errorOrData.message) || '');
+  const detail = compactRefreshDetail(rawMessage);
+  if (detail.includes('fetcher already running')) return '已有刷新任务正在运行，请稍后查看';
+  if (/timeout|timed out|Read timed out|HTTPConnectionPool/i.test(detail)) {
+    return '刷新耗时较长或服务暂时无响应，请稍后查看最新文章';
+  }
+  if (/FetchError|Fetch Error|\bResponse\b/i.test(detail)) {
+    return '抓取源站响应异常，请稍后重试';
+  }
+  if (data && data.status === 'skipped') return '已有刷新任务正在运行，请稍后查看';
+  if (data && data.returncode !== undefined && data.returncode !== null) {
+    return '抓取任务退出码 ' + data.returncode + (detail ? '：' + detail : '');
+  }
+  if (detail) return detail;
+  if (status) return '刷新接口返回 HTTP ' + status;
+  return '刷新失败，请稍后重试';
+}
+
+async function parseRefreshResponse(resp) {
+  const text = await resp.text();
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch (e) {
+    const trimmed = text.trim();
+    if (trimmed.startsWith('<')) {
+      throw new Error('刷新接口返回了 HTML 页面，请检查服务是否超时或反向代理是否生效');
+    }
+    throw new Error('刷新接口返回格式错误');
+  }
+  if (data && data.status === 'skipped') return data;
+  if (!resp.ok || data.status === 'error') {
+    throw new Error(refreshErrorMessage(data, resp.status));
+  }
+  return data;
+}
+
+function isTransientRefreshError(error) {
+  const message = (error && error.message) || '';
+  return /Failed to fetch|NetworkError|Load failed|接口返回了 HTML|接口返回格式错误|超时|timeout|timed out|temporarily|Response|FetchError/i.test(message);
+}
+
+async function requestRefreshOnce() {
+  const resp = await fetch('/auth/refresh', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + authToken },
+    cache: 'no-store',
+  });
+  return parseRefreshResponse(resp);
+}
+
 function rebuildCategoryMap(rows) {
   const next = { News: [], Tech: [], Biz: [], Info: [] };
   sourceMeta = {};
@@ -3583,14 +3648,21 @@ async function triggerRefresh({ stateAlreadySet = false, showStart = true } = {}
 
   // Fire refresh request asynchronously — don't block the UI.
   // Backend fetches in background; new articles appear on next auto-refresh cycle.
-  fetch('/auth/refresh', {
-    method: 'POST',
-    headers: { 'Authorization': 'Bearer ' + authToken },
-    cache: 'no-store',
-  })
-    .then(() => showToast('✅ 刷新完成'))
-    .catch(e => showToast('❌ 刷新失败: ' + (e.message || '网络错误')))
-    .finally(() => setRefreshRunning(false));
+  try {
+    let data;
+    try {
+      data = await requestRefreshOnce();
+    } catch (firstError) {
+      if (!isTransientRefreshError(firstError)) throw firstError;
+      await delay(800);
+      data = await requestRefreshOnce();
+    }
+    showToast(data.status === 'skipped' ? '已有刷新任务正在运行，请稍后查看' : '✅ 刷新完成');
+  } catch (e) {
+    showToast('❌ ' + refreshErrorMessage(e));
+  } finally {
+    setRefreshRunning(false);
+  }
 }
 
 function setRefreshRunning(isRunning) {

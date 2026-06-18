@@ -335,6 +335,28 @@ def test_manual_refresh_has_no_unused_silent_start_mode():
     assert "if (showStart) showToast('🔄 正在后台抓取...');" in block
 
 
+def test_manual_refresh_uses_structured_error_messages_and_long_backend_timeout():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    web_source = (ROOT / "web_server.py").read_text(encoding="utf-8")
+    trigger_start = html.index("async function triggerRefresh(")
+    trigger_end = html.index("function setRefreshRunning(", trigger_start)
+    trigger_block = html[trigger_start:trigger_end]
+    protected_start = web_source.index("def protected_refresh")
+    protected_end = web_source.index("# ─── Health", protected_start)
+    protected_block = web_source[protected_start:protected_end]
+
+    assert "function refreshErrorMessage" in html
+    assert "async function parseRefreshResponse" in html
+    assert "async function requestRefreshOnce()" in html
+    assert "function isTransientRefreshError" in html
+    assert "await requestRefreshOnce();" in trigger_block
+    assert "await delay(800);" in trigger_block
+    assert "data = await requestRefreshOnce();" in trigger_block
+    assert "if (data && data.status === 'skipped') return data;" in html
+    assert "showToast('❌ 刷新失败: ' + (e.message || '网络错误'))" not in trigger_block
+    assert "http_req.get(\"http://127.0.0.1:8081/refresh\", timeout=150)" in protected_block
+
+
 def test_pagination_uses_double_buffer_and_switches_during_scroll():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     start = html.index("async function goToPage(page)")
