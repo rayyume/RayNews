@@ -366,7 +366,12 @@ def test_article_images_retry_with_cache_busting_when_mobile_runtime_loses_them(
     assert "event.target instanceof HTMLImageElement" in html
     assert "url.searchParams.set('img_retry'," in html
     assert "img.dataset.originalSrc" in html
+    assert "img.dataset.imgFailed" in html
     assert "img.dataset.imgRetry" in html
+    assert "function shouldRetryBrokenImage(img)" in html
+    assert "if (!shouldRetryBrokenImage(img)) return;" in html
+    assert "img.dataset.imgFailed !== '1'" in html
+    assert "!img.complete" in html
     assert "document.addEventListener('visibilitychange', retryBrokenVisibleImages);" in html
     assert "window.addEventListener('online', retryBrokenVisibleImages);" in html
 

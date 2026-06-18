@@ -5346,6 +5346,7 @@ function recoverImageLoad(img) {
   const currentSrc = img.dataset.originalSrc || img.getAttribute('src') || img.currentSrc || '';
   if (!currentSrc) return;
   img.dataset.originalSrc = currentSrc;
+  img.dataset.imgFailed = '1';
   const attempts = Number(img.dataset.imgRetry || '0');
   if (attempts >= 2) {
     img.classList.add('image-load-failed');
@@ -5359,11 +5360,17 @@ function recoverImageLoad(img) {
   }, nextAttempt === 1 ? 250 : 900);
 }
 
+function shouldRetryBrokenImage(img) {
+  if (!(img instanceof HTMLImageElement)) return false;
+  if (img.complete && img.naturalWidth > 0) return false;
+  if (img.dataset.imgFailed !== '1' && !img.complete) return false;
+  return img.dataset.imgFailed === '1' || (img.complete && img.naturalWidth === 0);
+}
+
 function retryBrokenVisibleImages() {
   if (document.hidden) return;
   document.querySelectorAll('#list img, #overlay img, #favoritesList img').forEach(img => {
-    if (!(img instanceof HTMLImageElement)) return;
-    if (img.complete && img.naturalWidth > 0) return;
+    if (!shouldRetryBrokenImage(img)) return;
     img.dataset.imgRetry = '0';
     recoverImageLoad(img);
   });
