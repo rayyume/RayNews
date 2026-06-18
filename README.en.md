@@ -231,6 +231,7 @@ Favorited article images are excluded from `IMAGE_CACHE_MAX_MB` eviction, so the
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CUSTOM_HEAD_HTML` | empty | Trusted HTML injected into `<head>`, such as an analytics script |
+| `CUSTOM_FOOTER_HTML` | empty | Trusted HTML that replaces the home-page footer content before the version and GitHub link; supports `<script>` while keeping the fixed suffix |
 | `HTTP_PROXY` | empty | HTTP proxy |
 | `HTTPS_PROXY` | empty | HTTPS proxy |
 | `NO_PROXY` | `localhost,127.0.0.1` | Addresses that bypass the proxy |

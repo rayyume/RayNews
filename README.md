@@ -231,6 +231,7 @@ AI Endpoint、API Key、模型和供应商由用户在网页的“设置 → AI�
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `CUSTOM_HEAD_HTML` | 空 | 注入页面 `<head>` 的受信任 HTML，例如统计脚本 |
+| `CUSTOM_FOOTER_HTML` | 空 | 替换主页底部版本号和 GitHub 链接前方内容的受信任 HTML；支持 `<script>`，固定保留版本号与 GitHub 链接 |
 | `HTTP_PROXY` | 空 | HTTP 代理 |
 | `HTTPS_PROXY` | 空 | HTTPS 代理 |
 | `NO_PROXY` | `localhost,127.0.0.1` | 不使用代理的地址 |

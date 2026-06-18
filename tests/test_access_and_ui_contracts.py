@@ -634,3 +634,23 @@ def test_header_avatar_search_and_summary_controls_are_aligned():
     assert ".daily-summary-btn{position:relative;width:32px;height:32px;" in html
     assert 'class="icon-btn daily-summary-btn"' in html
     assert ".header-right .header-avatar .user-avatar{width:30px!important;height:30px!important}" in html
+
+
+def test_footer_supports_runtime_html_injection_before_fixed_suffix():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    entrypoint = (ROOT / "entrypoint.sh").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    readme_en = (ROOT / "README.en.md").read_text(encoding="utf-8")
+
+    assert 'id="footer"' in html
+    assert "<!-- {{CUSTOM_FOOTER_HTML_START}} -->" in html
+    assert "<!-- {{CUSTOM_FOOTER_HTML_END}} -->" in html
+    assert "· {{FULL_BUILD_VERSION}} ·" in html
+    assert "https://github.com/rayyume/RayNews-Reader" in html
+    assert 'os.environ.get("CUSTOM_FOOTER_HTML", "")' in entrypoint
+    assert 'footer_start = "<!-- {{CUSTOM_FOOTER_HTML_START}} -->"' in entrypoint
+    assert 'footer_end = "<!-- {{CUSTOM_FOOTER_HTML_END}} -->"' in entrypoint
+    assert "html = before + custom_footer + after" in entrypoint
+    assert "FOOTER_INJECT" not in entrypoint
+    assert "`CUSTOM_FOOTER_HTML`" in readme
+    assert "`CUSTOM_FOOTER_HTML`" in readme_en
