@@ -357,6 +357,20 @@ def test_manual_refresh_uses_structured_error_messages_and_long_backend_timeout(
     assert "http_req.get(\"http://127.0.0.1:8081/refresh\", timeout=150)" in protected_block
 
 
+def test_article_images_retry_with_cache_busting_when_mobile_runtime_loses_them():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+
+    assert "function cacheBustedImageSrc(src, attempt)" in html
+    assert "function recoverImageLoad(img)" in html
+    assert "document.addEventListener('error', event => {" in html
+    assert "event.target instanceof HTMLImageElement" in html
+    assert "url.searchParams.set('img_retry'," in html
+    assert "img.dataset.originalSrc" in html
+    assert "img.dataset.imgRetry" in html
+    assert "document.addEventListener('visibilitychange', retryBrokenVisibleImages);" in html
+    assert "window.addEventListener('online', retryBrokenVisibleImages);" in html
+
+
 def test_pagination_uses_double_buffer_and_switches_during_scroll():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     start = html.index("async function goToPage(page)")

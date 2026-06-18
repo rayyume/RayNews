@@ -5329,6 +5329,52 @@ function proxyImages(html) {
   });
 }
 
+function cacheBustedImageSrc(src, attempt) {
+  if (!src) return src;
+  try {
+    const url = new URL(src, location.href);
+    if (url.pathname === '/img-cache' || url.pathname === '/img-proxy') {
+      url.searchParams.set('img_retry', String(Date.now()) + '-' + String(attempt || 1));
+      return url.origin === location.origin ? (url.pathname + url.search + url.hash) : url.href;
+    }
+  } catch {}
+  return src;
+}
+
+function recoverImageLoad(img) {
+  if (!img || !(img instanceof HTMLImageElement)) return;
+  const currentSrc = img.dataset.originalSrc || img.getAttribute('src') || img.currentSrc || '';
+  if (!currentSrc) return;
+  img.dataset.originalSrc = currentSrc;
+  const attempts = Number(img.dataset.imgRetry || '0');
+  if (attempts >= 2) {
+    img.classList.add('image-load-failed');
+    return;
+  }
+  const nextAttempt = attempts + 1;
+  img.dataset.imgRetry = String(nextAttempt);
+  img.classList.remove('image-load-failed');
+  setTimeout(() => {
+    img.src = cacheBustedImageSrc(currentSrc, nextAttempt);
+  }, nextAttempt === 1 ? 250 : 900);
+}
+
+function retryBrokenVisibleImages() {
+  if (document.hidden) return;
+  document.querySelectorAll('#list img, #overlay img, #favoritesList img').forEach(img => {
+    if (!(img instanceof HTMLImageElement)) return;
+    if (img.complete && img.naturalWidth > 0) return;
+    img.dataset.imgRetry = '0';
+    recoverImageLoad(img);
+  });
+}
+
+document.addEventListener('error', event => {
+  if (event.target instanceof HTMLImageElement) recoverImageLoad(event.target);
+}, true);
+document.addEventListener('visibilitychange', retryBrokenVisibleImages);
+window.addEventListener('online', retryBrokenVisibleImages);
+
 // Dynamic badge color from source name hash
 const BADGE_COLORS = [
   '#f59e0b','#22c55e','#3b82f6','#a855f7','#ec4899',
