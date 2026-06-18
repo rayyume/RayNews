@@ -4124,6 +4124,7 @@ function rebuildSourceFilterGroups() {
     for (const source of group.sources) sourceToFilterGroup[source] = group.key;
     return group;
   });
+  return groups;
 }
 
 function toggleCategoryExpansion(cat) {
@@ -4179,7 +4180,8 @@ function renderFilters() {
       if (!cat) return;
       const body = el.querySelector(`.cat-body[data-cat="${cat}"]`);
       const hasSourceButtons = body && body.querySelector('.fbtn');
-      if (hasSourceButtons) {
+      const isMobileSidebar = window.matchMedia && window.matchMedia('(max-width: 768px)').matches;
+      if (hasSourceButtons && isMobileSidebar) {
         toggleCategoryExpansion(cat);
         return;
       }

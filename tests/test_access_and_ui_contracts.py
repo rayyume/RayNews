@@ -1,6 +1,11 @@
 import sqlite3
+import shutil
+import subprocess
 import sys
+import textwrap
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -563,6 +568,9 @@ def test_mobile_sidebar_and_header_touch_targets_are_explicit():
 
 def test_mobile_sidebar_keeps_open_when_expanding_source_categories():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    rebuild_start = html.index("function rebuildSourceFilterGroups()")
+    rebuild_end = html.index("function toggleCategoryExpansion(cat)", rebuild_start)
+    rebuild_block = html[rebuild_start:rebuild_end]
     render_start = html.index("function renderFilters()")
     render_end = html.index("async function selectFilter(value)", render_start)
     render_block = html[render_start:render_end]
@@ -571,11 +579,67 @@ def test_mobile_sidebar_keeps_open_when_expanding_source_categories():
     select_block = html[select_start:select_end]
 
     assert "function toggleCategoryExpansion(cat)" in html
+    assert "return groups;" in rebuild_block
     assert "const hasSourceButtons = body && body.querySelector('.fbtn');" in render_block
+    assert "const isMobileSidebar = window.matchMedia && window.matchMedia('(max-width: 768px)').matches;" in render_block
+    assert "if (hasSourceButtons && isMobileSidebar)" in render_block
     assert "toggleCategoryExpansion(cat);" in render_block
     assert render_block.index("toggleCategoryExpansion(cat);") < render_block.index("selectFilter('cat:' + cat);")
     assert "return;\n      }\n      if (filter === 'cat:' + cat)" in render_block
     assert "if (window.matchMedia && window.matchMedia('(max-width: 768px)').matches) closeSidebar();" in select_block
+
+
+def test_source_filter_rendering_executes_group_rebuild_path():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not available for frontend runtime contract test")
+
+    script = textwrap.dedent(
+        r"""
+        const fs = require('fs');
+        const vm = require('vm');
+        const html = fs.readFileSync('frontend/index.html', 'utf8');
+        const start = html.indexOf('function rebuildSourceFilterGroups()');
+        const end = html.indexOf('async function selectFilter(value)', start);
+        const code = html.slice(start, end);
+        const filters = { innerHTML: '', onclick: null };
+        const context = {
+          sourceFilterGroups: {},
+          sourceToFilterGroup: {},
+          sourceRows: [{
+            source: '财经早餐',
+            label: '财经早餐',
+            category: 'Finance',
+            sources: ['财经早餐'],
+            raw_rows: [{ category: 'Finance' }]
+          }],
+          CATEGORY_ORDER: ['Finance'],
+          filter: 'all',
+          localStorage: { getItem(){ return null; }, setItem(){} },
+          document: { getElementById(id){ return id === 'filters' ? filters : null; } },
+          window: { matchMedia(){ return { matches: false }; } },
+          sourceLabel(v){ return v; },
+          sourceGroupKey(v){ return v; },
+          chooseSourceGroupCategory(){ return 'Finance'; },
+          sourceCategory(){ return 'Finance'; },
+          categoryDisplayName(v){ return v; },
+          esc(v){ return String(v); },
+        };
+        vm.createContext(context);
+        vm.runInContext(code + '\nrenderFilters();', context);
+        if (!filters.innerHTML.includes('财经早餐')) {
+          throw new Error('renderFilters did not render grouped source button');
+        }
+        """
+    )
+    result = subprocess.run(
+        [node, "-e", script],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_mobile_layout_and_article_content_cannot_create_horizontal_scroll():
