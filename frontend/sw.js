@@ -60,6 +60,11 @@ self.addEventListener('fetch', event => {
     return;
   }
 
+  // Auth/session mutations must always hit the network.
+  if (url.pathname.startsWith('/auth/')) {
+    return;
+  }
+
   // ── API list: network-first + background cache (no cold-start delay) ──
   if (url.pathname.startsWith('/api/')) {
     const cacheRequest = normalizedApiRequest(event.request);

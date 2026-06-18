@@ -407,15 +407,18 @@ def _get_article_meta(article_id: int) -> dict | None:
 
 
 _news_conn = None
+_news_conn_lock = threading.Lock()
 
 
 def _get_news_db():
     """Persistent connection to news.db for batch queries."""
     global _news_conn
     if _news_conn is None and os.path.exists(NEWS_DB):
-        _news_conn = sqlite3.connect(NEWS_DB, check_same_thread=False)
-        _news_conn.row_factory = sqlite3.Row
-        _ensure_news_schema(_news_conn)
+        with _news_conn_lock:
+            if _news_conn is None and os.path.exists(NEWS_DB):
+                _news_conn = sqlite3.connect(NEWS_DB, check_same_thread=False)
+                _news_conn.row_factory = sqlite3.Row
+                _ensure_news_schema(_news_conn)
     return _news_conn
 
 
@@ -2195,75 +2198,68 @@ def _save_ai_result(article_id: int, summary: str | None = None,
     import sqlite3
     if not os.path.exists(NEWS_DB):
         return
+    conn = None
     try:
         conn = sqlite3.connect(NEWS_DB)
-        existing = _get_ai_result(article_id)
-        if existing:
-            sets = []
-            vals = []
-            if summary is not None:
-                sets.append("summary = ?")
-                vals.append(summary)
-                sets.append("summary_error = NULL")
-                sets.append("summary_error_at = NULL")
-            if translation is not None:
-                sets.append("translation = ?")
-                vals.append(translation)
-            if summary_error is not None:
-                sets.append("summary_error = ?")
-                vals.append(summary_error[:500])
-                sets.append("summary_error_at = datetime('now')")
-            if title_summary is not None:
-                sets.append("title_summary = ?")
-                vals.append(title_summary)
-                sets.append("title_summary_error = NULL")
-                sets.append("title_summary_error_at = NULL")
-            if title_summary_error is not None:
-                sets.append("title_summary_error = ?")
-                vals.append(title_summary_error[:500])
-                sets.append("title_summary_error_at = datetime('now')")
-            if title_summary_provider is not None:
-                sets.append("title_summary_provider = ?")
-                vals.append(title_summary_provider)
-            if title_summary_model is not None:
-                sets.append("title_summary_model = ?")
-                vals.append(title_summary_model)
-            if title_summary_by_user_id is not None:
-                sets.append("title_summary_by_user_id = ?")
-                vals.append(title_summary_by_user_id)
-            if sets:
-                sets.append("updated_at = datetime('now')")
-                vals.append(article_id)
-                conn.execute(
-                    f"UPDATE ai_results SET {', '.join(sets)} WHERE article_id = ?",
-                    vals,
-                )
-        else:
-            conn.execute(
-                "INSERT INTO ai_results "
-                "(article_id, summary, translation, summary_error, summary_error_at, "
-                "title_summary, title_summary_error, title_summary_error_at, "
-                "title_summary_provider, title_summary_model, title_summary_by_user_id) "
-                "VALUES (?, ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END, "
-                "?, ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END, ?, ?, ?)",
-                (
-                    article_id,
-                    summary,
-                    translation,
-                    summary_error[:500] if summary_error else None,
-                    summary_error,
-                    title_summary,
-                    title_summary_error[:500] if title_summary_error else None,
-                    title_summary_error,
-                    title_summary_provider,
-                    title_summary_model,
-                    title_summary_by_user_id,
-                ),
-            )
+        _init_ai_results_table()
+        conn.execute(
+            """
+            INSERT INTO ai_results
+            (article_id, summary, translation, summary_error, summary_error_at,
+             title_summary, title_summary_error, title_summary_error_at,
+             title_summary_provider, title_summary_model, title_summary_by_user_id)
+            VALUES (?, ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END,
+                    ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END,
+                    ?, ?, ?)
+            ON CONFLICT(article_id) DO UPDATE SET
+                summary = COALESCE(excluded.summary, summary),
+                translation = COALESCE(excluded.translation, translation),
+                summary_error = CASE
+                    WHEN excluded.summary IS NOT NULL THEN NULL
+                    WHEN excluded.summary_error IS NOT NULL THEN excluded.summary_error
+                    ELSE summary_error
+                END,
+                summary_error_at = CASE
+                    WHEN excluded.summary IS NOT NULL THEN NULL
+                    WHEN excluded.summary_error IS NOT NULL THEN datetime('now')
+                    ELSE summary_error_at
+                END,
+                title_summary = COALESCE(excluded.title_summary, title_summary),
+                title_summary_error = CASE
+                    WHEN excluded.title_summary IS NOT NULL THEN NULL
+                    WHEN excluded.title_summary_error IS NOT NULL THEN excluded.title_summary_error
+                    ELSE title_summary_error
+                END,
+                title_summary_error_at = CASE
+                    WHEN excluded.title_summary IS NOT NULL THEN NULL
+                    WHEN excluded.title_summary_error IS NOT NULL THEN datetime('now')
+                    ELSE title_summary_error_at
+                END,
+                title_summary_provider = COALESCE(excluded.title_summary_provider, title_summary_provider),
+                title_summary_model = COALESCE(excluded.title_summary_model, title_summary_model),
+                title_summary_by_user_id = COALESCE(excluded.title_summary_by_user_id, title_summary_by_user_id),
+                updated_at = datetime('now')
+            """,
+            (
+                article_id,
+                summary,
+                translation,
+                summary_error[:500] if summary_error else None,
+                summary_error,
+                title_summary,
+                title_summary_error[:500] if title_summary_error else None,
+                title_summary_error,
+                title_summary_provider,
+                title_summary_model,
+                title_summary_by_user_id,
+            ),
+        )
         conn.commit()
-        conn.close()
     except Exception:
         pass
+    finally:
+        if conn:
+            conn.close()
 
 
 # ─── AI Result Cache (read-only) ──────────────────────────

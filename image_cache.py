@@ -392,10 +392,10 @@ def enqueue_article_image_prefetch(
     queued = 0
     for url, is_cover in collect_image_urls(body_html, thumb, body_limit=body_limit):
         url_hash = _url_hash(url)
-        if not pinned and get_cached_image(url):
-            continue
         pending_key = f"{url_hash}:{1 if pinned else 0}"
         with _prefetch_lock:
+            if not pinned and get_cached_image(url):
+                continue
             if pending_key in _prefetch_pending:
                 continue
             _prefetch_pending.add(pending_key)

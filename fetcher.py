@@ -565,9 +565,30 @@ def parse_datetime(dt_str: str) -> dict:
                 "date": dt_cst.strftime("%Y-%m-%d"),
                 "timestamp": int(dt.timestamp()),
             }
-    except Exception:
-        pass
-    return {"iso": "", "time": "", "date": "", "timestamp": 0}
+    except Exception as exc:
+        log.warning(f"Could not parse message datetime {dt_str!r}; using current Beijing time: {exc}")
+    dt_cst = datetime.now(CST)
+    return {
+        "iso": dt_cst.isoformat(),
+        "time": dt_cst.strftime("%H:%M"),
+        "date": dt_cst.strftime("%Y-%m-%d"),
+        "timestamp": int(dt_cst.timestamp()),
+    }
+
+
+def _legacy_news_item_key(item: dict) -> str:
+    """Return a stable key for legacy news.json accumulation."""
+    article_id = item.get("id")
+    if article_id not in (None, ""):
+        return f"id:{article_id}"
+    telegraph_url = item.get("telegraph_url") or ""
+    if telegraph_url:
+        return f"url:{telegraph_url}"
+    return "fallback:{source}:{date}:{title}".format(
+        source=item.get("source", ""),
+        date=item.get("date", ""),
+        title=item.get("title", ""),
+    )
 
 
 # ─── Telegraph Fetching ──────────────────────────────────
@@ -959,14 +980,14 @@ def run():
 
     # Process new messages with thread pool
     new_entries = []
-    any_failed = False
+    failed_count = 0
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(process_message, msg, msg["id"]): msg for msg in messages}
         for future in as_completed(futures):
             try:
                 new_entries.append(future.result())
             except Exception as e:
-                any_failed = True
+                failed_count += 1
                 msg_id = futures[future].get("id", "?")
                 log.error(f"Message processing failed (ID={msg_id}): {e}")
 
@@ -981,13 +1002,12 @@ def run():
     # Build seen_ids from existing items to avoid duplicates
     existing_ids = set()
     for item in existing_data.get("items", []):
-        # Use a combination of title + timestamp as dedup key
-        key = f"{item.get('title', '')}|{item.get('timestamp', 0)}"
+        key = _legacy_news_item_key(item)
         existing_ids.add(key)
 
     # Only add truly new entries
     for entry in new_entries:
-        key = f"{entry.get('title', '')}|{entry.get('timestamp', 0)}"
+        key = _legacy_news_item_key(entry)
         if key not in existing_ids:
             existing_data["items"].append(entry)
             existing_ids.add(key)
@@ -1011,9 +1031,9 @@ def run():
     # Update state with latest message ID
     # Only advance last_seen_id if ALL messages processed successfully,
     # otherwise failed messages would be permanently skipped on next run.
-    if any_failed:
+    if failed_count:
         log.warning(
-            f"{any_failed} message(s) failed — keeping last_seen_id={state.get('last_seen_id')} "
+            f"{failed_count} message(s) failed — keeping last_seen_id={state.get('last_seen_id')} "
             "so they can be retried on next fetch"
         )
     else:

@@ -1110,8 +1110,8 @@ async function apiFetch(url, options = {}) {
   if (authToken) headers['Authorization'] = 'Bearer ' + authToken;
   const resp = await fetch(url, { ...options, headers });
   if (resp.status === 401 && authToken) {
-    // Don't auto-logout on transient 401 — let caller handle the null
-    return null;
+    // Don't auto-logout on transient 401; let caller handle a structured auth error.
+    return { error: 'auth_expired', status: 401 };
   }
   return resp.json();
 }

@@ -14,6 +14,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from bs4 import BeautifulSoup
+
 from image_cache import (
     cache_image,
     enqueue_article_image_prefetch,
@@ -44,20 +46,22 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [refresh] %(message)
 log = logging.getLogger("refresh")
 _schema_lock = threading.Lock()
 _schema_ready = False
+_schema_ready_event = threading.Event()
 
 
 def ensure_schema_once(conn: sqlite3.Connection) -> None:
     global _schema_ready
-    if _schema_ready:
+    if _schema_ready_event.is_set() and _schema_ready:
         return
     with _schema_lock:
-        if _schema_ready:
+        if _schema_ready_event.is_set() and _schema_ready:
             return
         ensure_article_source_columns(conn)
         ensure_article_title_columns(conn)
         ensure_deleted_articles_table(conn)
         conn.commit()
-        _schema_ready = True
+        globals()["_schema_ready"] = True
+        _schema_ready_event.set()
 
 
 def ensure_article_title_columns(conn: sqlite3.Connection) -> None:
@@ -82,11 +86,13 @@ def get_db() -> sqlite3.Connection:
 # In-memory cache for article detail responses — invalidated on fetcher run
 _article_cache: dict[int, bytes] = {}
 _article_cache_lock = threading.Lock()
+_article_cache_inflight: dict[int, threading.Event] = {}
 
 
 def clear_article_cache():
     with _article_cache_lock:
         _article_cache.clear()
+        _article_cache_inflight.clear()
 
 
 def acquire_lock() -> bool:
@@ -347,10 +353,32 @@ def _strip_display_attribution(value: str | None) -> str | None:
         cleaned = next_value
 
 
+def _sanitize_article_html(value: str | None) -> str | None:
+    if not value:
+        return value
+    soup = BeautifulSoup(value, "html.parser")
+    for tag in soup.find_all(["script", "style", "iframe", "object", "embed"]):
+        tag.decompose()
+    for tag in soup.find_all(True):
+        for attr, attr_value in list(tag.attrs.items()):
+            attr_l = attr.lower()
+            if attr_l.startswith("on"):
+                del tag.attrs[attr]
+                continue
+            values = attr_value if isinstance(attr_value, list) else [str(attr_value)]
+            joined = " ".join(str(v).strip().lower() for v in values)
+            if attr_l in {"href", "src", "xlink:href", "formaction"}:
+                if joined.startswith(("javascript:", "data:text/html")):
+                    del tag.attrs[attr]
+    return str(soup)
+
+
 def _clean_article_display_fields(item: dict) -> dict:
     for field in ("summary", "body_html"):
         if field in item:
             item[field] = _strip_display_attribution(item.get(field))
+    if "body_html" in item:
+        item["body_html"] = _sanitize_article_html(item.get("body_html"))
     return item
 
 
@@ -504,7 +532,7 @@ def api_title_updates(params: dict) -> bytes:
             conn.close()
 
 
-def api_news_detail(article_id: int) -> bytes:
+def _build_news_detail_response(article_id: int) -> bytes:
     """GET /api/news/<id> — single article with body_html (cached)."""
     conn = None
     try:
@@ -514,13 +542,7 @@ def api_news_detail(article_id: int) -> bytes:
             (article_id,),
         ).fetchone()
         if deleted:
-            with _article_cache_lock:
-                _article_cache.pop(article_id, None)
             return json.dumps({"error": "not found"}).encode()
-        with _article_cache_lock:
-            cached = _article_cache.get(article_id)
-            if cached is not None:
-                return cached
         row = conn.execute(
             "SELECT * FROM articles WHERE id = ?", (article_id,)
         ).fetchone()
@@ -532,14 +554,55 @@ def api_news_detail(article_id: int) -> bytes:
         item["source"] = item["feed_source"]
         item = _clean_article_display_fields(item)
         result = json.dumps(item, ensure_ascii=False).encode()
-        with _article_cache_lock:
-            _article_cache[article_id] = result
         return result
     except Exception as e:
         return json.dumps({"error": str(e)}).encode()
     finally:
         if conn:
             conn.close()
+
+
+def api_news_detail(article_id: int) -> bytes:
+    """GET /api/news/<id> - single article with body_html (cached)."""
+    with _article_cache_lock:
+        cached = _article_cache.get(article_id)
+        if cached is not None:
+            return cached
+        event = _article_cache_inflight.get(article_id)
+        if event is None:
+            event = threading.Event()
+            _article_cache_inflight[article_id] = event
+            producer = True
+        else:
+            producer = False
+
+    if not producer:
+        event.wait()
+        with _article_cache_lock:
+            cached = _article_cache.get(article_id)
+            if cached is not None:
+                return cached
+        return _build_news_detail_response(article_id)
+
+    try:
+        result = _build_news_detail_response(article_id)
+        with _article_cache_lock:
+            try:
+                data = json.loads(result.decode("utf-8"))
+            except Exception:
+                data = {}
+            if not data.get("error"):
+                _article_cache[article_id] = result
+            else:
+                _article_cache.pop(article_id, None)
+            _article_cache_inflight.pop(article_id, None)
+            event.set()
+        return result
+    except Exception:
+        with _article_cache_lock:
+            _article_cache_inflight.pop(article_id, None)
+            event.set()
+        raise
 
 
 def api_sources() -> bytes:
