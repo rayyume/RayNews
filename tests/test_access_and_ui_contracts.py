@@ -561,6 +561,23 @@ def test_mobile_sidebar_and_header_touch_targets_are_explicit():
     assert ".header-right .refresh-btn{padding:3px 8px;font-size:10px}" in html
 
 
+def test_mobile_sidebar_keeps_open_when_expanding_source_categories():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    render_start = html.index("function renderFilters()")
+    render_end = html.index("async function selectFilter(value)", render_start)
+    render_block = html[render_start:render_end]
+    select_start = render_end
+    select_end = html.index("function filteredNews()", select_start)
+    select_block = html[select_start:select_end]
+
+    assert "function toggleCategoryExpansion(cat)" in html
+    assert "const hasSourceButtons = body && body.querySelector('.fbtn');" in render_block
+    assert "toggleCategoryExpansion(cat);" in render_block
+    assert render_block.index("toggleCategoryExpansion(cat);") < render_block.index("selectFilter('cat:' + cat);")
+    assert "return;\n      }\n      if (filter === 'cat:' + cat)" in render_block
+    assert "if (window.matchMedia && window.matchMedia('(max-width: 768px)').matches) closeSidebar();" in select_block
+
+
 def test_mobile_layout_and_article_content_cannot_create_horizontal_scroll():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     assert "html{font-size:16px;scroll-behavior:smooth;-webkit-font-smoothing:antialiased;max-width:100%;overflow-x:hidden}" in html
