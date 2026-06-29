@@ -362,37 +362,39 @@ class AIService:
         return self.chat(messages, max_tokens=200, temperature=0.2).strip()
 
     def summarize_title(self, title: str, max_chars: int = 30) -> str:
-        """Shorten a news title while preserving the core fact."""
+        """Shorten a news title and ask the model to self-check validity."""
         messages = [
             {
                 "role": "system",
                 "content": (
-                    "你是新闻标题编辑。把过长标题压缩为简洁中文标题，只输出标题本身。"
-                    "不得解释，不得加引号，不得使用省略号。"
+                    "??????????????????????????????"
+                    "???????????????????????? JSON?"
                 ),
             },
             {
                 "role": "user",
                 "content": (
-                    f"请将下面标题简写到 {max_chars} 个中文字符以内。\n"
-                    "要求：保留主体、动作和关键事实；不要新增原文没有的信息；"
-                    "不要输出“标题：”或任何说明。\n\n"
-                    f"原标题：{title}"
+                    f"????????? {max_chars} ????????\n"
+                    "???\n"
+                    "1. ???????????????????????????????\n"
+                    "2. ??????????????????????????????\n"
+                    "3. ?????????????????????\n"
+                    "4. ???????????????valid ??? false?\n"
+                    "5. ??? JSON??????????\n\n"
+                    "?????{\"title\":\"???\",\"valid\":true,\"reason\":\"????????\"}\n\n"
+                    f"????{title}"
                 ),
             },
         ]
-        return self.chat(messages, max_tokens=120, temperature=0.2).strip()
+        return self.chat(messages, max_tokens=180, temperature=0.2).strip()
 
-    # ─── Daily summary (layered) ──────────────────────────────
-    #
+
+    # Daily summary (layered)
     # Strategy:
-    #   1. For each article, use existing AI summary if available,
-    #      otherwise take first ~500 chars of body content.
-    #   2. Group articles by source → batch per source.
-    #   3. Generate a per-source mini-summary (or pass rich list for final combiner).
-    #   4. Final combiner: merge all source summaries into one daily summary.
-    #
-    # Returns {"summary": str, "stats": {...}}
+    #   1. For each article, use existing AI summary if available, otherwise an excerpt.
+    #   2. Group and cap articles before asking AI to select final candidates.
+    #   3. Generate the final Markdown summary from the selected articles.
+    # Returns {"summary": str, "stats": {...}}.
 
     def daily_summary(self, articles: list[dict]) -> dict:
         return self._daily_summary_v2(articles)
