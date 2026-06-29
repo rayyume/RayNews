@@ -973,7 +973,7 @@ class AIService:
                     {"role": "system", "content": "Reply with pong only."},
                     {"role": "user", "content": "ping"},
                 ],
-                max_tokens=8,
+                max_tokens=50,
                 temperature=0,
             )
         finally:
