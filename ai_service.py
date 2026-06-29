@@ -981,5 +981,4 @@ class AIService:
         finally:
             self.request_timeout = old_timeout
         if not (result or "").strip():
-            raise RuntimeError("AI API returned an empty chat completion")
-        return f"连接成功，当前模型可用：{self.model}"
+            raise RuntimeE
