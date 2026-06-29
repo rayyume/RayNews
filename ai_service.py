@@ -362,37 +362,39 @@ class AIService:
         return self.chat(messages, max_tokens=200, temperature=0.2).strip()
 
     def summarize_title(self, title: str, max_chars: int = 30) -> str:
-        """Shorten a news title while preserving the core fact."""
+        """Shorten a news title and ask the model to self-check validity."""
         messages = [
             {
                 "role": "system",
                 "content": (
-                    "你是新闻标题编辑。把过长标题压缩为简洁中文标题，只输出标题本身。"
-                    "不得解释，不得加引号，不得使用省略号。"
+                    "你是新闻标题编辑。把过长标题压缩为清晰、直观的中文新闻标题。"
+                    "必须判断压缩结果是否仍是有效新闻标题，并且只输出 JSON。"
                 ),
             },
             {
                 "role": "user",
                 "content": (
                     f"请将下面标题简写到 {max_chars} 个中文字符以内。\n"
-                    "要求：保留主体、动作和关键事实；不要新增原文没有的信息；"
-                    "不要输出“标题：”或任何说明。\n\n"
+                    "要求：\n"
+                    "1. 短标题必须保留主体、动作和关键事实，读者一眼能看懂发生了什么。\n"
+                    "2. 不能只输出数字、股票代码、金额、百分比、单个名词或残缺片段。\n"
+                    "3. 不要新增原标题没有的信息，不要使用省略号。\n"
+                    "4. 如果无法生成清晰直观的短标题，valid 必须为 false。\n"
+                    "5. 只输出 JSON，不要解释或代码块。\n\n"
+                    "输出格式：{\"title\":\"短标题\",\"valid\":true,\"reason\":\"保留了主体和事件\"}\n\n"
                     f"原标题：{title}"
                 ),
             },
         ]
-        return self.chat(messages, max_tokens=120, temperature=0.2).strip()
+        return self.chat(messages, max_tokens=180, temperature=0.2).strip()
 
-    # ─── Daily summary (layered) ──────────────────────────────
-    #
+
+    # Daily summary (layered)
     # Strategy:
-    #   1. For each article, use existing AI summary if available,
-    #      otherwise take first ~500 chars of body content.
-    #   2. Group articles by source → batch per source.
-    #   3. Generate a per-source mini-summary (or pass rich list for final combiner).
-    #   4. Final combiner: merge all source summaries into one daily summary.
-    #
-    # Returns {"summary": str, "stats": {...}}
+    #   1. For each article, use existing AI summary if available, otherwise an excerpt.
+    #   2. Group and cap articles before asking AI to select final candidates.
+    #   3. Generate the final Markdown summary from the selected articles.
+    # Returns {"summary": str, "stats": {...}}.
 
     def daily_summary(self, articles: list[dict]) -> dict:
         return self._daily_summary_v2(articles)

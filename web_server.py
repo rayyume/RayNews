@@ -1246,17 +1246,55 @@ def _needs_title_summary(title: str) -> bool:
     )
 
 
+def _strip_outer_title_quotes(text: str) -> str:
+    pairs = (
+        ("\"", "\""), ("'", "'"),
+        (chr(0x201c), chr(0x201d)), (chr(0x2018), chr(0x2019)),
+        (chr(0x300c), chr(0x300d)), (chr(0x300e), chr(0x300f)),
+    )
+    changed = True
+    while changed and len(text) >= 2:
+        changed = False
+        for left, right in pairs:
+            if text.startswith(left) and text.endswith(right):
+                text = text[len(left):-len(right)].strip()
+                changed = True
+                break
+    return text
+
+
+def _remove_title_summary_prefix(text: str) -> str:
+    prefixes = (
+        "\u4ee5\u4e0b\u662f\u7b80\u5199\u540e\u7684\u6807\u9898",
+        "\u4ee5\u4e0b\u662f\u538b\u7f29\u540e\u7684\u6807\u9898",
+        "\u4ee5\u4e0b\u662f\u4f18\u5316\u540e\u7684\u6807\u9898",
+        "\u6211\u4e3a\u4f60\u7b80\u5199\u540e\u7684\u6807\u9898",
+        "\u6211\u4e3a\u4f60\u538b\u7f29\u540e\u7684\u6807\u9898",
+        "\u6211\u4e3a\u4f60\u4f18\u5316\u540e\u7684\u6807\u9898",
+        "\u7b80\u5199\u540e\u7684\u6807\u9898",
+        "\u538b\u7f29\u540e\u7684\u6807\u9898",
+        "\u4f18\u5316\u540e\u7684\u6807\u9898",
+        "\u7b80\u5199\u6807\u9898",
+        "\u77ed\u6807\u9898",
+        "\u603b\u7ed3\u6807\u9898",
+        "\u6807\u9898",
+    )
+    stripped = text.lstrip()
+    for prefix in prefixes:
+        if stripped.lower().startswith(prefix.lower()):
+            rest = stripped[len(prefix):].lstrip()
+            if rest.startswith((":", chr(0xff1a))):
+                return rest[1:].lstrip()
+    return text
+
+
 def _clean_title_summary(title: str | None) -> str:
     text = " ".join((title or "").strip().split())
-    text = re.sub(
-        r"^(?:以下是)?(?:我为你)?(?:简写后的|压缩后的|优化后的)?"
-        r"(?:标题|简写标题|短标题|总结标题)\s*[:：]\s*",
-        "",
-        text,
-        flags=re.I,
-    )
-    text = re.sub(r"^\s*(?:[-*]\s+|\d{1,2}[.、]\s+)", "", text)
-    return text.strip(" \t\r\n\"'“”‘’《》「」『』")
+    text = _remove_title_summary_prefix(text)
+    text = re.sub(r"^\s*(?:[-*]\s+|\d{1,2}[.\u3001]\s+)", "", text)
+    quote_chars = " \t\r\n\"'" + "".join(chr(cp) for cp in (0x201c, 0x201d, 0x2018, 0x2019, 0x300c, 0x300d, 0x300e, 0x300f))
+    text = text.strip(quote_chars)
+    return _strip_outer_title_quotes(text).strip()
 
 
 def _is_valid_title_summary(title: str | None) -> bool:
@@ -1265,14 +1303,101 @@ def _is_valid_title_summary(title: str | None) -> bool:
         return False
     lowered = text.lower()
     bad_markers = (
-        "以下是", "简写后的", "无法", "不能", "请提供", "请补充",
-        "as an ai", "i cannot", "i'm unable",
+        "\u4ee5\u4e0b\u662f", "\u7b80\u5199\u540e\u7684", "\u65e0\u6cd5", "\u4e0d\u80fd",
+        "\u8bf7\u63d0\u4f9b", "\u8bf7\u8865\u5145", "as an ai", "i cannot", "i'm unable",
     )
     if any(marker in lowered for marker in bad_markers):
         return False
-    if "…" in text or "..." in text:
+    if chr(0x2026) in text or "..." in text:
         return False
     return _title_weight(text) <= TITLE_SUMMARY_MAX_WEIGHT
+
+
+def _parse_title_summary_result(raw: str | None) -> dict:
+    text = (raw or "").strip()
+    if not text:
+        return {"title": "", "valid": False, "reason": "empty AI title summary"}
+    match = re.search(r"\{.*\}", text, flags=re.S)
+    if match:
+        try:
+            data = json.loads(match.group(0))
+            return {
+                "title": data.get("title") or "",
+                "valid": bool(data.get("valid")),
+                "reason": data.get("reason") or "",
+            }
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return {"title": text, "valid": True, "reason": "legacy plain title summary"}
+
+
+def _balanced_title_punctuation(title: str) -> bool:
+    pairs = (
+        (chr(0x300a), chr(0x300b)), (chr(0x300c), chr(0x300d)),
+        (chr(0x300e), chr(0x300f)), (chr(0x201c), chr(0x201d)),
+        (chr(0x2018), chr(0x2019)),
+    )
+    for left, right in pairs:
+        if title.count(left) != title.count(right):
+            return False
+        if title.find(right) != -1 and (title.find(left) == -1 or title.find(right) < title.find(left)):
+            return False
+    return True
+
+
+def _looks_like_code_only_title(title: str) -> bool:
+    compact = re.sub(r"[\s\-_.:\u3001\uff1a/]+", "", title or "")
+    if not compact:
+        return True
+    if re.fullmatch(r"[\dA-Za-z]+", compact):
+        digits = len(re.findall(r"\d", compact))
+        letters = len(re.findall(r"[A-Za-z]", compact))
+        return digits >= 3 or (digits > 0 and letters <= 4)
+    if re.fullmatch(r"[\dA-Za-z.\-_/]+", title or ""):
+        return True
+    return False
+
+
+def _title_keyword_tokens(title: str) -> set[str]:
+    text = _clean_title_summary(title)
+    cjk_tokens = set(re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff]{2,}", text))
+    latin_tokens = {t.lower() for t in re.findall(r"[A-Za-z][A-Za-z0-9.+#-]{1,}", text)}
+    return cjk_tokens | latin_tokens
+
+
+def _shares_title_signal(candidate: str, original_title: str) -> bool:
+    original_tokens = _title_keyword_tokens(original_title)
+    if not original_tokens:
+        return True
+    candidate_tokens = _title_keyword_tokens(candidate)
+    if candidate_tokens & original_tokens:
+        return True
+    candidate_text = _clean_title_summary(candidate).lower()
+    original_text = _clean_title_summary(original_title).lower()
+    for token in original_tokens:
+        if token.lower() in candidate_text:
+            return True
+    for token in candidate_tokens:
+        if token.lower() in original_text:
+            return True
+    return False
+
+
+def _validate_ai_title_summary_result(result: dict | str | None, original_title: str = "") -> dict:
+    data = _parse_title_summary_result(result) if isinstance(result, str) or result is None else dict(result)
+    title = _repair_title_summary(data.get("title") or "")
+    reason = data.get("reason") or ""
+    if data.get("valid") is False:
+        return {"title": title, "valid": False, "reason": reason or "AI marked title summary invalid"}
+    if not _is_valid_title_summary(title):
+        return {"title": title, "valid": False, "reason": "invalid title summary length or format"}
+    if _looks_like_code_only_title(title):
+        return {"title": title, "valid": False, "reason": "invalid title summary: code-only or numeric title"}
+    if not _balanced_title_punctuation(title):
+        return {"title": title, "valid": False, "reason": "invalid title summary: unbalanced title punctuation"}
+    if original_title and not _shares_title_signal(title, original_title):
+        return {"title": title, "valid": False, "reason": "invalid title summary: missing original title signal"}
+    return {"title": title, "valid": True, "reason": reason}
 
 
 def _clip_title_by_weight(title: str, max_weight: int = TITLE_SUMMARY_MAX_WEIGHT) -> str:
@@ -1635,17 +1760,27 @@ def _process_article_title(article: dict, config: dict) -> bool:
         return changed
 
     cached = _get_ai_result(article_id) or {}
-    cached_summary = _clean_title_summary(cached.get("title_summary"))
-    if cached_summary and _is_valid_title_summary(cached_summary):
-        return _save_article_title_update(article_id, cached_summary, "title_summary") or changed
+    cached_summary = cached.get("title_summary")
+    if cached_summary:
+        cached_result = _validate_ai_title_summary_result(
+            {"title": cached_summary, "valid": True, "reason": "cached title summary"},
+            original_title=title,
+        )
+        if cached_result["valid"]:
+            return _save_article_title_update(article_id, cached_result["title"], "title_summary") or changed
+        _save_ai_result(article_id, title_summary_error=f"invalid cached title summary: {cached_result['reason']}")
+        return changed
 
     try:
         svc = svc or _title_service(config)
         raw_title = svc.summarize_title(title, TITLE_SUMMARY_MAX_CHARS)
-        short_title = _repair_title_summary(raw_title) or _repair_title_summary(title)
-        if not _is_valid_title_summary(short_title):
-            snippet = _clean_title_summary(raw_title)[:120] or "<empty>"
-            raise ValueError(f"AI returned invalid title summary: {snippet}")
+        parsed = _parse_title_summary_result(raw_title)
+        result = _validate_ai_title_summary_result(parsed, original_title=title)
+        if not result["valid"]:
+            snippet = _clean_title_summary(parsed.get("title") or raw_title)[:120] or "<empty>"
+            reason = result.get("reason") or "invalid title summary"
+            raise ValueError(f"AI returned invalid title summary: {reason}: {snippet}")
+        short_title = result["title"]
         _save_ai_result(
             article_id,
             title_summary=short_title,
@@ -1659,7 +1794,6 @@ def _process_article_title(article: dict, config: dict) -> bool:
         _save_ai_result(article_id, title_summary_error=str(e))
         raise
     return changed
-
 
 def _run_auto_title_process_once():
     """Translate and shorten today's titles for opted-in users."""
@@ -2158,6 +2292,9 @@ def _init_ai_results_table():
             conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_model TEXT")
         if "title_summary_by_user_id" not in cols:
             conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_by_user_id INTEGER")
+        if "updated_at" not in cols:
+            conn.execute("ALTER TABLE ai_results ADD COLUMN updated_at TEXT")
+            conn.execute("UPDATE ai_results SET updated_at = datetime('now') WHERE updated_at IS NULL")
         conn.commit()
         conn.close()
     except Exception:

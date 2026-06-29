@@ -12,17 +12,37 @@ sys.path.insert(0, str(ROOT))
 
 import refresh_server
 import web_server
+from ai_service import AIService
 
 SHORT_CHINESE_TITLE = "\u82f9\u679c\u53d1\u5e03 Vision Pro \u65b0\u7cfb\u7edf"
 LONG_CHINESE_TITLE = "\u8fd9\u662f\u4e00\u4e2a" + ("\u975e\u5e38" * 12) + "\u957f\u7684\u4e2d\u6587\u6807\u9898"
 SHORTENED_CHINESE_TITLE = "\u82f9\u679c\u53d1\u5e03\u65b0\u7cfb\u7edf"
+ORIGINAL_RESTAURANT_TITLE = "\u300a\u718a\u5bb6\u9910\u9986\u300b\u8ba9\u6700\u540e\u51e0\u79d2\u7269\u5c3d\u5176\u7528"
+SHORT_RESTAURANT_TITLE = "\u300a\u718a\u5bb6\u9910\u9986\u300b\u5229\u7528\u6700\u540e\u51e0\u79d2\u521b\u9020\u7b11\u70b9"
 
 
 def temp_db_path():
     return ROOT / f"tmp-title-test-{uuid.uuid4().hex}.db"
 
 
+class CaptureTitleAI(AIService):
+    def __init__(self):
+        pass
+
+    def chat(self, messages: list, max_tokens: int = 2000, temperature: float = 0.3) -> str:
+        self.messages = messages
+        return '{"title":"short","valid":true,"reason":"ok"}'
+
+
 class TitleProcessingTests(unittest.TestCase):
+    def test_summarize_title_prompt_is_readable_chinese(self):
+        svc = CaptureTitleAI()
+        svc.summarize_title("OpenAI releases a very long title about GPT-4o", 30)
+        prompt = "\n".join(message["content"] for message in svc.messages)
+        self.assertIn("\u65b0\u95fb\u6807\u9898\u7f16\u8f91", prompt)
+        self.assertIn("\u53ea\u8f93\u51fa JSON", prompt)
+        self.assertNotIn("????????", prompt)
+
     def test_overlong_title_uses_chinese_character_budget(self):
         self.assertFalse(web_server._needs_title_summary(SHORT_CHINESE_TITLE))
         self.assertTrue(web_server._needs_title_summary(LONG_CHINESE_TITLE))
@@ -39,6 +59,48 @@ class TitleProcessingTests(unittest.TestCase):
         self.assertEqual(web_server._clean_title_summary(f"\u4ee5\u4e0b\u662f\u7b80\u5199\u540e\u7684\u6807\u9898\uff1a{SHORTENED_CHINESE_TITLE}"), SHORTENED_CHINESE_TITLE)
         self.assertTrue(web_server._is_valid_title_summary(f"\u4ee5\u4e0b\u662f\u7b80\u5199\u540e\u7684\u6807\u9898\uff1a{SHORTENED_CHINESE_TITLE}"))
         self.assertFalse(web_server._is_valid_title_summary(LONG_CHINESE_TITLE))
+
+        self.assertEqual(web_server._clean_title_summary(ORIGINAL_RESTAURANT_TITLE), ORIGINAL_RESTAURANT_TITLE)
+
+    def test_ai_title_summary_rejects_numeric_and_broken_titles(self):
+        for value in ("3998", "500"):
+            result = web_server._validate_ai_title_summary_result(
+                {"title": value, "valid": True, "reason": "AI thinks it is short"},
+                original_title="\u683c\u9686\u6c47\u62a5\u9053\u516c\u53f8\u80a1\u4ef7\u5f02\u52a8",
+            )
+            self.assertFalse(result["valid"], value)
+
+        broken = web_server._validate_ai_title_summary_result(
+            {"title": "\u718a\u5bb6\u9910\u9986\u300b\u8ba9\u6700\u540e\u51e0\u79d2\u7269\u5c3d\u5176\u7528", "valid": True},
+            original_title=ORIGINAL_RESTAURANT_TITLE,
+        )
+        self.assertFalse(broken["valid"])
+
+        valid = web_server._validate_ai_title_summary_result(
+            {"title": SHORT_RESTAURANT_TITLE, "valid": True},
+            original_title=ORIGINAL_RESTAURANT_TITLE,
+        )
+        self.assertTrue(valid["valid"])
+        self.assertEqual(valid["title"], SHORT_RESTAURANT_TITLE)
+
+    def test_ai_title_summary_rejects_ai_self_invalid(self):
+        result = web_server._validate_ai_title_summary_result(
+            {"title": "\u82f9\u679c\u53d1\u5e03\u65b0\u7cfb\u7edf", "valid": False, "reason": "\u4fe1\u606f\u4e0d\u8db3"},
+            original_title="\u82f9\u679c\u53d1\u5e03 Vision Pro \u65b0\u7cfb\u7edf",
+        )
+        self.assertFalse(result["valid"])
+        self.assertIn("\u4fe1\u606f\u4e0d\u8db3", result["reason"])
+
+    def test_parse_title_summary_json_result(self):
+        parsed = web_server._parse_title_summary_result(
+            '{"title":"\u82f9\u679c\u53d1\u5e03\u65b0\u7cfb\u7edf","valid":true,"reason":"\u4fdd\u7559\u4e3b\u4f53\u548c\u4e8b\u4ef6"}'
+        )
+        self.assertEqual(parsed["title"], "\u82f9\u679c\u53d1\u5e03\u65b0\u7cfb\u7edf")
+        self.assertTrue(parsed["valid"])
+
+        legacy = web_server._parse_title_summary_result("\u82f9\u679c\u53d1\u5e03\u65b0\u7cfb\u7edf")
+        self.assertEqual(legacy["title"], "\u82f9\u679c\u53d1\u5e03\u65b0\u7cfb\u7edf")
+        self.assertTrue(legacy["valid"])
 
     def test_repair_title_summary_compacts_long_ai_output(self):
         raw = (
@@ -161,6 +223,54 @@ class TitleProcessingTests(unittest.TestCase):
                 limit=20,
             )
             self.assertIn(1, [item["id"] for item in candidates])
+        finally:
+            web_server.NEWS_DB = old_news_db
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(str(db_path) + suffix)
+                except FileNotFoundError:
+                    pass
+
+    def test_cached_numeric_title_summary_is_not_written_back(self):
+        db_path = temp_db_path()
+        old_news_db = web_server.NEWS_DB
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                "CREATE TABLE articles ("
+                "id INTEGER PRIMARY KEY, title TEXT, date TEXT, timestamp INTEGER, "
+                "source TEXT, feed_source TEXT, origin_source TEXT)"
+            )
+            conn.execute(
+                "CREATE TABLE ai_results ("
+                "article_id INTEGER PRIMARY KEY, summary TEXT, translation TEXT, "
+                "title_summary TEXT, title_summary_error TEXT, title_summary_error_at TEXT)"
+            )
+            original = "\u683c\u9686\u6c47\u957f\u6807\u9898" * 8
+            conn.execute(
+                "INSERT INTO articles (id, title, date, timestamp, source, feed_source, origin_source) "
+                "VALUES (1, ?, '2026-06-11', 1, ?, '', '')",
+                (original, "\u683c\u9686\u6c47"),
+            )
+            conn.execute("INSERT INTO ai_results (article_id, title_summary) VALUES (1, '3998')")
+            conn.commit()
+            conn.close()
+
+            web_server.NEWS_DB = str(db_path)
+            changed = web_server._process_article_title(
+                {"id": 1, "title": original, "title_summary_needed": True},
+                {"auto_title_summary_enabled": 1, "provider_type": "openai", "model": "fake"},
+            )
+
+            conn = sqlite3.connect(db_path)
+            title, error = conn.execute(
+                "SELECT a.title, r.title_summary_error "
+                "FROM articles a LEFT JOIN ai_results r ON r.article_id = a.id WHERE a.id = 1"
+            ).fetchone()
+            conn.close()
+            self.assertFalse(changed)
+            self.assertNotEqual(title, "3998")
+            self.assertIn("invalid cached title summary", error)
         finally:
             web_server.NEWS_DB = old_news_db
             for suffix in ("", "-wal", "-shm"):
