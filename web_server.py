@@ -1310,6 +1310,8 @@ def _is_valid_title_summary(title: str | None) -> bool:
         return False
     if chr(0x2026) in text or "..." in text:
         return False
+    if text.startswith("{"):
+        return False
     return _title_weight(text) <= TITLE_SUMMARY_MAX_WEIGHT
 
 
@@ -1333,9 +1335,23 @@ def _parse_title_summary_result(raw: str | None) -> dict:
 
 def _balanced_title_punctuation(title: str) -> bool:
     pairs = (
-        (chr(0x300a), chr(0x300b)), (chr(0x300c), chr(0x300d)),
-        (chr(0x300e), chr(0x300f)), (chr(0x201c), chr(0x201d)),
-        (chr(0x2018), chr(0x2019)),
+        # ASCII/西文
+        ("(", ")"), ("[", "]"), ("{", "}"),
+        # 全角 / CJK
+        ("\uff08", "\uff09"),   # （）
+        ("\uff3b", "\uff3d"),   # ［］
+        ("\uff5b", "\uff5d"),   # ｛｝
+        # 中文专用
+        ("\u300a", "\u300b"),   # 《》
+        ("\u300c", "\u300d"),   # 「」
+        ("\u300e", "\u300f"),   # 『』
+        ("\u3010", "\u3011"),   # 【】
+        ("\u3014", "\u3015"),   # 〔〕
+        ("\u3016", "\u3017"),   # 〖〗
+        ("\u3008", "\u3009"),   # 〈〉
+        # 弯引号
+        ("\u201c", "\u201d"),   # ""
+        ("\u2018", "\u2019"),   # ''
     )
     for left, right in pairs:
         if title.count(left) != title.count(right):

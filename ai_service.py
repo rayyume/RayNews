@@ -391,7 +391,7 @@ class AIService:
                 ),
             },
         ]
-        return self.chat(messages, max_tokens=200, temperature=0.2).strip()
+        return self.chat(messages, max_tokens=500, temperature=0.2).strip()
 
 
     # Daily summary (layered)
