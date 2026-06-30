@@ -361,32 +361,37 @@ class AIService:
         ]
         return self.chat(messages, max_tokens=200, temperature=0.2).strip()
 
-    def summarize_title(self, title: str, max_chars: int = 30) -> str:
-        """Shorten a news title and ask the model to self-check validity."""
+    def summarize_title(self, title: str, max_chars: int = 35) -> str:
+        """Shorten a news title using a 3-element editing approach."""
         messages = [
             {
                 "role": "system",
                 "content": (
-                    "你是新闻标题编辑。把过长标题压缩为清晰、直观的中文新闻标题。"
-                    "必须判断压缩结果是否仍是有效新闻标题，并且只输出 JSON。"
+                    "# Role\n"
+                    "你是一个资深的新闻编辑，擅长用极简、准确的语言提炼新闻核心。\n\n"
+                    "# Rule of 3 Elements (三要素融合标准)\n"
+                    "生成的单一标题必须在一句话中隐性包含以下三个核心要素：\n"
+                    "1. 核心主体：事件的主角（谁/哪个机构）。\n"
+                    "2. 核心事实：最新发生的最重大动作（做了什么）。\n"
+                    "3. 关键结果/数字：最能体现事件影响的细节或数据。\n\n"
+                    "# Constraints\n"
+                    f"- 字数严格控制在 30-{max_chars} 字之间，拒绝冗长。\n"
+                    "- 拒绝结构拆分：只需输出一行最终的标题，严禁带有「引题」「正题」「副题」等标签。\n"
+                    "- 拒绝前言后语：禁止输出「这是为你生成的标题：」等任何解释性废话。\n"
+                    "- 客观准确：严格基于原文事实，严禁夸大、魔改或使用震惊体。\n"
+                    "- 如有标点符号需准确：标题中如有《》「」等成对出现符号，需确保标点符号的完整，禁止仅出现一边的符号。\n\n"
+                    "只输出 JSON，不要解释或代码块。"
                 ),
             },
             {
                 "role": "user",
                 "content": (
-                    f"请将下面标题简写到 {max_chars} 个中文字符以内。\n"
-                    "要求：\n"
-                    "1. 短标题必须保留主体、动作和关键事实，读者一眼能看懂发生了什么。\n"
-                    "2. 不能只输出数字、股票代码、金额、百分比、单个名词或残缺片段。\n"
-                    "3. 不要新增原标题没有的信息，不要使用省略号。\n"
-                    "4. 如果无法生成清晰直观的短标题，valid 必须为 false。\n"
-                    "5. 只输出 JSON，不要解释或代码块。\n\n"
-                    "输出格式：{\"title\":\"短标题\",\"valid\":true,\"reason\":\"保留了主体和事件\"}\n\n"
-                    f"原标题：{title}"
+                    f"原标题：{title}\n\n"
+                    "输出格式：{\"title\":\"简写后的标题\",\"valid\":true,\"reason\":\"保留了主体和事件\"}"
                 ),
             },
         ]
-        return self.chat(messages, max_tokens=180, temperature=0.2).strip()
+        return self.chat(messages, max_tokens=200, temperature=0.2).strip()
 
 
     # Daily summary (layered)

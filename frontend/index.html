@@ -4825,6 +4825,16 @@ async function refreshHomepage() {
   }
   stabilizePageTop();
   await triggerRefresh({ stateAlreadySet: true, showStart: false });
+  // After backend scraping completes, reload the page with freshly scraped data
+  if (filter === 'all' && currentPage === 1) {
+    await loadNewsPage(1, {
+      activeFilter: 'all',
+      useCache: false,
+      forceNetwork: true,
+      userInitiated: false,
+      animate: false,
+    });
+  }
 }
 
 function articleDetailErrorText(e) {
