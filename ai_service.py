@@ -10,6 +10,24 @@ from typing import Optional
 from source_categories import CATEGORY_NAMES, CATEGORY_ORDER, clamp_weighted, local_short_source_name
 
 
+def _normalize_cjk_quotes(text: str) -> str:
+    """Convert ASCII straight quotes to Chinese corner brackets 「」 in CJK context.
+
+    Replaces paired "..." with 「...」 and, for content containing CJK characters,
+    paired '...' with 「...」.  Latin-only apostrophes and quotes (e.g. "India's")
+    are left untouched.
+    """
+    text = re.sub(r'"([^"]+)"', r'「\1」', text)
+    text = re.sub(
+        r"'([^']+)'",
+        lambda m: f'「{m.group(1)}」'
+        if re.search(r'[\u4e00-\u9fff]', m.group(1))
+        else m.group(0),
+        text,
+    )
+    return text
+
+
 # ─── Token-aware text truncation ─────────────────────────────
 # Conservative char→token estimate: 1 token ≈ 4 ASCII chars or ≈ 2 CJK chars
 # We use 3 chars/token as a safe midpoint for mixed content.
@@ -359,7 +377,7 @@ class AIService:
                 ),
             },
         ]
-        return self.chat(messages, max_tokens=200, temperature=0.2).strip()
+        return _normalize_cjk_quotes(self.chat(messages, max_tokens=200, temperature=0.2).strip())
 
     def summarize_title(self, title: str, max_chars: int = 35) -> str:
         """Shorten a news title using a 3-element editing approach."""
@@ -896,7 +914,7 @@ class AIService:
         translated_html = result
         if title:
             lines = result.split("\n", 1)
-            translated_title = lines[0].strip()
+            translated_title = _normalize_cjk_quotes(lines[0].strip())
             translated_html = lines[1] if len(lines) > 1 else ""
 
         return {"title": translated_title, "html": translated_html}

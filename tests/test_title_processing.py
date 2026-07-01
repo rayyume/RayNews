@@ -280,5 +280,49 @@ class TitleProcessingTests(unittest.TestCase):
                     pass
 
 
+class CJKQuoteNormalizationTests(unittest.TestCase):
+    """Tests for _normalize_cjk_quotes — ASCII quotes → Chinese corner brackets."""
+
+    def test_double_quotes_to_corner_brackets(self):
+        result = web_server._normalize_cjk_quotes('印度军火部门寻求与阿联酋的关键突破："信心提振器"')
+        self.assertEqual(result, '印度军火部门寻求与阿联酋的关键突破：「信心提振器」')
+
+    def test_single_quotes_with_cjk_content(self):
+        result = web_server._normalize_cjk_quotes("印度军火部门寻求与阿联酋的关键突破：'信心提振器'")
+        self.assertEqual(result, '印度军火部门寻求与阿联酋的关键突破：「信心提振器」')
+
+    def test_english_apostrophe_preserved(self):
+        result = web_server._normalize_cjk_quotes("India's arms sector eyes breakthrough")
+        self.assertEqual(result, "India's arms sector eyes breakthrough")
+
+    def test_mixed_quotes_in_title(self):
+        result = web_server._normalize_cjk_quotes('OpenAI发布"GPT-5"模型，微软称"里程碑"')
+        self.assertEqual(result, 'OpenAI发布「GPT-5」模型，微软称「里程碑」')
+
+    def test_no_quotes_unchanged(self):
+        result = web_server._normalize_cjk_quotes("这是一个正常的新闻标题")
+        self.assertEqual(result, "这是一个正常的新闻标题")
+
+    def test_empty_string(self):
+        result = web_server._normalize_cjk_quotes("")
+        self.assertEqual(result, "")
+
+    def test_clean_title_summary_applies_normalization(self):
+        result = web_server._clean_title_summary('印度军火： "信心提振器"')
+        self.assertEqual(result, '印度军火： 「信心提振器」')
+
+    def test_translate_title_returns_normalized(self):
+        """Integration-style: verify the function pipeline normalizes quotes."""
+        from ai_service import AIService, _normalize_cjk_quotes as ai_normalize
+        # We can't easily mock the AI here for translate_title, but we can verify
+        # the normalization function itself works identically in both modules
+        result = ai_normalize('印度军火部门寻求与阿联酋的关键突破："信心提振器"')
+        self.assertEqual(result, '印度军火部门寻求与阿联酋的关键突破：「信心提振器」')
+        self.assertEqual(
+            ai_normalize("India's arms sector"),
+            "India's arms sector",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

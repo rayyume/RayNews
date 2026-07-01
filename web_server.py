@@ -1288,13 +1288,28 @@ def _remove_title_summary_prefix(text: str) -> str:
     return text
 
 
+def _normalize_cjk_quotes(text: str) -> str:
+    """Convert ASCII straight quotes to Chinese corner brackets 「」 in CJK context."""
+    text = re.sub(r'"([^"]+)"', r'「\1」', text)
+    text = re.sub(
+        r"'([^']+)'",
+        lambda m: f'「{m.group(1)}」'
+        if re.search(r'[\u4e00-\u9fff]', m.group(1))
+        else m.group(0),
+        text,
+    )
+    return text
+
+
 def _clean_title_summary(title: str | None) -> str:
     text = " ".join((title or "").strip().split())
     text = _remove_title_summary_prefix(text)
     text = re.sub(r"^\s*(?:[-*]\s+|\d{1,2}[.\u3001]\s+)", "", text)
-    quote_chars = " \t\r\n\"'" + "".join(chr(cp) for cp in (0x201c, 0x201d, 0x2018, 0x2019, 0x300c, 0x300d, 0x300e, 0x300f))
+    quote_chars = " \t\r\n" + "".join(chr(cp) for cp in (0x201c, 0x201d, 0x2018, 0x2019, 0x300c, 0x300d, 0x300e, 0x300f))
     text = text.strip(quote_chars)
-    return _strip_outer_title_quotes(text).strip()
+    text = _strip_outer_title_quotes(text).strip()
+    text = _normalize_cjk_quotes(text)
+    return text
 
 
 def _is_valid_title_summary(title: str | None) -> bool:
