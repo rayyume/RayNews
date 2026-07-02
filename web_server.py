@@ -1289,10 +1289,20 @@ def _remove_title_summary_prefix(text: str) -> str:
 
 
 def _normalize_cjk_quotes(text: str) -> str:
-    """Convert ASCII straight quotes to Chinese corner brackets 「」 in CJK context."""
+    """Convert ASCII straight quotes and Unicode curly quotes to Chinese corner brackets 「」 in CJK context."""
+    # Paired double quotes — ASCII and Unicode curly
     text = re.sub(r'"([^"]+)"', r'「\1」', text)
+    text = re.sub('\u201c([^\u201d]+)\u201d', r'「\1」', text)
+    # Paired single quotes — ASCII and Unicode curly (only in CJK context)
     text = re.sub(
         r"'([^']+)'",
+        lambda m: f'「{m.group(1)}」'
+        if re.search(r'[\u4e00-\u9fff]', m.group(1))
+        else m.group(0),
+        text,
+    )
+    text = re.sub(
+        '\u2018([^\u2019]+)\u2019',
         lambda m: f'「{m.group(1)}」'
         if re.search(r'[\u4e00-\u9fff]', m.group(1))
         else m.group(0),
@@ -1306,7 +1316,10 @@ def _clean_title_summary(title: str | None) -> str:
     text = _remove_title_summary_prefix(text)
     text = re.sub(r"^\s*(?:[-*]\s+|\d{1,2}[.\u3001]\s+)", "", text)
     quote_chars = " \t\r\n" + "".join(chr(cp) for cp in (0x201c, 0x201d, 0x2018, 0x2019, 0x300c, 0x300d, 0x300e, 0x300f))
-    text = text.strip(quote_chars)
+    # Only strip quote chars when both ends have them (prevent asymmetric tearing:
+    # e.g. 飞行员「患有焦虑症」 should not become 飞行员「患有焦虑症)
+    if text and text[0] in quote_chars and text[-1] in quote_chars:
+        text = text.strip(quote_chars)
     text = _strip_outer_title_quotes(text).strip()
     text = _normalize_cjk_quotes(text)
     return text

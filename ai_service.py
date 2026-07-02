@@ -11,15 +11,25 @@ from source_categories import CATEGORY_NAMES, CATEGORY_ORDER, clamp_weighted, lo
 
 
 def _normalize_cjk_quotes(text: str) -> str:
-    """Convert ASCII straight quotes to Chinese corner brackets 「」 in CJK context.
+    """Convert ASCII straight quotes and Unicode curly quotes to Chinese corner brackets 「」 in CJK context.
 
-    Replaces paired "..." with 「...」 and, for content containing CJK characters,
-    paired '...' with 「...」.  Latin-only apostrophes and quotes (e.g. "India's")
-    are left untouched.
+    Replaces paired "…", \u201c…\u201d (Unicode curly double) and, for content
+    containing CJK characters, paired '…' and \u2018…\u2019 (Unicode curly single)
+    with 「…」.  Latin-only apostrophes and quotes (e.g. "India's") are left untouched.
     """
+    # Paired double quotes — ASCII and Unicode curly
     text = re.sub(r'"([^"]+)"', r'「\1」', text)
+    text = re.sub('\u201c([^\u201d]+)\u201d', r'「\1」', text)
+    # Paired single quotes — ASCII and Unicode curly (only in CJK context)
     text = re.sub(
         r"'([^']+)'",
+        lambda m: f'「{m.group(1)}」'
+        if re.search(r'[\u4e00-\u9fff]', m.group(1))
+        else m.group(0),
+        text,
+    )
+    text = re.sub(
+        '\u2018([^\u2019]+)\u2019',
         lambda m: f'「{m.group(1)}」'
         if re.search(r'[\u4e00-\u9fff]', m.group(1))
         else m.group(0),
