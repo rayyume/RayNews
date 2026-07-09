@@ -333,13 +333,6 @@ body.body-scroll-lock{overflow:hidden!important}
 .user-menu-item:hover{background:var(--bg-card-hover);color:var(--text)}
 
 /* ═══ Admin Panel ═══════════════════════════════════ */
-.admin-overlay{position:fixed;inset:0;z-index:400;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity 0.2s}
-.admin-overlay.open{opacity:1;pointer-events:auto}
-.admin-panel{position:relative;z-index:1;background:var(--bg-card);border:1px solid var(--border);border-radius:16px;width:520px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.4)}
-.admin-header{display:flex;align-items:center;justify-content:space-between;padding:20px 24px;border-bottom:1px solid var(--border);flex-shrink:0}
-.admin-header h2{margin:0;font-size:18px;font-weight:700}
-.admin-close{background:none;border:none;color:var(--text-3);font-size:18px;cursor:pointer;padding:4px 8px;border-radius:6px;transition:all 0.15s}
-.admin-close:hover{background:var(--bg-card-hover);color:var(--text)}
 .admin-body{overflow-x:hidden;overflow-y:auto;padding:16px 24px;flex:1}
 .admin-stat{display:flex;gap:16px;margin-bottom:16px}
 .admin-stat-box{flex:1;background:var(--bg);border-radius:10px;padding:12px 16px;text-align:center}
@@ -450,6 +443,9 @@ body.body-scroll-lock{overflow:hidden!important}
 .settings-tab{padding:8px 16px;border:none;background:none;color:var(--text-3);font-size:13px;font-weight:600;cursor:pointer;font-family:var(--font);border-bottom:2px solid transparent;margin-bottom:-1px;transition:all 0.15s}
 .settings-tab:hover{color:var(--text)}
 .settings-tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+.admin-settings-tab{padding:8px 16px;border:none;background:none;color:var(--text-3);font-size:13px;font-weight:600;cursor:pointer;font-family:var(--font);border-bottom:2px solid transparent;margin-bottom:-1px;transition:all 0.15s}
+.admin-settings-tab:hover{color:var(--text)}
+.admin-settings-tab.active{color:var(--accent);border-bottom-color:var(--accent)}
 .source-manager{display:flex;flex-direction:column;gap:10px}
 .source-manager-head{display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin-bottom:8px}
 .source-step{padding:12px 0;border-bottom:1px solid var(--border)}
@@ -513,9 +509,10 @@ body.body-scroll-lock{overflow:hidden!important}
           </div>
         </div>
         <div class="user-menu-items">
-          <button class="user-menu-item" onclick="openFavorites()">⭐ 我的收藏</button>
-          <button class="user-menu-item" onclick="openSettings()">⚙️ 设置</button>
-          <button class="user-menu-item" onclick="openAdminPanel()" id="adminPanelBtn" style="display:none">👤 用户管理</button>
+          <div class="user-menu-item" id="previewMenuNotice" style="display:none;cursor:default;color:var(--text-3);font-size:12px;line-height:1.5">🔒 预览账号待管理员审核，暂不可用任何功能</div>
+          <button class="user-menu-item" onclick="openFavorites()" id="favMenuItem">⭐ 我的收藏</button>
+          <button class="user-menu-item" onclick="openSettings()" id="settingsMenuItem">⚙️ 用户设置</button>
+          <button class="user-menu-item" onclick="openAdminSettings()" id="adminSettingsBtn" style="display:none">🛠️ 管理员设置</button>
           <button class="user-menu-item" onclick="logout()">🚪 退出登录</button>
         </div>
       </div>
@@ -592,16 +589,120 @@ body.body-scroll-lock{overflow:hidden!important}
   </div>
 </div>
 
-<!-- ═══ Admin Panel ═══════════════════════════════════════ -->
-<div class="admin-overlay" id="adminOverlay">
-  <div class="admin-backdrop" onclick="closeAdminPanel()" style="position:absolute;inset:0"></div>
-  <div class="admin-panel">
-    <div class="admin-header">
-      <h2>👤 用户管理</h2>
-      <button class="admin-close" onclick="closeAdminPanel()">✕</button>
+<!-- ═══ Admin Settings Panel ═══════════════════════════════ -->
+<div class="ai-overlay" id="adminSettingsOverlay">
+  <div class="ai-backdrop" onclick="closeAdminSettings()" style="position:absolute;inset:0"></div>
+  <div class="ai-panel">
+    <div class="ai-header">
+      <h2>🛠️ 管理员设置</h2>
+      <button class="ai-close" onclick="closeAdminSettings()">✕</button>
     </div>
-    <div class="admin-body" id="adminBody">
-      <div class="admin-loading">加载中...</div>
+    <div class="ai-body" id="adminSettingsBody">
+      <!-- Tabs -->
+      <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:16px;border-bottom:1px solid var(--border);padding-bottom:0">
+        <button class="admin-settings-tab active" data-admin-tab="users" onclick="switchAdminTab('users')">用户管理</button>
+        <button class="admin-settings-tab" data-admin-tab="summary" onclick="switchAdminTab('summary')">摘要</button>
+        <button class="admin-settings-tab" data-admin-tab="sources" onclick="switchAdminTab('sources')">订阅源</button>
+        <button class="admin-settings-tab" data-admin-tab="translate" onclick="switchAdminTab('translate')">翻译</button>
+        <button class="admin-settings-tab" data-admin-tab="systemapi" onclick="switchAdminTab('systemapi')">服务端API</button>
+      </div>
+      <div id="adminSettingsStatus" class="settings-toast" role="status" aria-live="polite"></div>
+
+      <!-- Users Tab -->
+      <div id="adminTabUsers">
+        <div class="admin-body" id="adminBody">
+          <div class="admin-loading">加载中...</div>
+        </div>
+      </div>
+
+      <!-- Summary Tab -->
+      <div id="adminTabSummary" style="display:none">
+        <div class="ai-toggle" onclick="document.getElementById('autoSummaryEnabled').click()">
+          <input type="checkbox" id="autoSummaryEnabled" onclick="event.stopPropagation()">
+          <span>📝 自动生成文章摘要</span>
+        </div>
+        <p class="ai-hint" style="margin-top:8px">开启后，系统会用下方"服务端API"配置的系统 Key，在后台小批量为新文章生成摘要，结果对所有用户共享。</p>
+
+        <div class="ai-toggle" onclick="document.getElementById('autoTitleSummaryEnabled').click()" style="margin-top:12px">
+          <input type="checkbox" id="autoTitleSummaryEnabled" onclick="event.stopPropagation()">
+          <span>🏷️ 自动简写过长文章标题</span>
+        </div>
+        <p class="ai-hint" style="margin-top:8px">开启后，抓取到当天标题超过 30 个中文字符的文章时，会在后台用系统 API 简写标题，结果对所有用户共享。</p>
+
+        <button class="ai-save-btn" onclick="saveSummarySettings()" style="margin-top:16px">保存摘要设置</button>
+      </div>
+
+      <!-- Sources Tab -->
+      <div id="adminTabSources" style="display:none">
+        <div class="source-step">
+          <div class="source-step-title">1. 识别文章来源标签</div>
+          <p class="ai-hint">从文章底部最后一个 via 链接重新识别真正来源，用于修复历史文章中误识别的来源。</p>
+          <div class="source-step-actions source-admin-only">
+            <button class="ai-save-btn" id="sourceRedetectBtn" onclick="redetectArticleSources()" style="margin:0;width:auto;padding:8px 12px">重新识别来源</button>
+            <button class="ai-save-btn" id="sourceReinitBtn" onclick="reinitializeSourceLabels()" style="margin:0;width:auto;padding:8px 12px;background:var(--bg-card);color:var(--text);border:1px solid var(--border)">初始化订阅源标签</button>
+          </div>
+        </div>
+        <div class="source-step">
+          <div class="source-step-title">2. 订阅源分类与合并</div>
+          <p class="ai-hint">AI 会将已识别的来源缩写并归入四个分类；手动保存和合并优先，不会被 AI 覆盖。</p>
+          <div class="source-step-actions source-admin-only">
+            <button class="ai-save-btn" onclick="classifySources(false)" style="margin:0;width:auto;padding:8px 12px">AI处理待分类</button>
+            <button class="ai-save-btn" onclick="classifySourcesAll(false)" style="margin:0;width:auto;padding:8px 12px">后台处理全部</button>
+            <button class="ai-save-btn" onclick="classifySources(true)" style="margin:0;width:auto;padding:8px 12px;background:var(--bg-card);color:var(--text);border:1px solid var(--border)">重新分类非手动来源</button>
+          </div>
+        </div>
+        <div id="sourceManagerStatus" class="ai-hint" style="margin-bottom:8px"></div>
+        <input class="ai-input" id="sourceSearchInput" type="text" placeholder="🔍 搜索订阅源..." oninput="renderSourceManager(sourceRows)" style="margin-bottom:8px">
+        <div class="source-manager" id="sourceManagerList">
+          <div class="fav-empty">加载中...</div>
+        </div>
+      </div>
+
+      <!-- Translate Tab -->
+      <div id="adminTabTranslate" style="display:none">
+        <div class="ai-toggle" onclick="document.getElementById('autoTranslateTitle').click()">
+          <input type="checkbox" id="autoTranslateTitle" onclick="event.stopPropagation()">
+          <span>🌐 自动翻译标题</span>
+        </div>
+
+        <div class="ai-toggle" onclick="document.getElementById('autoTranslateContent').click()" style="margin-top:8px">
+          <input type="checkbox" id="autoTranslateContent" onclick="event.stopPropagation()">
+          <span>📄 自动翻译内容</span>
+        </div>
+        <p class="ai-hint" style="margin-top:8px">开启后，系统会用系统 API 在后台小批量翻译英文标题或正文，结果对所有用户共享。</p>
+
+        <button class="ai-save-btn" onclick="saveGeneralSettings()" style="margin-top:16px">保存翻译设置</button>
+      </div>
+
+      <!-- System API Tab -->
+      <div id="adminTabSystemapi" style="display:none">
+        <label class="ai-label">API 格式</label>
+        <select class="ai-select" id="sysAiProviderType">
+          <option value="openai">OpenAI 兼容格式</option>
+          <option value="claude">Claude/Anthropic 格式</option>
+        </select>
+        <p class="ai-hint">DeepSeek/Ollama 选 OpenAI；Anthropic 选 Claude</p>
+
+        <label class="ai-label">API 端点</label>
+        <input class="ai-input" id="sysAiEndpoint" placeholder="https://api.openai.com/v1">
+
+        <label class="ai-label">API Key</label>
+        <input class="ai-input" id="sysAiApiKey" type="password" placeholder="sk-..." autocomplete="off">
+
+        <label class="ai-label">模型</label>
+        <input class="ai-input" id="sysAiModel" placeholder="gpt-4o-mini / deepseek-chat">
+
+        <label class="ai-label">服务商名称</label>
+        <input class="ai-input" id="sysAiProvider" placeholder="DeepSeek">
+
+        <div class="ai-toggle" onclick="document.getElementById('sysAiEnabled').click()">
+          <input type="checkbox" id="sysAiEnabled" onclick="event.stopPropagation()">
+          <span>启用系统 AI</span>
+        </div>
+
+        <button class="ai-save-btn" onclick="saveSystemAiConfig()">💾 保存服务端API配置</button>
+        <p class="ai-hint" style="margin-top:8px">此 Key 仅供后台自动摘要/自动翻译使用，与每个用户在"用户设置→AI"中配置的个人 Key 互相独立。</p>
+      </div>
     </div>
   </div>
 </div>
@@ -644,7 +745,7 @@ body.body-scroll-lock{overflow:hidden!important}
   <div class="ai-backdrop" onclick="closeAISettings()" style="position:absolute;inset:0"></div>
   <div class="ai-panel">
     <div class="ai-header">
-      <h2>设置</h2>
+      <h2>用户设置</h2>
       <button class="ai-close" onclick="closeAISettings()">✕</button>
     </div>
     <div class="ai-body" id="settingsBody">
@@ -652,9 +753,6 @@ body.body-scroll-lock{overflow:hidden!important}
       <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:16px;border-bottom:1px solid var(--border);padding-bottom:0">
         <button class="settings-tab active" data-tab="account" onclick="switchSettingsTab('account')">账号</button>
         <button class="settings-tab" data-tab="ai" onclick="switchSettingsTab('ai')">AI</button>
-        <button class="settings-tab" data-tab="summary" onclick="switchSettingsTab('summary')">摘要</button>
-        <button class="settings-tab" data-tab="sources" id="sourcesSettingsTab" onclick="switchSettingsTab('sources')" style="display:none">订阅源</button>
-        <button class="settings-tab" data-tab="translate" onclick="switchSettingsTab('translate')">翻译</button>
         <button class="settings-tab" data-tab="notify" onclick="switchSettingsTab('notify')">通知</button>
         <button class="settings-tab" data-tab="theme" onclick="switchSettingsTab('theme')">主题</button>
       </div>
@@ -692,50 +790,6 @@ body.body-scroll-lock{overflow:hidden!important}
         <button class="ai-save-btn" onclick="testAIConnection()" style="margin-top:10px;background:var(--bg-card);color:var(--text);border:1px solid var(--border)" id="testAiBtn">🔌 测试 API 连接</button>
       </div>
 
-      <!-- Summary Tab -->
-      <div id="settingsTabSummary" style="display:none">
-        <div class="ai-toggle" onclick="document.getElementById('autoSummaryEnabled').click()">
-          <input type="checkbox" id="autoSummaryEnabled" onclick="event.stopPropagation()">
-          <span>📝 自动生成文章摘要</span>
-        </div>
-        <p class="ai-hint" style="margin-top:8px">开启后，系统会在后台小批量为新文章生成摘要，供文章页和每日摘要复用。</p>
-
-        <div class="ai-toggle" onclick="document.getElementById('autoTitleSummaryEnabled').click()" style="margin-top:12px">
-          <input type="checkbox" id="autoTitleSummaryEnabled" onclick="event.stopPropagation()">
-          <span>🏷️ 自动简写过长文章标题</span>
-        </div>
-        <p class="ai-hint" style="margin-top:8px">开启后，抓取到当天标题超过 30 个中文字符的文章时，会在后台用你的 AI API 简写标题，其他用户可复用结果。</p>
-
-        <button class="ai-save-btn" onclick="saveSummarySettings()" style="margin-top:16px">保存摘要设置</button>
-      </div>
-
-      <!-- Sources Tab -->
-      <div id="settingsTabSources" style="display:none">
-        <div class="source-step">
-          <div class="source-step-title">1. 识别文章来源标签</div>
-          <p class="ai-hint">从文章底部最后一个 via 链接重新识别真正来源，用于修复历史文章中误识别的来源。</p>
-          <div class="source-step-actions source-admin-only">
-            <button class="ai-save-btn" id="sourceRedetectBtn" onclick="redetectArticleSources()" style="display:none;margin:0;width:auto;padding:8px 12px">重新识别来源</button>
-            <button class="ai-save-btn" id="sourceReinitBtn" onclick="reinitializeSourceLabels()" style="display:none;margin:0;width:auto;padding:8px 12px;background:var(--bg-card);color:var(--text);border:1px solid var(--border)">初始化订阅源标签</button>
-            <span class="ai-hint" id="sourceRedetectHint" style="display:none;align-self:center;margin:0">仅管理员可执行全局来源重识别。</span>
-          </div>
-        </div>
-        <div class="source-step">
-          <div class="source-step-title">2. 订阅源分类与合并</div>
-          <p class="ai-hint">AI 会将已识别的来源缩写并归入四个分类；手动保存和合并优先，不会被 AI 覆盖。</p>
-          <div class="source-step-actions source-admin-only">
-            <button class="ai-save-btn" onclick="classifySources(false)" style="margin:0;width:auto;padding:8px 12px">AI处理待分类</button>
-            <button class="ai-save-btn" onclick="classifySourcesAll(false)" style="margin:0;width:auto;padding:8px 12px">后台处理全部</button>
-            <button class="ai-save-btn" onclick="classifySources(true)" style="margin:0;width:auto;padding:8px 12px;background:var(--bg-card);color:var(--text);border:1px solid var(--border)">重新分类非手动来源</button>
-          </div>
-        </div>
-        <div id="sourceManagerStatus" class="ai-hint" style="margin-bottom:8px"></div>
-        <input class="ai-input" id="sourceSearchInput" type="text" placeholder="🔍 搜索订阅源..." oninput="renderSourceManager(sourceRows)" style="margin-bottom:8px">
-        <div class="source-manager" id="sourceManagerList">
-          <div class="fav-empty">加载中...</div>
-        </div>
-      </div>
-
       <!-- Notification Tab -->
       <div id="settingsTabNotify" style="display:none">
         <label class="ai-label">接收邮箱</label>
@@ -754,22 +808,6 @@ body.body-scroll-lock{overflow:hidden!important}
 
         <button class="ai-save-btn" onclick="saveNotifyConfig()" style="margin-top:14px">保存通知配置</button>
         <button class="ai-save-btn" onclick="testNotification()" style="margin-top:8px;background:var(--bg-card);color:var(--text);border:1px solid var(--border)">📧 发送测试邮件</button>
-      </div>
-
-      <!-- Translate Tab -->
-      <div id="settingsTabTranslate" style="display:none">
-        <div class="ai-toggle" onclick="document.getElementById('autoTranslateTitle').click()">
-          <input type="checkbox" id="autoTranslateTitle" onclick="event.stopPropagation()">
-          <span>🌐 自动翻译标题</span>
-        </div>
-
-        <div class="ai-toggle" onclick="document.getElementById('autoTranslateContent').click()" style="margin-top:8px">
-          <input type="checkbox" id="autoTranslateContent" onclick="event.stopPropagation()">
-          <span>📄 自动翻译内容</span>
-        </div>
-        <p class="ai-hint" style="margin-top:8px">开启后，系统会在后台小批量翻译英文标题或正文，并替换原有英文内容。</p>
-
-        <button class="ai-save-btn" onclick="saveGeneralSettings()" style="margin-top:16px">保存翻译设置</button>
       </div>
 
       <!-- Theme Tab -->
@@ -913,6 +951,13 @@ function applyThemePreference(pref) {
 let authToken = null;
 let authUser = null;
 let authMode = 'login'; // 'login' | 'register'
+
+// Preview accounts are intentionally permission-equivalent to a logged-out
+// visitor (pending admin review) — anything gated on "must be logged in"
+// should also treat a preview session as not logged in.
+function isRestrictedUser() {
+  return !authToken || (authUser && authUser.role === 'preview');
+}
 
 function loadAuth() {
   authToken = localStorage.getItem('raynews_token');
@@ -1441,7 +1486,7 @@ async function loadSourceCategories() {
   }
   try {
     let data;
-    if (authToken) {
+    if (!isRestrictedUser()) {
       data = await apiFetch('/sources');
     } else {
       const resp = await fetch('/api/sources');
@@ -1694,34 +1739,29 @@ function updateUserUI() {
     document.getElementById('userAvatarImg').src = getAvatarUrl(authUser);
     document.getElementById('userAvatarImg').style.display = '';
     document.getElementById('userAvatarLetter').style.display = 'none';
-    document.getElementById('adminPanelBtn').style.display = authUser.role === 'admin' ? '' : 'none';
-    const sourcesSettingsTab = document.getElementById('sourcesSettingsTab');
-    if (sourcesSettingsTab) sourcesSettingsTab.style.display = authUser.role === 'admin' ? '' : 'none';
-    const sourceRedetectBtn = document.getElementById('sourceRedetectBtn');
-    if (sourceRedetectBtn) sourceRedetectBtn.style.display = authUser.role === 'admin' ? '' : 'none';
-    const sourceReinitBtn = document.getElementById('sourceReinitBtn');
-    if (sourceReinitBtn) sourceReinitBtn.style.display = authUser.role === 'admin' ? '' : 'none';
-    const sourceRedetectHint = document.getElementById('sourceRedetectHint');
-    if (sourceRedetectHint) sourceRedetectHint.style.display = authUser.role === 'admin' ? 'none' : '';
+    document.getElementById('adminSettingsBtn').style.display = authUser.role === 'admin' ? '' : 'none';
     document.querySelectorAll('.source-admin-only').forEach(el => {
       el.style.display = authUser.role === 'admin' ? '' : 'none';
     });
 
+    // Preview accounts are permission-wise identical to a logged-out visitor:
+    // they can only browse the article list/detail. Reduce the menu to a
+    // notice + logout so there's no dead-end interactive UI left behind.
+    const isPreview = authUser.role === 'preview';
+    const previewNotice = document.getElementById('previewMenuNotice');
+    if (previewNotice) previewNotice.style.display = isPreview ? '' : 'none';
+    const favMenuItem = document.getElementById('favMenuItem');
+    if (favMenuItem) favMenuItem.style.display = isPreview ? 'none' : '';
+    const settingsMenuItem = document.getElementById('settingsMenuItem');
+    if (settingsMenuItem) settingsMenuItem.style.display = isPreview ? 'none' : '';
+
     // Preview users: hide refresh button
     const refreshBtn = document.getElementById('refreshBtn');
-    if (refreshBtn) refreshBtn.style.display = authUser.role === 'preview' ? 'none' : '';
+    if (refreshBtn) refreshBtn.style.display = isPreview ? 'none' : '';
   } else {
     // Show login button in header
     const existingAvatar = document.querySelector('.header-avatar');
     if (existingAvatar) existingAvatar.style.display = 'none';
-    const sourcesSettingsTab = document.getElementById('sourcesSettingsTab');
-    if (sourcesSettingsTab) sourcesSettingsTab.style.display = 'none';
-    const sourceRedetectBtn = document.getElementById('sourceRedetectBtn');
-    if (sourceRedetectBtn) sourceRedetectBtn.style.display = 'none';
-    const sourceReinitBtn = document.getElementById('sourceReinitBtn');
-    if (sourceReinitBtn) sourceReinitBtn.style.display = 'none';
-    const sourceRedetectHint = document.getElementById('sourceRedetectHint');
-    if (sourceRedetectHint) sourceRedetectHint.style.display = 'none';
     document.querySelectorAll('.source-admin-only').forEach(el => {
       el.style.display = 'none';
     });
@@ -1761,17 +1801,15 @@ function setSettingsSensitiveInputsEnabled(enabled) {
 }
 
 function openSettings() {
+  if (isRestrictedUser()) { closeUserMenu(); return; }
   closeUserMenu();
   document.getElementById('aiOverlay').classList.add('open');
   lockBodyScroll();
   switchSettingsTab('account');
   loadAIConfig();
-  loadSummarySettings();
   loadNotifyConfig();
-  loadGeneralSettings();
   loadThemeSettings();
   loadAccountTab();
-  if (authUser && authUser.role === 'admin') loadSourcesTab();
   hideSettingsStatus();
 }
 
@@ -1782,17 +1820,43 @@ function closeAISettings() {
 }
 
 function switchSettingsTab(tab) {
-  if (tab === 'sources' && (!authUser || authUser.role !== 'admin')) tab = 'account';
   document.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
   document.querySelector('.settings-tab[data-tab="' + tab + '"]').classList.add('active');
-  ['account','ai','summary','sources','translate','notify','theme'].forEach(t => {
+  ['account','ai','notify','theme'].forEach(t => {
     document.getElementById('settingsTab' + t.charAt(0).toUpperCase() + t.slice(1)).style.display = t === tab ? '' : 'none';
   });
   setSettingsSensitiveInputsEnabled(tab === 'ai' && document.getElementById('aiOverlay').classList.contains('open'));
   // Load avatar preview when switching to account tab
   if (tab === 'account') loadAccountTab();
-  if (tab === 'sources') loadSourcesTab();
   if (tab === 'theme') loadThemeSettings();
+}
+
+// ═══ Admin Settings (Users + Summary + Sources + Translate + System API) ═══
+function openAdminSettings() {
+  if (!authUser || authUser.role !== 'admin') return;
+  closeUserMenu();
+  document.getElementById('adminSettingsOverlay').classList.add('open');
+  lockBodyScroll();
+  switchAdminTab('users');
+}
+
+function closeAdminSettings() {
+  document.getElementById('adminSettingsOverlay').classList.remove('open');
+  unlockBodyScroll();
+}
+
+function switchAdminTab(tab) {
+  if (!authUser || authUser.role !== 'admin') return;
+  document.querySelectorAll('.admin-settings-tab').forEach(t => t.classList.remove('active'));
+  document.querySelector('.admin-settings-tab[data-admin-tab="' + tab + '"]').classList.add('active');
+  ['users','summary','sources','translate','systemapi'].forEach(t => {
+    document.getElementById('adminTab' + t.charAt(0).toUpperCase() + t.slice(1)).style.display = t === tab ? '' : 'none';
+  });
+  if (tab === 'users') loadAdminUsers();
+  if (tab === 'summary') loadSummarySettings();
+  if (tab === 'sources') loadSourcesTab();
+  if (tab === 'translate') loadGeneralSettings();
+  if (tab === 'systemapi') loadSystemAiConfig();
 }
 
 function loadAccountTab() {
@@ -1812,8 +1876,14 @@ function loadAccountTab() {
   }
 }
 
+function _activeSettingsToastEl() {
+  // Settings/admin-settings/daily-summary all reuse this toast widget; pick
+  // whichever overlay is currently open, falling back to the user settings one.
+  return document.querySelector('.ai-overlay.open .settings-toast') || document.getElementById('settingsStatus');
+}
+
 function showSettingsStatus(msg, type) {
-  const el = document.getElementById('settingsStatus');
+  const el = _activeSettingsToastEl();
   if (!el) return;
   clearTimeout(settingsToastTimer);
   const kind = type === 'error' ? 'err' : (type || 'ok');
@@ -1824,7 +1894,7 @@ function showSettingsStatus(msg, type) {
 }
 
 function hideSettingsStatus() {
-  const el = document.getElementById('settingsStatus');
+  const el = _activeSettingsToastEl();
   if (!el) return;
   clearTimeout(settingsToastTimer);
   el.className = 'settings-toast';
@@ -2486,6 +2556,48 @@ async function testAIConnection() {
   } catch (e) { showSettingsStatus('❌ 测试失败: ' + e.message, 'err'); }
 }
 
+// ─── System AI Config (admin-only, drives background jobs) ──
+
+async function loadSystemAiConfig() {
+  try {
+    const data = await apiFetch('/admin/system-ai-config');
+    if (!data) return;
+    document.getElementById('sysAiProviderType').value = data.provider_type || 'openai';
+    document.getElementById('sysAiEndpoint').value = data.endpoint || '';
+    document.getElementById('sysAiModel').value = data.model || '';
+    document.getElementById('sysAiProvider').value = data.provider || '';
+    document.getElementById('sysAiEnabled').checked = !!data.enabled;
+    const keyInput = document.getElementById('sysAiApiKey');
+    keyInput.value = '';
+    keyInput.placeholder = data.has_api_key ? '✅ 已配置，留空保持不变' : '输入 API Key';
+  } catch (e) {}
+}
+
+async function saveSystemAiConfig() {
+  showSettingsStatus('⏳ 保存中...', 'ok');
+  try {
+    const payload = {
+      provider: document.getElementById('sysAiProvider').value,
+      endpoint: document.getElementById('sysAiEndpoint').value,
+      model: document.getElementById('sysAiModel').value,
+      provider_type: document.getElementById('sysAiProviderType').value,
+      enabled: document.getElementById('sysAiEnabled').checked ? 1 : 0,
+    };
+    const keyVal = document.getElementById('sysAiApiKey').value;
+    if (keyVal) payload.api_key = keyVal;
+    const resp = await fetch('/admin/system-ai-config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
+      body: JSON.stringify(payload),
+    });
+    if (resp.status === 401) { logout(); showSettingsStatus('❌ 登录已过期，请重新登录', 'err'); return; }
+    const data = await resp.json();
+    if (data.error) { showSettingsStatus('❌ ' + data.error, 'err'); return; }
+    showSettingsStatus('✅ 服务端API配置已保存');
+    loadSystemAiConfig();
+  } catch (e) { showSettingsStatus('❌ 保存失败: ' + e.message, 'err'); }
+}
+
 // ─── Notification Config ─────────────────────────────────
 
 async function loadSummarySettings() {
@@ -2964,45 +3076,172 @@ function closeSidebar() {
 
 // ═══ AI Actions on Article ═══════════════════════════════
 
+// ═══ Browser-side AI (manual summarize/translate) ═════════
+// Manual summarize/translate no longer proxies through the server: if the
+// server has no shared cached result yet, the browser calls the LLM
+// provider directly using the current user's own saved API key, then POSTs
+// the result back to the server so every other user can reuse it.
+
+async function fetchMyAiConfig() {
+  try {
+    return await apiFetch('/ai/config/client');
+  } catch (e) {
+    return null;
+  }
+}
+
+function normalizeCjkQuotes(text) {
+  if (!text) return text;
+  text = text.replace(/"([^"]+)"/g, '「$1」');
+  text = text.replace(/“([^”]+)”/g, '「$1」');
+  text = text.replace(/'([^']+)'/g, (m, p1) => (/[一-鿿]/.test(p1) ? `「${p1}」` : m));
+  text = text.replace(/‘([^’]+)’/g, (m, p1) => (/[一-鿿]/.test(p1) ? `「${p1}」` : m));
+  return text;
+}
+
+function buildSummarizeMessages(title, text) {
+  const truncated = (text || '').trim().slice(0, 12000);
+  let prompt = '请为以下文章生成一个简洁的中文摘要，200字以内。';
+  if (title) prompt = `文章标题：${title}\n\n${prompt}`;
+  return [
+    { role: 'system', content: '你是一个专业的新闻摘要助手。请用简洁的语言概括文章核心内容。' },
+    { role: 'user', content: `${prompt}\n\n文章内容：\n${truncated}` },
+  ];
+}
+
+function buildTranslateFullMessages(html, title) {
+  const langName = '中文';
+  const parts = [];
+  if (title) parts.push(`文章标题（请翻译并保持格式）：${title}`);
+  parts.push(`文章正文 HTML（请翻译标签内文本，保持所有 HTML 结构不变）：\n${html}`);
+  const userContent = parts.join('\n\n');
+
+  let prompt = `请将以下文章翻译为${langName}。\n\n要求：\n`;
+  if (title) prompt += '0. 第一行输出翻译后的标题，不要任何标记或引号\n';
+  prompt += '1. 只翻译标签内的文本内容，保持所有 HTML 标签不变\n';
+  prompt += '2. 保持原文的段落、换行、超链接（<a>标签）、加粗（<b>）、斜体（<i>）等所有格式\n';
+  prompt += '3. 不要添加、删除或修改任何 HTML 标签和属性\n';
+  prompt += '4. 直接输出翻译后的 HTML，不要包含 ```html 代码块标记或任何额外说明文字\n\n';
+  if (title) prompt += '输出格式：\n第一行：翻译后的标题\n之后：翻译后的完整 HTML\n\n';
+
+  return [
+    { role: 'system', content: `你是一个专业的翻译助手。将文章翻译为${langName}，保持全部 HTML 标签和结构不变。` },
+    { role: 'user', content: prompt + userContent },
+  ];
+}
+
+async function callOpenAiChat(config, messages, maxTokens, temperature) {
+  const base = (config.endpoint || '').replace(/\/$/, '');
+  const url = base.includes('/v1') ? base + '/chat/completions' : base + '/v1/chat/completions';
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer ' + config.api_key,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ model: config.model, messages, max_tokens: maxTokens, temperature }),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    throw new Error(`AI API HTTP ${resp.status}: ${text.slice(0, 300)}`);
+  }
+  const data = await resp.json();
+  return data.choices[0].message.content;
+}
+
+async function callClaudeChat(config, messages, maxTokens, temperature) {
+  const base = (config.endpoint || '').replace(/\/$/, '');
+  const url = base.includes('/v1') ? base + '/messages' : base + '/v1/messages';
+  let system = '';
+  const claudeMessages = [];
+  messages.forEach(m => {
+    if (m.role === 'system') system = m.content;
+    else claudeMessages.push({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content });
+  });
+  const body = { model: config.model, max_tokens: maxTokens, messages: claudeMessages, temperature };
+  if (system) body.system = system;
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'x-api-key': config.api_key,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    throw new Error(`AI API HTTP ${resp.status}: ${text.slice(0, 300)}`);
+  }
+  const data = await resp.json();
+  return data.content[0].text;
+}
+
+async function aiChat(config, messages, maxTokens, temperature) {
+  if (config.provider_type === 'claude') return callClaudeChat(config, messages, maxTokens, temperature);
+  return callOpenAiChat(config, messages, maxTokens, temperature);
+}
+
 async function aiSummarize(articleId) {
+  if (isRestrictedUser()) { showToast('🔒 预览账号待管理员审核，暂不可用此功能'); return; }
   const btn = document.querySelector('.ai-summarize-btn');
   if (btn) btn.disabled = true;
 
-  // ⏳ Show loading state immediately
   const articleWrap = document.getElementById('articleWrap');
   let existingSummary = document.getElementById('aiSummaryTop');
-  if (!existingSummary) {
-    existingSummary = document.createElement('div');
-    existingSummary.id = 'aiSummaryTop';
-    existingSummary.style.cssText = 'background:rgba(110,142,251,0.08);border:1px solid var(--accent);border-radius:var(--radius);padding:14px 16px;margin-bottom:16px;font-size:13px;line-height:1.7;color:var(--text)';
-    existingSummary.innerHTML = '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;font-size:11px;font-weight:700;color:var(--accent)">📝 AI 摘要</div><span style="color:var(--text-3)">⏳ 生成中...</span>';
-    // Insert at the very top of articleWrap, after the h1
-    const h1 = articleWrap.querySelector('h1');
-    const meta = articleWrap.querySelector('.article-meta');
-    if (meta && meta.nextSibling) {
-      articleWrap.insertBefore(existingSummary, meta.nextSibling);
-    } else if (h1 && h1.nextSibling) {
-      articleWrap.insertBefore(existingSummary, h1.nextSibling);
-    } else {
-      articleWrap.prepend(existingSummary);
+  const setSummaryHtml = (innerHtml) => {
+    if (!existingSummary) {
+      existingSummary = document.createElement('div');
+      existingSummary.id = 'aiSummaryTop';
+      existingSummary.style.cssText = 'background:rgba(110,142,251,0.08);border:1px solid var(--accent);border-radius:var(--radius);padding:14px 16px;margin-bottom:16px;font-size:13px;line-height:1.7;color:var(--text)';
+      const h1 = articleWrap.querySelector('h1');
+      const meta = articleWrap.querySelector('.article-meta');
+      if (meta && meta.nextSibling) articleWrap.insertBefore(existingSummary, meta.nextSibling);
+      else if (h1 && h1.nextSibling) articleWrap.insertBefore(existingSummary, h1.nextSibling);
+      else articleWrap.prepend(existingSummary);
     }
-  } else {
-    existingSummary.innerHTML = '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;font-size:11px;font-weight:700;color:var(--accent)">📝 AI 摘要</div><span style="color:var(--text-3)">⏳ 生成中...</span>';
-  }
+    existingSummary.innerHTML = '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;font-size:11px;font-weight:700;color:var(--accent)">📝 AI 摘要</div>' + innerHtml;
+  };
+  setSummaryHtml('<span style="color:var(--text-3)">⏳ 生成中...</span>');
 
   try {
-    const resp = await fetch('/ai/summarize/' + articleId, { method: 'POST', headers: { 'Authorization': 'Bearer ' + authToken } });
-    const data = await resp.json();
-    if (!data) { existingSummary.innerHTML = '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;font-size:11px;font-weight:700;color:var(--accent)">📝 AI 摘要</div><span style="color:var(--accent)">❌ 请求失败</span>'; return; }
-    if (data.error) { existingSummary.innerHTML = '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;font-size:11px;font-weight:700;color:var(--accent)">📝 AI 摘要</div><span style="color:#ef4444">❌ ' + esc(data.error) + '</span>'; return; }
-    existingSummary.innerHTML = '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;font-size:11px;font-weight:700;color:var(--accent)">📝 AI 摘要</div>' + esc(data.summary);
+    // 1) Server already has a shared result — just show it, no LLM call.
+    const cachedResp = await fetch('/ai/result/' + articleId, { headers: { 'Authorization': 'Bearer ' + authToken } });
+    const cached = cachedResp.ok ? await cachedResp.json().catch(() => null) : null;
+    if (cached && cached.summary) {
+      setSummaryHtml(esc(cached.summary));
+      if (btn) btn.disabled = false;
+      return;
+    }
+
+    // 2) Nothing shared yet — generate locally in the browser with the user's own API.
+    const config = await fetchMyAiConfig();
+    if (!config || !config.enabled || !config.api_key) {
+      setSummaryHtml('<span style="color:#ef4444">❌ 请先在用户设置→AI 中配置你的 API</span>');
+      if (btn) btn.disabled = false;
+      return;
+    }
+    const title = articleWrap.querySelector('h1')?.textContent || '';
+    const bodyEl = document.getElementById('articleBody');
+    const text = bodyEl ? (bodyEl.innerText || bodyEl.textContent || '') : '';
+    const summary = (await aiChat(config, buildSummarizeMessages(title, text), 2000, 0.3)).trim();
+    setSummaryHtml(esc(summary));
+
+    // 3) Share the result back to the server for other users to reuse.
+    fetch('/ai/result/' + articleId, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
+      body: JSON.stringify({ summary }),
+    }).catch(e => console.warn('failed to share summary result:', e));
   } catch (e) {
-    existingSummary.innerHTML = '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;font-size:11px;font-weight:700;color:var(--accent)">📝 AI 摘要</div><span style="color:#ef4444">❌ 网络错误: ' + esc(e.message || '') + '</span>';
+    setSummaryHtml('<span style="color:#ef4444">❌ ' + esc(e.message || '生成失败，请检查你的 API 配置和网络（自建 endpoint 需支持浏览器跨域）') + '</span>');
   }
   if (btn) btn.disabled = false;
 }
 
 async function aiTranslate(articleId) {
+  if (isRestrictedUser()) { showToast('🔒 预览账号待管理员审核，暂不可用此功能'); return; }
   const bodyEl = document.getElementById('articleBody');
   if (!bodyEl) { showToast('❌ 未找到文章内容'); return; }
 
@@ -3036,40 +3275,23 @@ async function aiTranslate(articleId) {
     return;
   }
 
-  // First-time translate — call API
+  // First-time translate
   if (btn) btn.disabled = true;
 
   const originalHtml = bodyEl.innerHTML;
   const originalTitle = h1 ? h1.textContent : '';
 
-  // Show loading
   bodyEl.innerHTML = '<p style="color:var(--text-2);text-align:center;padding:40px 0">⏳ 翻译中...</p>';
 
-  try {
-    const resp = await fetch('/ai/translate-full/' + articleId, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
-      body: JSON.stringify({ html: originalHtml, title: originalTitle, target_lang: 'zh-CN' }),
-    });
-    if (resp.status === 401) { logout(); showToast('❌ 登录已过期，请重新登录'); bodyEl.innerHTML = originalHtml; if (btn) btn.disabled = false; return; }
-    const data = await resp.json();
-    if (!data) { showToast('❌ 请求失败'); bodyEl.innerHTML = originalHtml; if (btn) btn.disabled = false; return; }
-    if (data.error) { showToast('❌ ' + data.error); bodyEl.innerHTML = originalHtml; if (btn) btn.disabled = false; return; }
-
-    const translatedHtml = proxyImages(data.translated_html);
-    const translatedTitle = data.translated_title || '';
-
-    // Store both versions in dataset for toggle (including title)
+  const applyTranslation = (translatedHtmlRaw, translatedTitle) => {
+    const translatedHtml = proxyImages(translatedHtmlRaw);
     bodyEl.dataset.originalHtml = originalHtml;
     bodyEl.dataset.originalTitle = originalTitle;
     bodyEl.dataset.translatedHtml = translatedHtml;
-    bodyEl.dataset.translatedTitle = translatedTitle;
+    bodyEl.dataset.translatedTitle = translatedTitle || '';
     bodyEl.dataset.showingTranslation = 'true';
-
-    // Replace body and title with translated content
     bodyEl.innerHTML = translatedHtml;
     if (h1 && translatedTitle) h1.textContent = translatedTitle;
-    // Re-attach lightbox
     bodyEl.querySelectorAll('img').forEach(img => {
       img.addEventListener('click', e => {
         e.stopPropagation();
@@ -3077,58 +3299,62 @@ async function aiTranslate(articleId) {
         document.getElementById('lb').classList.add('open');
       });
     });
-    if (btn) {
-      btn.textContent = '原文';
-      btn.disabled = false;
-    }
-    showToast('✅ 翻译完成');
+    if (btn) { btn.textContent = '原文'; btn.disabled = false; }
+  };
 
+  try {
+    // 1) Server already has a shared result — just show it, no LLM call.
+    const cachedResp = await fetch('/ai/result/' + articleId, { headers: { 'Authorization': 'Bearer ' + authToken } });
+    const cached = cachedResp.ok ? await cachedResp.json().catch(() => null) : null;
+    if (cached && cached.translation) {
+      const t = cached.translation.trim();
+      if (t.startsWith('{')) {
+        let cachedData = null;
+        try { cachedData = JSON.parse(t); } catch (e) { cachedData = null; }
+        if (cachedData && cachedData.html) {
+          applyTranslation(cachedData.html, cachedData.title || '');
+          showToast('✅ 翻译完成');
+          syncArticleTitle(articleId, cachedData.title || '');
+          return;
+        }
+      } else if (t.startsWith('<')) {
+        applyTranslation(t, '');
+        showToast('✅ 翻译完成');
+        return;
+      }
+    }
+
+    // 2) Nothing shared yet — generate locally in the browser with the user's own API.
+    const config = await fetchMyAiConfig();
+    if (!config || !config.enabled || !config.api_key) {
+      showToast('❌ 请先在用户设置→AI 中配置你的 API');
+      bodyEl.innerHTML = originalHtml;
+      if (btn) btn.disabled = false;
+      return;
+    }
+    const raw = await aiChat(config, buildTranslateFullMessages(originalHtml, originalTitle), 8000, 0.3);
+    let translatedTitle = '';
+    let translatedHtml = raw;
+    if (originalTitle) {
+      const lines = raw.split('\n');
+      translatedTitle = normalizeCjkQuotes((lines.shift() || '').trim());
+      translatedHtml = lines.join('\n');
+    }
+    applyTranslation(translatedHtml, translatedTitle);
+    showToast('✅ 翻译完成');
     syncArticleTitle(articleId, translatedTitle);
+
+    // 3) Share the result back to the server for other users to reuse.
+    fetch('/ai/result/' + articleId, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
+      body: JSON.stringify({ translation: JSON.stringify({ title: translatedTitle, html: translatedHtml }) }),
+    }).catch(e => console.warn('failed to share translation result:', e));
   } catch (e) {
     bodyEl.innerHTML = originalHtml;
-    showToast('❌ 网络错误: ' + (e.message || ''));
+    showToast('❌ 生成失败: ' + (e.message || '请检查你的 API 配置和网络（自建 endpoint 需支持浏览器跨域）'));
     if (btn) btn.disabled = false;
   }
-}
-
-/**
- * Scan article body for translatable text segments.
- * Supports: p, li, blockquote, h2-h6, dd, figcaption
- * Fallback: split by <br> if no block elements found.
- * Preserves inline HTML (b, i, a) for the AI.
- */
-function scanArticleSegments(bodyEl) {
-  const selector = 'p, li, blockquote, h2, h3, h4, h5, h6, dd, figcaption';
-  let elements = bodyEl.querySelectorAll(selector);
-
-  // Fallback: if no standard block elements, restructure <br>-based content
-  if (elements.length === 0) {
-    const html = bodyEl.innerHTML;
-    // Split by <br> — each part becomes a paragraph
-    const parts = html.split(/<br\s*\/?>/i).map(s => s.trim()).filter(s => s);
-    if (parts.length > 1) {
-      // Rebuild body with proper <p> tags so standard scanning works
-      bodyEl.innerHTML = parts.map(p => '<p>' + p + '</p>').join('');
-      elements = bodyEl.querySelectorAll('p');
-    } else {
-      return [];
-    }
-  }
-
-  const segments = [];
-  let id = 0;
-
-  elements.forEach(el => {
-    let html = el.innerHTML.trim();
-    if (!html) return;
-    if (el.querySelector('img') && !el.textContent.trim()) return;
-    html = html.replace(/<div\s+class="ai-translation-inline"[^>]*>.*?<\/div>/gi, '');
-    html = html.trim();
-    if (!html) return;
-    segments.push({ id: id++, el: el, text: html });
-  });
-
-  return segments;
 }
 
 /**
@@ -3136,7 +3362,7 @@ function scanArticleSegments(bodyEl) {
  * Called after renderArticleBody completes.
  */
 async function autoDisplaySummary(articleId) {
-  if (!authToken) return;
+  if (isRestrictedUser()) return;
   try {
     const resp = await fetch('/ai/result/' + articleId, {
       headers: { 'Authorization': 'Bearer ' + authToken },
@@ -3217,20 +3443,9 @@ async function autoDisplaySummary(articleId) {
         if (btn) btn.textContent = '原文';
         return;
       }
-      // Old format: JSON array (backward compat)
-      let translations;
-      try { translations = JSON.parse(t); } catch { return; }
-      if (!Array.isArray(translations) || translations.length === 0) return;
-      const segments = scanArticleSegments(bodyEl);
-      translations.forEach(t => {
-        const seg = segments.find(s => s.id === t.id);
-        if (!seg || !t.text) return;
-        const td = document.createElement('div');
-        td.className = 'ai-translation-inline';
-        td.style.cssText = 'font-size:inherit;line-height:1.7;color:var(--text-2);margin:0 0 1em 0;padding-left:0;font-weight:400';
-        td.innerHTML = t.text;
-        seg.el.parentNode.insertBefore(td, seg.el.nextSibling);
-      });
+      // No other writer produces a per-segment JSON array anymore
+      // (the old /ai/translate-batch endpoint has been removed); ignore
+      // anything else rather than innerHTML-rendering unrecognized content.
     }
   } catch (e) {
     // Silent fail — cache check is optional
@@ -3260,6 +3475,7 @@ function showAIActions(articleId) {
 // ═══ Favorites ════════════════════════════════════════
 
 function openFavorites() {
+  if (isRestrictedUser()) { closeUserMenu(); return; }
   closeUserMenu();
   document.getElementById('favOverlay').classList.add('open');
   lockBodyScroll();
@@ -3326,6 +3542,7 @@ async function unfavorite(articleId) {
 }
 
 async function toggleFavorite() {
+  if (isRestrictedUser()) return;
   const btn = document.getElementById('favBtn');
   if (!btn || btn.classList.contains('loading')) return;
   const articleId = parseInt(document.getElementById('overlay').dataset.articleId);
@@ -3374,38 +3591,27 @@ async function checkFavoriteStatus(articleId) {
 }
 
 // ═══ Admin Panel ════════════════════════════════════
-async function openAdminPanel() {
-  closeUserMenu();
-  const overlay = document.getElementById('adminOverlay');
-  overlay.classList.add('open');
-  lockBodyScroll();
-  document.getElementById('adminBody').innerHTML = '<div class="admin-loading">加载中...</div>';
-  await loadAdminUsers();
-}
-
-function closeAdminPanel() {
-  document.getElementById('adminOverlay').classList.remove('open');
-  unlockBodyScroll();
-}
-
 async function loadAdminUsers() {
   try {
-    const data = await apiFetch('/auth/users');
-    if (!data) return;
-    renderAdminUsers(data);
+    const [users, invitations] = await Promise.all([
+      apiFetch('/auth/users'),
+      apiFetch('/auth/pending-invitations'),
+    ]);
+    if (!users) return;
+    renderAdminUsers(users, invitations || { invitations: [], total: 0 });
   } catch (e) {
     document.getElementById('adminBody').innerHTML = '<p style="text-align:center;padding:40px;color:var(--text-3)">❌ 加载失败</p>';
   }
 }
 
-function renderAdminUsers(data) {
+function renderAdminUsers(data, invitationData) {
   const users = data.users || [];
   const total = data.total || 0;
   const adminCount = users.filter(u => u.role === 'admin').length;
-  const previewCount = users.filter(u => u.role === 'preview').length;
+  const invitations = invitationData.invitations || [];
 
   const rows = users.map(u => {
-    const roleClass = u.role === 'admin' ? 'admin' : (u.role === 'preview' ? 'preview' : 'user');
+    const roleClass = u.role === 'admin' ? 'admin' : 'user';
     const canModify = u.id !== authUser.id; // can't modify yourself
     return `<tr>
       <td><strong>${esc(u.nickname || u.email.split('@')[0])}</strong><br><span style="font-size:11px;color:var(--text-3)">${esc(u.email)}</span></td>
@@ -3413,7 +3619,6 @@ function renderAdminUsers(data) {
       <td style="font-size:11px;color:var(--text-3)">${u.created_at ? u.created_at.slice(0, 10) : '-'}</td>
       <td>
         ${canModify ? `<select class="admin-role-select" data-uid="${u.id}" onchange="changeUserRole(${u.id}, this.value)">
-          <option value="preview" ${u.role === 'preview' ? 'selected' : ''}>preview</option>
           <option value="user" ${u.role === 'user' ? 'selected' : ''}>user</option>
           <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>admin</option>
         </select>` : '-'}
@@ -3422,17 +3627,46 @@ function renderAdminUsers(data) {
     </tr>`;
   }).join('');
 
+  const invitationRows = invitations.map(inv => `<tr>
+      <td>${esc(inv.email)}</td>
+      <td style="font-size:11px;color:var(--text-3)">${inv.created_at ? inv.created_at.slice(0, 16).replace('T', ' ') : '-'}</td>
+      <td style="font-family:monospace;font-size:12px">${esc(inv.code)}</td>
+      <td><button class="admin-del-btn" onclick="revokePendingInvitation(${inv.id}, '${esc(inv.email)}')">撤销</button></td>
+    </tr>`).join('');
+
   document.getElementById('adminBody').innerHTML = `
     <div class="admin-stat">
       <div class="admin-stat-box"><div class="admin-stat-num">${total}</div><div class="admin-stat-label">总用户</div></div>
       <div class="admin-stat-box"><div class="admin-stat-num">${adminCount}</div><div class="admin-stat-label">管理员</div></div>
-      <div class="admin-stat-box"><div class="admin-stat-num">${previewCount}</div><div class="admin-stat-label">待审核</div></div>
+      <div class="admin-stat-box"><div class="admin-stat-num">${invitations.length}</div><div class="admin-stat-label">待审核</div></div>
     </div>
     <table class="admin-table">
       <thead><tr><th>用户</th><th>角色</th><th>注册时间</th><th>修改角色</th><th></th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
+    <div style="margin-top:20px;font-size:13px;font-weight:700;color:var(--text-2)">🕓 待审核邀请申请（已申请邀请码但尚未完成注册）</div>
+    <p class="ai-hint" style="margin:4px 0 8px">把邀请码告知申请人后，对方在注册页填码完成注册即可，无需在此手动处理。</p>
+    <table class="admin-table">
+      <thead><tr><th>邮箱</th><th>申请时间</th><th>邀请码</th><th></th></tr></thead>
+      <tbody>${invitationRows || '<tr><td colspan="4" style="text-align:center;color:var(--text-3);padding:16px">暂无待审核申请</td></tr>'}</tbody>
+    </table>
   `;
+}
+
+async function revokePendingInvitation(id, email) {
+  if (!confirm('确定撤销 ' + email + ' 的邀请申请？')) return;
+  try {
+    const resp = await fetch('/auth/pending-invitations/' + id, {
+      method: 'DELETE',
+      headers: { 'Authorization': 'Bearer ' + authToken },
+    });
+    const data = await resp.json();
+    if (data.error) { showToast('❌ ' + data.error); return; }
+    showToast('✅ 已撤销');
+    await loadAdminUsers();
+  } catch (e) {
+    showToast('❌ 撤销失败');
+  }
 }
 
 async function changeUserRole(userId, newRole) {
@@ -3901,7 +4135,7 @@ function hasBlockingOverlayOpen() {
     'aiOverlay',
     'dailySummaryOverlay',
     'favOverlay',
-    'adminOverlay',
+    'adminSettingsOverlay',
     'sourceArticlesOverlay',
     'authModal',
     'lb',
@@ -4410,6 +4644,10 @@ function openSearch() {
   if (!authToken) {
     showToast('🔒 登录后才能搜索文章');
     showAuth('search');
+    return;
+  }
+  if (authUser && authUser.role === 'preview') {
+    showToast('🔒 预览账号待管理员审核，暂不可用此功能');
     return;
   }
   const overlay = document.getElementById('searchOverlay');
@@ -4950,7 +5188,7 @@ function openArticle(id) {
     lockArticleBackground();
     document.getElementById('overlay').dataset.articleId = id;
     // Check favorite status
-    if (authToken) checkFavoriteStatus(id);
+    if (!isRestrictedUser()) checkFavoriteStatus(id);
     wrap.innerHTML = '<p style="color:var(--text-2);text-align:center;padding:60px 0">加载中...</p>';
     const requestId = ++activeArticleRequestId;
     // Try cache first
@@ -4966,8 +5204,7 @@ function openArticle(id) {
           <span class="badge" style="${badgeStyle(displaySourceForArticle(feedSourceOf(data)))}" title="${esc(sourceBadgeTitle(feedSourceOf(data)))}">${esc(sourceLabel(displaySourceForArticle(feedSourceOf(data))))}</span>
           <span>${formatTime(data.date || '', data.time || '')}</span>
           <span style="margin-left:auto;display:flex;gap:8px;align-items:center" id="aiActions" data-article-id="${id}">
-            <button class="article-ai-btn ai-summarize-btn" onclick="aiSummarize(${id})">摘要</button>
-            <button class="article-ai-btn ai-translate-btn" onclick="aiTranslate(${id})">翻译</button>
+            ${isRestrictedUser() ? '' : `<button class="article-ai-btn ai-summarize-btn" onclick="aiSummarize(${id})">摘要</button><button class="article-ai-btn ai-translate-btn" onclick="aiTranslate(${id})">翻译</button>`}
           </span>
         </div>
         ${coverImg}
@@ -4977,7 +5214,7 @@ function openArticle(id) {
       `;
       renderArticleBody(wrap, data, id);
       autoDisplaySummary(id);
-      if (authToken) checkFavoriteStatus(id);
+      if (!isRestrictedUser()) checkFavoriteStatus(id);
       syncArticleHistory(id, data.date || '');
     };
     fetchArticleDetail(id)
@@ -5007,8 +5244,7 @@ function openArticle(id) {
       <span class="badge" style="${badgeStyle(displaySourceForArticle(feedSourceOf(n)))}" title="${esc(sourceBadgeTitle(feedSourceOf(n)))}">${esc(sourceLabel(displaySourceForArticle(feedSourceOf(n))))}</span>
       <span>${formatTime(n.date, n.time)}</span>
       <span style="margin-left:auto;display:flex;gap:8px;align-items:center" id="aiActions" data-article-id="${id}">
-        <button class="article-ai-btn ai-summarize-btn" onclick="aiSummarize(${id})">摘要</button>
-        <button class="article-ai-btn ai-translate-btn" onclick="aiTranslate(${id})">翻译</button>
+        ${isRestrictedUser() ? '' : `<button class="article-ai-btn ai-summarize-btn" onclick="aiSummarize(${id})">摘要</button><button class="article-ai-btn ai-translate-btn" onclick="aiTranslate(${id})">翻译</button>`}
       </span>
     </div>
     ${coverImg}
@@ -5024,7 +5260,7 @@ function openArticle(id) {
   lockArticleBackground();
   document.getElementById('overlay').dataset.articleId = id;
   // Check favorite status
-  if (authToken) checkFavoriteStatus(id);
+  if (!isRestrictedUser()) checkFavoriteStatus(id);
   syncArticleHistory(n.id, n.date);
 
   // Fetch full article body from API

@@ -61,6 +61,17 @@ CREATE TABLE IF NOT EXISTS invitation_codes (
     email       TEXT    NOT NULL,
     used        INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS system_ai_config (
+    id          INTEGER PRIMARY KEY CHECK(id = 1),
+    provider    TEXT    NOT NULL DEFAULT 'openai',
+    api_key     TEXT    NOT NULL DEFAULT '',
+    endpoint    TEXT    NOT NULL DEFAULT 'https://api.openai.com/v1',
+    model       TEXT    NOT NULL DEFAULT 'gpt-4o-mini',
+    provider_type TEXT NOT NULL DEFAULT 'openai'
+                    CHECK(provider_type IN ('openai', 'claude')),
+    enabled     INTEGER NOT NULL DEFAULT 0
 );"""
 
 # ─── Connection ───────────────────────────────────────────────
@@ -94,6 +105,17 @@ def get_db() -> sqlite3.Connection:
             _db.execute("ALTER TABLE user_settings ADD COLUMN theme_preference TEXT NOT NULL DEFAULT 'system'")
         except sqlite3.OperationalError:
             pass  # column already exists
+        # Auto-summary/auto-translate are now admin-only; zero out any
+        # leftover opt-in flags on non-admin accounts from before this change.
+        _db.execute(
+            "UPDATE user_settings SET auto_translate_title = 0, auto_translate_content = 0, "
+            "auto_title_summary_enabled = 0, auto_summary_enabled = 0 "
+            "WHERE user_id NOT IN (SELECT id FROM users WHERE role = 'admin')"
+        )
+        # The "preview" role has been retired: registration now grants "user"
+        # directly, and "who's pending" is tracked via unused invitation_codes
+        # instead. Promote any leftover preview accounts from before this change.
+        _db.execute("UPDATE users SET role = 'user' WHERE role = 'preview'")
         _db.commit()
     return _db
 
@@ -302,6 +324,38 @@ def set_ai_config(user_id: int, **kwargs) -> dict:
     return get_ai_config(user_id)
 
 
+# ─── System AI Config (admin-managed, drives background jobs) ──
+
+
+def get_system_ai_config() -> dict:
+    db = get_db()
+    row = db.execute(
+        "SELECT provider, api_key, endpoint, model, provider_type, enabled "
+        "FROM system_ai_config WHERE id = 1"
+    ).fetchone()
+    if row:
+        return dict(row)
+    return {
+        "provider": "openai", "api_key": "", "endpoint": "https://api.openai.com/v1",
+        "model": "gpt-4o-mini", "provider_type": "openai", "enabled": 0,
+    }
+
+
+def set_system_ai_config(**kwargs) -> dict:
+    """Upsert the singleton system AI config. Allowed keys: provider, api_key, endpoint, model, provider_type, enabled."""
+    allowed = {"provider", "api_key", "endpoint", "model", "provider_type", "enabled"}
+    updates = {k: v for k, v in kwargs.items() if k in allowed}
+    if not updates:
+        return get_system_ai_config()
+    db = get_db()
+    db.execute("INSERT OR IGNORE INTO system_ai_config (id) VALUES (1)")
+    sets = ", ".join(f"{k} = ?" for k in updates)
+    vals = list(updates.values())
+    db.execute(f"UPDATE system_ai_config SET {sets} WHERE id = 1", vals)
+    db.commit()
+    return get_system_ai_config()
+
+
 # ─── User Settings ─────────────────────────────────────────
 
 
@@ -380,6 +434,45 @@ def use_invitation_code(code: str) -> bool:
     db = get_db()
     cur = db.execute(
         "UPDATE invitation_codes SET used = 1 WHERE code = ? AND used = 0",
+        (code,),
+    )
+    db.commit()
+    return cur.rowcount > 0
+
+
+def list_pending_invitations() -> list[dict]:
+    """Invite-code requests that haven't been used to complete registration yet."""
+    db = get_db()
+    rows = db.execute(
+        "SELECT id, code, email, created_at FROM invitation_codes "
+        "WHERE used = 0 ORDER BY created_at DESC"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def count_pending_invitations() -> int:
+    db = get_db()
+    return db.execute(
+        "SELECT COUNT(*) FROM invitation_codes WHERE used = 0"
+    ).fetchone()[0]
+
+
+def delete_invitation_code(invitation_id: int) -> bool:
+    """Revoke a pending (unused) invitation request."""
+    db = get_db()
+    cur = db.execute(
+        "DELETE FROM invitation_codes WHERE id = ? AND used = 0",
+        (invitation_id,),
+    )
+    db.commit()
+    return cur.rowcount > 0
+
+
+def delete_invitation_code_by_code(code: str) -> bool:
+    """Roll back a just-created code (e.g. the notification email failed to send)."""
+    db = get_db()
+    cur = db.execute(
+        "DELETE FROM invitation_codes WHERE code = ? AND used = 0",
         (code,),
     )
     db.commit()

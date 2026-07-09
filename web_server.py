@@ -24,7 +24,9 @@ from models import (
     add_favorite, remove_favorite, get_favorites, get_all_favorite_article_ids, is_favorited,
     count_article_favorites,
     get_ai_config, set_ai_config, get_user_settings, set_user_settings,
+    get_system_ai_config, set_system_ai_config,
     create_invitation_code, validate_invitation_code, use_invitation_code,
+    list_pending_invitations, delete_invitation_code, delete_invitation_code_by_code,
 )
 from auth import init_auth, create_token, require_auth, require_role
 from auth_validation import is_valid_email
@@ -165,7 +167,9 @@ def register():
         if not validate_invitation_code(invite_code, email):
             return jsonify({"error": "invalid or expired invitation code"}), 400
 
-    role = "admin" if count_users() == 0 else "preview"
+    # Invite code already gates who can register at all, so a successful
+    # registration is the approval step — no separate preview/pending state.
+    role = "admin" if count_users() == 0 else "user"
 
     user = create_user(email, password, nickname, role)
     if user is None:
@@ -197,17 +201,19 @@ def request_invite():
     if get_user_by_email(email):
         return jsonify({"error": "email already registered"}), 409
 
-    # Generate code
-    code = create_invitation_code(email)
-
-    # Send email via Resend
+    # Verify the email service is actually usable *before* persisting a code,
+    # so a config problem never leaves a valid-but-undelivered invitation
+    # sitting in the pending-review list.
     api_key = os.environ.get("RESEND_API_KEY", "")
     if not api_key:
-        return jsonify({"error": "invitation code generated but email service not configured. Contact admin."}), 500
+        return jsonify({"error": "email service not configured. Contact admin."}), 500
     admin_email = (os.environ.get("RAYNEWS_ADMIN_EMAIL") or get_first_admin_email() or "").strip()
     if not admin_email:
-        return jsonify({"error": "invitation code generated but admin email is not configured."}), 500
+        return jsonify({"error": "admin email is not configured."}), 500
     from_email = os.environ.get("RAYNEWS_FROM_EMAIL") or "onboarding@resend.dev"
+
+    # Generate code
+    code = create_invitation_code(email)
 
     try:
         from notifier import send_email
@@ -230,7 +236,8 @@ h1{{color:#6e8efb;font-size:18px}}
                    html, from_name="RayNews", from_email=from_email)
     except Exception as e:
         print(f"[web] Failed to send invite email: {e}")
-        return jsonify({"error": f"邀请码已生成，但邮件发送失败：{e}"}), 500
+        delete_invitation_code_by_code(code)
+        return jsonify({"error": f"邮件发送失败，请稍后重试：{e}"}), 500
 
     return jsonify({"ok": True, "message": "邀请码已发送至管理员邮箱，请等待审核"}), 201
 
@@ -265,7 +272,7 @@ def me():
 
 
 @app.route("/auth/me", methods=["PUT"])
-@require_auth
+@require_role("user", "admin")
 def update_me():
     data = request.get_json(silent=True) or {}
     allowed = {k: data[k] for k in ("nickname",) if k in data}
@@ -286,7 +293,7 @@ ALLOWED_AVATAR_TYPES = {
 
 
 @app.route("/auth/me/avatar", methods=["PUT"])
-@require_auth
+@require_role("user", "admin")
 def upload_avatar():
     """Upload avatar as base64 data URL. Saves to data/avatars/{user_id}.{ext}."""
     data = request.get_json(silent=True) or {}
@@ -366,12 +373,62 @@ def admin_delete_user(user_id):
 def admin_set_role(user_id):
     data = request.get_json(silent=True) or {}
     new_role = data.get("role")
-    if new_role not in ("preview", "user", "admin"):
+    if new_role not in ("user", "admin"):
         return jsonify({"error": "invalid role"}), 400
     if user_id == g.user_id:
         return jsonify({"error": "cannot change your own role"}), 400
     user = update_user(user_id, role=new_role)
     return jsonify(user) if user else (jsonify({"error": "not found"}), 404)
+
+
+@app.route("/auth/pending-invitations", methods=["GET"])
+@require_role("admin")
+def admin_list_pending_invitations():
+    """Invite-code requests that haven't been used to complete registration yet."""
+    pending = list_pending_invitations()
+    return jsonify({"invitations": pending, "total": len(pending)})
+
+
+@app.route("/auth/pending-invitations/<int:invitation_id>", methods=["DELETE"])
+@require_role("admin")
+def admin_revoke_pending_invitation(invitation_id):
+    ok = delete_invitation_code(invitation_id)
+    if ok:
+        return jsonify({"ok": True}), 200
+    return jsonify({"error": "not found"}), 404
+
+
+@app.route("/admin/system-ai-config", methods=["GET"])
+@require_role("admin")
+def admin_get_system_ai_config():
+    config = get_system_ai_config()
+    safe = dict(config)
+    safe["has_api_key"] = bool(safe.get("api_key"))
+    safe.pop("api_key", None)
+    return jsonify(safe)
+
+
+@app.route("/admin/system-ai-config", methods=["PUT"])
+@require_role("admin")
+def admin_set_system_ai_config():
+    try:
+        data = request.get_json(silent=True) or {}
+        api_key = data.get("api_key", "")
+        if "****" in api_key:
+            existing = get_system_ai_config()
+            if existing.get("api_key"):
+                data["api_key"] = existing["api_key"]
+            else:
+                data.pop("api_key", None)
+        config = set_system_ai_config(**data)
+        safe = dict(config)
+        safe["has_api_key"] = bool(safe.get("api_key"))
+        safe.pop("api_key", None)
+        return jsonify(safe)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"server error: {str(e)}"}), 500
 
 
 # ─── Favorites API ─────────────────────────────────────────
@@ -489,7 +546,7 @@ import sqlite3
 
 
 @app.route("/favorites", methods=["GET"])
-@require_auth
+@require_role("user", "admin")
 def list_favorites():
     """List user's favorites with article metadata."""
     favs = get_favorites(g.user_id)
@@ -517,7 +574,7 @@ def list_favorites():
 
 
 @app.route("/favorites", methods=["POST"])
-@require_auth
+@require_role("user", "admin")
 def add_favorite_route():
     data = request.get_json(silent=True) or {}
     article_id = data.get("article_id")
@@ -531,7 +588,7 @@ def add_favorite_route():
 
 
 @app.route("/favorites/<int:article_id>", methods=["DELETE"])
-@require_auth
+@require_role("user", "admin")
 def remove_favorite_route(article_id):
     ok = remove_favorite(g.user_id, article_id)
     if ok:
@@ -542,7 +599,7 @@ def remove_favorite_route(article_id):
 
 
 @app.route("/favorites/<int:article_id>/status", methods=["GET"])
-@require_auth
+@require_role("user", "admin")
 def favorite_status(article_id):
     return jsonify({"favorited": is_favorited(g.user_id, article_id)})
 
@@ -550,7 +607,7 @@ def favorite_status(article_id):
 # ─── AI Routes ─────────────────────────────────────────────
 
 @app.route("/ai/config", methods=["GET"])
-@require_auth
+@require_role("user", "admin")
 def get_ai_config_route():
     config = get_ai_config(g.user_id)
     if not config:
@@ -570,7 +627,7 @@ def get_ai_config_route():
 
 
 @app.route("/ai/config", methods=["PUT"])
-@require_auth
+@require_role("user", "admin")
 def set_ai_config_route():
     try:
         data = request.get_json(silent=True) or {}
@@ -594,39 +651,26 @@ def set_ai_config_route():
         return jsonify({"error": f"server error: {str(e)}"}), 500
 
 
-@app.route("/ai/summarize/<int:article_id>", methods=["POST"])
-@require_auth
-def ai_summarize(article_id):
+@app.route("/ai/config/client", methods=["GET"])
+@require_role("user", "admin")
+def get_ai_config_client_route():
+    """Return the calling user's own AI config, including the plaintext api_key.
+
+    Used by the browser to call the LLM provider directly for manual
+    summarize/translate when the server has no shared cached result yet.
+    Only ever returns the requesting user's own config (g.user_id).
+    """
     config = get_ai_config(g.user_id)
-    if not config or not config.get("enabled"):
-        return jsonify({"error": "AI not configured. Go to Settings → AI to set up."}), 400
-    if not config.get("api_key"):
-        return jsonify({"error": "API key not configured"}), 400
-
-    can_use_shared_summary = _user_auto_summary_enabled(g.user_id)
-
-    # Check cache first
-    cached = _get_ai_result(article_id) if can_use_shared_summary else None
-    if cached and cached.get("summary"):
-        return jsonify({"summary": cached["summary"], "cached": True})
-
-    try:
-        summary, cached = _generate_article_summary(
-            article_id,
-            config,
-            use_shared_cache=can_use_shared_summary,
-            save_shared_cache=can_use_shared_summary,
-        )
-        return jsonify({"summary": summary, "cached": cached})
-    except KeyError as e:
-        return jsonify({"error": str(e)}), 404
-    except Exception as e:
-        return jsonify({"error": f"AI request failed: {str(e)}"}), 502
-
-
-def _user_auto_summary_enabled(user_id: int) -> bool:
-    settings = get_user_settings(user_id) or {}
-    return bool(settings.get("auto_summary_enabled"))
+    if not config:
+        return jsonify({
+            "provider": "openai",
+            "endpoint": "https://api.openai.com/v1",
+            "model": "gpt-4o-mini",
+            "provider_type": "openai",
+            "enabled": False,
+            "api_key": "",
+        })
+    return jsonify(dict(config))
 
 
 def _generate_article_summary(article_id: int, config: dict,
@@ -656,146 +700,50 @@ def _generate_article_summary(article_id: int, config: dict,
     return summary, False
 
 
-@app.route("/ai/translate/<int:article_id>", methods=["POST"])
-@require_auth
-def ai_translate(article_id):
-    config = get_ai_config(g.user_id)
-    if not config or not config.get("enabled"):
-        return jsonify({"error": "AI not configured. Go to Settings → AI to set up."}), 400
-    if not config.get("api_key"):
-        return jsonify({"error": "API key not configured"}), 400
+@app.route("/ai/result/<int:article_id>", methods=["POST"])
+@require_role("user", "admin")
+def ai_save_result(article_id):
+    """Save a browser-generated summary/translation into the shared cache.
 
-    # Check cache first
-    cached = _get_ai_result(article_id)
-    if cached and cached.get("translation"):
-        return jsonify({"translation": cached["translation"], "cached": True})
-
+    Manual summarize/translate now runs in the user's own browser against
+    their own AI config (see GET /ai/config/client) instead of a server-side
+    proxy call. Once the browser has a result, it POSTs it here so every
+    other user can reuse it via GET /ai/result/<id> without regenerating.
+    Body: {"summary": "..."} or {"translation": "..."} (translation is the
+    same JSON-string-encoded {"title", "html"} shape used elsewhere).
+    """
     article = _fetch_article_body(article_id)
     if not article:
         return jsonify({"error": "article not found"}), 404
 
-    try:
-        svc = AIService(
-            api_key=config["api_key"],
-            endpoint=config["endpoint"],
-            model=config["model"],
-            provider_type=config.get("provider_type", "openai"),
-        )
-        translation = svc.translate(
-            article_text=article.get("body_html") or article.get("summary") or "",
-            title=article.get("title", ""),
-        )
-        # Save to cache
-        _save_ai_result(article_id, translation=translation)
-        return jsonify({"translation": translation})
-    except Exception as e:
-        return jsonify({"error": f"AI request failed: {str(e)}"}), 502
-
-
-@app.route("/ai/translate-full/<int:article_id>", methods=["POST"])
-@require_auth
-def ai_translate_full(article_id):
-    """Translate the full article HTML (including title) — replaces old segment-based approach.
-
-    Frontend sends {html: "...", title: "...", target_lang: "zh-CN"}.
-    Backend caches the result by article_id for reuse.
-    Returns {translated_html, translated_title} both with and without title.
-    """
-    config = get_ai_config(g.user_id)
-    if not config or not config.get("enabled"):
-        return jsonify({"error": "AI not configured. Go to Settings → AI to set up."}), 400
-    if not config.get("api_key"):
-        return jsonify({"error": "API key not configured"}), 400
-
     data = request.get_json(silent=True) or {}
-    html = data.get("html", "")
-    title = data.get("title", "")
-    target_lang = data.get("target_lang", "zh-CN")
-    if not html:
-        return jsonify({"error": "html required"}), 400
+    summary = data.get("summary")
+    translation = data.get("translation")
+    if not summary and not translation:
+        return jsonify({"error": "summary or translation required"}), 400
 
-    # Check cache first
-    cached = _get_ai_result(article_id)
-    if cached and cached.get("translation"):
-        t = cached["translation"]
-        # New format with title: JSON {"title": "...", "html": "..."}
-        if t and t.strip().startswith("{"):
-            try:
-                cached_data = json.loads(t)
-                return jsonify({
-                    "translated_html": cached_data.get("html", ""),
-                    "translated_title": cached_data.get("title", ""),
-                    "cached": True,
-                })
-            except (json.JSONDecodeError, TypeError):
-                pass  # stale cache, re-translate
-        # Legacy format: plain HTML (starts with '<') — no title
-        elif t and t.strip().startswith("<"):
-            return jsonify({"translated_html": t, "translated_title": "", "cached": True})
+    kwargs = {}
+    if summary:
+        kwargs["summary"] = summary
+    if translation:
+        kwargs["translation"] = translation
+    _save_ai_result(article_id, **kwargs)
 
-    try:
-        svc = AIService(
-            api_key=config["api_key"],
-            endpoint=config["endpoint"],
-            model=config["model"],
-            provider_type=config.get("provider_type", "openai"),
-        )
-        result = svc.translate_full(html, target_lang, title=title)
-        translated_html = result["html"]
-        translated_title = result["title"]
-        # Save to cache as JSON
-        cache_data = json.dumps({"title": translated_title, "html": translated_html})
-        _save_ai_result(article_id, translation=cache_data)
-        # Also update article title in news.db so home page shows translated title
+    # Keep the article title in news.db in sync so the home page list shows
+    # the translated title too (mirrors the old server-side translate-full behavior).
+    if translation:
+        try:
+            translated_title = json.loads(translation).get("title") if translation.strip().startswith("{") else ""
+        except (json.JSONDecodeError, TypeError):
+            translated_title = ""
         if translated_title:
             _save_article_title_update(article_id, translated_title, "translation")
-        return jsonify({"translated_html": translated_html, "translated_title": translated_title})
-    except Exception as e:
-        return jsonify({"error": f"AI request failed: {str(e)}"}), 502
 
-
-@app.route("/ai/translate-batch/<int:article_id>", methods=["POST"])
-@require_auth
-def ai_translate_batch(article_id):
-    """Translate article paragraphs in batch — frontend provides segments, we cache by article_id."""
-    config = get_ai_config(g.user_id)
-    if not config or not config.get("enabled"):
-        return jsonify({"error": "AI not configured. Go to Settings → AI to set up."}), 400
-    if not config.get("api_key"):
-        return jsonify({"error": "API key not configured"}), 400
-
-    data = request.get_json(silent=True) or {}
-    segments = data.get("segments", [])
-    if not segments or not isinstance(segments, list):
-        return jsonify({"error": "segments array required"}), 400
-
-    # Check cache first
-    cached = _get_ai_result(article_id)
-    if cached and cached.get("translation"):
-        try:
-            import json
-            return jsonify({"translations": json.loads(cached["translation"]), "cached": True})
-        except (json.JSONDecodeError, TypeError):
-            pass  # stale cache, re-translate
-
-    try:
-        svc = AIService(
-            api_key=config["api_key"],
-            endpoint=config["endpoint"],
-            model=config["model"],
-            provider_type=config.get("provider_type", "openai"),
-        )
-        translations = svc.translate_batch(segments)
-        # Cache as JSON string in the translation field
-        import json
-        _save_ai_result(article_id, translation=json.dumps(translations))
-        return jsonify({"translations": translations})
-    except Exception as e:
-        return jsonify({"error": f"AI request failed: {str(e)}"}), 502
+    return jsonify({"ok": True})
 
 
 @app.route("/ai/test-connection", methods=["POST"])
-@require_auth
+@require_role("user", "admin")
 def ai_test_connection():
     """Test the user's AI API configuration with a minimal prompt."""
     config = get_ai_config(g.user_id)
@@ -823,7 +771,7 @@ def ai_test_connection():
 
 
 @app.route("/ai/daily-summary", methods=["POST"])
-@require_auth
+@require_role("user", "admin")
 def ai_daily_summary():
     config = get_ai_config(g.user_id)
     if not config or not config.get("enabled"):
@@ -860,7 +808,7 @@ def ai_daily_summary():
 
 
 @app.route("/ai/daily-summary/today", methods=["GET"])
-@require_auth
+@require_role("user", "admin")
 def ai_daily_summary_today():
     today_str = _today_str()
     _cleanup_daily_summary_jobs()
@@ -893,7 +841,7 @@ def ai_daily_summary_today():
 
 
 @app.route("/ai/daily-summary/<job_id>", methods=["GET"])
-@require_auth
+@require_role("user", "admin")
 def ai_daily_summary_status(job_id):
     with _daily_summary_jobs_lock:
         job = _daily_summary_jobs.get(job_id)
@@ -1009,7 +957,7 @@ def _run_daily_summary_job(job_id, user_id, config):
         today_str = _today_str()
         articles = _fetch_articles_by_date(
             today_str,
-            include_shared_summary=_user_auto_summary_enabled(user_id),
+            include_shared_summary=True,
         )
         if not articles:
             _update_daily_summary_job(job_id, status="failed", error="no articles today")
@@ -1123,7 +1071,7 @@ def _send_daily_summaries():
         print(f"[scheduler] User {uid}: time matched ({scheduled_time}), fetching articles...")
         articles = _fetch_articles_by_date(
             today_str,
-            include_shared_summary=bool(settings.get("auto_summary_enabled")),
+            include_shared_summary=True,
         )
         if not articles:
             print(f"[scheduler] User {uid}: no articles for {today_str}")
@@ -1171,41 +1119,54 @@ def _daily_summary_loop():
         _time.sleep(60)
 
 
-def _get_auto_summary_users() -> list[dict]:
-    """Users who opted in to background article summaries and have usable AI config."""
+def _system_auto_config(*flag_columns: str) -> dict | None:
+    """Build a single synthetic config for background auto jobs.
+
+    Auto-summary/auto-translate/auto-title-process are admin-only: the flags
+    still live on the triggering admin's user_settings row (so the admin UI
+    stays simple), but the actual AI credentials always come from the
+    admin-managed system_ai_config, never from any individual user's own key.
+    Returns None unless some admin has one of the given flags on AND the
+    system AI config is enabled with a key.
+    """
     try:
         db = get_db()
-        rows = db.execute(
-            "SELECT s.user_id, c.endpoint, c.model, c.api_key, c.provider_type, c.enabled "
-            "FROM user_settings s "
-            "JOIN ai_configs c ON c.user_id = s.user_id "
-            "WHERE s.auto_summary_enabled = 1 "
-            "AND c.enabled = 1 "
-            "AND c.api_key != ''"
-        ).fetchall()
-        return [dict(r) for r in rows]
+        cond = " OR ".join(f"s.{col} = 1" for col in flag_columns)
+        row = db.execute(
+            "SELECT s.user_id, s.auto_translate_title, s.auto_translate_content, "
+            "s.auto_title_summary_enabled, s.auto_summary_enabled "
+            "FROM user_settings s JOIN users u ON u.id = s.user_id "
+            f"WHERE u.role = 'admin' AND ({cond}) LIMIT 1"
+        ).fetchone()
+        if not row:
+            return None
+        sys_config = get_system_ai_config()
+        if not sys_config or not sys_config.get("enabled") or not sys_config.get("api_key"):
+            return None
+        config = dict(row)
+        config.update({
+            "endpoint": sys_config["endpoint"],
+            "model": sys_config["model"],
+            "api_key": sys_config["api_key"],
+            "provider_type": sys_config.get("provider_type", "openai"),
+            "enabled": sys_config.get("enabled", 1),
+        })
+        return config
     except Exception as e:
-        print(f"[auto-summary] settings DB error: {e}")
-        return []
+        print(f"[auto-service] system config lookup error: {e}")
+        return None
+
+
+def _get_auto_summary_users() -> list[dict]:
+    """Admin-enabled background article summarization, using the system AI config."""
+    config = _system_auto_config("auto_summary_enabled")
+    return [config] if config else []
 
 
 def _get_auto_translation_users() -> list[dict]:
-    """Users who opted in to background translation and have usable AI config."""
-    try:
-        db = get_db()
-        rows = db.execute(
-            "SELECT s.user_id, s.auto_translate_title, s.auto_translate_content, "
-            "c.endpoint, c.model, c.api_key, c.provider_type, c.enabled "
-            "FROM user_settings s "
-            "JOIN ai_configs c ON c.user_id = s.user_id "
-            "WHERE (s.auto_translate_title = 1 OR s.auto_translate_content = 1) "
-            "AND c.enabled = 1 "
-            "AND c.api_key != ''"
-        ).fetchall()
-        return [dict(r) for r in rows]
-    except Exception as e:
-        print(f"[auto-translate] settings DB error: {e}")
-        return []
+    """Admin-enabled background translation, using the system AI config."""
+    config = _system_auto_config("auto_translate_title", "auto_translate_content")
+    return [config] if config else []
 
 
 def _has_latin(text: str) -> bool:
@@ -1500,7 +1461,7 @@ def _ensure_article_title_columns(conn) -> None:
 
 def _save_article_title_update(article_id: int, title: str | None,
                                title_source: str = "ai") -> bool:
-    title = _clean_title_summary(title)
+    title = _clean_title_summary(_sanitize_plain_text(title or "", max_len=300))
     if not title or not os.path.exists(NEWS_DB):
         return False
     conn = sqlite3.connect(NEWS_DB, timeout=30)
@@ -1692,22 +1653,9 @@ def _auto_translation_loop():
 
 
 def _get_auto_title_process_users() -> list[dict]:
-    """Users who enabled title translation/shortening and have usable AI config."""
-    try:
-        db = get_db()
-        rows = db.execute(
-            "SELECT s.user_id, s.auto_translate_title, s.auto_title_summary_enabled, "
-            "c.endpoint, c.model, c.api_key, c.provider_type, c.enabled "
-            "FROM user_settings s "
-            "JOIN ai_configs c ON c.user_id = s.user_id "
-            "WHERE (s.auto_translate_title = 1 OR s.auto_title_summary_enabled = 1) "
-            "AND c.enabled = 1 "
-            "AND c.api_key != ''"
-        ).fetchall()
-        return [dict(r) for r in rows]
-    except Exception as e:
-        print(f"[auto-title] settings DB error: {e}")
-        return []
+    """Admin-enabled title translation/shortening, using the system AI config."""
+    config = _system_auto_config("auto_translate_title", "auto_title_summary_enabled")
+    return [config] if config else []
 
 
 def _fetch_title_process_articles(config: dict, limit: int = AUTO_TITLE_PROCESS_BATCH_LIMIT) -> list[dict]:
@@ -2367,6 +2315,86 @@ def _get_ai_result(article_id: int) -> dict | None:
         return None
 
 
+_SANITIZE_ALLOWED_TAGS = {
+    "p", "br", "b", "strong", "i", "em", "u", "s", "a", "ul", "ol", "li",
+    "blockquote", "h1", "h2", "h3", "h4", "h5", "h6", "dd", "dt", "dl",
+    "figure", "figcaption", "img", "span", "div", "table", "thead", "tbody",
+    "tr", "td", "th", "code", "pre", "sub", "sup", "hr",
+}
+_SANITIZE_ALLOWED_ATTRS = {"a": {"href"}, "img": {"src", "alt"}}
+
+
+def _sanitize_translated_html(html: str) -> str:
+    """Whitelist-sanitize AI-translated article HTML before it enters the
+    shared cache.
+
+    Manual translate/summarize results come from whichever user happened to
+    trigger them (browser-generated with their own API key), and even
+    admin-driven auto-translation results come from an LLM reading
+    attacker-influenced article text — never trust returned HTML as safe to
+    innerHTML-render for every other user without stripping scripts, event
+    handlers, and javascript:/data: URLs first.
+    """
+    if not html:
+        return html
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup.find_all(True):
+        if tag.name not in _SANITIZE_ALLOWED_TAGS:
+            tag.unwrap()
+            continue
+        allowed_attrs = _SANITIZE_ALLOWED_ATTRS.get(tag.name, set())
+        for attr in list(tag.attrs.keys()):
+            if attr not in allowed_attrs:
+                del tag[attr]
+        if tag.name == "a" and tag.get("href"):
+            href = tag["href"].strip()
+            if not re.match(r"^https?://|^mailto:", href, re.I):
+                del tag["href"]
+            else:
+                tag["rel"] = "noopener noreferrer"
+                tag["target"] = "_blank"
+        if tag.name == "img" and tag.get("src"):
+            src = tag["src"].strip()
+            if not re.match(r"^https?://", src, re.I):
+                tag.decompose()
+    return str(soup)
+
+
+def _sanitize_plain_text(text: str, max_len: int = 4000) -> str:
+    """Strip any HTML markup for values that must always be plain text."""
+    if not text:
+        return text
+    cleaned = BeautifulSoup(text, "html.parser").get_text()
+    return cleaned.strip()[:max_len]
+
+
+def _sanitize_translation_payload(translation: str) -> str:
+    stripped = translation.strip()
+    if stripped.startswith("{"):
+        try:
+            data = json.loads(stripped)
+        except (json.JSONDecodeError, TypeError):
+            return _sanitize_translated_html(translation)
+        data["html"] = _sanitize_translated_html(data.get("html") or "")
+        data["title"] = _sanitize_plain_text(data.get("title") or "", max_len=300)
+        return json.dumps(data, ensure_ascii=False)
+    if stripped.startswith("["):
+        # Legacy per-segment array shape ([{"id":0,"text":"<b>..</b>"}, ...]) —
+        # no live route writes this anymore, but sanitize each item's HTML
+        # defensively in case old data ever gets re-saved through here.
+        try:
+            items = json.loads(stripped)
+        except (json.JSONDecodeError, TypeError):
+            return _sanitize_translated_html(translation)
+        if not isinstance(items, list):
+            return _sanitize_translated_html(translation)
+        for item in items:
+            if isinstance(item, dict) and "text" in item:
+                item["text"] = _sanitize_translated_html(item.get("text") or "")
+        return json.dumps(items, ensure_ascii=False)
+    return _sanitize_translated_html(translation)
+
+
 def _save_ai_result(article_id: int, summary: str | None = None,
                     translation: str | None = None,
                     summary_error: str | None = None,
@@ -2377,6 +2405,10 @@ def _save_ai_result(article_id: int, summary: str | None = None,
                     title_summary_by_user_id: int | None = None):
     """Save or update AI result for an article."""
     import sqlite3
+    if summary is not None:
+        summary = _sanitize_plain_text(summary)
+    if translation is not None:
+        translation = _sanitize_translation_payload(translation)
     if not os.path.exists(NEWS_DB):
         return
     conn = None
@@ -2447,13 +2479,10 @@ def _save_ai_result(article_id: int, summary: str | None = None,
 
 
 @app.route("/ai/result/<int:article_id>", methods=["GET"])
-@require_auth
+@require_role("user", "admin")
 def ai_get_result(article_id):
-    """Return cached AI result (summary/translation) without generating."""
+    """Return cached AI result (summary/translation) without generating. Shared by all users."""
     cached = _get_ai_result(article_id)
-    if cached and not _user_auto_summary_enabled(g.user_id):
-        cached = dict(cached)
-        cached.pop("summary", None)
     return jsonify(cached or {})
 
 
@@ -2480,7 +2509,7 @@ def _promote_legacy_admin_source_settings(conn: sqlite3.Connection) -> None:
 
 
 @app.route("/sources", methods=["GET"])
-@require_auth
+@require_role("user", "admin")
 def list_sources():
     conn = _get_news_db()
     if not conn:
@@ -2494,7 +2523,7 @@ def list_sources():
 
 
 @app.route("/sources/articles", methods=["GET"])
-@require_auth
+@require_role("user", "admin")
 def list_source_articles():
     conn = _get_news_db()
     if not conn:
@@ -3071,7 +3100,7 @@ def redetect_single_source():
 # ─── Settings Routes ────────────────────────────────────────
 
 @app.route("/settings", methods=["GET"])
-@require_auth
+@require_role("user", "admin")
 def get_settings():
     settings = get_user_settings(g.user_id)
     if not settings:
@@ -3097,9 +3126,20 @@ def get_settings():
 
 
 @app.route("/settings", methods=["PUT"])
-@require_auth
+@require_role("user", "admin")
 def update_settings():
     data = request.get_json(silent=True) or {}
+    # Auto-summary/auto-translate are admin-only; silently drop these fields
+    # for non-admin requests instead of erroring, so the rest of the payload
+    # (theme, notifications, daily summary) still saves normally.
+    if g.user_role != "admin":
+        for key in (
+            "auto_summary_enabled",
+            "auto_translate_title",
+            "auto_translate_content",
+            "auto_title_summary_enabled",
+        ):
+            data.pop(key, None)
     # Normalize notification_config to JSON string for storage
     if "notification_config" in data:
         nc = data["notification_config"]
@@ -3117,10 +3157,10 @@ def update_settings():
         )
     )
     if needs_ai_config:
-        config = get_ai_config(g.user_id)
+        config = get_system_ai_config()
         if not config or not config.get("enabled") or not config.get("api_key"):
             return jsonify({
-                "error": "请先在AI菜单中设置API"
+                "error": "请先在管理员设置→服务端API中配置系统AI"
             }), 400
     settings = set_user_settings(g.user_id, **data)
     if not settings:
@@ -3148,7 +3188,7 @@ def _is_enabled_value(value) -> bool:
 
 
 @app.route("/settings/test-notification", methods=["POST"])
-@require_auth
+@require_role("user", "admin")
 def test_notification():
     """Send a test email via Resend API using configured server email settings."""
     settings = get_user_settings(g.user_id) or {}
