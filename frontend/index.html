@@ -2757,6 +2757,23 @@ async function saveGeneralSettings() {
   } catch (e) { showSettingsStatus('❌ 保存失败', 'err'); }
 }
 
+function formatBeijingDateTime(sqliteUtc, withTime = true) {
+  // SQLite's datetime('now') default always stores UTC ("YYYY-MM-DD HH:MM:SS"),
+  // regardless of the container's TZ env var — convert explicitly for display
+  // instead of rendering the raw UTC string.
+  if (!sqliteUtc) return '-';
+  const iso = sqliteUtc.replace(' ', 'T');
+  const d = new Date(iso.endsWith('Z') ? iso : iso + 'Z');
+  if (isNaN(d.getTime())) return sqliteUtc;
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(d);
+  const v = Object.fromEntries(parts.map(p => [p.type, p.value]));
+  return withTime ? `${v.year}-${v.month}-${v.day} ${v.hour}:${v.minute}` : `${v.year}-${v.month}-${v.day}`;
+}
+
 function beijingDateString() {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: 'Asia/Shanghai',
@@ -3616,7 +3633,7 @@ function renderAdminUsers(data, invitationData) {
     return `<tr>
       <td><strong>${esc(u.nickname || u.email.split('@')[0])}</strong><br><span style="font-size:11px;color:var(--text-3)">${esc(u.email)}</span></td>
       <td><span class="admin-role-badge ${roleClass}">${u.role}</span></td>
-      <td style="font-size:11px;color:var(--text-3)">${u.created_at ? u.created_at.slice(0, 10) : '-'}</td>
+      <td style="font-size:11px;color:var(--text-3)">${formatBeijingDateTime(u.created_at, false)}</td>
       <td>
         ${canModify ? `<select class="admin-role-select" data-uid="${u.id}" onchange="changeUserRole(${u.id}, this.value)">
           <option value="user" ${u.role === 'user' ? 'selected' : ''}>user</option>
@@ -3629,7 +3646,7 @@ function renderAdminUsers(data, invitationData) {
 
   const invitationRows = invitations.map(inv => `<tr>
       <td>${esc(inv.email)}</td>
-      <td style="font-size:11px;color:var(--text-3)">${inv.created_at ? inv.created_at.slice(0, 16).replace('T', ' ') : '-'}</td>
+      <td style="font-size:11px;color:var(--text-3)">${formatBeijingDateTime(inv.created_at)}</td>
       <td style="font-family:monospace;font-size:12px">${esc(inv.code)}</td>
       <td><button class="admin-del-btn" onclick="revokePendingInvitation(${inv.id}, '${esc(inv.email)}')">撤销</button></td>
     </tr>`).join('');
