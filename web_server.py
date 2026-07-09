@@ -51,6 +51,11 @@ AUTO_TITLE_PROCESS_SCAN_LIMIT = int(os.environ.get("AUTO_TITLE_PROCESS_SCAN_LIMI
 AUTO_SOURCE_CLASSIFY_BATCH_LIMIT = int(os.environ.get("AUTO_SOURCE_CLASSIFY_BATCH_LIMIT", "50"))
 AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS = int(os.environ.get("AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS", "60"))
 TELEGRAM_EMBED_TIMEOUT_SECONDS = int(os.environ.get("TELEGRAM_EMBED_TIMEOUT_SECONDS", "12"))
+# Daily summary is now server-generated once and broadcast to every subscribed
+# user — the send time is a fixed ops-level setting, not user-configurable.
+DAILY_SUMMARY_HOUR = int(os.environ.get("DAILY_SUMMARY_HOUR", "21"))
+DAILY_SUMMARY_MINUTE = int(os.environ.get("DAILY_SUMMARY_MINUTE", "0"))
+DAILY_SUMMARY_WINDOW_MINUTES = int(os.environ.get("DAILY_SUMMARY_WINDOW_MINUTES", "10"))
 TITLE_SUMMARY_MAX_CHARS = int(os.environ.get("TITLE_SUMMARY_MAX_CHARS", "30"))
 TITLE_SUMMARY_MAX_WEIGHT = TITLE_SUMMARY_MAX_CHARS * 2
 TITLE_SUMMARY_MAX_TOTAL_CHARS = int(os.environ.get("TITLE_SUMMARY_MAX_TOTAL_CHARS", "40"))
@@ -786,6 +791,30 @@ def admin_system_ai_test_connection():
 @app.route("/ai/daily-summary", methods=["POST"])
 @require_role("user", "admin")
 def ai_daily_summary():
+    today_str = _today_str()
+
+    # Reuse today's shared summary if it already exists (from the fixed
+    # 21:00 broadcast or another user's request) instead of spending this
+    # user's own key on a duplicate AI call.
+    shared = _get_daily_summary_global_cache(today_str)
+    if shared:
+        _cleanup_daily_summary_jobs()
+        job_id = uuid.uuid4().hex
+        with _daily_summary_jobs_lock:
+            _daily_summary_jobs[job_id] = {
+                "job_id": job_id,
+                "user_id": g.user_id,
+                "date": today_str,
+                "status": "completed",
+                "created_at": time.time(),
+                "updated_at": time.time(),
+                "summary": shared["summary"],
+                "article_count": shared["article_count"],
+                "stats": shared["stats"],
+                "error": "",
+            }
+        return jsonify({"job_id": job_id, "status": "completed"}), 202
+
     config = get_ai_config(g.user_id)
     if not config or not config.get("enabled"):
         return jsonify({"error": "AI not configured. Go to Settings → AI to set up."}), 400
@@ -802,7 +831,7 @@ def ai_daily_summary():
         _daily_summary_jobs[job_id] = {
             "job_id": job_id,
             "user_id": g.user_id,
-            "date": _today_str(),
+            "date": today_str,
             "status": "queued",
             "created_at": time.time(),
             "updated_at": time.time(),
@@ -840,6 +869,17 @@ def ai_daily_summary_today():
                     "updated_at": job.get("updated_at"),
                 })
 
+    shared = _get_daily_summary_global_cache(today_str)
+    if shared:
+        return jsonify({
+            "status": "completed",
+            "date": today_str,
+            "summary": shared["summary"],
+            "article_count": shared["article_count"],
+            "stats": shared["stats"],
+            "updated_at": shared["updated_at"],
+        })
+
     cached = _get_daily_summary_cache(g.user_id, today_str)
     if cached:
         return jsonify({
@@ -868,9 +908,15 @@ _daily_summary_jobs = {}
 _daily_summary_jobs_lock = threading.Lock()
 
 
-def _today_str() -> str:
+def _beijing_now():
+    """Explicit UTC+8 'now' — independent of the container's TZ env var
+    (unlike SQLite's own datetime('now'), which is always UTC)."""
     import datetime as _dt
-    return _dt.datetime.now().strftime("%Y-%m-%d")
+    return _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=8)))
+
+
+def _today_str() -> str:
+    return _beijing_now().strftime("%Y-%m-%d")
 
 
 def _init_daily_summary_cache_table():
@@ -945,6 +991,123 @@ def _save_daily_summary_cache(user_id: int, date_str: str, summary: str,
         print(f"[daily-summary] cache write failed: {e}")
 
 
+# ─── Shared (server-wide) daily summary ───────────────────────
+# One summary per day, generated with the admin-configured system AI and
+# broadcast by email to every user with daily_summary_enabled — replaces the
+# old per-user generation so N subscribers no longer cost N AI calls.
+
+
+def _init_daily_summary_global_table():
+    if not os.path.exists(NEWS_DB):
+        return
+    try:
+        conn = sqlite3.connect(NEWS_DB)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS daily_summary_global (
+                date          TEXT PRIMARY KEY,
+                summary       TEXT NOT NULL,
+                article_count INTEGER NOT NULL DEFAULT 0,
+                stats         TEXT NOT NULL DEFAULT '{}',
+                updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[daily-summary] global cache table init failed: {e}")
+
+
+def _get_daily_summary_global_cache(date_str: str) -> dict | None:
+    if not os.path.exists(NEWS_DB):
+        return None
+    try:
+        _init_daily_summary_global_table()
+        conn = sqlite3.connect(NEWS_DB)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT summary, article_count, stats, updated_at "
+            "FROM daily_summary_global WHERE date = ?",
+            (date_str,),
+        ).fetchone()
+        conn.close()
+        if not row:
+            return None
+        data = dict(row)
+        try:
+            data["stats"] = json.loads(data.get("stats") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            data["stats"] = {}
+        return data
+    except Exception as e:
+        print(f"[daily-summary] global cache read failed: {e}")
+        return None
+
+
+def _save_daily_summary_global_cache(date_str: str, summary: str,
+                                     article_count: int, stats: dict):
+    if not os.path.exists(NEWS_DB):
+        return
+    try:
+        _init_daily_summary_global_table()
+        conn = sqlite3.connect(NEWS_DB)
+        conn.execute(
+            "INSERT INTO daily_summary_global "
+            "(date, summary, article_count, stats, updated_at) "
+            "VALUES (?, ?, ?, ?, datetime('now')) "
+            "ON CONFLICT(date) DO UPDATE SET "
+            "summary = excluded.summary, "
+            "article_count = excluded.article_count, "
+            "stats = excluded.stats, "
+            "updated_at = datetime('now')",
+            (date_str, summary, article_count, json.dumps(stats or {}, ensure_ascii=False)),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[daily-summary] global cache write failed: {e}")
+
+
+def _generate_daily_summary_global(date_str: str) -> dict | None:
+    """Return (generating if needed) the one shared daily summary for date_str,
+    using the admin-configured system AI. Returns None if it can't be produced
+    yet (no system AI configured, or no articles for that date)."""
+    cached = _get_daily_summary_global_cache(date_str)
+    if cached:
+        return cached
+
+    sys_config = get_system_ai_config()
+    if not sys_config or not sys_config.get("enabled") or not sys_config.get("api_key"):
+        print("[daily-summary] system AI not configured (管理员设置→服务端API), cannot generate")
+        return None
+
+    articles = _fetch_articles_by_date(date_str, include_shared_summary=True)
+    if not articles:
+        print(f"[daily-summary] no articles for {date_str}")
+        return None
+
+    try:
+        svc = AIService(
+            api_key=sys_config["api_key"],
+            endpoint=sys_config["endpoint"],
+            model=sys_config["model"],
+            provider_type=sys_config.get("provider_type", "openai"),
+        )
+        raw_article_count = len(articles)
+        deduped = _dedup_articles(articles)
+        result = svc.daily_summary(deduped)
+        result["stats"]["total_articles"] = raw_article_count
+        result["stats"]["articles_after_dedup"] = len(deduped)
+        _save_daily_summary_global_cache(date_str, result["summary"], raw_article_count, result["stats"])
+        return {
+            "summary": result["summary"],
+            "article_count": raw_article_count,
+            "stats": result["stats"],
+        }
+    except Exception as e:
+        print(f"[daily-summary] global generation failed: {e}")
+        return None
+
+
 def _cleanup_daily_summary_jobs():
     cutoff = time.time() - 3600
     with _daily_summary_jobs_lock:
@@ -1006,7 +1169,7 @@ def _run_daily_summary_job(job_id, user_id, config):
         _update_daily_summary_job(job_id, status="failed", error=f"AI request failed: {str(e)}")
 
 
-_daily_summary_sent = set()  # {(user_id, date), ...}
+_daily_summary_broadcast_dates = set()  # {date_str, ...} — days the shared summary has already been generated + sent
 _auto_summary_lock = threading.Lock()
 _auto_translation_lock = threading.Lock()
 _auto_title_process_lock = threading.Lock()
@@ -1015,37 +1178,52 @@ _legacy_admin_source_settings_lock = threading.Lock()
 _legacy_admin_source_settings_promoted = False
 
 
-def _send_daily_summaries():
-    """Check all users' settings and send daily summary emails where due."""
+def _broadcast_daily_summary(force: bool = False) -> dict:
+    """Generate (once) and email the one shared daily summary to every user
+    with daily_summary_enabled. Runs automatically at DAILY_SUMMARY_HOUR:MINUTE
+    Beijing time; `force=True` (admin manual trigger) bypasses the time
+    window and the "already sent today" guard.
+    """
     import json as _json
     from notifier import send_daily_summary_email
-    from models import get_db as _get_settings_db
-    import datetime as _dt
 
-    now = _dt.datetime.now()
-    now_hhmm = now.strftime("%H:%M")
+    now = _beijing_now()
     today_str = now.strftime("%Y-%m-%d")
-    now_minutes = now.hour * 60 + now.minute  # minutes since midnight for window matching
-
-    print(f"[scheduler] Checking at {now_hhmm} ({today_str})...")
 
     resend_api_key = os.environ.get("RESEND_API_KEY", "")
     if not resend_api_key:
         print("[scheduler] RESEND_API_KEY not set, skipping")
-        return
+        return {"status": "skipped", "reason": "RESEND_API_KEY not set"}
+
+    if not force:
+        if today_str in _daily_summary_broadcast_dates:
+            return {"status": "skipped", "reason": "already sent today"}
+        target_minutes = DAILY_SUMMARY_HOUR * 60 + DAILY_SUMMARY_MINUTE
+        now_minutes = now.hour * 60 + now.minute
+        diff = now_minutes - target_minutes
+        if diff < 0 or diff >= DAILY_SUMMARY_WINDOW_MINUTES:
+            return {"status": "skipped", "reason": "outside daily send window"}
 
     try:
-        db = _get_settings_db()
+        db = get_db()
         rows = db.execute(
-            "SELECT user_id, notification_config, daily_summary_enabled, auto_summary_enabled "
-            "FROM user_settings WHERE daily_summary_enabled = 1"
+            "SELECT user_id, notification_config FROM user_settings WHERE daily_summary_enabled = 1"
         ).fetchall()
     except Exception as e:
         print(f"[scheduler] DB error: {e}")
-        return
+        return {"status": "error", "reason": str(e)}
 
-    print(f"[scheduler] Found {len(rows)} user(s) with daily_summary_enabled=1")
+    print(f"[scheduler] Daily summary broadcast for {today_str}: {len(rows)} subscriber(s)")
+    if not rows:
+        if not force:
+            _daily_summary_broadcast_dates.add(today_str)
+        return {"status": "skipped", "reason": "no subscribers"}
 
+    result = _generate_daily_summary_global(today_str)
+    if not result:
+        return {"status": "error", "reason": "generation failed (check 管理员设置→服务端API, or no articles yet)"}
+
+    sent = 0
     for row in rows:
         settings = dict(row)
         nc = settings.get("notification_config", "{}")
@@ -1054,70 +1232,23 @@ def _send_daily_summaries():
                 nc = _json.loads(nc)
             except (_json.JSONDecodeError, TypeError):
                 nc = {}
-        resend_cfg = nc.get("resend", {})
-        to_email = resend_cfg.get("to_email", "")
-        scheduled_time = resend_cfg.get("daily_summary_time", "08:00")
-
+        to_email = (nc.get("resend") or {}).get("to_email", "")
         if not to_email:
-            print(f"[scheduler] User {settings['user_id']}: no to_email, skipping")
             continue
-
-        # Use a 10-minute window: trigger if current time is within 10 min of scheduled time
         try:
-            sh, sm = map(int, scheduled_time.split(":"))
-            scheduled_minutes = sh * 60 + sm
-        except (ValueError, AttributeError):
-            print(f"[scheduler] User {settings['user_id']}: invalid time '{scheduled_time}', skipping")
-            continue
-
-        diff = now_minutes - scheduled_minutes
-        if diff < 0 or diff >= 10:
-            print(f"[scheduler] User {settings['user_id']}: scheduled={scheduled_time} now={now_hhmm} (diff={diff}m), out of window, skipping")
-            continue
-
-        uid = settings["user_id"]
-        dedup_key = (uid, today_str)
-        if dedup_key in _daily_summary_sent:
-            print(f"[scheduler] User {uid}: already sent today, skipping")
-            continue
-
-        print(f"[scheduler] User {uid}: time matched ({scheduled_time}), fetching articles...")
-        articles = _fetch_articles_by_date(
-            today_str,
-            include_shared_summary=True,
-        )
-        if not articles:
-            print(f"[scheduler] User {uid}: no articles for {today_str}")
-            continue
-
-        from ai_service import AIService
-        ai_config = _get_ai_config_for_user(uid)
-        if not ai_config or not ai_config.get("enabled") or not ai_config.get("api_key"):
-            print(f"[scheduler] User {uid}: AI not configured, skipping daily summary")
-            continue
-
-        try:
-            svc = AIService(
-                api_key=ai_config["api_key"],
-                endpoint=ai_config["endpoint"],
-                model=ai_config["model"],
-                provider_type=ai_config.get("provider_type", "openai"),
-            )
-            raw_article_count = len(articles)
-            articles = _dedup_articles(articles)
-            deduped_article_count = len(articles)
-            result = svc.daily_summary(articles)
-            summary = result["summary"]
-            stats = result["stats"]
-            stats["total_articles"] = raw_article_count
-            stats["articles_after_dedup"] = deduped_article_count
-            _save_daily_summary_cache(uid, today_str, summary, raw_article_count, stats)
-            send_daily_summary_email(resend_api_key, to_email, summary, stats)
-            _daily_summary_sent.add(dedup_key)
-            print(f"[scheduler] Daily summary sent to {to_email} for {today_str}. "
-                  f"Stats: {stats}")
+            send_daily_summary_email(resend_api_key, to_email, result["summary"], result["stats"])
+            sent += 1
         except Exception as e:
-            print(f"[scheduler] Daily summary failed for user {uid}: {e}")
+            print(f"[scheduler] send to user {settings.get('user_id')} ({to_email}) failed: {e}")
+
+    if not force:
+        _daily_summary_broadcast_dates.add(today_str)
+    print(f"[scheduler] Daily summary broadcast for {today_str}: sent to {sent}/{len(rows)} subscriber(s)")
+    return {"status": "ok", "sent": sent, "subscribers": len(rows), "date": today_str}
+
+
+def _send_daily_summaries():
+    _broadcast_daily_summary(force=False)
 
 
 def _daily_summary_loop():
@@ -2108,23 +2239,9 @@ def _auto_summary_loop():
 @app.route("/ai/daily-summary/send", methods=["POST"])
 @require_role("admin")
 def ai_daily_summary_send():
-    """Manually trigger daily summary delivery for administrators."""
-    _send_daily_summaries()
-    return jsonify({"status": "ok", "checked_at": __import__("datetime").datetime.now().strftime("%H:%M")})
-
-
-def _get_ai_config_for_user(user_id: int) -> dict | None:
-    """Fetch a user's AI config for programmatic use."""
-    from models import get_db as _db
-    try:
-        db = _db()
-        row = db.execute(
-            "SELECT endpoint, model, api_key, provider_type, enabled "
-            "FROM ai_configs WHERE user_id = ?", (user_id,)
-        ).fetchone()
-        return dict(row) if row else None
-    except Exception:
-        return None
+    """Manually force-send today's shared daily summary now (bypasses the fixed send window)."""
+    result = _broadcast_daily_summary(force=True)
+    return jsonify(result)
 
 
 def _fetch_recent_articles(limit: int = 20) -> list[dict]:
@@ -3263,12 +3380,15 @@ def scheduler_status():
     """Return scheduler status for debugging."""
     import datetime as _dt
     now = _dt.datetime.now()
+    beijing_now = _beijing_now()
     return jsonify({
         "running": True,
         "server_time": now.strftime("%Y-%m-%d %H:%M:%S"),
-        "today": now.strftime("%Y-%m-%d"),
+        "beijing_time": beijing_now.strftime("%Y-%m-%d %H:%M:%S"),
+        "today": beijing_now.strftime("%Y-%m-%d"),
         "timezone_hint": str(_dt.datetime.now().astimezone().tzinfo),
-        "sent_today": list(_daily_summary_sent),
+        "daily_summary_send_time": f"{DAILY_SUMMARY_HOUR:02d}:{DAILY_SUMMARY_MINUTE:02d}",
+        "daily_summary_broadcast_dates": list(_daily_summary_broadcast_dates),
     })
 
 
@@ -3277,6 +3397,7 @@ def scheduler_status():
 if __name__ == "__main__":
     _init_ai_results_table()
     _init_daily_summary_cache_table()
+    _init_daily_summary_global_table()
     import threading as _th
     _th.Thread(target=_daily_summary_loop, daemon=True).start()
     _th.Thread(target=_auto_summary_loop, daemon=True).start()
