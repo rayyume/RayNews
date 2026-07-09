@@ -198,8 +198,11 @@ def test_article_back_and_refresh_do_not_replace_the_whole_list():
     assert "function flushPendingListUpdate()" not in html
     assert "flushPendingListUpdate();" not in close_block
     assert "renderList();" not in close_block
-    assert "const refreshCursor = latestKnownTimestamp || latestNewsTimestamp();" in refresh_block
-    assert "await loadSince(refreshCursor, { forceApply: true });" in refresh_block
+    # triggerRefresh no longer reloads the list itself — it just kicks off the
+    # backend fetch and lets the normal auto-refresh cycle pick up new articles.
+    assert "data = await requestRefreshOnce();" in refresh_block
+    assert "if (!isTransientRefreshError(firstError)) throw firstError;" in refresh_block
+    assert "loadSince(" not in refresh_block
     assert "const listResp = await fetch('/api/news?size='" not in refresh_block
 
 
