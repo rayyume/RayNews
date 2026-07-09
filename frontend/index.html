@@ -701,6 +701,8 @@ body.body-scroll-lock{overflow:hidden!important}
         </div>
 
         <button class="ai-save-btn" onclick="saveSystemAiConfig()">💾 保存服务端API配置</button>
+        <p class="ai-hint" style="margin:6px 0 0;text-align:center;font-size:11px;color:var(--text-3)">💡 修改配置后请先保存，再点击下方测试</p>
+        <button class="ai-save-btn" onclick="testSystemAiConnection()" style="margin-top:10px;background:var(--bg-card);color:var(--text);border:1px solid var(--border)">🔌 测试 API 连接</button>
         <p class="ai-hint" style="margin-top:8px">此 Key 仅供后台自动摘要/自动翻译使用，与每个用户在"用户设置→AI"中配置的个人 Key 互相独立。</p>
       </div>
     </div>
@@ -2596,6 +2598,34 @@ async function saveSystemAiConfig() {
     showSettingsStatus('✅ 服务端API配置已保存');
     loadSystemAiConfig();
   } catch (e) { showSettingsStatus('❌ 保存失败: ' + e.message, 'err'); }
+}
+
+async function testSystemAiConnection() {
+  showSettingsStatus('⏳ 测试中...', 'ok');
+  try {
+    const testResp = await fetch('/admin/system-ai-config/test', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + authToken },
+    });
+    if (testResp.status === 401) { logout(); showSettingsStatus('❌ 登录已过期，请重新登录', 'err'); return; }
+    const testText = await testResp.text();
+    let testData;
+    try {
+      testData = JSON.parse(testText);
+    } catch (parseErr) {
+      console.error('testSystemAiConnection: JSON parse failed, got text:', testText);
+      if (testText.includes('cloudflare') || testText.includes('Bad gateway') || testText.includes('502')) {
+        showSettingsStatus('❌ 服务器无法连接 AI 服务（Cloudflare 502）。可能是代理链路问题，请检查 Docker 容器的 HTTP_PROXY 环境变量配置', 'err');
+      } else if (testText.includes('504') || testText.includes('Gateway Timeout')) {
+        showSettingsStatus('❌ AI 服务请求超时。请检查 API 地址是否正确，或网络代理配置', 'err');
+      } else {
+        showSettingsStatus('❌ 服务器返回异常（非 JSON）。可在浏览器控制台查看详情', 'err');
+      }
+      return;
+    }
+    if (testData.error) { showSettingsStatus('❌ ' + testData.error, 'err'); return; }
+    showSettingsStatus('✅ 连接成功！模型响应：' + (testData.response || 'ok'), 'ok');
+  } catch (e) { showSettingsStatus('❌ 测试失败: ' + e.message, 'err'); }
 }
 
 // ─── Notification Config ─────────────────────────────────

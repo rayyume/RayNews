@@ -742,13 +742,10 @@ def ai_save_result(article_id):
     return jsonify({"ok": True})
 
 
-@app.route("/ai/test-connection", methods=["POST"])
-@require_role("user", "admin")
-def ai_test_connection():
-    """Test the user's AI API configuration with a minimal prompt."""
-    config = get_ai_config(g.user_id)
+def _run_ai_connection_test(config: dict | None) -> tuple[dict, int]:
+    """Shared connectivity test used by both the personal and system AI configs."""
     if not config or not config.get("api_key"):
-        return jsonify({"error": "AI not configured. Save API config first."}), 400
+        return {"error": "AI not configured. Save API config first."}, 400
     try:
         svc = AIService(
             api_key=config["api_key"],
@@ -758,16 +755,32 @@ def ai_test_connection():
         )
         response = svc.test_connection()
         if not response or not response.strip():
-            return jsonify({"error": "Connection test returned empty response"}), 502
-        return jsonify({"ok": True, "response": response})
-    except requests.exceptions.ConnectTimeout as e:
-        return jsonify({"error": "连接 AI 服务超时。请检查 API 地址是否正确，或 Docker 容器是否配置了 HTTP_PROXY 环境变量"}), 502
+            return {"error": "Connection test returned empty response"}, 502
+        return {"ok": True, "response": response}, 200
+    except requests.exceptions.ConnectTimeout:
+        return {"error": "连接 AI 服务超时。请检查 API 地址是否正确，或 Docker 容器是否配置了 HTTP_PROXY 环境变量"}, 502
     except requests.exceptions.ConnectionError as e:
-        return jsonify({"error": f"无法连接 AI 服务（{type(e).__name__}）。请检查网络代理配置：Docker 容器需要设置 HTTP_PROXY/HTTPS_PROXY 环境变量"}), 502
+        return {"error": f"无法连接 AI 服务（{type(e).__name__}）。请检查网络代理配置：Docker 容器需要设置 HTTP_PROXY/HTTPS_PROXY 环境变量"}, 502
     except requests.exceptions.Timeout as e:
-        return jsonify({"error": f"AI 服务响应超时: {e}"}), 502
+        return {"error": f"AI 服务响应超时: {e}"}, 502
     except Exception as e:
-        return jsonify({"error": f"Connection test failed: {str(e)}"}), 502
+        return {"error": f"Connection test failed: {str(e)}"}, 502
+
+
+@app.route("/ai/test-connection", methods=["POST"])
+@require_role("user", "admin")
+def ai_test_connection():
+    """Test the user's own AI API configuration with a minimal prompt."""
+    body, status = _run_ai_connection_test(get_ai_config(g.user_id))
+    return jsonify(body), status
+
+
+@app.route("/admin/system-ai-config/test", methods=["POST"])
+@require_role("admin")
+def admin_system_ai_test_connection():
+    """Test the admin-configured system AI (drives background auto summary/translate)."""
+    body, status = _run_ai_connection_test(get_system_ai_config())
+    return jsonify(body), status
 
 
 @app.route("/ai/daily-summary", methods=["POST"])
