@@ -114,6 +114,14 @@ a:hover{text-decoration:underline}
 .fbtn:hover{border-color:var(--border-hover);color:var(--text);background:var(--bg-card)}
 .fbtn.active{background:var(--accent-dim);border-color:var(--accent);color:var(--accent)}
 
+/* ═══ Top Category Bar ════════════════════════════ */
+.topcat-bar{display:flex;gap:8px;padding:14px 0 2px;overflow-x:auto;scrollbar-width:none}
+.topcat-bar:empty{padding:0}
+.topcat-bar::-webkit-scrollbar{display:none}
+.topcat-btn{flex-shrink:0;border:1px solid var(--border);background:var(--bg-surface);color:var(--text-2);font-size:12px;font-weight:700;cursor:pointer;padding:5px 14px;border-radius:100px;font-family:var(--font);white-space:nowrap;transition:background .15s,border-color .15s,color .15s}
+.topcat-btn:hover{background:var(--accent-dim);border-color:var(--accent);color:var(--accent)}
+.topcat-btn.active{background:var(--accent-dim);border-color:var(--accent);color:var(--accent)}
+
 /* ═══ News List ═══════════════════════════════════ */
 .list{display:flex;flex-direction:column;gap:1px;background:var(--border);border-radius:var(--radius);overflow:hidden;margin-bottom:40px;position:relative}
 .list.manual-refreshing::before{content:'';position:absolute;z-index:4;left:0;top:0;width:36%;height:3px;background:linear-gradient(90deg,transparent,var(--accent),transparent);pointer-events:none;animation:listRefreshSweep 1.15s ease-in-out infinite}
@@ -527,6 +535,8 @@ body.body-scroll-lock{overflow:hidden!important}
     <div class="sidebar-header">分类与来源</div>
     <div class="filters" id="filters"></div>
   </div>
+
+  <div class="topcat-bar" id="topCatBar"></div>
 
   <div class="list page-loading" id="list">
     <div class="skeleton-item" style="border-bottom:1px solid var(--border)"><div class="skeleton-thumb"></div><div class="skeleton-lines"><div class="skeleton-line"></div><div class="skeleton-line"></div></div></div>
@@ -1546,6 +1556,29 @@ function sourceBadgeTitle(source) {
 
 function categoryDisplayName(cat) {
   return CATEGORY_NAMES[cat] || cat;
+}
+
+// Small screens shorten "政经新闻" → "政经" etc. to keep the whole row on one line.
+function topCatLabel(cat) {
+  const full = categoryDisplayName(cat);
+  const isNarrow = window.matchMedia && window.matchMedia('(max-width: 640px)').matches;
+  return isNarrow ? full.slice(0, 2) : full;
+}
+
+function renderTopCatBar() {
+  const el = document.getElementById('topCatBar');
+  if (!el) return;
+  let html = `<button class="topcat-btn ${filter === 'all' ? 'active' : ''}" data-f="all">All</button>`;
+  for (const cat of CATEGORY_ORDER) {
+    const active = filter === 'cat:' + cat ? 'active' : '';
+    html += `<button class="topcat-btn ${active}" data-f="cat:${esc(cat)}" title="${esc(categoryDisplayName(cat))}">${esc(topCatLabel(cat))}</button>`;
+  }
+  el.innerHTML = html;
+  el.onclick = e => {
+    const btn = e.target.closest('.topcat-btn');
+    if (!btn) return;
+    selectFilter(btn.dataset.f);
+  };
 }
 
 // ═══ Body Scroll Lock ════════════════════════════════════
@@ -4531,6 +4564,7 @@ function renderFilters() {
     html += `</div>`;
   }
   el.innerHTML = html;
+  if (typeof renderTopCatBar === 'function') renderTopCatBar();
 
   // Click handler using delegation
   el.onclick = e => {
@@ -4576,6 +4610,7 @@ async function selectFilter(value) {
   el.querySelectorAll('.cat-header').forEach(h => h.classList.remove('active'));
   filter = value;
   currentPage = 1;
+  if (typeof renderTopCatBar === 'function') renderTopCatBar();
 
   // Determine which category to expand (if any)
   let activeCat = '';
@@ -5742,6 +5777,10 @@ if (window.matchMedia) {
 loadAuth();
 resetMobileColdStartScroll();
 bootstrapNews();
+// Re-shorten/restore top category labels when the viewport crosses the mobile breakpoint
+if (window.matchMedia) {
+  window.matchMedia('(max-width: 640px)').addEventListener('change', renderTopCatBar);
+}
 // Restore sidebar preference
 try {
   if (localStorage.getItem('raynews_sidebar') === '1') {
