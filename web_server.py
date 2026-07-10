@@ -58,6 +58,13 @@ DAILY_SUMMARY_MINUTE = int(os.environ.get("DAILY_SUMMARY_MINUTE", "0"))
 DAILY_SUMMARY_WINDOW_MINUTES = int(os.environ.get("DAILY_SUMMARY_WINDOW_MINUTES", "10"))
 TITLE_SUMMARY_MAX_CHARS = int(os.environ.get("TITLE_SUMMARY_MAX_CHARS", "30"))
 TITLE_SUMMARY_MAX_WEIGHT = TITLE_SUMMARY_MAX_CHARS * 2
+# Aspirational lower bound communicated to the LLM in the shortening prompt.
+TITLE_SUMMARY_PROMPT_MIN_CHARS = int(os.environ.get("TITLE_SUMMARY_PROMPT_MIN_CHARS", "18"))
+# Hard floor enforced by the validator. Kept well below the prompt's target so
+# legitimately short titles aren't rejected; the real defense against
+# attribution-only junk (e.g. "据FT报道") is _shares_title_signal below.
+TITLE_SUMMARY_MIN_CHARS = int(os.environ.get("TITLE_SUMMARY_MIN_CHARS", "6"))
+TITLE_SUMMARY_MIN_WEIGHT = TITLE_SUMMARY_MIN_CHARS * 2
 TITLE_SUMMARY_MAX_TOTAL_CHARS = int(os.environ.get("TITLE_SUMMARY_MAX_TOTAL_CHARS", "40"))
 
 # ─── App Setup ────────────────────────────────────────────────
@@ -1445,7 +1452,8 @@ def _is_valid_title_summary(title: str | None) -> bool:
         return False
     if text.startswith("{"):
         return False
-    return _title_weight(text) <= TITLE_SUMMARY_MAX_WEIGHT
+    weight = _title_weight(text)
+    return TITLE_SUMMARY_MIN_WEIGHT <= weight <= TITLE_SUMMARY_MAX_WEIGHT
 
 
 def _parse_title_summary_result(raw: str | None) -> dict:
@@ -1507,6 +1515,18 @@ def _looks_like_code_only_title(title: str) -> bool:
     return False
 
 
+# Attribution/sourcing words and wire-service names. These are excluded when
+# checking whether a shortened title still carries the original's subject \u2014
+# a title that only echoes "who reported it" (e.g. "\u636eFT\u62a5\u9053") without any of
+# the actual subject/action tokens must not be treated as on-topic.
+TITLE_ATTRIBUTION_STOPWORDS = {
+    "\u62a5\u9053", "\u636e\u62a5\u9053", "\u636e\u6089", "\u6d88\u606f", "\u6d88\u606f\u4eba\u58eb", "\u63f4\u5f15", "\u77e5\u60c5\u4eba\u58eb", "\u62a5\u9053\u79f0", "\u62a5\u9053\u8bf4",
+    "reuters", "bloomberg", "afp", "ap", "cnn", "bbc", "wsj", "ft",
+    "\u8def\u900f", "\u5f6d\u535a", "\u7f8e\u8054\u793e", "\u6cd5\u65b0\u793e", "\u534e\u5c14\u8857\u65e5\u62a5", "\u91d1\u878d\u65f6\u62a5", "\u7ebd\u7ea6\u65f6\u62a5", "nyt",
+    "sources", "reports", "reported", "reporting", "said", "according", "says",
+}
+
+
 def _title_keyword_tokens(title: str) -> set[str]:
     text = _clean_title_summary(title)
     cjk_tokens = set(re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff]{2,}", text))
@@ -1515,10 +1535,12 @@ def _title_keyword_tokens(title: str) -> set[str]:
 
 
 def _shares_title_signal(candidate: str, original_title: str) -> bool:
-    original_tokens = _title_keyword_tokens(original_title)
+    original_tokens = _title_keyword_tokens(original_title) - TITLE_ATTRIBUTION_STOPWORDS
     if not original_tokens:
         return True
-    candidate_tokens = _title_keyword_tokens(candidate)
+    candidate_tokens = _title_keyword_tokens(candidate) - TITLE_ATTRIBUTION_STOPWORDS
+    if not candidate_tokens:
+        return False
     if candidate_tokens & original_tokens:
         return True
     candidate_text = _clean_title_summary(candidate).lower()
@@ -1909,7 +1931,7 @@ def _process_article_title(article: dict, config: dict) -> bool:
 
     try:
         svc = svc or _title_service(config)
-        raw_title = svc.summarize_title(title, TITLE_SUMMARY_MAX_CHARS)
+        raw_title = svc.summarize_title(title, TITLE_SUMMARY_MAX_CHARS, TITLE_SUMMARY_PROMPT_MIN_CHARS)
         parsed = _parse_title_summary_result(raw_title)
         result = _validate_ai_title_summary_result(parsed, original_title=title)
         if not result["valid"]:

@@ -83,6 +83,23 @@ class TitleProcessingTests(unittest.TestCase):
         self.assertTrue(valid["valid"])
         self.assertEqual(valid["title"], SHORT_RESTAURANT_TITLE)
 
+    def test_ai_title_summary_rejects_attribution_only_title(self):
+        # Regression: "Tencent in Talks to Become Largest Holder of Manus, FT
+        # Reports" must not be reduced to a bare attribution clause like
+        # "据FT报道" — that drops the actual subject (Tencent/Manus) and keeps
+        # only "who reported it", which fails the news-title 3-elements rule.
+        original_title = "腾讯洽谈成为 Manus 最大股东，据 FT 报道"
+        result = web_server._validate_ai_title_summary_result(
+            {"title": "据FT报道", "valid": True, "reason": "shortened"},
+            original_title=original_title,
+        )
+        self.assertFalse(result["valid"])
+
+        self.assertFalse(web_server._shares_title_signal("据FT报道", original_title))
+        self.assertTrue(web_server._shares_title_signal(
+            "腾讯洽谈成为 Manus 最大股东", original_title
+        ))
+
     def test_ai_title_summary_rejects_ai_self_invalid(self):
         result = web_server._validate_ai_title_summary_result(
             {"title": "\u82f9\u679c\u53d1\u5e03\u65b0\u7cfb\u7edf", "valid": False, "reason": "\u4fe1\u606f\u4e0d\u8db3"},

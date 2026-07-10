@@ -389,7 +389,7 @@ class AIService:
         ]
         return _normalize_cjk_quotes(self.chat(messages, max_tokens=200, temperature=0.2).strip())
 
-    def summarize_title(self, title: str, max_chars: int = 35) -> str:
+    def summarize_title(self, title: str, max_chars: int = 35, min_chars: int = 18) -> str:
         """Shorten a news title using a 3-element editing approach."""
         messages = [
             {
@@ -403,7 +403,9 @@ class AIService:
                     "2. 核心事实：最新发生的最重大动作（做了什么）。\n"
                     "3. 关键结果/数字：最能体现事件影响的细节或数据。\n\n"
                     "# Constraints\n"
-                    f"- 字数严格控制在 30-{max_chars} 字之间，拒绝冗长。\n"
+                    f"- 字数严格控制在 {min_chars}-{max_chars} 字之间，拒绝冗长，也不能过短。\n"
+                    "- 必须保留原标题的核心主体（人物/机构/产品等专有名词）和核心动作，"
+                    "禁止只保留消息来源或引述框架（如「据FT报道」「知情人士称」等）而丢掉主体和事实本身。\n"
                     "- 拒绝结构拆分：只需输出一行最终的标题，严禁带有「引题」「正题」「副题」等标签。\n"
                     "- 拒绝前言后语：禁止输出「这是为你生成的标题：」等任何解释性废话。\n"
                     "- 客观准确：严格基于原文事实，严禁夸大、魔改或使用震惊体。\n"
