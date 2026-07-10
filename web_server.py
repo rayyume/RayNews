@@ -743,7 +743,14 @@ def ai_save_result(article_id):
 
     # Keep the article title in news.db in sync so the home page list shows
     # the translated title too (mirrors the old server-side translate-full behavior).
-    if translation:
+    # Restricted to admins: this endpoint accepts any logged-in user's
+    # self-reported translation JSON, and the home page title is shown to
+    # every visitor — a regular user must not be able to rewrite it by simply
+    # submitting a crafted payload. Non-admin submissions still populate the
+    # shared summary/translation cache above; only the title-sync side effect
+    # is gated. (Non-admin titles still get translated via the validated
+    # admin-driven auto-title-process pipeline in _process_article_title.)
+    if translation and g.user_role == "admin":
         try:
             translated_title = json.loads(translation).get("title") if translation.strip().startswith("{") else ""
         except (json.JSONDecodeError, TypeError):
@@ -1176,7 +1183,6 @@ def _run_daily_summary_job(job_id, user_id, config):
         _update_daily_summary_job(job_id, status="failed", error=f"AI request failed: {str(e)}")
 
 
-_daily_summary_broadcast_dates = set()  # {date_str, ...} — days the shared summary has already been generated + sent
 _auto_summary_lock = threading.Lock()
 _auto_translation_lock = threading.Lock()
 _auto_title_process_lock = threading.Lock()
@@ -1185,11 +1191,78 @@ _legacy_admin_source_settings_lock = threading.Lock()
 _legacy_admin_source_settings_promoted = False
 
 
+def _init_daily_summary_sends_table():
+    if not os.path.exists(NEWS_DB):
+        return
+    try:
+        conn = sqlite3.connect(NEWS_DB)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS daily_summary_sends (
+                date       TEXT NOT NULL,
+                user_id    INTEGER NOT NULL,
+                email      TEXT NOT NULL,
+                status     TEXT NOT NULL DEFAULT 'sent',
+                sent_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (date, user_id)
+            )
+        """)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[daily-summary] sends table init failed: {e}")
+
+
+def _get_daily_summary_sent_user_ids(date_str: str) -> set[int]:
+    """user_ids already *successfully* sent this date's summary — failed
+    attempts are excluded on purpose so the next run retries them."""
+    if not os.path.exists(NEWS_DB):
+        return set()
+    try:
+        _init_daily_summary_sends_table()
+        conn = sqlite3.connect(NEWS_DB)
+        rows = conn.execute(
+            "SELECT user_id FROM daily_summary_sends WHERE date = ? AND status = 'sent'",
+            (date_str,),
+        ).fetchall()
+        conn.close()
+        return {int(r[0]) for r in rows}
+    except Exception as e:
+        print(f"[daily-summary] sends read failed: {e}")
+        return set()
+
+
+def _record_daily_summary_send(date_str: str, user_id: int, email: str, status: str):
+    if not os.path.exists(NEWS_DB):
+        return
+    try:
+        _init_daily_summary_sends_table()
+        conn = sqlite3.connect(NEWS_DB)
+        conn.execute(
+            "INSERT INTO daily_summary_sends (date, user_id, email, status, sent_at) "
+            "VALUES (?, ?, ?, ?, datetime('now')) "
+            "ON CONFLICT(date, user_id) DO UPDATE SET "
+            "email = excluded.email, status = excluded.status, sent_at = excluded.sent_at",
+            (date_str, user_id, email, status),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[daily-summary] sends write failed: {e}")
+
+
 def _broadcast_daily_summary(force: bool = False) -> dict:
     """Generate (once) and email the one shared daily summary to every user
     with daily_summary_enabled. Runs automatically at DAILY_SUMMARY_HOUR:MINUTE
     Beijing time; `force=True` (admin manual trigger) bypasses the time
-    window and the "already sent today" guard.
+    window and resends to every subscriber regardless of history.
+
+    Send state is persisted in daily_summary_sends (date, user_id) rather than
+    kept in memory: an in-memory "already sent today" set is lost on every
+    restart, which could cause a duplicate broadcast if the process restarts
+    inside the same day's send window. Persisting per-recipient status also
+    lets a transient per-recipient failure (e.g. one bad email) get retried
+    on the next scheduler tick instead of being silently skipped for the rest
+    of the day.
     """
     import json as _json
     from notifier import send_daily_summary_email
@@ -1203,8 +1276,6 @@ def _broadcast_daily_summary(force: bool = False) -> dict:
         return {"status": "skipped", "reason": "RESEND_API_KEY not set"}
 
     if not force:
-        if today_str in _daily_summary_broadcast_dates:
-            return {"status": "skipped", "reason": "already sent today"}
         target_minutes = DAILY_SUMMARY_HOUR * 60 + DAILY_SUMMARY_MINUTE
         now_minutes = now.hour * 60 + now.minute
         diff = now_minutes - target_minutes
@@ -1220,17 +1291,7 @@ def _broadcast_daily_summary(force: bool = False) -> dict:
         print(f"[scheduler] DB error: {e}")
         return {"status": "error", "reason": str(e)}
 
-    print(f"[scheduler] Daily summary broadcast for {today_str}: {len(rows)} subscriber(s)")
-    if not rows:
-        if not force:
-            _daily_summary_broadcast_dates.add(today_str)
-        return {"status": "skipped", "reason": "no subscribers"}
-
-    result = _generate_daily_summary_global(today_str)
-    if not result:
-        return {"status": "error", "reason": "generation failed (check 管理员设置→服务端API, or no articles yet)"}
-
-    sent = 0
+    recipients = {}  # user_id -> to_email
     for row in rows:
         settings = dict(row)
         nc = settings.get("notification_config", "{}")
@@ -1240,18 +1301,35 @@ def _broadcast_daily_summary(force: bool = False) -> dict:
             except (_json.JSONDecodeError, TypeError):
                 nc = {}
         to_email = (nc.get("resend") or {}).get("to_email", "")
-        if not to_email:
-            continue
+        if to_email:
+            recipients[int(settings["user_id"])] = to_email
+
+    print(f"[scheduler] Daily summary broadcast for {today_str}: {len(recipients)} subscriber(s)")
+    if not recipients:
+        return {"status": "skipped", "reason": "no subscribers"}
+
+    already_sent = set() if force else _get_daily_summary_sent_user_ids(today_str)
+    pending = {uid: email for uid, email in recipients.items() if uid not in already_sent}
+    if not pending:
+        return {"status": "skipped", "reason": "already sent today"}
+
+    result = _generate_daily_summary_global(today_str)
+    if not result:
+        return {"status": "error", "reason": "generation failed (check 管理员设置→服务端API, or no articles yet)"}
+
+    sent = 0
+    for user_id, to_email in pending.items():
         try:
             send_daily_summary_email(resend_api_key, to_email, result["summary"], result["stats"])
+            _record_daily_summary_send(today_str, user_id, to_email, "sent")
             sent += 1
         except Exception as e:
-            print(f"[scheduler] send to user {settings.get('user_id')} ({to_email}) failed: {e}")
+            print(f"[scheduler] send to user {user_id} ({to_email}) failed: {e}")
+            _record_daily_summary_send(today_str, user_id, to_email, "failed")
 
-    if not force:
-        _daily_summary_broadcast_dates.add(today_str)
-    print(f"[scheduler] Daily summary broadcast for {today_str}: sent to {sent}/{len(rows)} subscriber(s)")
-    return {"status": "ok", "sent": sent, "subscribers": len(rows), "date": today_str}
+    print(f"[scheduler] Daily summary broadcast for {today_str}: sent to {sent}/{len(pending)} pending "
+          f"({len(recipients)} total subscriber(s))")
+    return {"status": "ok", "sent": sent, "pending": len(pending), "subscribers": len(recipients), "date": today_str}
 
 
 def _send_daily_summaries():
@@ -1625,6 +1703,26 @@ def _ensure_article_title_columns(conn) -> None:
         conn.execute("ALTER TABLE articles ADD COLUMN title_source TEXT")
 
 
+def _invalidate_refresh_server_cache(article_id: int) -> None:
+    """Best-effort: tell refresh_server.py to drop its in-memory cached
+    /api/news/<id> response for this article, so the next read reflects the
+    title/body update we just wrote to news.db instead of stale cached JSON.
+    refresh_server is a separate process with no other way to learn about
+    writes made here; without this, staleness only self-heals on the next
+    ~15min fetcher cycle (which clears the whole cache) or when some client
+    happens to poll /api/news/title-updates (which only handles title
+    changes, not body_html).
+    """
+    try:
+        requests.get(
+            "http://127.0.0.1:8081/internal/cache-evict",
+            params={"id": article_id},
+            timeout=3,
+        )
+    except requests.exceptions.RequestException:
+        pass  # non-fatal — cache will self-heal on the next fetcher cycle
+
+
 def _save_article_title_update(article_id: int, title: str | None,
                                title_source: str = "ai") -> bool:
     title = _clean_title_summary(_sanitize_plain_text(title or "", max_len=300))
@@ -1648,6 +1746,7 @@ def _save_article_title_update(article_id: int, title: str | None,
             (title, title_source, article_id),
         )
         conn.commit()
+        _invalidate_refresh_server_cache(article_id)
         return True
     finally:
         conn.close()
@@ -1720,6 +1819,9 @@ def _save_article_translation(article_id: int, title: str | None = None,
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(f"UPDATE articles SET {', '.join(sets)} WHERE id = ?", vals)
         conn.commit()
+        # _save_article_title_update() above already invalidates on a title
+        # change; body_html has no such path, so cover it here too.
+        _invalidate_refresh_server_cache(article_id)
     finally:
         conn.close()
 
@@ -3403,14 +3505,16 @@ def scheduler_status():
     import datetime as _dt
     now = _dt.datetime.now()
     beijing_now = _beijing_now()
+    today_str = beijing_now.strftime("%Y-%m-%d")
+    today_sent = sorted(_get_daily_summary_sent_user_ids(today_str))
     return jsonify({
         "running": True,
         "server_time": now.strftime("%Y-%m-%d %H:%M:%S"),
         "beijing_time": beijing_now.strftime("%Y-%m-%d %H:%M:%S"),
-        "today": beijing_now.strftime("%Y-%m-%d"),
+        "today": today_str,
         "timezone_hint": str(_dt.datetime.now().astimezone().tzinfo),
         "daily_summary_send_time": f"{DAILY_SUMMARY_HOUR:02d}:{DAILY_SUMMARY_MINUTE:02d}",
-        "daily_summary_broadcast_dates": list(_daily_summary_broadcast_dates),
+        "daily_summary_sent_user_ids_today": today_sent,
     })
 
 
@@ -3420,6 +3524,7 @@ if __name__ == "__main__":
     _init_ai_results_table()
     _init_daily_summary_cache_table()
     _init_daily_summary_global_table()
+    _init_daily_summary_sends_table()
     import threading as _th
     _th.Thread(target=_daily_summary_loop, daemon=True).start()
     _th.Thread(target=_auto_summary_loop, daemon=True).start()

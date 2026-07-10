@@ -532,6 +532,22 @@ def api_title_updates(params: dict) -> bytes:
             conn.close()
 
 
+def api_cache_evict(params: dict) -> tuple[bytes, int]:
+    """GET /internal/cache-evict?id=<article_id> — loopback-only, called by
+    web_server.py right after it updates an article's title/body in news.db,
+    so the next read doesn't return a stale cached response. Without this,
+    staleness only self-heals on the next ~15min fetcher cycle (which clears
+    the whole cache) or when a client happens to poll /api/news/title-updates
+    (which only handles title changes, not body_html).
+    """
+    article_id = (params.get("id", [""])[0] or "").strip()
+    if not article_id.isdigit():
+        return json.dumps({"error": "invalid id"}).encode(), 400
+    with _article_cache_lock:
+        _article_cache.pop(int(article_id), None)
+    return json.dumps({"ok": True}).encode(), 200
+
+
 def _build_news_detail_response(article_id: int) -> bytes:
     """GET /api/news/<id> — single article with body_html (cached)."""
     conn = None
@@ -679,6 +695,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # ── Legacy routes ──
         if path == "/refresh":
             body, status = run_fetcher()
+            send_json(self, body, status)
+            return
+
+        # ── Internal (loopback-only via nginx routing; not exposed under /api/) ──
+        if path == "/internal/cache-evict":
+            body, status = api_cache_evict(params)
             send_json(self, body, status)
             return
 
