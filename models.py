@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS users (
     password    TEXT    NOT NULL,
     nickname    TEXT    NOT NULL DEFAULT '',
     role        TEXT    NOT NULL DEFAULT 'user'
-                        CHECK(role IN ('preview', 'user', 'admin')),
+                        CHECK(role IN ('user', 'admin')),
     avatar_url  TEXT    NOT NULL DEFAULT '',
     created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
 );
@@ -121,6 +121,41 @@ def get_db() -> sqlite3.Connection:
         # instead. Promote any leftover preview accounts from before this change.
         _db.execute("UPDATE users SET role = 'user' WHERE role = 'preview'")
         _db.commit()
+        # Migration: tighten the `role` CHECK constraint to drop the retired
+        # 'preview' value now that no row can hold it (the UPDATE above already
+        # promoted every leftover one). SQLite has no ALTER TABLE ... DROP
+        # CONSTRAINT, so this rebuilds the table per SQLite's documented
+        # 12-step procedure: create a new table with the tighter constraint,
+        # copy every row over, drop the old table, rename the new one in place.
+        # Guarded by inspecting the live schema text so it only runs once.
+        existing_sql = _db.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'"
+        ).fetchone()
+        if existing_sql and "'preview'" in (existing_sql[0] or ""):
+            _db.execute("PRAGMA foreign_keys=OFF")
+            _db.executescript(
+                """
+                CREATE TABLE users_new (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    email       TEXT    NOT NULL UNIQUE,
+                    password    TEXT    NOT NULL,
+                    nickname    TEXT    NOT NULL DEFAULT '',
+                    role        TEXT    NOT NULL DEFAULT 'user'
+                                        CHECK(role IN ('user', 'admin')),
+                    avatar_url  TEXT    NOT NULL DEFAULT '',
+                    created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+                );
+                INSERT INTO users_new (id, email, password, nickname, role, avatar_url, created_at)
+                    SELECT id, email, password, nickname, role, avatar_url, created_at FROM users;
+                DROP TABLE users;
+                ALTER TABLE users_new RENAME TO users;
+                """
+            )
+            violations = _db.execute("PRAGMA foreign_key_check").fetchall()
+            _db.execute("PRAGMA foreign_keys=ON")
+            if violations:
+                raise RuntimeError(f"users table rebuild left dangling foreign keys: {violations}")
+            _db.commit()
     return _db
 
 

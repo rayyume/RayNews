@@ -352,7 +352,6 @@ body.body-scroll-lock{overflow:hidden!important}
 .admin-role-badge{display:inline-block;padding:2px 8px;border-radius:100px;font-size:11px;font-weight:700}
 .admin-role-badge.admin{background:rgba(239,68,68,0.12);color:#ef4444}
 .admin-role-badge.user{background:rgba(59,130,246,0.12);color:#3b82f6}
-.admin-role-badge.preview{background:rgba(245,158,11,0.12);color:#f59e0b}
 .admin-role-select{background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 8px;font-size:12px;font-family:var(--font);cursor:pointer;outline:none}
 .admin-role-select:focus{border-color:var(--accent)}
 .admin-del-btn{background:none;border:1px solid rgba(239,68,68,0.3);color:#ef4444;padding:4px 10px;border-radius:6px;font-size:11px;cursor:pointer;font-family:var(--font);transition:all 0.15s}
@@ -517,7 +516,6 @@ body.body-scroll-lock{overflow:hidden!important}
           </div>
         </div>
         <div class="user-menu-items">
-          <div class="user-menu-item" id="previewMenuNotice" style="display:none;cursor:default;color:var(--text-3);font-size:12px;line-height:1.5">🔒 预览账号待管理员审核，暂不可用任何功能</div>
           <button class="user-menu-item" onclick="openFavorites()" id="favMenuItem">⭐ 我的收藏</button>
           <button class="user-menu-item" onclick="openSettings()" id="settingsMenuItem">⚙️ 用户设置</button>
           <button class="user-menu-item" onclick="openAdminSettings()" id="adminSettingsBtn" style="display:none">🛠️ 管理员设置</button>
@@ -962,11 +960,8 @@ let authToken = null;
 let authUser = null;
 let authMode = 'login'; // 'login' | 'register'
 
-// Preview accounts are intentionally permission-equivalent to a logged-out
-// visitor (pending admin review) — anything gated on "must be logged in"
-// should also treat a preview session as not logged in.
 function isRestrictedUser() {
-  return !authToken || (authUser && authUser.role === 'preview');
+  return !authToken;
 }
 
 function loadAuth() {
@@ -1810,21 +1805,6 @@ function updateUserUI() {
     document.querySelectorAll('.source-admin-only').forEach(el => {
       el.style.display = authUser.role === 'admin' ? '' : 'none';
     });
-
-    // Preview accounts are permission-wise identical to a logged-out visitor:
-    // they can only browse the article list/detail. Reduce the menu to a
-    // notice + logout so there's no dead-end interactive UI left behind.
-    const isPreview = authUser.role === 'preview';
-    const previewNotice = document.getElementById('previewMenuNotice');
-    if (previewNotice) previewNotice.style.display = isPreview ? '' : 'none';
-    const favMenuItem = document.getElementById('favMenuItem');
-    if (favMenuItem) favMenuItem.style.display = isPreview ? 'none' : '';
-    const settingsMenuItem = document.getElementById('settingsMenuItem');
-    if (settingsMenuItem) settingsMenuItem.style.display = isPreview ? 'none' : '';
-
-    // Preview users: hide refresh button
-    const refreshBtn = document.getElementById('refreshBtn');
-    if (refreshBtn) refreshBtn.style.display = isPreview ? 'none' : '';
   } else {
     // Show login button in header
     const existingAvatar = document.querySelector('.header-avatar');
@@ -3691,7 +3671,7 @@ async function checkFavoriteStatus(articleId) {
     btn.title = '收藏';
     const label = btn.querySelector('span');
     if (label) label.textContent = '收藏';
-    btn.style.display = (authToken && !(authUser && authUser.role === 'preview')) ? '' : 'none';
+    btn.style.display = authToken ? '' : 'none';
     if (data && data.favorited) {
       btn.classList.add('on');
       btn.title = '取消收藏';
@@ -3979,11 +3959,6 @@ async function triggerRefresh({ stateAlreadySet = false, showStart = true } = {}
   // Unauthenticated users cannot refresh
   if (!authToken) {
     showToast('🔒 请先登录');
-    return;
-  }
-  // Preview users cannot refresh
-  if (authUser && authUser.role === 'preview') {
-    showToast('🔒 预览用户无此权限');
     return;
   }
 
@@ -4809,10 +4784,6 @@ function openSearch() {
     showAuth('search');
     return;
   }
-  if (authUser && authUser.role === 'preview') {
-    showToast('🔒 预览账号待管理员审核，暂不可用此功能');
-    return;
-  }
   const overlay = document.getElementById('searchOverlay');
   overlay.classList.add('open');
   overlay.setAttribute('aria-hidden', 'false');
@@ -5003,11 +4974,6 @@ function renderList() {
 }
 
 function renderPagination(totalPages) {
-  // Preview users: no pagination
-  if (authUser && authUser.role === 'preview') {
-    document.getElementById('pagination').innerHTML = '';
-    return;
-  }
   const el = document.getElementById('pagination');
   if (totalPages <= 1) { el.innerHTML = ''; return; }
   el.innerHTML = `
@@ -5048,8 +5014,6 @@ async function goToPage(page) {
     showAuth();
     return;
   }
-  // Preview users: no pagination
-  if (authUser && authUser.role === 'preview') return;
   const totalPages = Math.max(1, Math.ceil(currentTotal / PAGE_SIZE));
   if (page < 1 || page > totalPages) return;
   rememberCurrentListHistory();
@@ -5178,7 +5142,7 @@ async function showHomepageAfterScroll() {
 }
 
 async function refreshHomepage() {
-  if (!authToken || (authUser && authUser.role === 'preview')) {
+  if (!authToken) {
     triggerRefresh();
     return;
   }
@@ -5356,7 +5320,7 @@ function openArticle(id) {
   if (favBtn) {
     favBtn.classList.remove('on');
     favBtn.title = '收藏';
-    favBtn.style.display = (authToken && !(authUser && authUser.role === 'preview')) ? '' : 'none';
+    favBtn.style.display = authToken ? '' : 'none';
   }
 
   // If article not in memory, fetch metadata from API

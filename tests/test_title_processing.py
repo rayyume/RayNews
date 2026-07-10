@@ -39,7 +39,7 @@ class TitleProcessingTests(unittest.TestCase):
         svc = CaptureTitleAI()
         svc.summarize_title("OpenAI releases a very long title about GPT-4o", 30)
         prompt = "\n".join(message["content"] for message in svc.messages)
-        self.assertIn("\u65b0\u95fb\u6807\u9898\u7f16\u8f91", prompt)
+        self.assertIn("\u8d44\u6df1\u7684\u65b0\u95fb\u7f16\u8f91", prompt)
         self.assertIn("\u53ea\u8f93\u51fa JSON", prompt)
         self.assertNotIn("????????", prompt)
 

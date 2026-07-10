@@ -264,7 +264,10 @@ def test_service_worker_normalizes_api_cache_keys():
     assert "function normalizedApiRequest(request)" in sw
     assert "url.searchParams.delete('t');" in sw
     assert "cache.match(cacheRequest)" in sw
-    assert "cache.put(cacheRequest, network.clone())" in sw
+    # network.clone() is assigned to a local before cache.put() rather than
+    # inlined, but it's still the normalized cacheRequest key that gets stored.
+    assert "const cloned = network.clone();" in sw
+    assert "cache.put(cacheRequest, cloned)" in sw
 
 
 def test_search_uses_server_side_pagination_without_limiting_database_scope():
@@ -526,7 +529,12 @@ def test_cold_start_bootstrap_has_loading_animation():
     boot_start = html.index("async function bootstrapNews()")
     boot_end = html.index("// Initial load", boot_start)
     boot_block = html[boot_start:boot_end]
-    assert "loadNewsPage(initialState.page, {" in boot_block
+    # Cold start always lands on page 1, even if the URL has ?page=N (see
+    # commit 4490ff9 "reset page to 1 on browser refresh") — a stale bookmark
+    # shouldn't drop the user onto a page whose content may have shifted.
+    # restoreListStateFromUrl() (back/forward navigation) is unaffected.
+    assert "currentPage = 1;" in boot_block
+    assert "loadNewsPage(1, {" in boot_block
     assert "userInitiated: true," in boot_block
     assert "animate: true," in boot_block
     assert "useCache: false," in boot_block

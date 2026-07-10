@@ -3376,12 +3376,12 @@ def test_notification():
 
 # ─── Health (unused section divider) ────────────────────────
 
-# ─── Preview-restricted Refresh ──────────────────────────
+# ─── Authenticated Refresh ────────────────────────────────
 
 @app.route("/auth/refresh", methods=["POST", "GET"])
 @require_role("user", "admin")
 def protected_refresh():
-    """Trigger fetcher refresh. Protected from preview users."""
+    """Trigger fetcher refresh. Requires an authenticated user or admin."""
     import requests as http_req
     try:
         resp = http_req.get("http://127.0.0.1:8081/refresh", timeout=150)
