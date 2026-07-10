@@ -4411,7 +4411,13 @@ async function loadNewsPage(page = 1, {
       pendingLatestPage = activeFilter === 'all' && page === 1 ? data : pendingLatestPage;
     } else {
       applyNewsPage(data, page, activeFilter, {
-        animate: animate && !cacheApplied,
+        // Don't force-disable animation just because the cache pass already
+        // animated: preserveDom's reconcileVisibleArticles() uses a separate,
+        // targeted FLIP transition (only diffed cards move/fade), not the
+        // page-switching cascade — so if the network response differs from
+        // what the cache showed, that diff should still animate smoothly
+        // instead of hard-swapping with zero transition.
+        animate,
         preserveDom: cacheApplied || (!userInitiated && news.length > 0),
       });
     }
