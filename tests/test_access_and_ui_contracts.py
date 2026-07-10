@@ -243,12 +243,18 @@ def test_idle_refresh_only_returns_to_latest_after_five_minutes_and_new_articles
     idle_start = html.index("async function showLatestAfterIdle()")
     idle_end = html.index("function scheduleAdjacentPagePrefetch", idle_start)
     idle_block = html[idle_start:idle_end]
-    assert "pendingNewArticleCount" in idle_block
+    # Idle auto-apply is scoped to whichever category is currently active, not
+    # hardcoded to "all" — it reads pendingRelevantCount(activeFilter) and never
+    # reassigns `filter`.
+    assert "const activeFilter = filter;" in idle_block
+    assert "pendingRelevantCount(activeFilter)" in idle_block
     assert "hasBlockingOverlayOpen()" in idle_block
     assert "scrollPageToTop({ onNearTop: applyLatest, auto: true })" in idle_block
     assert "if (!completed) return;" in idle_block
     assert "currentPage = 1;" in idle_block
-    assert "filter = 'all';" in idle_block
+    # Only the just-consumed category's pending items are dropped, not every
+    # category's — an unseen article in another category must survive.
+    assert "consumePendingNewArticles(activeFilter);" in idle_block
     assert "document.addEventListener('visibilitychange'" in html
     assert "loadDataWithRetry();" not in html
 
@@ -313,19 +319,32 @@ def test_cached_page_background_calibration_reuses_existing_cards():
     assert "const showPageProgress = !cacheApplied && userInitiated;" in load_block
 
 
-def test_all_home_refresh_controls_use_one_shared_first_page_flow():
+def test_logo_and_header_refresh_share_flow_while_scroll_top_is_quiet():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    # Logo and the header "刷新" button are the hard-refresh path: they always
+    # jump back to "all" and trigger a fresh backend scrape.
     assert 'class="logo" onclick="refreshHomepage()"' in html
     assert 'id="refreshBtn" onclick="refreshHomepage()"' in html
-    assert 'id="scrollTopBtn" onclick="refreshHomepage()"' in html
     start = html.index("async function refreshHomepage()")
-    end = html.index("function articleDetailErrorText", start)
+    end = html.index("async function scrollToTopAndCheckLatest", start)
     block = html[start:end]
     assert "setRefreshRunning(true);" in block
     assert "preparePageNavigation(1, 'all')" in block
     assert "scrollPageToTop({" in block
     assert "applyNewsPage(targetData, 1, 'all', { animate: true, preserveDom: true });" in block
     assert "await triggerRefresh({ stateAlreadySet: true, showStart: false });" in block
+
+    # The bottom-right ↑ button is a different, lighter-weight action: scroll to
+    # top and quietly check for new articles in whatever filter is active — it
+    # must NOT force filter back to "all" and must NOT trigger a backend scrape.
+    assert 'id="scrollTopBtn" onclick="scrollToTopAndCheckLatest()"' in html
+    quiet_start = html.index("async function scrollToTopAndCheckLatest()")
+    quiet_end = html.index("function articleDetailErrorText", quiet_start)
+    quiet_block = html[quiet_start:quiet_end]
+    assert "const activeFilter = filter;" in quiet_block
+    assert "loadSince(cursor, { forceApply: true })" in quiet_block
+    assert "filter = 'all'" not in quiet_block
+    assert "triggerRefresh(" not in quiet_block
 
 
 def test_manual_refresh_has_no_unused_silent_start_mode():
@@ -522,15 +541,20 @@ def test_new_article_prompt_and_idle_motion_are_cancellable():
     prompt_start = html.index("async function revealPendingLatest()")
     prompt_end = html.index("function scheduleAdjacentPagePrefetch", prompt_start)
     prompt_block = html[prompt_start:prompt_end]
-    assert "if (!pendingNewArticleCount) return;" in prompt_block
+    # revealPendingLatest is scoped to whatever category is active — it checks
+    # pendingRelevantCount(activeFilter), not the raw global pendingNewArticleCount,
+    # and reloads using that same activeFilter instead of forcing "all".
+    assert "const activeFilter = filter;" in prompt_block
+    assert "if (!pendingRelevantCount(activeFilter)) return;" in prompt_block
     assert "loadNewsPage(1, {" in prompt_block
     assert "forceNetwork: true" in prompt_block
-    assert "pendingLatestPage = null;" in prompt_block
+    # Only the revealed category's pending items are consumed, not the whole queue.
+    assert "consumePendingNewArticles(activeFilter);" in prompt_block
     assert "hideNewArticlesPrompt();" in prompt_block
     assert "function cancelActiveAutoMotion()" in html
     assert "if (!activeScrollMotion || !activeScrollMotion.auto) return;" in html
     assert "if (!completed) return;" in html
-    assert "const atLatestTop = filter === 'all'" in html
+    assert "const atLatestTop = currentPage === 1" in html
 
 
 def test_list_filter_and_page_are_encoded_in_history_url():

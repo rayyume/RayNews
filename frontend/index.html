@@ -863,7 +863,7 @@ body.body-scroll-lock{overflow:hidden!important}
   </div>
 </div>
 
-<button class="scroll-top-btn" id="scrollTopBtn" onclick="refreshHomepage()" title="回到首页并刷新">↑</button>
+<button class="scroll-top-btn" id="scrollTopBtn" onclick="scrollToTopAndCheckLatest()" title="回到顶部，检查新文章">↑</button>
 
 <script>
 const PAGE_SIZE = 30;
@@ -906,6 +906,7 @@ let pageNavigationPending = false;
 const pageMemoryBuffer = new Map();
 const pagePrefetchPromises = new Map();
 let pendingNewArticleCount = 0;
+let pendingNewItems = [];
 let seenArticleIds = new Set();
 let pendingLatestPage = null;
 let lastUserActivityAt = Date.now();
@@ -4254,10 +4255,50 @@ function hasBlockingOverlayOpen() {
   });
 }
 
+// Does a newly-arrived article belong to the given filter (an "all"/"cat:X"/source-group key)?
+// Mirrors the same server-side scoping buildNewsPageParams() uses, but resolved client-side
+// from data we already have (sourceMeta), so no extra request is needed just to decide relevance.
+function articleMatchesFilter(item, activeFilter) {
+  if (!item) return false;
+  if (!activeFilter || activeFilter === 'all') return true;
+  if (activeFilter.startsWith('cat:')) {
+    return sourceCategory(item.source || item.feed_source) === activeFilter.slice(4);
+  }
+  const group = sourceFilterGroups[activeFilter];
+  if (!group) return false;
+  return group.sources.includes(item.source) || group.sources.includes(item.feed_source);
+}
+
+function pendingRelevantCount(activeFilter = filter) {
+  return pendingNewItems.filter(item => articleMatchesFilter(item, activeFilter)).length;
+}
+
+// Marks the pending items relevant to `activeFilter` as "seen" without touching
+// pending items for any OTHER category — e.g. revealing the News prompt must not
+// silently drop a still-unseen Tech article from the notification queue. Passing
+// 'all' clears everything, since every item matches the 'all' filter.
+// seenArticleIds is intentionally never reset here: it's a session-lifetime dedup
+// guard against loadSince() double-counting a since-cursor edge case, not a
+// per-category concern, and leaving it be is strictly safer than clearing it.
+function consumePendingNewArticles(activeFilter) {
+  if (!pendingNewItems.length) {
+    hideNewArticlesPrompt();
+    return;
+  }
+  pendingNewItems = pendingNewItems.filter(item => !articleMatchesFilter(item, activeFilter));
+  pendingNewArticleCount = pendingNewItems.length;
+  hideNewArticlesPrompt();
+  showNewArticlesPrompt();
+}
+
 function showNewArticlesPrompt() {
   const prompt = document.getElementById('newArticlesPrompt');
-  if (!prompt || !pendingNewArticleCount) return;
-  prompt.textContent = `有 ${pendingNewArticleCount} 篇新文章，点击查看`;
+  if (!prompt) return;
+  // Only surface the toast when the newly-arrived articles are actually relevant
+  // to whatever category the user is currently looking at.
+  const count = pendingRelevantCount();
+  if (!count) return;
+  prompt.textContent = `有 ${count} 篇新文章，点击查看`;
   prompt.classList.add('show');
 }
 
@@ -4267,49 +4308,48 @@ function hideNewArticlesPrompt() {
 }
 
 async function revealPendingLatest() {
-  if (!pendingNewArticleCount) return;
+  const activeFilter = filter;
+  if (!pendingRelevantCount(activeFilter)) return;
   if (hasBlockingOverlayOpen()) return;
   programmaticScrollUntil = Date.now() + 800;
-  // Clear pending state
-  pendingLatestPage = null;
-  pendingNewArticleCount = 0;
-  seenArticleIds = new Set();
   hideNewArticlesPrompt();
-  // Scroll to top, then fresh load from network
+  // Scroll to top, then fresh load from network — keep whatever category is
+  // currently selected instead of jumping the user back to "All".
   await scrollPageToTop();
-  filter = 'all';
+  if (filter !== activeFilter) return;
   currentPage = 1;
   const loaded = await loadNewsPage(1, {
-    activeFilter: 'all',
+    activeFilter,
     useCache: false,
     forceNetwork: true,
     userInitiated: true,
     animate: true,
   });
-  if (loaded) syncListUrl({ replace: true });
+  if (loaded) {
+    consumePendingNewArticles(activeFilter);
+    syncListUrl({ replace: true });
+  }
   stabilizePageTop();
 }
 
 async function showLatestAfterIdle() {
-  if (!pendingNewArticleCount) return;
+  const activeFilter = filter;
+  if (!pendingRelevantCount(activeFilter)) return;
   if (document.hidden || hasBlockingOverlayOpen()) return;
   if (Date.now() - lastUserActivityAt < IDLE_LATEST_DELAY_MS) return;
-  if (!pendingLatestPage) {
-    try {
-      pendingLatestPage = await fetchNewsPage(1, 'all');
-      await writeCachedNewsPage(1, 'all', pendingLatestPage);
-    } catch (e) {
-      return;
-    }
+  let latestPage;
+  try {
+    latestPage = await fetchNewsPage(1, activeFilter);
+    await writeCachedNewsPage(1, activeFilter, latestPage);
+  } catch (e) {
+    return;
   }
-  const latestPage = pendingLatestPage;
   let pageApplied = false;
   const applyLatest = () => {
-    if (pageApplied || hasBlockingOverlayOpen()) return;
+    if (pageApplied || hasBlockingOverlayOpen() || filter !== activeFilter) return;
     pageApplied = true;
-    filter = 'all';
     currentPage = 1;
-    applyNewsPage(latestPage, 1, 'all', { animate: true, preserveDom: true });
+    applyNewsPage(latestPage, 1, activeFilter, { animate: true, preserveDom: true });
     syncListUrl({ replace: true });
   };
   programmaticScrollUntil = Date.now() + 800;
@@ -4317,10 +4357,7 @@ async function showLatestAfterIdle() {
   if (!completed) return;
   applyLatest();
   if (!pageApplied) return;
-  pendingLatestPage = null;
-  pendingNewArticleCount = 0;
-  seenArticleIds = new Set();
-  hideNewArticlesPrompt();
+  consumePendingNewArticles(activeFilter);
   lastUserActivityAt = Date.now();
 }
 
@@ -4493,24 +4530,29 @@ async function loadSince(timestamp, { forceApply = false } = {}) {
     if (!added) return 0;
     latestKnownTimestamp = Math.max(latestKnownTimestamp, ...newItems.map(item => Number(item.timestamp) || 0));
     pendingNewArticleCount += added;
+    pendingNewItems = pendingNewItems.concat(newItems);
     refreshTodayArticleCount();
     await loadSourceCategories();
-    const latestData = await fetchNewsPage(1, 'all');
-    pendingLatestPage = latestData;
-    await writeCachedNewsPage(1, 'all', latestData);
-    const atLatestTop = filter === 'all'
-      && currentPage === 1
+    // Keep an "all"-scoped snapshot warm — refreshHomepage()/showHomepageAfterScroll()
+    // (the logo/顶部刷新 hard-refresh path) intentionally always jump to "all" and rely on this.
+    const latestAllData = await fetchNewsPage(1, 'all');
+    pendingLatestPage = latestAllData;
+    await writeCachedNewsPage(1, 'all', latestAllData);
+
+    const activeFilter = filter;
+    const relevantCount = pendingRelevantCount(activeFilter);
+    const atLatestTop = currentPage === 1
       && window.scrollY <= 4
       && !hasBlockingOverlayOpen();
-    if ((forceApply || atLatestTop) && filter === 'all' && currentPage === 1 && !hasBlockingOverlayOpen()) {
-      applyNewsPage(latestData, 1, 'all', { animate: true, preserveDom: true });
-      pendingLatestPage = null;
-      pendingNewArticleCount = 0;
-      seenArticleIds = new Set();
-      hideNewArticlesPrompt();
-    } else if (Date.now() - lastUserActivityAt >= IDLE_LATEST_DELAY_MS) {
+    if ((forceApply || atLatestTop) && currentPage === 1 && !hasBlockingOverlayOpen() && relevantCount > 0) {
+      const latestData = activeFilter === 'all' ? latestAllData : await fetchNewsPage(1, activeFilter);
+      if (filter === activeFilter) {
+        applyNewsPage(latestData, 1, activeFilter, { animate: true, preserveDom: true });
+        consumePendingNewArticles(activeFilter);
+      }
+    } else if (relevantCount > 0 && Date.now() - lastUserActivityAt >= IDLE_LATEST_DELAY_MS) {
       showLatestAfterIdle();
-    } else if (!forceApply) {
+    } else if (!forceApply && relevantCount > 0) {
       showNewArticlesPrompt();
     }
     return added;
@@ -4671,6 +4713,10 @@ async function selectFilter(value) {
     currentPage = previousPage;
     renderFilters();
   } else {
+    // Manually visiting a category means the user has now seen its latest
+    // content too — drop any still-pending "new articles" for it so a stale
+    // toast can't pop up later for something already viewed.
+    consumePendingNewArticles(value);
     syncListUrl({ push: true });
     if (window.matchMedia && window.matchMedia('(max-width: 768px)').matches) closeSidebar();
   }
@@ -5108,8 +5154,7 @@ async function showHomepageAfterScroll() {
   if (pendingLatestPage) {
     applyNewsPage(pendingLatestPage, 1, 'all', { animate: true, preserveDom: true });
     pendingLatestPage = null;
-    pendingNewArticleCount = 0;
-    seenArticleIds = new Set();
+    consumePendingNewArticles('all');
     return true;
   }
   const loaded = await loadNewsPage(1, {
@@ -5145,9 +5190,7 @@ async function refreshHomepage() {
     currentPage = 1;
     applyNewsPage(targetData, 1, 'all', { animate: true, preserveDom: true });
     pendingLatestPage = null;
-    pendingNewArticleCount = 0;
-    seenArticleIds = new Set();
-    hideNewArticlesPrompt();
+    consumePendingNewArticles('all');
     syncListUrl({ replace: true });
   };
   const targetPromise = (pendingLatestPage
@@ -5184,6 +5227,24 @@ async function refreshHomepage() {
       animate: true,
     });
   }
+}
+
+// Bottom-right ↑ button: just "back to top" + a quiet check for new articles in
+// whatever category is currently selected. Unlike refreshHomepage() (logo / header
+// "刷新" button), this never forces filter back to "all" and never triggers a full
+// backend re-scrape — it only asks "is there anything new since last time?".
+async function scrollToTopAndCheckLatest() {
+  const activeFilter = filter;
+  programmaticScrollUntil = Date.now() + 800;
+  const completed = await scrollPageToTop();
+  if (!completed || filter !== activeFilter) return;
+  if (currentPage !== 1) {
+    currentPage = 1;
+    const loaded = await loadNewsPage(1, { activeFilter, useCache: true, userInitiated: true, animate: true });
+    if (!loaded || filter !== activeFilter) return;
+  }
+  const cursor = latestKnownTimestamp || latestNewsTimestamp();
+  if (cursor > 0) await loadSince(cursor, { forceApply: true });
 }
 
 function articleDetailErrorText(e) {
