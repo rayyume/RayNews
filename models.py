@@ -105,6 +105,10 @@ def get_db() -> sqlite3.Connection:
             _db.execute("ALTER TABLE user_settings ADD COLUMN theme_preference TEXT NOT NULL DEFAULT 'system'")
         except sqlite3.OperationalError:
             pass  # column already exists
+        # Registration now requires a username, stored in the nickname column.
+        # Backfill existing accounts that predate this requirement: keep their
+        # nickname if they set one, otherwise fall back to their email.
+        _db.execute("UPDATE users SET nickname = email WHERE nickname = ''")
         # Auto-summary/auto-translate are now admin-only; zero out any
         # leftover opt-in flags on non-admin accounts from before this change.
         _db.execute(

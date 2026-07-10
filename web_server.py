@@ -158,8 +158,8 @@ def register():
     nickname = (data.get("nickname") or "").strip()
     invite_code = (data.get("invite_code") or "").strip().upper()
 
-    if not email or not password:
-        return jsonify({"error": "email and password required"}), 400
+    if not email or not password or not nickname:
+        return jsonify({"error": "email, username and password required"}), 400
     if not is_valid_email(email):
         return jsonify({"error": "invalid email format"}), 400
     if len(password) < 6:
