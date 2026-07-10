@@ -1558,27 +1558,42 @@ function categoryDisplayName(cat) {
   return CATEGORY_NAMES[cat] || cat;
 }
 
-// Small screens shorten "政经新闻" → "政经" etc. to keep the whole row on one line.
-function topCatLabel(cat) {
-  const full = categoryDisplayName(cat);
-  const isNarrow = window.matchMedia && window.matchMedia('(max-width: 640px)').matches;
-  return isNarrow ? full.slice(0, 2) : full;
+function topCatEntries() {
+  return [{ key: 'all', full: 'All' }].concat(
+    CATEGORY_ORDER.map(cat => ({ key: 'cat:' + cat, full: categoryDisplayName(cat) }))
+  );
 }
 
+// renderFilters() (and thus this) runs on every background refresh, not just
+// on user clicks. Rebuilding the button DOM every time can swap the node out
+// from under an in-flight click (mousedown fires on the old node, the redraw
+// happens, mouseup/click resolves against whatever new node now sits at that
+// screen position) — causing "click A, B gets selected" or a dropped first
+// click. So build the buttons once and only mutate active-state/label text
+// on subsequent calls; never replace nodes the user might be clicking.
 function renderTopCatBar() {
   const el = document.getElementById('topCatBar');
   if (!el) return;
-  let html = `<button class="topcat-btn ${filter === 'all' ? 'active' : ''}" data-f="all">All</button>`;
-  for (const cat of CATEGORY_ORDER) {
-    const active = filter === 'cat:' + cat ? 'active' : '';
-    html += `<button class="topcat-btn ${active}" data-f="cat:${esc(cat)}" title="${esc(categoryDisplayName(cat))}">${esc(topCatLabel(cat))}</button>`;
+  const entries = topCatEntries();
+  const expectedKeys = entries.map(entry => entry.key).join('|');
+  if (el.dataset.keys !== expectedKeys) {
+    el.innerHTML = entries.map(entry => `<button class="topcat-btn" data-f="${esc(entry.key)}"></button>`).join('');
+    el.dataset.keys = expectedKeys;
+    el.onclick = e => {
+      const btn = e.target.closest('.topcat-btn');
+      if (!btn) return;
+      selectFilter(btn.dataset.f);
+    };
   }
-  el.innerHTML = html;
-  el.onclick = e => {
-    const btn = e.target.closest('.topcat-btn');
+  const isNarrow = window.matchMedia && window.matchMedia('(max-width: 640px)').matches;
+  const buttons = el.querySelectorAll('.topcat-btn');
+  entries.forEach((entry, i) => {
+    const btn = buttons[i];
     if (!btn) return;
-    selectFilter(btn.dataset.f);
-  };
+    btn.classList.toggle('active', filter === entry.key);
+    btn.title = entry.full;
+    btn.textContent = entry.key === 'all' ? 'All' : (isNarrow ? entry.full.slice(0, 2) : entry.full);
+  });
 }
 
 // ═══ Body Scroll Lock ════════════════════════════════════
