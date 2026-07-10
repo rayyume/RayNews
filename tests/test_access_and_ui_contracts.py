@@ -730,18 +730,40 @@ def test_mobile_layout_and_article_content_cannot_create_horizontal_scroll():
     assert ".article-body table{display:table;width:100%!important;max-width:100%!important;table-layout:fixed;" in html
     assert ".article-body iframe,.article-body embed,.article-body object,.article-body svg,.article-body canvas{max-width:100%!important}" in html
     assert ".search-body{flex:1;min-height:0;overflow-x:hidden;overflow-y:auto;" in html
-    assert ".sidebar{position:fixed;left:0;top:56px;bottom:0;z-index:40;width:200px;" in html
+    assert ".sidebar{position:fixed;left:0;top:calc(56px + var(--topcat-h));bottom:0;z-index:40;width:200px;" in html
     assert "overflow-x:hidden;overflow-y:auto;padding:16px 12px" in html
 
 
 def test_mobile_header_is_fixed_and_content_respects_safe_area():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     assert ".header{position:fixed;top:0;left:0;right:0;" in html
-    assert ".app{width:100%;max-width:960px;margin:0 auto;padding:calc(56px + env(safe-area-inset-top,0px))" in html
+    # The top category bar is also fixed, directly below the header (on both
+    # desktop and PWA) — .app's padding-top reserves space for both the
+    # header AND the bar via the shared --topcat-h custom property, so page
+    # content never renders underneath either of them.
+    assert "--topcat-h: 44px;" in html
+    assert ".app{width:100%;max-width:960px;margin:0 auto;padding:calc(56px + var(--topcat-h) + env(safe-area-inset-top,0px))" in html
+    assert ".topcat-bar{position:fixed;top:calc(56px + env(safe-area-inset-top,0px));left:0;right:0;" in html
     mobile_start = html.index("@media(max-width:768px)")
     mobile_end = html.index("@media(min-width:769px)", mobile_start)
     mobile_block = html[mobile_start:mobile_end]
-    assert ".sidebar{top:calc(56px + env(safe-area-inset-top,0px));width:180px}" in mobile_block
+    assert ".sidebar{top:calc(56px + var(--topcat-h) + env(safe-area-inset-top,0px));width:180px}" in mobile_block
+
+
+def test_admin_user_tables_scroll_horizontally_instead_of_clipping_on_narrow_pwa():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    # .admin-body itself hides horizontal overflow (it's not the whole panel
+    # that should scroll), so each wide table needs its own scrollable
+    # wrapper with a sane min-width — otherwise on a narrow PWA viewport
+    # (.ai-panel caps at max-width:94vw) the 5-column user table has no
+    # escape valve and gets clipped/squeezed illegibly instead of scrolling.
+    assert ".admin-body{overflow-x:hidden;" in html
+    assert ".admin-table-wrap{overflow-x:auto;" in html
+    assert ".admin-table{width:100%;min-width:520px;" in html
+    render_start = html.index("function renderAdminUsers(data, invitationData)")
+    render_end = html.index("async function revokePendingInvitation", render_start)
+    render_block = html[render_start:render_end]
+    assert render_block.count('<div class="admin-table-wrap"><table class="admin-table">') == 2
 
 
 def test_article_back_button_does_not_pass_click_event_as_history_state():
