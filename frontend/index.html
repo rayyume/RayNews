@@ -5954,7 +5954,11 @@ function sanitizeTranslatedHtml(html) {
       }
       if (tag === 'img' && el.getAttribute('src')) {
         const src = el.getAttribute('src').trim();
-        if (!/^https?:\/\//i.test(src)) el.remove();
+        // Allow absolute http(s) and our own same-origin image proxy endpoints.
+        // The body HTML fed into translation is already proxied
+        // (src="/img-cache?url=..."), so an https-only rule strips every image
+        // from the translated output. Mirrors web_server.py _sanitize_translated_html.
+        if (!/^https?:\/\//i.test(src) && !/^\/img-(?:cache|proxy)\?/i.test(src)) el.remove();
       }
     });
   };

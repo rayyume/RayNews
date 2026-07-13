@@ -2903,7 +2903,13 @@ def _sanitize_translated_html(html: str) -> str:
                 tag["target"] = "_blank"
         if tag.name == "img" and tag.get("src"):
             src = tag["src"].strip()
-            if not re.match(r"^https?://", src, re.I):
+            # Allow absolute http(s) URLs and our own same-origin image proxy
+            # endpoints. The manual-translate flow feeds already-proxied body
+            # HTML (img src="/img-cache?url=...") through here, so an https-only
+            # rule silently strips *every* image from the translated result.
+            # These relative URLs only ever load an image via our own cache; the
+            # real risk this guards against is javascript:/data: srcs.
+            if not re.match(r"^https?://|^/img-(?:cache|proxy)\?", src, re.I):
                 tag.decompose()
     return str(soup)
 
