@@ -387,7 +387,7 @@ class AIService:
                 ),
             },
         ]
-        return _normalize_cjk_quotes(self.chat(messages, max_tokens=200, temperature=0.2).strip())
+        return _normalize_cjk_quotes(self.chat(messages, max_tokens=500, temperature=0.2).strip())
 
     def summarize_title(self, title: str, max_chars: int = 35, min_chars: int = 18) -> str:
         """Shorten a news title using a 3-element editing approach."""

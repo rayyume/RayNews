@@ -79,6 +79,14 @@ TITLE_SUMMARY_PROMPT_MIN_CHARS = int(os.environ.get("TITLE_SUMMARY_PROMPT_MIN_CH
 TITLE_SUMMARY_MIN_CHARS = int(os.environ.get("TITLE_SUMMARY_MIN_CHARS", "6"))
 TITLE_SUMMARY_MIN_WEIGHT = TITLE_SUMMARY_MIN_CHARS * 2
 TITLE_SUMMARY_MAX_TOTAL_CHARS = int(os.environ.get("TITLE_SUMMARY_MAX_TOTAL_CHARS", "40"))
+# Only *trigger* the extra AI shortening pass once a title runs meaningfully
+# past the target length — not the moment it crosses it by a character or two.
+# The target (TITLE_SUMMARY_MAX_CHARS) is still what the prompt asks the model
+# to aim for; this ratio just avoids spending an AI call to trim a 31-char
+# title down to 30 (the list UI CSS-clamps to 2 lines anyway).
+TITLE_SUMMARY_TRIGGER_RATIO = float(os.environ.get("TITLE_SUMMARY_TRIGGER_RATIO", "1.3"))
+TITLE_SUMMARY_TRIGGER_CJK = int(TITLE_SUMMARY_MAX_CHARS * TITLE_SUMMARY_TRIGGER_RATIO)
+TITLE_SUMMARY_TRIGGER_TOTAL = int(TITLE_SUMMARY_MAX_TOTAL_CHARS * TITLE_SUMMARY_TRIGGER_RATIO)
 
 # ─── App Setup ────────────────────────────────────────────────
 
@@ -1488,8 +1496,8 @@ def _title_total_chars(title: str) -> int:
 
 def _needs_title_summary(title: str) -> bool:
     return (
-        _title_cjk_count(title) > TITLE_SUMMARY_MAX_CHARS
-        or _title_total_chars(title) > TITLE_SUMMARY_MAX_TOTAL_CHARS
+        _title_cjk_count(title) > TITLE_SUMMARY_TRIGGER_CJK
+        or _title_total_chars(title) > TITLE_SUMMARY_TRIGGER_TOTAL
     )
 
 
