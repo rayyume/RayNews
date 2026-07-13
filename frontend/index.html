@@ -3515,7 +3515,7 @@ async function autoDisplaySummary(articleId) {
         // Save original before replacing for toggle support
         bodyEl.dataset.originalHtml = bodyEl.innerHTML;
         bodyEl.dataset.originalTitle = h1El ? h1El.textContent : '';
-        bodyEl.dataset.translatedHtml = proxyImages(cachedData.html);
+        bodyEl.dataset.translatedHtml = proxyImages(sanitizeTranslatedHtml(cachedData.html));
         bodyEl.dataset.translatedTitle = cachedData.title || '';
         bodyEl.dataset.showingTranslation = 'true';
         bodyEl.innerHTML = bodyEl.dataset.translatedHtml;
@@ -3537,7 +3537,7 @@ async function autoDisplaySummary(articleId) {
       if (t.startsWith('<')) {
         // Save original before replacing for toggle support
         bodyEl.dataset.originalHtml = bodyEl.innerHTML;
-        bodyEl.dataset.translatedHtml = proxyImages(t);
+        bodyEl.dataset.translatedHtml = proxyImages(sanitizeTranslatedHtml(t));
         bodyEl.dataset.showingTranslation = 'true';
         bodyEl.innerHTML = bodyEl.dataset.translatedHtml;
         // Re-attach lightbox
