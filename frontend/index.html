@@ -148,6 +148,17 @@ a:hover{text-decoration:underline}
 .item-arrow{position:absolute;right:20px;top:50%;transform:translateY(-50%);color:var(--text-3);opacity:0;transition:opacity 0.12s,transform 0.12s;font-size:14px}
 .item:hover .item-arrow{opacity:1;transform:translateY(-50%) translateX(2px)}
 
+/* ═══ Locked Section (guest paywall blur) ═════════ */
+.locked-section{position:relative;min-height:180px}
+.locked-content{filter:blur(9px) saturate(0.85);pointer-events:none;user-select:none;-webkit-user-select:none}
+.locked-content .item:hover{background:var(--bg-card)}
+.locked-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;cursor:pointer;background:linear-gradient(180deg,transparent 0%,var(--bg-card) 50%)}
+.locked-overlay-card{display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center}
+.locked-lock-icon{width:44px;height:44px;border-radius:50%;background:var(--bg-card);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:18px;box-shadow:0 10px 30px rgba(0,0,0,0.35)}
+.locked-overlay-text{font-size:13px;font-weight:600;color:var(--text-2)}
+.locked-overlay-btn{background:var(--accent);color:#fff;border:none;padding:10px 26px;border-radius:100px;font-size:13px;font-weight:700;cursor:pointer;font-family:var(--font);transition:opacity 0.15s}
+.locked-overlay-btn:hover{opacity:0.88}
+
 /* ═══ Search Overlay ═════════════════════════════ */
 .icon-btn{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border:none;background:transparent;color:var(--text-2);border-radius:8px;cursor:pointer;transition:all 0.15s;flex-shrink:0}
 .icon-btn:hover{background:var(--bg-card);color:var(--accent)}
@@ -1158,6 +1169,7 @@ function logout() {
   localStorage.removeItem('raynews_user');
   closeUserMenu();
   updateUserUI();
+  renderList();
   showToast('已退出登录');
 }
 
@@ -1764,6 +1776,7 @@ async function submitAuth() {
       showToast(authMode === 'login' ? '✅ 登录成功' : '✅ 注册成功');
       loadUserSettings();
       syncDailySummaryToday();
+      renderList();
       if (nextAction === 'search') openSearch();
     }
   } catch (e) {
@@ -4979,8 +4992,34 @@ function renderList() {
     return;
   }
 
+  if (!authToken) {
+    el.innerHTML = renderLockedList(items);
+    renderPagination(0);
+    return;
+  }
+
   el.innerHTML = items.map(articleItemHtml).join('');
   renderPagination(totalPages);
+}
+
+function renderLockedList(items) {
+  const visible = items.slice(0, 3).map(articleItemHtml).join('');
+  const lockedItems = items.slice(3);
+  if (!lockedItems.length) return visible;
+  const blurredCount = Math.min(lockedItems.length, 6);
+  const blurred = lockedItems.slice(0, blurredCount).map(articleItemHtml).join('');
+  return visible + `
+    <div class="locked-section">
+      <div class="locked-content">${blurred}</div>
+      <div class="locked-overlay" onclick="showAuth('list')">
+        <div class="locked-overlay-card">
+          <div class="locked-lock-icon">🔒</div>
+          <div class="locked-overlay-text">登录后查看全部 ${items.length} 条新闻</div>
+          <button class="locked-overlay-btn" onclick="event.stopPropagation();showAuth('list')">立即登录</button>
+        </div>
+      </div>
+    </div>
+  `;
 }
 
 function renderPagination(totalPages) {
