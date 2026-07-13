@@ -453,6 +453,7 @@ class AIService:
             "110" if is_deepseek else "120",
         ))
         max_items_per_category = int(os.environ.get("AI_DAILY_MAX_ITEMS_PER_CATEGORY", "16"))
+        min_candidates_per_category = int(os.environ.get("AI_DAILY_MIN_CANDIDATES_PER_CATEGORY", "10"))
         categories = ("政经新闻", "科技动态", "商业聚焦", "其他信息")
 
         def article_link(article: dict) -> str:
@@ -551,12 +552,18 @@ class AIService:
         def score_article(title: str, text: str, source: str, has_summary: bool) -> tuple[float, int]:
             haystack = f"{title} {text} {source}".lower()
             keyword_hits = sum(1 for keyword in importance_keywords if keyword.lower() in haystack)
+            # info_score reflects how much an article has been "written up",
+            # not how newsworthy it is: a breaking item that hasn't had time
+            # to accumulate a long body reads the same as a low-importance
+            # one. Count it once (not once per component) and keep the
+            # has_summary bonus small, so short/fresh items aren't penalized
+            # twice for the same trait.
             info_score = min(len(title) / 18, 3) + min(len(text) / 90, 4)
-            quality_score = (4 if has_summary else 1) + info_score
-            importance_score = keyword_hits * 2 + info_score
+            quality_score = 2 if has_summary else 1
+            importance_score = keyword_hits * 2
             if re.search(r"\d|%|亿元|亿美元|万亿|百分点|基点", haystack):
                 importance_score += 1.5
-            return quality_score + importance_score, keyword_hits
+            return quality_score + importance_score + info_score, keyword_hits
 
         def normalize_title_key(title: str) -> str:
             value = plain_text(title).lower()
@@ -731,6 +738,26 @@ class AIService:
             items.sort(key=lambda e: e.get("score", 0), reverse=True)
             capped.extend(items[:max_articles_per_source])
         articles_after_source_cap = len(capped)
+        capped.sort(key=lambda e: e.get("score", 0), reverse=True)
+
+        # Reserve each category's top-scored items before the global cut.
+        # A pure global sort can wipe out an entire category (e.g. one made
+        # up mostly of short, freshly-published items) before the AI
+        # selection stage ever sees it; reserving a floor per category keeps
+        # it in the running on merit within its own category.
+        reserved_ids = set()
+        reserved = []
+        for category in categories:
+            for item in capped:
+                if item["category"] != category or item["id"] in reserved_ids:
+                    continue
+                reserved.append(item)
+                reserved_ids.add(item["id"])
+                if sum(1 for e in reserved if e["category"] == category) >= min_candidates_per_category:
+                    break
+        rest = [e for e in capped if e["id"] not in reserved_ids]
+        remaining_slots = max(0, max_daily_candidates - len(reserved))
+        capped = reserved + rest[:remaining_slots]
         capped.sort(key=lambda e: e.get("score", 0), reverse=True)
         capped = capped[:max_daily_candidates]
         articles_selected_for_ai = len(capped)

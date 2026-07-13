@@ -3704,6 +3704,7 @@ function renderAdminUsers(data, invitationData) {
   const users = data.users || [];
   const total = data.total || 0;
   const adminCount = users.filter(u => u.role === 'admin').length;
+  const active7d = data.active_7d || 0;
   const invitations = invitationData.invitations || [];
 
   const rows = users.map(u => {
@@ -3713,6 +3714,8 @@ function renderAdminUsers(data, invitationData) {
       <td><strong>${esc(u.nickname || u.email.split('@')[0])}</strong><br><span style="font-size:11px;color:var(--text-3)">${esc(u.email)}</span></td>
       <td><span class="admin-role-badge ${roleClass}">${u.role}</span></td>
       <td style="font-size:11px;color:var(--text-3)">${formatBeijingDateTime(u.created_at, false)}</td>
+      <td style="font-size:11px;color:var(--text-3);text-align:center">${u.visit_count || 0}</td>
+      <td style="font-size:11px;color:var(--text-3)">${u.last_seen_at ? formatBeijingDateTime(u.last_seen_at) : '从未访问'}</td>
       <td>
         ${canModify ? `<select class="admin-role-select" data-uid="${u.id}" onchange="changeUserRole(${u.id}, this.value)">
           <option value="user" ${u.role === 'user' ? 'selected' : ''}>user</option>
@@ -3734,10 +3737,11 @@ function renderAdminUsers(data, invitationData) {
     <div class="admin-stat">
       <div class="admin-stat-box"><div class="admin-stat-num">${total}</div><div class="admin-stat-label">总用户</div></div>
       <div class="admin-stat-box"><div class="admin-stat-num">${adminCount}</div><div class="admin-stat-label">管理员</div></div>
+      <div class="admin-stat-box"><div class="admin-stat-num">${active7d}</div><div class="admin-stat-label">近7天活跃</div></div>
       <div class="admin-stat-box"><div class="admin-stat-num">${invitations.length}</div><div class="admin-stat-label">待审核</div></div>
     </div>
     <div class="admin-table-wrap"><table class="admin-table">
-      <thead><tr><th>用户</th><th>角色</th><th>注册时间</th><th>修改角色</th><th></th></tr></thead>
+      <thead><tr><th>用户</th><th>角色</th><th>注册时间</th><th>访问次数</th><th>最近访问</th><th>修改角色</th><th></th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>
     <div style="margin-top:20px;font-size:13px;font-weight:700;color:var(--text-2)">🕓 待审核邀请申请（已申请邀请码但尚未完成注册）</div>

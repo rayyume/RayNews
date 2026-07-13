@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from models import (
     get_db, create_user, get_user, get_user_by_email, get_user_by_username,
     update_user, delete_user, list_users, get_first_admin_email, count_users,
+    count_active_users_since,
     verify_password,
     add_favorite, remove_favorite, get_favorites, get_all_favorite_article_ids, is_favorited,
     count_article_favorites,
@@ -366,7 +367,11 @@ def upload_avatar():
 @require_role("admin")
 def admin_list_users():
     users = list_users()
-    return jsonify({"users": users, "total": len(users)})
+    return jsonify({
+        "users": users,
+        "total": len(users),
+        "active_7d": count_active_users_since(7),
+    })
 
 
 @app.route("/auth/users/<int:user_id>", methods=["DELETE"])

@@ -3,6 +3,7 @@
 import sqlite3
 import json
 import bcrypt
+from datetime import datetime
 from pathlib import Path
 import os
 
@@ -55,6 +56,14 @@ CREATE TABLE IF NOT EXISTS user_settings (
     notification_config     TEXT    NOT NULL DEFAULT '{}'
 );
 
+CREATE TABLE IF NOT EXISTS user_access_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    accessed_at TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_access_log_user_time ON user_access_log(user_id, accessed_at);
+
 CREATE TABLE IF NOT EXISTS invitation_codes (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     code        TEXT    NOT NULL UNIQUE,
@@ -103,6 +112,14 @@ def get_db() -> sqlite3.Connection:
             pass  # column already exists
         try:
             _db.execute("ALTER TABLE user_settings ADD COLUMN theme_preference TEXT NOT NULL DEFAULT 'system'")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        try:
+            _db.execute("ALTER TABLE users ADD COLUMN visit_count INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        try:
+            _db.execute("ALTER TABLE users ADD COLUMN last_seen_at TEXT NOT NULL DEFAULT ''")
         except sqlite3.OperationalError:
             pass  # column already exists
         # Registration now requires a username, stored in the nickname column.
@@ -163,7 +180,8 @@ def create_user(email: str, password: str, nickname: str = "",
 def get_user(user_id: int) -> dict | None:
     db = get_db()
     row = db.execute(
-        "SELECT id, email, nickname, role, avatar_url, created_at FROM users WHERE id = ?",
+        "SELECT id, email, nickname, role, avatar_url, created_at, "
+        "visit_count, last_seen_at FROM users WHERE id = ?",
         (user_id,),
     ).fetchone()
     return dict(row) if row else None
@@ -212,7 +230,8 @@ def delete_user(user_id: int) -> bool:
 def list_users() -> list[dict]:
     db = get_db()
     rows = db.execute(
-        "SELECT id, email, nickname, role, avatar_url, created_at FROM users ORDER BY id"
+        "SELECT id, email, nickname, role, avatar_url, created_at, "
+        "visit_count, last_seen_at FROM users ORDER BY id"
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -228,6 +247,53 @@ def get_first_admin_email() -> str:
 def count_users() -> int:
     db = get_db()
     return db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+
+
+# ─── Access Stats ──────────────────────────────────────────
+
+_ACCESS_THROTTLE_SECONDS = 300  # collapse bursts of requests into one "visit"
+
+
+def record_access(user_id: int) -> None:
+    """Bump a user's visit counter/last-seen timestamp, throttled per session.
+
+    Called on every authenticated request, so repeat calls within the
+    throttle window only refresh last_seen_at without inflating visit_count
+    or the detail log.
+    """
+    db = get_db()
+    row = db.execute("SELECT last_seen_at FROM users WHERE id = ?", (user_id,)).fetchone()
+    if row is None:
+        return
+    now = datetime.utcnow()
+    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    should_count = True
+    last_seen = row["last_seen_at"]
+    if last_seen:
+        try:
+            last_dt = datetime.strptime(last_seen, "%Y-%m-%d %H:%M:%S")
+            if (now - last_dt).total_seconds() < _ACCESS_THROTTLE_SECONDS:
+                should_count = False
+        except ValueError:
+            pass
+    if should_count:
+        db.execute(
+            "UPDATE users SET visit_count = visit_count + 1, last_seen_at = ? WHERE id = ?",
+            (now_str, user_id),
+        )
+        db.execute("INSERT INTO user_access_log (user_id, accessed_at) VALUES (?, ?)", (user_id, now_str))
+    else:
+        db.execute("UPDATE users SET last_seen_at = ? WHERE id = ?", (now_str, user_id))
+    db.commit()
+
+
+def count_active_users_since(days: int) -> int:
+    db = get_db()
+    row = db.execute(
+        "SELECT COUNT(*) FROM users WHERE last_seen_at >= datetime('now', ?)",
+        (f"-{int(days)} days",),
+    ).fetchone()
+    return int(row[0]) if row else 0
 
 
 # ─── Favorites ─────────────────────────────────────────────
