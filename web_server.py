@@ -1564,15 +1564,18 @@ def _clean_title_summary(title: str | None) -> str:
     return text
 
 
+_AI_REFUSAL_MARKERS = (
+    "\u4ee5\u4e0b\u662f", "\u65e0\u6cd5", "\u4e0d\u80fd",
+    "\u8bf7\u63d0\u4f9b", "\u8bf7\u8865\u5145", "as an ai", "i cannot", "i'm unable",
+)
+
+
 def _is_valid_title_summary(title: str | None) -> bool:
     text = _clean_title_summary(title)
     if not text:
         return False
     lowered = text.lower()
-    bad_markers = (
-        "\u4ee5\u4e0b\u662f", "\u7b80\u5199\u540e\u7684", "\u65e0\u6cd5", "\u4e0d\u80fd",
-        "\u8bf7\u63d0\u4f9b", "\u8bf7\u8865\u5145", "as an ai", "i cannot", "i'm unable",
-    )
+    bad_markers = _AI_REFUSAL_MARKERS + ("\u7b80\u5199\u540e\u7684",)
     if any(marker in lowered for marker in bad_markers):
         return False
     if chr(0x2026) in text or "..." in text:
@@ -1696,6 +1699,35 @@ def _validate_ai_title_summary_result(result: dict | str | None, original_title:
     if original_title and not _shares_title_signal(title, original_title):
         return {"title": title, "valid": False, "reason": "invalid title summary: missing original title signal"}
     return {"title": title, "valid": True, "reason": reason}
+
+
+def _validate_title_translation(translated: str | None, original_title: str) -> dict:
+    """Sanity-check a translated title before it's saved as the site-wide title.
+
+    Unlike summarize_title() (which is validated by _validate_ai_title_summary_result
+    above), translate_title() has no fixed target length — a translation can
+    legitimately be as long as the original. So this only screens out
+    truncated/garbled/refusal output (e.g. an upstream hiccup returning
+    "SK海力士在" instead of a full sentence), not length.
+    """
+    title = _clean_title_summary(translated)
+    if not title:
+        return {"title": title, "valid": False, "reason": "empty translation"}
+    if any(marker in title.lower() for marker in _AI_REFUSAL_MARKERS):
+        return {"title": title, "valid": False, "reason": "AI refusal or explanation, not a translation"}
+    if chr(0x2026) in title or "..." in title:
+        return {"title": title, "valid": False, "reason": "translation looks truncated (ellipsis)"}
+    if title.startswith("{"):
+        return {"title": title, "valid": False, "reason": "unparsed JSON payload"}
+    if _looks_like_code_only_title(title):
+        return {"title": title, "valid": False, "reason": "code-only or numeric title"}
+    if not _balanced_title_punctuation(title):
+        return {"title": title, "valid": False, "reason": "unbalanced punctuation (likely truncated)"}
+    if _title_weight(title) < TITLE_SUMMARY_MIN_WEIGHT:
+        return {"title": title, "valid": False, "reason": "translation too short, likely truncated"}
+    if not _shares_title_signal(title, original_title):
+        return {"title": title, "valid": False, "reason": "translation missing original title signal"}
+    return {"title": title, "valid": True, "reason": ""}
 
 
 def _clip_title_by_weight(title: str, max_weight: int = TITLE_SUMMARY_MAX_WEIGHT) -> str:
@@ -2057,11 +2089,16 @@ def _process_article_title(article: dict, config: dict) -> bool:
 
     if article.get("translate_title_needed") and _needs_translation(title):
         svc = _title_service(config)
-        translated = _clean_title_summary(svc.translate_title(title, "zh-CN"))
-        if translated:
+        raw_translated = svc.translate_title(title, "zh-CN")
+        result = _validate_title_translation(raw_translated, title)
+        if result["valid"]:
+            translated = result["title"]
             if _save_article_title_update(article_id, translated, "translation"):
                 changed = True
             title = translated
+        else:
+            print(f"[auto-title] Article {article_id}: discarded invalid title translation "
+                  f"({result['reason']}): {result['title'][:120]!r}")
 
     if not config.get("auto_title_summary_enabled"):
         return changed
