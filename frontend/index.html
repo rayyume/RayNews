@@ -937,6 +937,7 @@ let sourceToFilterGroup = {};
 let lastNewsDiagnostics = null;
 
 let news = [];
+let hasLoadedNewsOnce = false;
 let filter = 'all';
 let currentPage = 1;
 let currentTotal = 0;
@@ -4234,6 +4235,7 @@ function renderColdStartError(message) {
 
 function applyNewsPage(data, page, activeFilter, { animate = false, preserveDom = false } = {}) {
   news = Array.isArray(data.items) ? data.items : [];
+  hasLoadedNewsOnce = true;
   currentPage = Number(data.page || page || 1);
   currentTotal = Number(data.total || 0);
   lastNewsDiagnostics = data.diagnostics || null;
@@ -5090,6 +5092,19 @@ function renderList() {
   const items = filteredNews();
   if (!authToken) currentPage = 1;
   const el = document.getElementById('list');
+
+  // Nothing has come back from the server yet (e.g. renderList() gets
+  // triggered incidentally — like logout()'s cleanup — while the very first
+  // /api/news request is still in flight on a slow/cold-starting backend).
+  // Showing "0条新闻" / "该分类暂无新闻" here would be a false negative, not
+  // a real empty result, so keep the loading skeleton up instead until the
+  // first real response lands (applyNewsPage sets hasLoadedNewsOnce).
+  if (!hasLoadedNewsOnce) {
+    renderColdStartSkeleton();
+    renderPagination(0);
+    return;
+  }
+
   const totalPages = Math.max(1, Math.ceil(currentTotal / PAGE_SIZE));
   if (currentPage > totalPages) currentPage = totalPages;
 
