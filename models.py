@@ -53,7 +53,14 @@ CREATE TABLE IF NOT EXISTS user_settings (
     auto_summary_enabled    INTEGER NOT NULL DEFAULT 0,
     daily_summary_enabled   INTEGER NOT NULL DEFAULT 0,
     theme_preference        TEXT    NOT NULL DEFAULT 'system',
-    notification_config     TEXT    NOT NULL DEFAULT '{}'
+    notification_config     TEXT    NOT NULL DEFAULT '{}',
+    share_ai_results        INTEGER NOT NULL DEFAULT 0,
+    share_view_title        INTEGER NOT NULL DEFAULT 0,
+    share_view_translation  INTEGER NOT NULL DEFAULT 0,
+    share_view_summary      INTEGER NOT NULL DEFAULT 0,
+    share_last_check_at     TEXT,
+    share_last_check_ok     INTEGER,
+    share_last_check_error  TEXT
 );
 
 CREATE TABLE IF NOT EXISTS user_access_log (
@@ -122,6 +129,19 @@ def get_db() -> sqlite3.Connection:
             _db.execute("ALTER TABLE users ADD COLUMN last_seen_at TEXT NOT NULL DEFAULT ''")
         except sqlite3.OperationalError:
             pass  # column already exists
+        for _col_sql in (
+            "ALTER TABLE user_settings ADD COLUMN share_ai_results INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE user_settings ADD COLUMN share_view_title INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE user_settings ADD COLUMN share_view_translation INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE user_settings ADD COLUMN share_view_summary INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE user_settings ADD COLUMN share_last_check_at TEXT",
+            "ALTER TABLE user_settings ADD COLUMN share_last_check_ok INTEGER",
+            "ALTER TABLE user_settings ADD COLUMN share_last_check_error TEXT",
+        ):
+            try:
+                _db.execute(_col_sql)
+            except sqlite3.OperationalError:
+                pass  # column already exists
         # Registration now requires a username, stored in the nickname column.
         # Backfill existing accounts that predate this requirement: keep their
         # nickname if they set one, otherwise fall back to their email.
@@ -438,18 +458,31 @@ def get_user_settings(user_id: int) -> dict | None:
     row = db.execute(
         "SELECT id, auto_translate_title, auto_translate_content, "
         "auto_title_summary_enabled, auto_summary_enabled, "
-        "daily_summary_enabled, theme_preference, notification_config "
+        "daily_summary_enabled, theme_preference, notification_config, "
+        "share_ai_results, share_view_title, share_view_translation, share_view_summary, "
+        "share_last_check_at, share_last_check_ok, share_last_check_error "
         "FROM user_settings WHERE user_id = ?",
         (user_id,),
     ).fetchone()
     return dict(row) if row else None
 
 
+def get_users_with_share_enabled() -> list[int]:
+    """User ids that currently have the AI-result sharing master switch on."""
+    db = get_db()
+    rows = db.execute(
+        "SELECT user_id FROM user_settings WHERE share_ai_results = 1"
+    ).fetchall()
+    return [int(r["user_id"]) for r in rows]
+
+
 def set_user_settings(user_id: int, **kwargs) -> dict:
     """Upsert settings."""
     allowed = {"auto_translate_title", "auto_translate_content",
                "auto_title_summary_enabled", "auto_summary_enabled", "daily_summary_enabled",
-               "theme_preference", "notification_config"}
+               "theme_preference", "notification_config",
+               "share_ai_results", "share_view_title", "share_view_translation", "share_view_summary",
+               "share_last_check_at", "share_last_check_ok", "share_last_check_error"}
     updates = {k: v for k, v in kwargs.items() if k in allowed}
     if not updates:
         return get_user_settings(user_id) or {}

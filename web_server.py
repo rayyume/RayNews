@@ -25,6 +25,7 @@ from models import (
     add_favorite, remove_favorite, get_favorites, get_all_favorite_article_ids, is_favorited,
     count_article_favorites,
     get_ai_config, set_ai_config, get_user_settings, set_user_settings,
+    get_users_with_share_enabled,
     get_system_ai_config, set_system_ai_config,
     create_invitation_code, validate_invitation_code, use_invitation_code,
     list_pending_invitations, delete_invitation_code, delete_invitation_code_by_code,
@@ -51,6 +52,9 @@ AUTO_TITLE_PROCESS_INTERVAL_SECONDS = int(os.environ.get("AUTO_TITLE_PROCESS_INT
 AUTO_TITLE_PROCESS_SCAN_LIMIT = int(os.environ.get("AUTO_TITLE_PROCESS_SCAN_LIMIT", "1000"))
 AUTO_SOURCE_CLASSIFY_BATCH_LIMIT = int(os.environ.get("AUTO_SOURCE_CLASSIFY_BATCH_LIMIT", "50"))
 AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS = int(os.environ.get("AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS", "60"))
+AI_SHARE_REVALIDATION_INTERVAL_SECONDS = int(
+    os.environ.get("AI_SHARE_REVALIDATION_INTERVAL_HOURS", "6")
+) * 3600
 TELEGRAM_EMBED_TIMEOUT_SECONDS = int(os.environ.get("TELEGRAM_EMBED_TIMEOUT_SECONDS", "12"))
 # Daily summary is now server-generated once and broadcast to every subscribed
 # user — the send time is a fixed ops-level setting, not user-configurable.
@@ -805,6 +809,46 @@ def admin_system_ai_test_connection():
     """Test the admin-configured system AI (drives background auto summary/translate)."""
     body, status = _run_ai_connection_test(get_system_ai_config())
     return jsonify(body), status
+
+
+def _run_ai_share_revalidation_once():
+    """Re-verify every opted-in user's own AI connectivity.
+
+    A user's "共享 AI 结果" access is only granted after a live connectivity
+    test at save time (see update_settings); this loop periodically re-tests
+    it so a key that later expires/runs out of credit doesn't leave shared
+    content permanently accessible. On failure, the master switch and all
+    three view sub-toggles are cascaded off — same invariant enforced by
+    update_settings (a sub-toggle must never be on while the master is off).
+    """
+    import datetime as _dt
+    for user_id in get_users_with_share_enabled():
+        config = get_ai_config(user_id)
+        body, status = _run_ai_connection_test(config)
+        now_str = _dt.datetime.now().isoformat(timespec="seconds")
+        if status == 200:
+            set_user_settings(
+                user_id,
+                share_last_check_at=now_str, share_last_check_ok=1, share_last_check_error=None,
+            )
+        else:
+            set_user_settings(
+                user_id,
+                share_ai_results=0, share_view_title=0, share_view_translation=0, share_view_summary=0,
+                share_last_check_at=now_str, share_last_check_ok=0,
+                share_last_check_error=body.get("error", "connection test failed"),
+            )
+        time.sleep(0.5)  # spread requests out instead of bursting every provider at once
+
+
+def _ai_share_revalidation_loop():
+    time.sleep(60)
+    while True:
+        try:
+            _run_ai_share_revalidation_once()
+        except Exception as e:
+            print(f"[share-revalidation] Error in loop: {e}")
+        time.sleep(AI_SHARE_REVALIDATION_INTERVAL_SECONDS)
 
 
 @app.route("/ai/daily-summary", methods=["POST"])
@@ -2740,9 +2784,20 @@ def _save_ai_result(article_id: int, summary: str | None = None,
 @app.route("/ai/result/<int:article_id>", methods=["GET"])
 @require_role("user", "admin")
 def ai_get_result(article_id):
-    """Return cached AI result (summary/translation) without generating. Shared by all users."""
-    cached = _get_ai_result(article_id)
-    return jsonify(cached or {})
+    """Return cached AI result (summary/translation) without generating.
+
+    Shared cache, but each field is only returned to viewers who opted into
+    seeing it (Settings → AI → 共享) — see share_view_summary/share_view_translation.
+    """
+    cached = dict(_get_ai_result(article_id) or {})
+    settings = get_user_settings(g.user_id) or {}
+    if not settings.get("share_view_summary"):
+        cached.pop("summary", None)
+        cached.pop("summary_error", None)
+        cached.pop("summary_error_at", None)
+    if not settings.get("share_view_translation"):
+        cached.pop("translation", None)
+    return jsonify(cached)
 
 
 # ─── Source Categories ─────────────────────────────────────
@@ -3371,6 +3426,13 @@ def get_settings():
             "daily_summary_enabled": False,
             "theme_preference": "system",
             "notification_config": {},
+            "share_ai_results": False,
+            "share_view_title": False,
+            "share_view_translation": False,
+            "share_view_summary": False,
+            "share_last_check_at": None,
+            "share_last_check_ok": None,
+            "share_last_check_error": None,
         })
     # Parse notification_config JSON
     safe = dict(settings)
@@ -3406,6 +3468,46 @@ def update_settings():
     if "theme_preference" in data:
         theme = str(data.get("theme_preference") or "system").strip().lower()
         data["theme_preference"] = theme if theme in {"system", "light", "dark"} else "system"
+
+    # Sharing ("共享AI结果"): the master switch requires the user's own AI
+    # config to pass a live connectivity test at save time — this isn't the
+    # admin-only system AI, so every role (including plain "user") goes
+    # through this check. Sub-toggles (title/translation/summary) may only be
+    # turned on once the master switch is verified on; turning the master
+    # switch off cascades off all sub-toggles regardless of what the request
+    # body says, so we never persist a state where a sub-toggle is on while
+    # the master is off.
+    share_sub_keys = ("share_view_title", "share_view_translation", "share_view_summary")
+    if "share_ai_results" in data:
+        import datetime as _dt
+        if _is_enabled_value(data.get("share_ai_results")):
+            user_ai_config = get_ai_config(g.user_id)
+            if not user_ai_config or not user_ai_config.get("enabled") or not user_ai_config.get("api_key"):
+                return jsonify({"error": "请先在AI设置中配置并启用有效的API"}), 400
+            test_body, test_status = _run_ai_connection_test(user_ai_config)
+            now_str = _dt.datetime.now().isoformat(timespec="seconds")
+            if test_status != 200:
+                set_user_settings(
+                    g.user_id,
+                    share_last_check_at=now_str, share_last_check_ok=0,
+                    share_last_check_error=test_body.get("error", "connection test failed"),
+                )
+                return jsonify({"error": test_body.get("error", "AI 连通性测试失败")}), 400
+            data["share_ai_results"] = 1
+            data["share_last_check_at"] = now_str
+            data["share_last_check_ok"] = 1
+            data["share_last_check_error"] = None
+        else:
+            data["share_ai_results"] = 0
+            for key in share_sub_keys:
+                data[key] = 0
+    resulting_share_master = _is_enabled_value(
+        data["share_ai_results"] if "share_ai_results" in data
+        else (get_user_settings(g.user_id) or {}).get("share_ai_results")
+    )
+    if not resulting_share_master and any(_is_enabled_value(data.get(key)) for key in share_sub_keys):
+        return jsonify({"error": "请先开启并通过校验“共享AI结果”"}), 400
+
     needs_ai_config = any(
         _is_enabled_value(data.get(key))
         for key in (
@@ -3536,6 +3638,7 @@ if __name__ == "__main__":
     _th.Thread(target=_auto_translation_loop, daemon=True).start()
     _th.Thread(target=_auto_title_process_loop, daemon=True).start()
     _th.Thread(target=_auto_source_classification_loop, daemon=True).start()
+    _th.Thread(target=_ai_share_revalidation_loop, daemon=True).start()
     _th.Thread(target=_pin_existing_favorite_images_on_startup, daemon=True).start()
     print("[scheduler] Daily summary background thread started")
     print("[auto-summary] Background summary thread started")
