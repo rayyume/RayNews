@@ -63,6 +63,14 @@ DAILY_SUMMARY_MINUTE = int(os.environ.get("DAILY_SUMMARY_MINUTE", "0"))
 DAILY_SUMMARY_WINDOW_MINUTES = int(os.environ.get("DAILY_SUMMARY_WINDOW_MINUTES", "10"))
 TITLE_SUMMARY_MAX_CHARS = int(os.environ.get("TITLE_SUMMARY_MAX_CHARS", "30"))
 TITLE_SUMMARY_MAX_WEIGHT = TITLE_SUMMARY_MAX_CHARS * 2
+# The list UI already CSS-clamps titles to 2 lines with an ellipsis
+# (frontend .item-title: -webkit-line-clamp:2), so there's no display reason
+# to hard-reject a summary just for running over TITLE_SUMMARY_MAX_CHARS —
+# doing so only forced AI/regex gymnastics (dropped details, brittle
+# punctuation-splitting fallbacks) to hit an arbitrary target. This backstop
+# instead only catches genuinely broken output (e.g. the AI ignoring the
+# "shorten" instruction and returning most of the article).
+TITLE_SUMMARY_MAX_WEIGHT_HARD = TITLE_SUMMARY_MAX_WEIGHT * 3
 # Aspirational lower bound communicated to the LLM in the shortening prompt.
 TITLE_SUMMARY_PROMPT_MIN_CHARS = int(os.environ.get("TITLE_SUMMARY_PROMPT_MIN_CHARS", "18"))
 # Hard floor enforced by the validator. Kept well below the prompt's target so
@@ -1583,7 +1591,7 @@ def _is_valid_title_summary(title: str | None) -> bool:
     if text.startswith("{"):
         return False
     weight = _title_weight(text)
-    return TITLE_SUMMARY_MIN_WEIGHT <= weight <= TITLE_SUMMARY_MAX_WEIGHT
+    return TITLE_SUMMARY_MIN_WEIGHT <= weight <= TITLE_SUMMARY_MAX_WEIGHT_HARD
 
 
 def _parse_title_summary_result(raw: str | None) -> dict:
@@ -1693,7 +1701,9 @@ def _validate_ai_title_summary_result(result: dict | str | None, original_title:
     is wrong — a false positive on any one of them used to discard an
     otherwise-fine title forever, since the same input reliably re-triggers
     the same rule on every retry. Those are logged but kept instead: a
-    slightly-off title beats no title.
+    slightly-off title beats no title. (_repair_title_summary, upstream,
+    checks bracket/quote balance itself before picking a fallback clause, so
+    a mid-bracket punctuation warning here should be rare in practice.)
     """
     data = _parse_title_summary_result(result) if isinstance(result, str) or result is None else dict(result)
     title = _repair_title_summary(data.get("title") or "")
@@ -1812,26 +1822,36 @@ def _clip_title_by_weight(title: str, max_weight: int = TITLE_SUMMARY_MAX_WEIGHT
 
 
 def _repair_title_summary(title: str | None) -> str:
-    """Turn a slightly non-compliant AI title into a valid short title when safe."""
+    """Turn a slightly non-compliant AI title into a valid short title when safe.
+
+    The sentence/clause splits below are punctuation-based and don't know
+    about bracket/quote pairs — a naturally-written title can have a comma or
+    colon nested inside a 「」/《》 quote (e.g. "「甲：从乙到丙」是丁"), and
+    slicing there leaves one candidate with a dangling open bracket. Such a
+    candidate can still be short enough to pass _is_valid_title_summary's
+    length check, so it must also pass _balanced_title_punctuation before
+    being accepted — otherwise a fragment like "「甲" gets picked as the
+    "repaired" title instead of a genuinely complete clause.
+    """
     text = _clean_title_summary(title)
     if not text:
         return ""
     text = text.replace("……", " ").replace("...", " ").replace("…", " ")
     text = " ".join(text.split())
-    if _is_valid_title_summary(text):
+    if _is_valid_title_summary(text) and _balanced_title_punctuation(text):
         return text
 
     sentence_parts = [p.strip() for p in re.split(r"[。！？!?；;]\s*", text) if p.strip()]
     for part in sentence_parts:
         part = _clean_title_summary(part)
-        if _is_valid_title_summary(part):
+        if _is_valid_title_summary(part) and _balanced_title_punctuation(part):
             return part
 
     clause_source = sentence_parts[0] if sentence_parts else text
     clause_parts = [p.strip() for p in re.split(r"[，,、：:]\s*", clause_source) if p.strip()]
     for part in clause_parts:
         part = _clean_title_summary(part)
-        if _is_valid_title_summary(part):
+        if _is_valid_title_summary(part) and _balanced_title_punctuation(part):
             return part
 
     return _clip_title_by_weight(clause_source)
