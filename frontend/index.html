@@ -825,7 +825,7 @@ body.body-scroll-lock{overflow:hidden!important}
           <input type="checkbox" id="shareAiResults" onclick="event.stopPropagation()" onchange="updateShareSubToggleState()">
           <span>共享 AI 结果</span>
         </div>
-        <p class="ai-hint">开启前会先校验你在“AI”标签页里配置的 API 是否有效可用（会消耗一次极小额度的连通性测试调用）。</p>
+        <p class="ai-hint">人人为我，我为人人。开启共享的用户相互共享 AI 结果，并有权查看服务端 AI 结果。</p>
 
         <div class="ai-toggle" onclick="document.getElementById('shareViewTitle').click()" style="margin-top:14px">
           <input type="checkbox" id="shareViewTitle" onclick="event.stopPropagation()" disabled>
@@ -839,11 +839,11 @@ body.body-scroll-lock{overflow:hidden!important}
           <input type="checkbox" id="shareViewSummary" onclick="event.stopPropagation()" disabled>
           <span>查看服务端共享的文章摘要</span>
         </div>
-        <p class="ai-hint" id="shareSubHint">以上三项需先开启并通过校验“共享 AI 结果”才能勾选。</p>
+        <p class="ai-hint" id="shareSubHint">需先开启共享 AI 结果</p>
 
         <button class="ai-save-btn" onclick="saveShareConfig()" id="saveShareBtn" style="margin-top:10px">💾 保存共享设置</button>
         <p class="ai-hint" id="shareCheckStatus" style="margin-top:10px;text-align:center"></p>
-        <p class="ai-hint" style="margin-top:2px;text-align:center;font-size:11px;color:var(--text-3)">系统会定期（约每 6 小时）用你的 API 复测连通性；一旦连不通，以上共享资格会被自动取消，届时可回到此页查看原因。</p>
+        <p class="ai-hint" style="margin-top:2px;text-align:center;font-size:11px;color:var(--text-3)">系统会定期复测连通性，失败将自动取消共享资格。</p>
       </div>
 
       <!-- Notification Tab -->
