@@ -445,6 +445,33 @@ class AIService:
         ]
         return self.chat(messages, max_tokens=500, temperature=temperature).strip()
 
+    def translate_and_condense_title(self, title: str, target_lang: str = "zh-CN",
+                                     max_chars: int = 30, min_chars: int = 18,
+                                     feedback: str = "", temperature: float = 0.2) -> str:
+        """One-shot translate + shorten for a title that is BOTH foreign and
+        over-long. Doing it in a single call (instead of translate → notice
+        it's still long → summarize) avoids a second AI round-trip and stops
+        the on-screen title from visibly changing twice. Reuses the same
+        3-element editing standard as summarize_title, with a translate step
+        folded in. Returns plain text."""
+        lang_name = "中文" if "zh" in target_lang else target_lang
+        system = (
+            f"你是一个资深的双语新闻编辑。先将标题准确翻译为{lang_name}，"
+            "再按下述标准精炼为一个简洁完整的标题。\n\n"
+            + self._title_summary_system_prompt(max_chars, min_chars)
+            + "\n- 忠实于原文含义，保留专有名词、公司名、产品名的通用译法，不要添加原文没有的信息。"
+        )
+        messages = [
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": f"原标题（需翻译并精炼）：{title}" + self._retry_feedback_line(feedback),
+            },
+        ]
+        return _normalize_cjk_quotes(
+            self.chat(messages, max_tokens=500, temperature=temperature).strip()
+        )
+
 
     # Daily summary (layered)
     # Strategy:

@@ -1,7 +1,17 @@
 # 标题翻译与简写链路改进方案
 
-> 状态：待实施
+> 状态：已实施（commit 1/2/3 均已落地）
 > 日期：2026-07-13
+>
+> 实施补充说明：
+> - `_fetch_untranslated_articles`（`[auto-translate]` 回路）未加翻译退避——该
+>   路径 `_translate_article_background` 不做校验、不产生拒绝，永远不会写入
+>   `title_translation_error`，退避在此为死代码，故仅在做校验的 `[auto-title]`
+>   路径（`_fetch_title_process_articles`）落地。
+> - 顺带修复一个既有时区 bug：`title_summary_error_at`/`title_translation_error_at`
+>   由 SQLite `datetime('now')`（UTC）写入，原代码用 `time.mktime`（本地时区）
+>   解析，在 UTC+8 部署环境下退避窗口偏移 8h、几乎从不生效；改用
+>   `calendar.timegm` 按 UTC 解析。见 `_within_error_backoff`。
 > 背景：v5.0.1 上线后，自动标题翻译/简写链路陆续暴露出多个问题（跨语言校验误杀、
 > 括号切分截断、失败无限重试等）。前几轮已完成校验规则修正（软/硬警告分级、
 > `_repair_title_summary` 括号配对、字数上限放宽为软目标）。本方案在此基础上做

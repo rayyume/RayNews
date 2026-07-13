@@ -7,6 +7,7 @@ import json
 import sqlite3
 import threading
 import time
+import calendar
 import uuid
 import requests
 
@@ -87,6 +88,10 @@ TITLE_SUMMARY_MAX_TOTAL_CHARS = int(os.environ.get("TITLE_SUMMARY_MAX_TOTAL_CHAR
 TITLE_SUMMARY_TRIGGER_RATIO = float(os.environ.get("TITLE_SUMMARY_TRIGGER_RATIO", "1.3"))
 TITLE_SUMMARY_TRIGGER_CJK = int(TITLE_SUMMARY_MAX_CHARS * TITLE_SUMMARY_TRIGGER_RATIO)
 TITLE_SUMMARY_TRIGGER_TOTAL = int(TITLE_SUMMARY_MAX_TOTAL_CHARS * TITLE_SUMMARY_TRIGGER_RATIO)
+# When a title is BOTH foreign and over-long, translate+shorten it in a single
+# AI call rather than translate → notice it's still long → summarize (two calls,
+# title visibly changes twice). Set to "0" to fall back to the two-step path.
+TITLE_MERGE_TRANSLATE_CONDENSE = os.environ.get("TITLE_MERGE_TRANSLATE_CONDENSE", "1") == "1"
 
 # ─── App Setup ────────────────────────────────────────────────
 
@@ -1492,11 +1497,15 @@ TITLE_ERROR_BACKOFF_HOURS = float(os.environ.get("TITLE_ERROR_BACKOFF_HOURS", "6
 def _within_error_backoff(error_at: str | None, hours: float = TITLE_ERROR_BACKOFF_HOURS) -> bool:
     """True if a recorded failure timestamp is recent enough that we should
     skip retrying for now. Shared by the title-translation and title-summary
-    paths so a title that just failed isn't hammered every 10s at low temp."""
+    paths so a title that just failed isn't hammered every 10s at low temp.
+
+    The stored timestamp comes from SQLite datetime('now'), which is UTC, so
+    it's parsed with calendar.timegm (UTC), not time.mktime (local) — the
+    latter silently skews the window by the host's UTC offset."""
     if not error_at:
         return False
     try:
-        err_ts = time.mktime(time.strptime(error_at, "%Y-%m-%d %H:%M:%S"))
+        err_ts = calendar.timegm(time.strptime(error_at, "%Y-%m-%d %H:%M:%S"))
     except (ValueError, TypeError):
         return False
     return (time.time() - err_ts) < hours * 3600
@@ -2226,14 +2235,60 @@ def _summarize_title_with_retry(svc: "AIService", title: str) -> dict:
     return _validate_ai_title_summary_result(_parse_title_summary_result(raw2), original_title=title)
 
 
+def _translate_condense_with_retry(svc: "AIService", title: str) -> dict:
+    """One-shot translate+shorten with one corrective retry. Validated as a
+    title summary (the output is both translated and shortened), against the
+    still-foreign original."""
+    raw = svc.translate_and_condense_title(
+        title, "zh-CN", TITLE_SUMMARY_MAX_CHARS, TITLE_SUMMARY_PROMPT_MIN_CHARS)
+    result = _validate_ai_title_summary_result(_parse_title_summary_result(raw), original_title=title)
+    if result["valid"]:
+        return result
+    raw2 = svc.translate_and_condense_title(
+        title, "zh-CN", TITLE_SUMMARY_MAX_CHARS, TITLE_SUMMARY_PROMPT_MIN_CHARS,
+        feedback=result.get("reason") or "输出不合规",
+        temperature=TITLE_RETRY_TEMPERATURE,
+    )
+    return _validate_ai_title_summary_result(_parse_title_summary_result(raw2), original_title=title)
+
+
 def _process_article_title(article: dict, config: dict) -> bool:
     article_id = article["id"]
     title = article.get("title") or ""
     changed = False
     svc = None
+    summarize_enabled = bool(config.get("auto_title_summary_enabled"))
 
     if article.get("translate_title_needed") and _needs_translation(title):
         svc = _title_service(config)
+
+        # Merged path: the title is BOTH foreign and over-long, so translate
+        # and shorten it in a single call — one AI round-trip, and the title
+        # only changes once on screen instead of translate-then-shorten.
+        if (TITLE_MERGE_TRANSLATE_CONDENSE and summarize_enabled
+                and _needs_title_summary(title)):
+            result = _translate_condense_with_retry(svc, title)
+            if result["valid"]:
+                new_title = result["title"]
+                if _save_article_title_update(article_id, new_title, "title_summary"):
+                    changed = True
+                _save_ai_result(
+                    article_id,
+                    title_summary=new_title,
+                    title_summary_provider=config.get("provider_type") or "openai",
+                    title_summary_model=config.get("model") or "",
+                    title_summary_by_user_id=config.get("user_id"),
+                    clear_title_translation_error=True,
+                )
+            else:
+                print(f"[auto-title] Article {article_id}: discarded invalid "
+                      f"translate+condense ({result['reason']}): {result['title'][:120]!r}")
+                _save_ai_result(
+                    article_id,
+                    title_translation_error=f"{result['reason']}: {result['title'][:120]}",
+                )
+            return changed
+
         result = _translate_title_with_retry(svc, title)
         if result["valid"]:
             translated = result["title"]
@@ -2249,7 +2304,7 @@ def _process_article_title(article: dict, config: dict) -> bool:
                 title_translation_error=f"{result['reason']}: {result['title'][:120]}",
             )
 
-    if not config.get("auto_title_summary_enabled"):
+    if not summarize_enabled:
         return changed
     if not _needs_title_summary(title):
         return changed
