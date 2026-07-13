@@ -3,6 +3,7 @@
 import sqlite3
 import json
 import bcrypt
+from datetime import datetime
 from pathlib import Path
 import os
 
@@ -52,8 +53,23 @@ CREATE TABLE IF NOT EXISTS user_settings (
     auto_summary_enabled    INTEGER NOT NULL DEFAULT 0,
     daily_summary_enabled   INTEGER NOT NULL DEFAULT 0,
     theme_preference        TEXT    NOT NULL DEFAULT 'system',
-    notification_config     TEXT    NOT NULL DEFAULT '{}'
+    notification_config     TEXT    NOT NULL DEFAULT '{}',
+    share_ai_results        INTEGER NOT NULL DEFAULT 0,
+    share_view_title        INTEGER NOT NULL DEFAULT 0,
+    share_view_translation  INTEGER NOT NULL DEFAULT 0,
+    share_view_summary      INTEGER NOT NULL DEFAULT 0,
+    share_last_check_at     TEXT,
+    share_last_check_ok     INTEGER,
+    share_last_check_error  TEXT
 );
+
+CREATE TABLE IF NOT EXISTS user_access_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    accessed_at TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_access_log_user_time ON user_access_log(user_id, accessed_at);
 
 CREATE TABLE IF NOT EXISTS invitation_codes (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -105,6 +121,27 @@ def get_db() -> sqlite3.Connection:
             _db.execute("ALTER TABLE user_settings ADD COLUMN theme_preference TEXT NOT NULL DEFAULT 'system'")
         except sqlite3.OperationalError:
             pass  # column already exists
+        try:
+            _db.execute("ALTER TABLE users ADD COLUMN visit_count INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        try:
+            _db.execute("ALTER TABLE users ADD COLUMN last_seen_at TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        for _col_sql in (
+            "ALTER TABLE user_settings ADD COLUMN share_ai_results INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE user_settings ADD COLUMN share_view_title INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE user_settings ADD COLUMN share_view_translation INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE user_settings ADD COLUMN share_view_summary INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE user_settings ADD COLUMN share_last_check_at TEXT",
+            "ALTER TABLE user_settings ADD COLUMN share_last_check_ok INTEGER",
+            "ALTER TABLE user_settings ADD COLUMN share_last_check_error TEXT",
+        ):
+            try:
+                _db.execute(_col_sql)
+            except sqlite3.OperationalError:
+                pass  # column already exists
         # Registration now requires a username, stored in the nickname column.
         # Backfill existing accounts that predate this requirement: keep their
         # nickname if they set one, otherwise fall back to their email.
@@ -163,7 +200,8 @@ def create_user(email: str, password: str, nickname: str = "",
 def get_user(user_id: int) -> dict | None:
     db = get_db()
     row = db.execute(
-        "SELECT id, email, nickname, role, avatar_url, created_at FROM users WHERE id = ?",
+        "SELECT id, email, nickname, role, avatar_url, created_at, "
+        "visit_count, last_seen_at FROM users WHERE id = ?",
         (user_id,),
     ).fetchone()
     return dict(row) if row else None
@@ -212,7 +250,8 @@ def delete_user(user_id: int) -> bool:
 def list_users() -> list[dict]:
     db = get_db()
     rows = db.execute(
-        "SELECT id, email, nickname, role, avatar_url, created_at FROM users ORDER BY id"
+        "SELECT id, email, nickname, role, avatar_url, created_at, "
+        "visit_count, last_seen_at FROM users ORDER BY id"
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -228,6 +267,53 @@ def get_first_admin_email() -> str:
 def count_users() -> int:
     db = get_db()
     return db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+
+
+# ─── Access Stats ──────────────────────────────────────────
+
+_ACCESS_THROTTLE_SECONDS = 300  # collapse bursts of requests into one "visit"
+
+
+def record_access(user_id: int) -> None:
+    """Bump a user's visit counter/last-seen timestamp, throttled per session.
+
+    Called on every authenticated request, so repeat calls within the
+    throttle window only refresh last_seen_at without inflating visit_count
+    or the detail log.
+    """
+    db = get_db()
+    row = db.execute("SELECT last_seen_at FROM users WHERE id = ?", (user_id,)).fetchone()
+    if row is None:
+        return
+    now = datetime.utcnow()
+    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    should_count = True
+    last_seen = row["last_seen_at"]
+    if last_seen:
+        try:
+            last_dt = datetime.strptime(last_seen, "%Y-%m-%d %H:%M:%S")
+            if (now - last_dt).total_seconds() < _ACCESS_THROTTLE_SECONDS:
+                should_count = False
+        except ValueError:
+            pass
+    if should_count:
+        db.execute(
+            "UPDATE users SET visit_count = visit_count + 1, last_seen_at = ? WHERE id = ?",
+            (now_str, user_id),
+        )
+        db.execute("INSERT INTO user_access_log (user_id, accessed_at) VALUES (?, ?)", (user_id, now_str))
+    else:
+        db.execute("UPDATE users SET last_seen_at = ? WHERE id = ?", (now_str, user_id))
+    db.commit()
+
+
+def count_active_users_since(days: int) -> int:
+    db = get_db()
+    row = db.execute(
+        "SELECT COUNT(*) FROM users WHERE last_seen_at >= datetime('now', ?)",
+        (f"-{int(days)} days",),
+    ).fetchone()
+    return int(row[0]) if row else 0
 
 
 # ─── Favorites ─────────────────────────────────────────────
@@ -372,18 +458,31 @@ def get_user_settings(user_id: int) -> dict | None:
     row = db.execute(
         "SELECT id, auto_translate_title, auto_translate_content, "
         "auto_title_summary_enabled, auto_summary_enabled, "
-        "daily_summary_enabled, theme_preference, notification_config "
+        "daily_summary_enabled, theme_preference, notification_config, "
+        "share_ai_results, share_view_title, share_view_translation, share_view_summary, "
+        "share_last_check_at, share_last_check_ok, share_last_check_error "
         "FROM user_settings WHERE user_id = ?",
         (user_id,),
     ).fetchone()
     return dict(row) if row else None
 
 
+def get_users_with_share_enabled() -> list[int]:
+    """User ids that currently have the AI-result sharing master switch on."""
+    db = get_db()
+    rows = db.execute(
+        "SELECT user_id FROM user_settings WHERE share_ai_results = 1"
+    ).fetchall()
+    return [int(r["user_id"]) for r in rows]
+
+
 def set_user_settings(user_id: int, **kwargs) -> dict:
     """Upsert settings."""
     allowed = {"auto_translate_title", "auto_translate_content",
                "auto_title_summary_enabled", "auto_summary_enabled", "daily_summary_enabled",
-               "theme_preference", "notification_config"}
+               "theme_preference", "notification_config",
+               "share_ai_results", "share_view_title", "share_view_translation", "share_view_summary",
+               "share_last_check_at", "share_last_check_ok", "share_last_check_error"}
     updates = {k: v for k, v in kwargs.items() if k in allowed}
     if not updates:
         return get_user_settings(user_id) or {}

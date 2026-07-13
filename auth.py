@@ -60,11 +60,12 @@ def require_auth(f):
             return jsonify({"error": "invalid or expired token"}), 401
         g.user_id = payload["user_id"]
         # Verify current role from database (don't trust stale JWT role)
-        from models import get_user
+        from models import get_user, record_access
         user = get_user(g.user_id)
         if not user:
             return jsonify({"error": "user not found"}), 401
         g.user_role = user["role"]
+        record_access(g.user_id)
         return f(*args, **kwargs)
 
     return wrapper

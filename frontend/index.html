@@ -148,6 +148,17 @@ a:hover{text-decoration:underline}
 .item-arrow{position:absolute;right:20px;top:50%;transform:translateY(-50%);color:var(--text-3);opacity:0;transition:opacity 0.12s,transform 0.12s;font-size:14px}
 .item:hover .item-arrow{opacity:1;transform:translateY(-50%) translateX(2px)}
 
+/* ═══ Locked Section (guest paywall blur) ═════════ */
+.locked-section{position:relative;min-height:180px}
+.locked-content{filter:blur(9px) saturate(0.85);pointer-events:none;user-select:none;-webkit-user-select:none}
+.locked-content .item:hover{background:var(--bg-card)}
+.locked-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;cursor:pointer;background:linear-gradient(180deg,transparent 0%,var(--bg-card) 50%)}
+.locked-overlay-card{display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center}
+.locked-lock-icon{width:44px;height:44px;border-radius:50%;background:var(--bg-card);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:18px;box-shadow:0 10px 30px rgba(0,0,0,0.35)}
+.locked-overlay-text{font-size:13px;font-weight:600;color:var(--text-2)}
+.locked-overlay-btn{background:var(--accent);color:#fff;border:none;padding:10px 26px;border-radius:100px;font-size:13px;font-weight:700;cursor:pointer;font-family:var(--font);transition:opacity 0.15s}
+.locked-overlay-btn:hover{opacity:0.88}
+
 /* ═══ Search Overlay ═════════════════════════════ */
 .icon-btn{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border:none;background:transparent;color:var(--text-2);border-radius:8px;cursor:pointer;transition:all 0.15s;flex-shrink:0}
 .icon-btn:hover{background:var(--bg-card);color:var(--accent)}
@@ -770,6 +781,7 @@ body.body-scroll-lock{overflow:hidden!important}
       <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:16px;border-bottom:1px solid var(--border);padding-bottom:0">
         <button class="settings-tab active" data-tab="account" onclick="switchSettingsTab('account')">账号</button>
         <button class="settings-tab" data-tab="ai" onclick="switchSettingsTab('ai')">AI</button>
+        <button class="settings-tab" data-tab="share" onclick="switchSettingsTab('share')">共享</button>
         <button class="settings-tab" data-tab="notify" onclick="switchSettingsTab('notify')">通知</button>
         <button class="settings-tab" data-tab="theme" onclick="switchSettingsTab('theme')">主题</button>
       </div>
@@ -805,6 +817,33 @@ body.body-scroll-lock{overflow:hidden!important}
         <button class="ai-save-btn" onclick="saveAIConfig()">💾 保存 AI 配置</button>
         <p class="ai-hint" style="margin:6px 0 0;text-align:center;font-size:11px;color:var(--text-3)">💡 修改配置后请先保存，再点击下方测试</p>
         <button class="ai-save-btn" onclick="testAIConnection()" style="margin-top:10px;background:var(--bg-card);color:var(--text);border:1px solid var(--border)" id="testAiBtn">🔌 测试 API 连接</button>
+      </div>
+
+      <!-- Share Tab -->
+      <div id="settingsTabShare" style="display:none">
+        <div class="ai-toggle" onclick="document.getElementById('shareAiResults').click()">
+          <input type="checkbox" id="shareAiResults" onclick="event.stopPropagation()" onchange="updateShareSubToggleState()">
+          <span>共享 AI 结果</span>
+        </div>
+        <p class="ai-hint">人人为我，我为人人。开启共享的用户相互共享 AI 结果，并有权查看服务端 AI 结果。</p>
+
+        <div class="ai-toggle" onclick="document.getElementById('shareViewTitle').click()" style="margin-top:14px">
+          <input type="checkbox" id="shareViewTitle" onclick="event.stopPropagation()" disabled>
+          <span>查看服务端共享的标题翻译</span>
+        </div>
+        <div class="ai-toggle" onclick="document.getElementById('shareViewTranslation').click()">
+          <input type="checkbox" id="shareViewTranslation" onclick="event.stopPropagation()" disabled>
+          <span>查看服务端共享的文章翻译</span>
+        </div>
+        <div class="ai-toggle" onclick="document.getElementById('shareViewSummary').click()">
+          <input type="checkbox" id="shareViewSummary" onclick="event.stopPropagation()" disabled>
+          <span>查看服务端共享的文章摘要</span>
+        </div>
+        <p class="ai-hint" id="shareSubHint">需先开启共享 AI 结果</p>
+
+        <button class="ai-save-btn" onclick="saveShareConfig()" id="saveShareBtn" style="margin-top:10px">💾 保存共享设置</button>
+        <p class="ai-hint" id="shareCheckStatus" style="margin-top:10px;text-align:center"></p>
+        <p class="ai-hint" style="margin-top:2px;text-align:center;font-size:11px;color:var(--text-3)">系统会定期复测连通性，失败将自动取消共享资格。</p>
       </div>
 
       <!-- Notification Tab -->
@@ -1158,6 +1197,7 @@ function logout() {
   localStorage.removeItem('raynews_user');
   closeUserMenu();
   updateUserUI();
+  renderList();
   showToast('已退出登录');
 }
 
@@ -1764,6 +1804,7 @@ async function submitAuth() {
       showToast(authMode === 'login' ? '✅ 登录成功' : '✅ 注册成功');
       loadUserSettings();
       syncDailySummaryToday();
+      renderList();
       if (nextAction === 'search') openSearch();
     }
   } catch (e) {
@@ -1875,13 +1916,14 @@ function closeAISettings() {
 function switchSettingsTab(tab) {
   document.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
   document.querySelector('.settings-tab[data-tab="' + tab + '"]').classList.add('active');
-  ['account','ai','notify','theme'].forEach(t => {
+  ['account','ai','share','notify','theme'].forEach(t => {
     document.getElementById('settingsTab' + t.charAt(0).toUpperCase() + t.slice(1)).style.display = t === tab ? '' : 'none';
   });
   setSettingsSensitiveInputsEnabled(tab === 'ai' && document.getElementById('aiOverlay').classList.contains('open'));
   // Load avatar preview when switching to account tab
   if (tab === 'account') loadAccountTab();
   if (tab === 'theme') loadThemeSettings();
+  if (tab === 'share') loadShareTab();
 }
 
 // ═══ Admin Settings (Users + Summary + Sources + Translate + System API) ═══
@@ -2609,6 +2651,70 @@ async function testAIConnection() {
   } catch (e) { showSettingsStatus('❌ 测试失败: ' + e.message, 'err'); }
 }
 
+// ─── Share Tab (opt-in access to shared server-side AI results) ──
+
+function updateShareSubToggleState() {
+  const masterOn = document.getElementById('shareAiResults').checked;
+  ['shareViewTitle', 'shareViewTranslation', 'shareViewSummary'].forEach(id => {
+    const el = document.getElementById(id);
+    el.disabled = !masterOn;
+    if (!masterOn) el.checked = false;
+  });
+  document.getElementById('shareSubHint').style.display = masterOn ? 'none' : '';
+}
+
+async function loadShareTab() {
+  await loadUserSettings();
+  const s = userAutoSettings || {};
+  document.getElementById('shareAiResults').checked = !!s.share_ai_results;
+  document.getElementById('shareViewTitle').checked = !!s.share_view_title;
+  document.getElementById('shareViewTranslation').checked = !!s.share_view_translation;
+  document.getElementById('shareViewSummary').checked = !!s.share_view_summary;
+  updateShareSubToggleState();
+  const statusEl = document.getElementById('shareCheckStatus');
+  if (!s.share_last_check_at) {
+    statusEl.textContent = '';
+  } else if (s.share_last_check_ok) {
+    statusEl.textContent = '✅ 上次校验成功：' + s.share_last_check_at;
+    statusEl.style.color = '';
+  } else {
+    statusEl.textContent = '❌ 上次校验失败（' + s.share_last_check_at + '）：' + (s.share_last_check_error || '未知错误') + '，共享资格已被取消';
+    statusEl.style.color = '#e5484d';
+  }
+}
+
+async function saveShareConfig() {
+  const btn = document.getElementById('saveShareBtn');
+  const masterOn = document.getElementById('shareAiResults').checked;
+  btn.disabled = true;
+  btn.textContent = masterOn ? '🔌 校验中...' : '保存中...';
+  showSettingsStatus(masterOn ? '⏳ 正在校验 API 连通性...' : '⏳ 保存中...', 'ok');
+  try {
+    const payload = {
+      share_ai_results: masterOn,
+      share_view_title: document.getElementById('shareViewTitle').checked,
+      share_view_translation: document.getElementById('shareViewTranslation').checked,
+      share_view_summary: document.getElementById('shareViewSummary').checked,
+    };
+    const resp = await fetch('/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
+      body: JSON.stringify(payload),
+    });
+    if (resp.status === 401) { logout(); showSettingsStatus('❌ 登录已过期，请重新登录', 'err'); return; }
+    const data = await resp.json();
+    if (data.error) { showSettingsStatus('❌ ' + data.error, 'err'); await loadShareTab(); return; }
+    showSettingsStatus('✅ 共享设置已保存', 'ok');
+    await loadShareTab();
+    renderList();
+  } catch (e) {
+    showSettingsStatus('❌ 保存失败: ' + e.message, 'err');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '💾 保存共享设置';
+  }
+}
+
 // ─── System AI Config (admin-only, drives background jobs) ──
 
 async function loadSystemAiConfig() {
@@ -2768,8 +2874,16 @@ async function loadUserSettings() {
       auto_translate_content: !!data.auto_translate_content,
       auto_summary_enabled: !!data.auto_summary_enabled,
       theme_preference: data.theme_preference || 'system',
+      share_ai_results: !!data.share_ai_results,
+      share_view_title: !!data.share_view_title,
+      share_view_translation: !!data.share_view_translation,
+      share_view_summary: !!data.share_view_summary,
+      share_last_check_at: data.share_last_check_at || null,
+      share_last_check_ok: data.share_last_check_ok,
+      share_last_check_error: data.share_last_check_error || null,
     };
     applyThemePreference(userAutoSettings.theme_preference);
+    renderList();
   } catch (e) {}
 }
 
@@ -3502,7 +3616,7 @@ async function autoDisplaySummary(articleId) {
         // Save original before replacing for toggle support
         bodyEl.dataset.originalHtml = bodyEl.innerHTML;
         bodyEl.dataset.originalTitle = h1El ? h1El.textContent : '';
-        bodyEl.dataset.translatedHtml = proxyImages(cachedData.html);
+        bodyEl.dataset.translatedHtml = proxyImages(sanitizeTranslatedHtml(cachedData.html));
         bodyEl.dataset.translatedTitle = cachedData.title || '';
         bodyEl.dataset.showingTranslation = 'true';
         bodyEl.innerHTML = bodyEl.dataset.translatedHtml;
@@ -3524,7 +3638,7 @@ async function autoDisplaySummary(articleId) {
       if (t.startsWith('<')) {
         // Save original before replacing for toggle support
         bodyEl.dataset.originalHtml = bodyEl.innerHTML;
-        bodyEl.dataset.translatedHtml = proxyImages(t);
+        bodyEl.dataset.translatedHtml = proxyImages(sanitizeTranslatedHtml(t));
         bodyEl.dataset.showingTranslation = 'true';
         bodyEl.innerHTML = bodyEl.dataset.translatedHtml;
         // Re-attach lightbox
@@ -3704,6 +3818,7 @@ function renderAdminUsers(data, invitationData) {
   const users = data.users || [];
   const total = data.total || 0;
   const adminCount = users.filter(u => u.role === 'admin').length;
+  const active7d = data.active_7d || 0;
   const invitations = invitationData.invitations || [];
 
   const rows = users.map(u => {
@@ -3713,6 +3828,8 @@ function renderAdminUsers(data, invitationData) {
       <td><strong>${esc(u.nickname || u.email.split('@')[0])}</strong><br><span style="font-size:11px;color:var(--text-3)">${esc(u.email)}</span></td>
       <td><span class="admin-role-badge ${roleClass}">${u.role}</span></td>
       <td style="font-size:11px;color:var(--text-3)">${formatBeijingDateTime(u.created_at, false)}</td>
+      <td style="font-size:11px;color:var(--text-3);text-align:center">${u.visit_count || 0}</td>
+      <td style="font-size:11px;color:var(--text-3)">${u.last_seen_at ? formatBeijingDateTime(u.last_seen_at) : '从未访问'}</td>
       <td>
         ${canModify ? `<select class="admin-role-select" data-uid="${u.id}" onchange="changeUserRole(${u.id}, this.value)">
           <option value="user" ${u.role === 'user' ? 'selected' : ''}>user</option>
@@ -3734,10 +3851,11 @@ function renderAdminUsers(data, invitationData) {
     <div class="admin-stat">
       <div class="admin-stat-box"><div class="admin-stat-num">${total}</div><div class="admin-stat-label">总用户</div></div>
       <div class="admin-stat-box"><div class="admin-stat-num">${adminCount}</div><div class="admin-stat-label">管理员</div></div>
+      <div class="admin-stat-box"><div class="admin-stat-num">${active7d}</div><div class="admin-stat-label">近7天活跃</div></div>
       <div class="admin-stat-box"><div class="admin-stat-num">${invitations.length}</div><div class="admin-stat-label">待审核</div></div>
     </div>
     <div class="admin-table-wrap"><table class="admin-table">
-      <thead><tr><th>用户</th><th>角色</th><th>注册时间</th><th>修改角色</th><th></th></tr></thead>
+      <thead><tr><th>用户</th><th>角色</th><th>注册时间</th><th>访问次数</th><th>最近访问</th><th>修改角色</th><th></th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>
     <div style="margin-top:20px;font-size:13px;font-weight:700;color:var(--text-2)">🕓 待审核邀请申请（已申请邀请码但尚未完成注册）</div>
@@ -4732,20 +4850,36 @@ function searchArticles(query) {
     .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
 }
 
+function _setDisplayedTitle(articleId, text) {
+  document.querySelectorAll(`.item[data-id="${articleId}"] .item-title`).forEach(el => {
+    el.textContent = text;
+  });
+  const overlay = document.getElementById('overlay');
+  if (overlay && overlay.dataset.articleId === String(articleId)) {
+    const h1 = document.querySelector('#articleWrap h1');
+    if (h1) h1.textContent = text;
+  }
+}
+
 function syncArticleTitle(articleId, translatedTitle) {
   if (!translatedTitle) return;
   const newsItem = news.find(n => n.id === articleId);
   if (newsItem) newsItem.title = translatedTitle;
   const searchItem = searchItems.find(n => n.id === articleId);
   if (searchItem) searchItem.title = translatedTitle;
-  document.querySelectorAll(`.item[data-id="${articleId}"] .item-title`).forEach(el => {
-    el.textContent = translatedTitle;
-  });
-  const overlay = document.getElementById('overlay');
-  if (overlay && overlay.dataset.articleId === String(articleId)) {
-    const h1 = document.querySelector('#articleWrap h1');
-    if (h1) h1.textContent = translatedTitle;
-  }
+  _setDisplayedTitle(articleId, translatedTitle);
+}
+
+// Server-wide title (article.title/original_title), as opposed to the
+// per-article manual content-translation title handled by syncArticleTitle
+// above — this one must respect the viewer's share_view_title setting.
+function applyServerTitleUpdate(item) {
+  const newsItem = news.find(n => n.id === item.id);
+  if (newsItem) { newsItem.title = item.title; newsItem.original_title = item.original_title; }
+  const searchItem = searchItems.find(n => n.id === item.id);
+  if (searchItem) { searchItem.title = item.title; searchItem.original_title = item.original_title; }
+  const display = displayTitle(item);
+  if (display) _setDisplayedTitle(item.id, display);
 }
 
 async function pollTitleUpdates() {
@@ -4758,7 +4892,7 @@ async function pollTitleUpdates() {
     if (data.error) return;
     titleUpdateCursor = data.cursor || titleUpdateCursor;
     (data.items || []).forEach(item => {
-      if (item && item.id && item.title) syncArticleTitle(item.id, item.title);
+      if (item && item.id && item.title) applyServerTitleUpdate(item);
     });
   } catch (e) {
     // Title updates are opportunistic; never disturb reading.
@@ -4772,7 +4906,7 @@ function articleItemHtml(n) {
     <div class="item" data-id="${n.id}" onclick="openArticle(${n.id})">
       ${n.thumb ? `<div class="item-thumb"><img src="${proxyImgSrc(n.thumb)}" alt="" loading="lazy" decoding="async"></div>` : ''}
       <div class="item-body">
-        <div class="item-title">${esc(n.title)}</div>
+        <div class="item-title">${esc(displayTitle(n))}</div>
         <div class="item-meta">
           <span class="badge" data-role="source" style="${badgeStyle(displaySourceForArticle(feedSourceOf(n)))}" title="${esc(sourceBadgeTitle(feedSourceOf(n)))}">${esc(sourceLabel(displaySourceForArticle(feedSourceOf(n))))}</span>
           <span data-role="time">${formatTime(n.date, n.time)}</span>
@@ -4975,8 +5109,34 @@ function renderList() {
     return;
   }
 
+  if (!authToken) {
+    el.innerHTML = renderLockedList(items);
+    renderPagination(0);
+    return;
+  }
+
   el.innerHTML = items.map(articleItemHtml).join('');
   renderPagination(totalPages);
+}
+
+function renderLockedList(items) {
+  const visible = items.slice(0, 3).map(articleItemHtml).join('');
+  const lockedItems = items.slice(3);
+  if (!lockedItems.length) return visible;
+  const blurredCount = Math.min(lockedItems.length, 6);
+  const blurred = lockedItems.slice(0, blurredCount).map(articleItemHtml).join('');
+  return visible + `
+    <div class="locked-section">
+      <div class="locked-content">${blurred}</div>
+      <div class="locked-overlay" onclick="showAuth('list')">
+        <div class="locked-overlay-card">
+          <div class="locked-lock-icon">🔒</div>
+          <div class="locked-overlay-text">登录后可查看全部新闻</div>
+          <button class="locked-overlay-btn" onclick="event.stopPropagation();showAuth('list')">立即登录</button>
+        </div>
+      </div>
+    </div>
+  `;
 }
 
 function renderPagination(totalPages) {
@@ -5347,7 +5507,7 @@ function openArticle(id) {
         ? `<div style="margin-bottom:20px"><img src="${coverSrc}" alt="" decoding="async" style="max-width:100%;border-radius:var(--radius);background:var(--bg-surface)"></div>`
         : '';
       wrap.innerHTML = `
-        <h1>${esc(data.title || '')}</h1>
+        <h1>${esc(displayTitle(data))}</h1>
         <div class="article-meta" style="position:relative">
           <span class="badge" style="${badgeStyle(displaySourceForArticle(feedSourceOf(data)))}" title="${esc(sourceBadgeTitle(feedSourceOf(data)))}">${esc(sourceLabel(displaySourceForArticle(feedSourceOf(data))))}</span>
           <span>${formatTime(data.date || '', data.time || '')}</span>
@@ -5387,7 +5547,7 @@ function openArticle(id) {
     ? `<div style="margin-bottom:20px"><img src="${coverSrc}" alt="" decoding="async" style="max-width:100%;border-radius:var(--radius);background:var(--bg-surface)"></div>`
     : '';
   wrap.innerHTML = `
-    <h1>${esc(n.title)}</h1>
+    <h1>${esc(displayTitle(n))}</h1>
     <div class="article-meta" style="position:relative">
       <span class="badge" style="${badgeStyle(displaySourceForArticle(feedSourceOf(n)))}" title="${esc(sourceBadgeTitle(feedSourceOf(n)))}">${esc(sourceLabel(displaySourceForArticle(feedSourceOf(n))))}</span>
       <span>${formatTime(n.date, n.time)}</span>
@@ -5660,6 +5820,16 @@ function esc(str) {
   const d = document.createElement('div');
   d.textContent = str;
   return d.innerHTML;
+}
+
+// The server always stores both the original and (if admin-translated) the
+// translated title on the article — which one to render is a per-viewer
+// choice gated by the "查看服务端共享的标题翻译" setting, so it's decided
+// here on the client rather than by the (unauthenticated) news API.
+function displayTitle(item) {
+  if (!item) return '';
+  if (userAutoSettings?.share_view_title) return item.title || item.original_title || '';
+  return item.original_title || item.title || '';
 }
 
 // Simple markdown to HTML renderer (subset: headers, bold, italic, code, links, lists, line breaks)

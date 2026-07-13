@@ -445,7 +445,7 @@ def api_news_list(params: dict) -> bytes:
             since_where = f"{where_sql}{' AND' if where_sql else ' WHERE'} timestamp >= ?"
             since_args = (*args, since_ts)
             rows = conn.execute(
-                "SELECT id, title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
+                "SELECT id, title, original_title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
                 "       COALESCE(NULLIF(feed_source, ''), source) AS feed_source, origin_source, "
                 "       time, date, timestamp, thumb, has_full_content, telegraph_url, summary "
                 f"FROM articles{since_where} ORDER BY timestamp DESC LIMIT ?",
@@ -458,7 +458,7 @@ def api_news_list(params: dict) -> bytes:
         else:
             offset = (page - 1) * size
             base_select = (
-                "SELECT id, title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
+                "SELECT id, title, original_title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
                 "       COALESCE(NULLIF(feed_source, ''), source) AS feed_source, origin_source, "
                 "       time, date, timestamp, thumb, has_full_content, telegraph_url, summary "
                 "FROM articles"
@@ -508,7 +508,7 @@ def api_title_updates(params: dict) -> bytes:
                 "cursor": cursor,
             }, ensure_ascii=False).encode()
         rows = conn.execute(
-            "SELECT id, title, title_updated_at, title_source "
+            "SELECT id, title, original_title, title_updated_at, title_source "
             "FROM articles "
             "WHERE title_updated_at IS NOT NULL "
             "AND (title_updated_at > ? OR (title_updated_at = ? AND id > ?)) "
