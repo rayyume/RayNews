@@ -1701,6 +1701,13 @@ def _validate_ai_title_summary_result(result: dict | str | None, original_title:
     return {"title": title, "valid": True, "reason": reason}
 
 
+def _title_numeric_tokens(title: str) -> set[str]:
+    """Digit sequences (years, counts, model numbers, ...) — unlike words,
+    these are expected to survive a correct translation unchanged, so they're
+    a safe cross-language signal for catching a hallucinated/off-topic title."""
+    return set(re.findall(r"\d+", title or ""))
+
+
 def _validate_title_translation(translated: str | None, original_title: str) -> dict:
     """Sanity-check a translated title before it's saved as the site-wide title.
 
@@ -1709,6 +1716,20 @@ def _validate_title_translation(translated: str | None, original_title: str) -> 
     legitimately be as long as the original. So this only screens out
     truncated/garbled/refusal output (e.g. an upstream hiccup returning
     "SK海力士在" instead of a full sentence), not length.
+
+    Deliberately does NOT run _shares_title_signal() against original_title:
+    that keyword-overlap check assumes both titles are in the same language
+    (it's designed for same-language title shortening), and a faithful
+    translation of a title with no numbers/acronyms/preserved proper nouns
+    will legitimately share zero literal word tokens with its English
+    original — which made this reject essentially all such translations. A
+    slightly imprecise translation is still more useful to readers than
+    silently discarding it and leaving the title untranslated forever.
+    Numbers are checked instead (_title_numeric_tokens below): unlike words,
+    digit sequences are expected to carry over unchanged in a correct
+    translation, so a translation that drops every number the original had
+    is a genuine sign of a hallucinated/off-topic title, not just a language
+    mismatch.
     """
     title = _clean_title_summary(translated)
     if not title:
@@ -1725,8 +1746,9 @@ def _validate_title_translation(translated: str | None, original_title: str) -> 
         return {"title": title, "valid": False, "reason": "unbalanced punctuation (likely truncated)"}
     if _title_weight(title) < TITLE_SUMMARY_MIN_WEIGHT:
         return {"title": title, "valid": False, "reason": "translation too short, likely truncated"}
-    if not _shares_title_signal(title, original_title):
-        return {"title": title, "valid": False, "reason": "translation missing original title signal"}
+    original_numbers = _title_numeric_tokens(original_title)
+    if original_numbers and not (original_numbers & _title_numeric_tokens(title)):
+        return {"title": title, "valid": False, "reason": "translation missing numbers from original title"}
     return {"title": title, "valid": True, "reason": ""}
 
 
