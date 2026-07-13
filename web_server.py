@@ -1486,6 +1486,22 @@ def _title_weight(title: str) -> int:
     return sum(1 if ord(ch) < 128 else 2 for ch in (title or "").strip())
 
 
+TITLE_ERROR_BACKOFF_HOURS = float(os.environ.get("TITLE_ERROR_BACKOFF_HOURS", "6"))
+
+
+def _within_error_backoff(error_at: str | None, hours: float = TITLE_ERROR_BACKOFF_HOURS) -> bool:
+    """True if a recorded failure timestamp is recent enough that we should
+    skip retrying for now. Shared by the title-translation and title-summary
+    paths so a title that just failed isn't hammered every 10s at low temp."""
+    if not error_at:
+        return False
+    try:
+        err_ts = time.mktime(time.strptime(error_at, "%Y-%m-%d %H:%M:%S"))
+    except (ValueError, TypeError):
+        return False
+    return (time.time() - err_ts) < hours * 3600
+
+
 def _title_cjk_count(title: str) -> int:
     return len(re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff]", title or ""))
 
@@ -2118,7 +2134,8 @@ def _fetch_title_process_articles(config: dict, limit: int = AUTO_TITLE_PROCESS_
         conn.commit()
         rows = conn.execute(
             "SELECT a.id, a.title, a.original_title, a.title_source, a.title_updated_at, "
-            "       r.title_summary, r.title_summary_error, r.title_summary_error_at "
+            "       r.title_summary, r.title_summary_error, r.title_summary_error_at, "
+            "       r.title_translation_error_at "
             "FROM articles a "
             "LEFT JOIN ai_results r ON r.article_id = a.id "
             "WHERE a.date = ? "
@@ -2133,7 +2150,6 @@ def _fetch_title_process_articles(config: dict, limit: int = AUTO_TITLE_PROCESS_
             conn.close()
 
     selected = []
-    now = time.time()
     for row in rows:
         article = dict(row)
         title = article.get("title") or ""
@@ -2145,15 +2161,15 @@ def _fetch_title_process_articles(config: dict, limit: int = AUTO_TITLE_PROCESS_
         )
         if not translate_needed and not summary_needed:
             continue
+        # Back off recently-failed translations so a title that reliably fails
+        # validation isn't re-attempted every 10s at low temperature.
+        if translate_needed and _within_error_backoff(article.get("title_translation_error_at")):
+            translate_needed = False
         previous_error = (article.get("title_summary_error") or "").lower()
         retryable_invalid_output = "invalid title summary" in previous_error
-        if summary_needed and article.get("title_summary_error_at") and not cached_summary and not retryable_invalid_output:
-            try:
-                err_ts = time.mktime(time.strptime(article["title_summary_error_at"], "%Y-%m-%d %H:%M:%S"))
-                if now - err_ts < 6 * 3600:
-                    summary_needed = False
-            except Exception:
-                pass
+        if (summary_needed and not cached_summary and not retryable_invalid_output
+                and _within_error_backoff(article.get("title_summary_error_at"))):
+            summary_needed = False
         if translate_needed or summary_needed:
             article["translate_title_needed"] = translate_needed
             article["title_summary_needed"] = summary_needed
@@ -2172,6 +2188,44 @@ def _title_service(config: dict) -> AIService:
     )
 
 
+# On a rejected result we re-ask once with the failure reason as feedback and
+# a higher temperature — a low-temp model tends to re-emit the same bad output
+# verbatim, so a plain retry is wasted. One corrective retry is enough; beyond
+# that the article backs off (error timestamp) instead of hammering every 10s.
+TITLE_RETRY_TEMPERATURE = float(os.environ.get("TITLE_RETRY_TEMPERATURE", "0.5"))
+
+
+def _translate_title_with_retry(svc: "AIService", title: str) -> dict:
+    """Translate `title`, and if validation rejects the output, re-ask once
+    with the failure reason as feedback. Returns the _validate_title_translation
+    dict of whichever attempt succeeded, else the last failure."""
+    raw = svc.translate_title(title, "zh-CN")
+    result = _validate_title_translation(raw, title)
+    if result["valid"]:
+        return result
+    raw2 = svc.translate_title(
+        title, "zh-CN",
+        feedback=result.get("reason") or "输出不合规",
+        temperature=TITLE_RETRY_TEMPERATURE,
+    )
+    return _validate_title_translation(raw2, title)
+
+
+def _summarize_title_with_retry(svc: "AIService", title: str) -> dict:
+    """Shorten `title`, re-asking once with feedback if the first result is
+    rejected. Returns the _validate_ai_title_summary_result dict."""
+    raw = svc.summarize_title(title, TITLE_SUMMARY_MAX_CHARS, TITLE_SUMMARY_PROMPT_MIN_CHARS)
+    result = _validate_ai_title_summary_result(_parse_title_summary_result(raw), original_title=title)
+    if result["valid"]:
+        return result
+    raw2 = svc.summarize_title(
+        title, TITLE_SUMMARY_MAX_CHARS, TITLE_SUMMARY_PROMPT_MIN_CHARS,
+        feedback=result.get("reason") or "输出不合规",
+        temperature=TITLE_RETRY_TEMPERATURE,
+    )
+    return _validate_ai_title_summary_result(_parse_title_summary_result(raw2), original_title=title)
+
+
 def _process_article_title(article: dict, config: dict) -> bool:
     article_id = article["id"]
     title = article.get("title") or ""
@@ -2180,16 +2234,20 @@ def _process_article_title(article: dict, config: dict) -> bool:
 
     if article.get("translate_title_needed") and _needs_translation(title):
         svc = _title_service(config)
-        raw_translated = svc.translate_title(title, "zh-CN")
-        result = _validate_title_translation(raw_translated, title)
+        result = _translate_title_with_retry(svc, title)
         if result["valid"]:
             translated = result["title"]
             if _save_article_title_update(article_id, translated, "translation"):
                 changed = True
             title = translated
+            _save_ai_result(article_id, clear_title_translation_error=True)
         else:
             print(f"[auto-title] Article {article_id}: discarded invalid title translation "
                   f"({result['reason']}): {result['title'][:120]!r}")
+            _save_ai_result(
+                article_id,
+                title_translation_error=f"{result['reason']}: {result['title'][:120]}",
+            )
 
     if not config.get("auto_title_summary_enabled"):
         return changed
@@ -2210,11 +2268,9 @@ def _process_article_title(article: dict, config: dict) -> bool:
 
     try:
         svc = svc or _title_service(config)
-        raw_title = svc.summarize_title(title, TITLE_SUMMARY_MAX_CHARS, TITLE_SUMMARY_PROMPT_MIN_CHARS)
-        parsed = _parse_title_summary_result(raw_title)
-        result = _validate_ai_title_summary_result(parsed, original_title=title)
+        result = _summarize_title_with_retry(svc, title)
         if not result["valid"]:
-            snippet = _clean_title_summary(parsed.get("title") or raw_title)[:120] or "<empty>"
+            snippet = _clean_title_summary(result.get("title") or "")[:120] or "<empty>"
             reason = result.get("reason") or "invalid title summary"
             raise ValueError(f"AI returned invalid title summary: {reason}: {snippet}")
         short_title = result["title"]
@@ -2687,6 +2743,8 @@ def _init_ai_results_table():
                 title_summary TEXT,
                 title_summary_error TEXT,
                 title_summary_error_at TEXT,
+                title_translation_error TEXT,
+                title_translation_error_at TEXT,
                 title_summary_provider TEXT,
                 title_summary_model TEXT,
                 title_summary_by_user_id INTEGER,
@@ -2709,6 +2767,10 @@ def _init_ai_results_table():
             conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_error TEXT")
         if "title_summary_error_at" not in cols:
             conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_error_at TEXT")
+        if "title_translation_error" not in cols:
+            conn.execute("ALTER TABLE ai_results ADD COLUMN title_translation_error TEXT")
+        if "title_translation_error_at" not in cols:
+            conn.execute("ALTER TABLE ai_results ADD COLUMN title_translation_error_at TEXT")
         if "title_summary_provider" not in cols:
             conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_provider TEXT")
         if "title_summary_model" not in cols:
@@ -2833,7 +2895,9 @@ def _save_ai_result(article_id: int, summary: str | None = None,
                     title_summary_error: str | None = None,
                     title_summary_provider: str | None = None,
                     title_summary_model: str | None = None,
-                    title_summary_by_user_id: int | None = None):
+                    title_summary_by_user_id: int | None = None,
+                    title_translation_error: str | None = None,
+                    clear_title_translation_error: bool = False):
     """Save or update AI result for an article."""
     import sqlite3
     if summary is not None:
@@ -2851,9 +2915,11 @@ def _save_ai_result(article_id: int, summary: str | None = None,
             INSERT INTO ai_results
             (article_id, summary, translation, summary_error, summary_error_at,
              title_summary, title_summary_error, title_summary_error_at,
+             title_translation_error, title_translation_error_at,
              title_summary_provider, title_summary_model, title_summary_by_user_id)
             VALUES (?, ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END,
                     ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END,
+                    ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END,
                     ?, ?, ?)
             ON CONFLICT(article_id) DO UPDATE SET
                 summary = COALESCE(excluded.summary, summary),
@@ -2879,6 +2945,16 @@ def _save_ai_result(article_id: int, summary: str | None = None,
                     WHEN excluded.title_summary_error IS NOT NULL THEN datetime('now')
                     ELSE title_summary_error_at
                 END,
+                title_translation_error = CASE
+                    WHEN ? = 1 THEN NULL
+                    WHEN excluded.title_translation_error IS NOT NULL THEN excluded.title_translation_error
+                    ELSE title_translation_error
+                END,
+                title_translation_error_at = CASE
+                    WHEN ? = 1 THEN NULL
+                    WHEN excluded.title_translation_error IS NOT NULL THEN datetime('now')
+                    ELSE title_translation_error_at
+                END,
                 title_summary_provider = COALESCE(excluded.title_summary_provider, title_summary_provider),
                 title_summary_model = COALESCE(excluded.title_summary_model, title_summary_model),
                 title_summary_by_user_id = COALESCE(excluded.title_summary_by_user_id, title_summary_by_user_id),
@@ -2893,9 +2969,13 @@ def _save_ai_result(article_id: int, summary: str | None = None,
                 title_summary,
                 title_summary_error[:500] if title_summary_error else None,
                 title_summary_error,
+                title_translation_error[:500] if title_translation_error else None,
+                title_translation_error,
                 title_summary_provider,
                 title_summary_model,
                 title_summary_by_user_id,
+                1 if clear_title_translation_error else 0,
+                1 if clear_title_translation_error else 0,
             ),
         )
         conn.commit()

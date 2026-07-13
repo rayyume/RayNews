@@ -368,8 +368,23 @@ class AIService:
         ]
         return self.chat(messages, max_tokens=4000)
 
-    def translate_title(self, title: str, target_lang: str = "zh-CN") -> str:
-        """Translate a single article title."""
+    @staticmethod
+    def _retry_feedback_line(feedback: str) -> str:
+        """A user-message suffix used when re-asking after a rejected result,
+        so the retry has a reason to produce something different instead of
+        re-emitting the same output at low temperature."""
+        if not feedback:
+            return ""
+        return (
+            f"\n\n注意：上一次输出存在问题（{feedback}），"
+            "请重新输出一个完整、成对标点配对齐全、语义完整的标题。"
+        )
+
+    def translate_title(self, title: str, target_lang: str = "zh-CN",
+                        feedback: str = "", temperature: float = 0.2) -> str:
+        """Translate a single article title. `feedback` (a prior failure
+        reason) triggers a corrective re-ask; callers raise `temperature` on
+        retries so a low-temp model doesn't just repeat the same bad output."""
         lang_name = "中文" if "zh" in target_lang else target_lang
         messages = [
             {
@@ -384,46 +399,51 @@ class AIService:
                     "2. 保留专有名词、公司名、产品名的通用写法。\n"
                     "3. 不要添加原文没有的信息。\n\n"
                     f"标题：{title}"
+                    + self._retry_feedback_line(feedback)
                 ),
             },
         ]
-        return _normalize_cjk_quotes(self.chat(messages, max_tokens=500, temperature=0.2).strip())
+        return _normalize_cjk_quotes(self.chat(messages, max_tokens=500, temperature=temperature).strip())
 
-    def summarize_title(self, title: str, max_chars: int = 35, min_chars: int = 18) -> str:
-        """Shorten a news title using a 3-element editing approach."""
+    def _title_summary_system_prompt(self, max_chars: int, min_chars: int) -> str:
+        return (
+            "# Role\n"
+            "你是一个资深的新闻编辑，擅长用极简、准确的语言提炼新闻核心。\n\n"
+            "# Rule of 3 Elements (三要素融合标准)\n"
+            "生成的单一标题必须在一句话中隐性包含以下三个核心要素：\n"
+            "1. 核心主体：事件的主角（谁/哪个机构）。\n"
+            "2. 核心事实：最新发生的最重大动作（做了什么）。\n"
+            "3. 关键结果/数字：最能体现事件影响的细节或数据。\n\n"
+            "# Constraints\n"
+            f"- 字数尽量控制在 {min_chars}-{max_chars} 字之间，拒绝过短；"
+            "如果为了保留关键信息、避免语义割裂或标点不完整，超过这个字数上限也可以，"
+            "但不要为了凑字数而堆砌无关细节。\n"
+            "- 必须保留原标题的核心主体（人物/机构/产品等专有名词）和核心动作，"
+            "禁止只保留消息来源或引述框架（如「据FT报道」「知情人士称」等）而丢掉主体和事实本身。\n"
+            "- 拒绝结构拆分：只需输出一行最终的标题，严禁带有「引题」「正题」「副题」等标签。\n"
+            "- 拒绝前言后语：禁止输出「这是为你生成的标题：」等任何解释性废话。\n"
+            "- 客观准确：严格基于原文事实，严禁夸大、魔改或使用震惊体。\n"
+            "- 如有标点符号需准确：标题中如有《》「」等成对出现符号，需确保标点符号的完整，禁止仅出现一边的符号。\n\n"
+            "只输出一行最终标题的纯文本，不要 JSON、解释、标签或代码块。"
+        )
+
+    def summarize_title(self, title: str, max_chars: int = 35, min_chars: int = 18,
+                        feedback: str = "", temperature: float = 0.2) -> str:
+        """Shorten a news title using a 3-element editing approach. Returns a
+        plain-text title (not JSON): the previous JSON contract was brittle —
+        an inner quote could break parsing and silently turn the raw payload
+        into the "title". `feedback`/`temperature` drive corrective retries."""
         messages = [
             {
                 "role": "system",
-                "content": (
-                    "# Role\n"
-                    "你是一个资深的新闻编辑，擅长用极简、准确的语言提炼新闻核心。\n\n"
-                    "# Rule of 3 Elements (三要素融合标准)\n"
-                    "生成的单一标题必须在一句话中隐性包含以下三个核心要素：\n"
-                    "1. 核心主体：事件的主角（谁/哪个机构）。\n"
-                    "2. 核心事实：最新发生的最重大动作（做了什么）。\n"
-                    "3. 关键结果/数字：最能体现事件影响的细节或数据。\n\n"
-                    "# Constraints\n"
-                    f"- 字数尽量控制在 {min_chars}-{max_chars} 字之间，拒绝过短；"
-                    "如果为了保留关键信息、避免语义割裂或标点不完整，超过这个字数上限也可以，"
-                    "但不要为了凑字数而堆砌无关细节。\n"
-                    "- 必须保留原标题的核心主体（人物/机构/产品等专有名词）和核心动作，"
-                    "禁止只保留消息来源或引述框架（如「据FT报道」「知情人士称」等）而丢掉主体和事实本身。\n"
-                    "- 拒绝结构拆分：只需输出一行最终的标题，严禁带有「引题」「正题」「副题」等标签。\n"
-                    "- 拒绝前言后语：禁止输出「这是为你生成的标题：」等任何解释性废话。\n"
-                    "- 客观准确：严格基于原文事实，严禁夸大、魔改或使用震惊体。\n"
-                    "- 如有标点符号需准确：标题中如有《》「」等成对出现符号，需确保标点符号的完整，禁止仅出现一边的符号。\n\n"
-                    "只输出 JSON，不要解释或代码块。"
-                ),
+                "content": self._title_summary_system_prompt(max_chars, min_chars),
             },
             {
                 "role": "user",
-                "content": (
-                    f"原标题：{title}\n\n"
-                    "输出格式：{\"title\":\"简写后的标题\",\"valid\":true,\"reason\":\"保留了主体和事件\"}"
-                ),
+                "content": f"原标题：{title}" + self._retry_feedback_line(feedback),
             },
         ]
-        return self.chat(messages, max_tokens=500, temperature=0.2).strip()
+        return self.chat(messages, max_tokens=500, temperature=temperature).strip()
 
 
     # Daily summary (layered)
