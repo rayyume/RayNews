@@ -1685,6 +1685,16 @@ def _shares_title_signal(candidate: str, original_title: str) -> bool:
 
 
 def _validate_ai_title_summary_result(result: dict | str | None, original_title: str = "") -> dict:
+    """Hard-reject only when the output structurally can't be a title summary
+    at all (AI says so itself, or it doesn't fit the length/format contract
+    the whole "shorten the title" feature exists to deliver). Everything else
+    below (code-only text, unbalanced punctuation, missing keyword/number
+    overlap with the original) is a probabilistic clue, not proof the result
+    is wrong — a false positive on any one of them used to discard an
+    otherwise-fine title forever, since the same input reliably re-triggers
+    the same rule on every retry. Those are logged but kept instead: a
+    slightly-off title beats no title.
+    """
     data = _parse_title_summary_result(result) if isinstance(result, str) or result is None else dict(result)
     title = _repair_title_summary(data.get("title") or "")
     reason = data.get("reason") or ""
@@ -1692,63 +1702,94 @@ def _validate_ai_title_summary_result(result: dict | str | None, original_title:
         return {"title": title, "valid": False, "reason": reason or "AI marked title summary invalid"}
     if not _is_valid_title_summary(title):
         return {"title": title, "valid": False, "reason": "invalid title summary length or format"}
+    warnings = []
     if _looks_like_code_only_title(title):
-        return {"title": title, "valid": False, "reason": "invalid title summary: code-only or numeric title"}
+        warnings.append("code-only or numeric title")
     if not _balanced_title_punctuation(title):
-        return {"title": title, "valid": False, "reason": "invalid title summary: unbalanced title punctuation"}
-    if original_title and not _shares_title_signal(title, original_title):
-        return {"title": title, "valid": False, "reason": "invalid title summary: missing original title signal"}
+        warnings.append("unbalanced punctuation")
+    if original_title:
+        # _shares_title_signal is a literal-keyword-overlap check that only
+        # makes sense when both titles are in the same language (same-language
+        # shortening). When the "summary" step is actually also translating
+        # (original_title is still untranslated English), fall back to the
+        # cross-language-safe numeric check instead — see _numbers_match.
+        if _needs_translation(original_title):
+            if not _numbers_match(original_title, title):
+                warnings.append("missing numbers from original title")
+        elif not _shares_title_signal(title, original_title):
+            warnings.append("missing original title signal")
+    if warnings:
+        print(f"[auto-title] title summary kept despite soft warning(s) "
+              f"({'; '.join(warnings)}): {title[:120]!r}")
     return {"title": title, "valid": True, "reason": reason}
 
 
-def _title_numeric_tokens(title: str) -> set[str]:
-    """Digit sequences (years, counts, model numbers, ...) — unlike words,
-    these are expected to survive a correct translation unchanged, so they're
-    a safe cross-language signal for catching a hallucinated/off-topic title."""
-    return set(re.findall(r"\d+", title or ""))
+def _title_numeric_values(text: str) -> set[float]:
+    """Numbers in a title, including Chinese 万/亿-scaled numerals (e.g. "1万"
+    -> 10000.0), normalized to their numeric value. Unlike words, a number's
+    *value* should survive a correct translation even though its literal
+    digits/formatting often don't (English "10,000" is routinely rendered as
+    Chinese "1万"), so this is a safer cross-language sanity check than
+    literal-token overlap (see _shares_title_signal).
+    """
+    text = text or ""
+    values: set[float] = set()
+    for m in re.finditer(r"\d[\d,]*\.?\d*", text):
+        try:
+            values.add(float(m.group(0).replace(",", "")))
+        except ValueError:
+            pass
+    for m in re.finditer(r"(\d+(?:\.\d+)?)\s*([万亿])", text):
+        try:
+            values.add(float(m.group(1)) * (10000 if m.group(2) == "万" else 100000000))
+        except ValueError:
+            pass
+    return values
+
+
+def _numbers_match(original_title: str, candidate: str) -> bool:
+    original_values = _title_numeric_values(original_title)
+    if not original_values:
+        return True
+    return bool(original_values & _title_numeric_values(candidate))
 
 
 def _validate_title_translation(translated: str | None, original_title: str) -> dict:
     """Sanity-check a translated title before it's saved as the site-wide title.
 
-    Unlike summarize_title() (which is validated by _validate_ai_title_summary_result
-    above), translate_title() has no fixed target length — a translation can
-    legitimately be as long as the original. So this only screens out
-    truncated/garbled/refusal output (e.g. an upstream hiccup returning
-    "SK海力士在" instead of a full sentence), not length.
-
-    Deliberately does NOT run _shares_title_signal() against original_title:
-    that keyword-overlap check assumes both titles are in the same language
-    (it's designed for same-language title shortening), and a faithful
-    translation of a title with no numbers/acronyms/preserved proper nouns
-    will legitimately share zero literal word tokens with its English
-    original — which made this reject essentially all such translations. A
-    slightly imprecise translation is still more useful to readers than
-    silently discarding it and leaving the title untranslated forever.
-    Numbers are checked instead (_title_numeric_tokens below): unlike words,
-    digit sequences are expected to carry over unchanged in a correct
-    translation, so a translation that drops every number the original had
-    is a genuine sign of a hallucinated/off-topic title, not just a language
-    mismatch.
+    Hard-rejects only truly unusable output: empty, an AI refusal/explanation
+    instead of a translation, or an unparsed JSON payload — cases where
+    there's no plausible title to fall back on at all. Everything else below
+    (ellipsis/truncation look, code-only text, unbalanced punctuation, being
+    shorter than expected, missing numbers from the original — see
+    _numbers_match) is a probabilistic heuristic, not proof of a bad
+    translation, and discarding on those used to permanently strand titles
+    that legitimately tripped one rule or another on every retry (the same
+    input reliably re-triggers the same rule, so it never self-heals). Those
+    are logged as a warning but the translation is kept: a slightly-off
+    translation is still more useful to readers than none at all.
     """
     title = _clean_title_summary(translated)
     if not title:
         return {"title": title, "valid": False, "reason": "empty translation"}
     if any(marker in title.lower() for marker in _AI_REFUSAL_MARKERS):
         return {"title": title, "valid": False, "reason": "AI refusal or explanation, not a translation"}
-    if chr(0x2026) in title or "..." in title:
-        return {"title": title, "valid": False, "reason": "translation looks truncated (ellipsis)"}
     if title.startswith("{"):
         return {"title": title, "valid": False, "reason": "unparsed JSON payload"}
+    warnings = []
+    if chr(0x2026) in title or "..." in title:
+        warnings.append("looks truncated (ellipsis)")
     if _looks_like_code_only_title(title):
-        return {"title": title, "valid": False, "reason": "code-only or numeric title"}
+        warnings.append("code-only or numeric title")
     if not _balanced_title_punctuation(title):
-        return {"title": title, "valid": False, "reason": "unbalanced punctuation (likely truncated)"}
+        warnings.append("unbalanced punctuation")
     if _title_weight(title) < TITLE_SUMMARY_MIN_WEIGHT:
-        return {"title": title, "valid": False, "reason": "translation too short, likely truncated"}
-    original_numbers = _title_numeric_tokens(original_title)
-    if original_numbers and not (original_numbers & _title_numeric_tokens(title)):
-        return {"title": title, "valid": False, "reason": "translation missing numbers from original title"}
+        warnings.append("shorter than expected")
+    if not _numbers_match(original_title, title):
+        warnings.append("missing numbers from original title")
+    if warnings:
+        print(f"[auto-title] translation kept despite soft warning(s) "
+              f"({'; '.join(warnings)}): {title[:120]!r}")
     return {"title": title, "valid": True, "reason": ""}
 
 
