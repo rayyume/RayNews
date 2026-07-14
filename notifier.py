@@ -10,15 +10,25 @@ RESEND_API = "https://api.resend.com/emails"
 
 def send_email(api_key: str, to_email: str, subject: str,
                html_body: str, from_name: str = "RayNews",
-               from_email: str | None = None) -> dict:
-    """Send an email via Resend API. Returns response dict."""
+               from_email: str | None = None,
+               idempotency_key: str | None = None) -> dict:
+    """Send an email via Resend API. Returns response dict.
+
+    `idempotency_key`, when provided, is passed to Resend so that a retry of a
+    send whose response we never saw (network timeout, non-JSON gateway error)
+    replays the original send instead of delivering a second copy. Resend keys
+    are honoured for 24h — long enough to cover the daily-summary send window.
+    """
     from_email = (from_email or os.environ.get("RAYNEWS_FROM_EMAIL") or "onboarding@resend.dev").strip()
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
     resp = requests.post(
         RESEND_API,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
+        headers=headers,
         json={
             "from": f"{from_name} <{from_email}>",
             "to": [to_email],
@@ -35,7 +45,8 @@ def send_email(api_key: str, to_email: str, subject: str,
 
 
 def send_daily_summary_email(api_key: str, to_email: str,
-                             summary_text: str, stats: dict) -> dict:
+                             summary_text: str, stats: dict,
+                             idempotency_key: str | None = None) -> dict:
     """Send a formatted daily summary email via Resend.
     Converts Markdown summary_text to HTML before embedding.
     stats is a dict with keys: total_articles, articles_after_dedup,
@@ -85,4 +96,5 @@ hr{{border:none;border-top:1px solid rgba(255,255,255,0.08);margin:16px 0}}
         api_key, to_email,
         f"RayNews 每日摘要 — {__import__('datetime').date.today()}",
         html,
+        idempotency_key=idempotency_key,
     )

@@ -1391,7 +1391,14 @@ def _broadcast_daily_summary(force: bool = False) -> dict:
     sent = 0
     for user_id, to_email in pending.items():
         try:
-            send_daily_summary_email(resend_api_key, to_email, result["summary"], result["stats"])
+            # Idempotency key = one send per (date, user). If a prior tick's send
+            # actually reached Resend but its response never got back to us (so it
+            # was recorded "failed" and retried this tick), Resend replays the
+            # original instead of delivering a duplicate.
+            send_daily_summary_email(
+                resend_api_key, to_email, result["summary"], result["stats"],
+                idempotency_key=f"daily-{today_str}-{user_id}",
+            )
             _record_daily_summary_send(today_str, user_id, to_email, "sent")
             sent += 1
         except Exception as e:
