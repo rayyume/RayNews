@@ -10,6 +10,7 @@ import time
 import calendar
 import uuid
 import requests
+from urllib.parse import urlsplit
 
 from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify, g
@@ -3379,12 +3380,25 @@ def classify_sources_job_status(job_id):
     return jsonify(safe)
 
 
+def _telegram_channel_and_base() -> tuple[str, str]:
+    """Resolve (channel, base_url) from TELEGRAM_CHANNEL_URL if set,
+    otherwise fall back to legacy TELEGRAM_CHANNEL + hardcoded t.me domain."""
+    channel_url = (os.environ.get("TELEGRAM_CHANNEL_URL") or "").strip()
+    if channel_url:
+        parsed = urlsplit(channel_url)
+        path_parts = [p for p in parsed.path.split("/") if p]
+        channel = path_parts[-1] if path_parts else ""
+        return channel, f"{parsed.scheme}://{parsed.netloc}"
+    channel = (os.environ.get("TELEGRAM_CHANNEL") or "").strip().lstrip("@")
+    return channel, "https://t.me"
+
+
 def _fetch_telegram_message_content(article_id: int) -> str:
     """Fetch the original Telegram message body for historical source repair."""
-    channel = (os.environ.get("TELEGRAM_CHANNEL") or "").strip().lstrip("@")
+    channel, base_url = _telegram_channel_and_base()
     if not channel or channel == "your_channel":
         return ""
-    url = f"https://t.me/{channel}/{article_id}?embed=1&mode=tme"
+    url = f"{base_url}/{channel}/{article_id}?embed=1&mode=tme"
     try:
         resp = requests.get(
             url,

@@ -282,7 +282,8 @@ def periodic_refresh():
 # ─── API Handlers ─────────────────────────────────────────
 
 def _diagnostics(count: int | None = None) -> dict:
-    channel = (os.environ.get("TELEGRAM_CHANNEL") or "").strip()
+    channel_url = (os.environ.get("TELEGRAM_CHANNEL_URL") or "").strip()
+    channel = channel_url or (os.environ.get("TELEGRAM_CHANNEL") or "").strip()
     exists = DB_FILE.exists()
     try:
         db_size = DB_FILE.stat().st_size if exists else 0

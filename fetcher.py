@@ -14,7 +14,7 @@ import logging
 import html as html_mod
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.utils import parsedate_to_datetime
 from datetime import timezone as dt_timezone, timedelta
@@ -31,9 +31,26 @@ from source_categories import (
 )
 
 # ─── Config (overridable via environment variables) ──────
-TELEGRAM_CHANNEL = os.environ.get("TELEGRAM_CHANNEL", "your_channel")
-TELEGRAM_LIST_URL = f"https://t.me/s/{TELEGRAM_CHANNEL}"
-TELEGRAM_POST_URL = f"https://t.me/{TELEGRAM_CHANNEL}/{{id}}?embed=1&mode=tme"
+def _resolve_telegram_urls() -> tuple[str, str, str]:
+    """Derive (channel, list_url, post_url) from TELEGRAM_CHANNEL_URL if set,
+    otherwise fall back to the legacy TELEGRAM_CHANNEL + hardcoded t.me domain.
+
+    Using a full URL avoids hardcoding the t.me domain in code, so a domain
+    change or mirror can be handled purely via env var.
+    """
+    channel_url = os.environ.get("TELEGRAM_CHANNEL_URL", "").strip()
+    if channel_url:
+        parsed = urlsplit(channel_url)
+        base = f"{parsed.scheme}://{parsed.netloc}"
+        path_parts = [p for p in parsed.path.split("/") if p]
+        channel = path_parts[-1] if path_parts else "your_channel"
+        return channel, channel_url, f"{base}/{channel}/{{id}}?embed=1&mode=tme"
+
+    channel = os.environ.get("TELEGRAM_CHANNEL", "your_channel")
+    return channel, f"https://t.me/s/{channel}", f"https://t.me/{channel}/{{id}}?embed=1&mode=tme"
+
+
+TELEGRAM_CHANNEL, TELEGRAM_LIST_URL, TELEGRAM_POST_URL = _resolve_telegram_urls()
 OUTPUT_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
 OUTPUT_FILE = OUTPUT_DIR / "news.json"
 STATE_FILE = OUTPUT_DIR / "fetcher_state.json"

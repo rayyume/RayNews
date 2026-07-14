@@ -119,7 +119,7 @@ cp .env.example .env
 At minimum, set:
 
 ```dotenv
-TELEGRAM_CHANNEL=your_public_channel
+TELEGRAM_CHANNEL_URL=https://t.me/s/your_public_channel
 RAYNEWS_PUBLIC_URL=https://news.example.com
 ```
 
@@ -176,7 +176,8 @@ volumes:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TELEGRAM_CHANNEL` | `your_channel` | Public Telegram channel name; replace the placeholder |
+| `TELEGRAM_CHANNEL_URL` | none | Full channel URL, e.g. `https://t.me/s/your_channel`; domain can be swapped for a mirror, recommended |
+| `TELEGRAM_CHANNEL` | `your_channel` | (Legacy) channel name only, domain fixed to `t.me`; used when `TELEGRAM_CHANNEL_URL` is unset |
 | `RAYNEWS_PUBLIC_URL` | none | Required public URL used for public links such as the email footer |
 | `TZ` | `Asia/Shanghai` | Container timezone |
 | `DATA_DIR` | `/app/data` | Persistent data directory |

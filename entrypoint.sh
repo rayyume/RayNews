@@ -27,8 +27,8 @@ except Exception as exc:
 PY
 
 # ─── Initial fetch (non-fatal — don't let this block startup) ──
-if [ -z "$TELEGRAM_CHANNEL" ] || [ "$TELEGRAM_CHANNEL" = "your_channel" ]; then
-  echo "[entrypoint] WARNING: TELEGRAM_CHANNEL is not configured; fetcher will not read the intended Telegram source."
+if [ -z "$TELEGRAM_CHANNEL_URL" ] && { [ -z "$TELEGRAM_CHANNEL" ] || [ "$TELEGRAM_CHANNEL" = "your_channel" ]; }; then
+  echo "[entrypoint] WARNING: TELEGRAM_CHANNEL_URL/TELEGRAM_CHANNEL is not configured; fetcher will not read the intended Telegram source."
 fi
 
 echo "=== Running initial fetch ==="
