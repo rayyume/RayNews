@@ -6123,14 +6123,28 @@ setInterval(function() {
   window.addEventListener(eventName, markUserActivity, { passive: true });
 });
 window.addEventListener('scroll', markUserActivity, { passive: true });
+// On iOS PWA the JS context (and its setInterval timers) is frozen while
+// backgrounded and may never resume the 12s title-update poll after the app
+// returns to the foreground — leaving already-listed titles stuck on their
+// pre-translation text until a manual refresh. Force a fresh fetch of both new
+// articles and title updates whenever the page becomes visible/focused again.
+// iOS sometimes fires only 'focus' (not 'visibilitychange') on PWA resume, so
+// listen for both and dedupe the work behind a short guard.
+let lastForegroundSyncAt = 0;
+function onReturnToForeground() {
+  const now = Date.now();
+  if (now - lastForegroundSyncAt < 1000) return;
+  lastForegroundSyncAt = now;
+  pageVisibleSince = now;
+  lastUserActivityAt = now;
+  const cursor = latestKnownTimestamp || latestNewsTimestamp();
+  if (cursor > 0) loadSince(cursor);
+  if (news.length > 0) pollTitleUpdates();
+}
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) {
-    pageVisibleSince = Date.now();
-    lastUserActivityAt = Date.now();
-    const cursor = latestKnownTimestamp || latestNewsTimestamp();
-    if (cursor > 0) loadSince(cursor);
-  }
+  if (!document.hidden) onReturnToForeground();
 });
+window.addEventListener('focus', onReturnToForeground);
 // ═══ Mobile: swipe-to-go-back on article overlay ════════
 (function() {
   const overlay = document.getElementById('overlay');
