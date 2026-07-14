@@ -119,7 +119,7 @@ cp .env.example .env
 至少在 `.env` 中填写：
 
 ```dotenv
-TELEGRAM_CHANNEL_URL=https://t.me/s/your_public_channel
+TELEGRAM_CHANNEL_URL=https://telegram.me/s/your_public_channel
 RAYNEWS_PUBLIC_URL=https://news.example.com
 ```
 
@@ -176,7 +176,7 @@ volumes:
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `TELEGRAM_CHANNEL_URL` | 无 | 完整频道链接，如 `https://t.me/s/your_channel`；域名可换成镜像域名，推荐使用 |
+| `TELEGRAM_CHANNEL_URL` | 无 | 完整频道链接，如 `https://telegram.me/s/your_channel`；域名可换成镜像域名，推荐使用 |
 | `TELEGRAM_CHANNEL` | `your_channel` | （旧配置方式）仅频道名，域名固定为 `t.me`；未设置 `TELEGRAM_CHANNEL_URL` 时生效 |
 | `RAYNEWS_PUBLIC_URL` | 无 | 对外访问地址；Compose 中为必填，用于邮件页脚等场景 |
 | `TZ` | `Asia/Shanghai` | 容器时区 |
