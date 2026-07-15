@@ -967,6 +967,7 @@ let todayArticleCount = null;
 let latestKnownTimestamp = 0;
 let pageRequestController = null;
 let pageRequestSequence = 0;
+let pageRequestPendingSequence = 0;
 let pageNavigationSequence = 0;
 let pageNavigationPending = false;
 const pageMemoryBuffer = new Map();
@@ -4239,12 +4240,14 @@ async function triggerRefresh() {
     page: currentPage,
     navigationSequence: pageNavigationSequence,
     requestSequence: pageRequestSequence,
+    pendingRequestSequence: pageRequestPendingSequence,
   };
-  const viewIsCurrent = expectedRequestSequence => (
+  const viewIsCurrent = (expectedRequestSequence, expectedPendingSequence) => (
     filter === refreshView.activeFilter
     && currentPage === refreshView.page
     && pageNavigationSequence === refreshView.navigationSequence
     && pageRequestSequence === expectedRequestSequence
+    && pageRequestPendingSequence === expectedPendingSequence
     && !pageNavigationPending
     && !hasBlockingOverlayOpen()
   );
@@ -4259,9 +4262,16 @@ async function triggerRefresh() {
     if (status.status === 'failed') {
       throw new Error(refreshErrorMessage(status));
     }
-    if (refreshView.page === 1 && viewIsCurrent(refreshView.requestSequence)) {
+    if (
+      refreshView.page === 1
+      && refreshView.pendingRequestSequence === 0
+      && viewIsCurrent(refreshView.requestSequence, 0)
+    ) {
       const completionRequestSequence = refreshView.requestSequence + 1;
-      const applicationGuard = () => viewIsCurrent(completionRequestSequence);
+      const applicationGuard = () => viewIsCurrent(
+        completionRequestSequence,
+        completionRequestSequence,
+      );
       const loaded = await loadNewsPage(1, {
         activeFilter: refreshView.activeFilter,
         useCache: false,
@@ -4269,7 +4279,7 @@ async function triggerRefresh() {
         animate: true,
         applicationGuard,
       });
-      if (loaded && applicationGuard()) {
+      if (loaded && viewIsCurrent(completionRequestSequence, 0)) {
         consumePendingNewArticles(refreshView.activeFilter);
       }
     }
@@ -4634,7 +4644,19 @@ function scheduleAdjacentPagePrefetch(page = currentPage, activeFilter = filter,
   if (page < totalPages) prefetchNewsPage(page + 1, activeFilter);
 }
 
-async function loadNewsPage(page = 1, {
+async function loadNewsPage(page = 1, options = {}) {
+  const requestSeq = ++pageRequestSequence;
+  pageRequestPendingSequence = requestSeq;
+  try {
+    return await loadNewsPageRequest(requestSeq, page, options);
+  } finally {
+    if (pageRequestPendingSequence === requestSeq) {
+      pageRequestPendingSequence = 0;
+    }
+  }
+}
+
+async function loadNewsPageRequest(requestSeq, page = 1, {
   activeFilter = filter,
   useCache = true,
   forceNetwork = false,
@@ -4642,7 +4664,6 @@ async function loadNewsPage(page = 1, {
   animate = false,
   applicationGuard = null,
 } = {}) {
-  const requestSeq = ++pageRequestSequence;
   let cacheApplied = false;
   if (useCache) {
     const cached = await readCachedNewsPage(page, activeFilter);

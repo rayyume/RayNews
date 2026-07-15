@@ -335,12 +335,22 @@ def test_manual_refresh_posts_once_then_polls_status():
     assert "activeFilter: filter," in block
     assert "navigationSequence: pageNavigationSequence," in block
     assert "requestSequence: pageRequestSequence," in block
+    assert "pendingRequestSequence: pageRequestPendingSequence," in block
+    assert "refreshView.pendingRequestSequence === 0" in block
     assert "&& !pageNavigationPending" in block
     assert block.count("loadNewsPage(1, {") == 1
     assert "refreshView.page === 1" in block
     assert "filter === refreshView.activeFilter" in block
     assert "!hasBlockingOverlayOpen()" in block
     assert "applicationGuard," in block
+
+
+def test_list_request_pending_marker_is_owned_by_matching_request():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    block = html[html.index("async function loadNewsPage("):html.index("async function loadNewsPageRequest(")]
+    assert "pageRequestPendingSequence = requestSeq;" in block
+    assert "if (pageRequestPendingSequence === requestSeq)" in block
+    assert "pageRequestPendingSequence = 0;" in block
 
 
 def test_refresh_status_polling_uses_authenticated_get_and_bounded_wait():

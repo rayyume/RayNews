@@ -111,6 +111,7 @@ context.filter = 'all';
 context.currentPage = 1;
 context.pageNavigationSequence = 3;
 context.pageRequestSequence = 8;
+context.pageRequestPendingSequence = 0;
 context.pageNavigationPending = false;
 context.hideNewArticlesPrompt = () => {{}};
 context.showToast = message => context.toasts.push(message);
@@ -172,6 +173,37 @@ assert.deepEqual(context.promptStates, [false]);
     )
 
 
+def test_manual_refresh_does_not_replace_a_list_request_already_in_flight():
+    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    setup = trigger_context_setup(
+        "return { job_id: 'job-1', status: 'completed', new_count: 1 };"
+    )
+    run_node(
+        trigger,
+        setup
+        + """
+context.filter = 'cat:Tech';
+context.pageRequestPendingSequence = context.pageRequestSequence;
+context.abortCalls = 0;
+context.pageRequestController = { abort: () => context.abortCalls++ };
+context.loadNewsPage = async () => {
+  context.loadCalls++;
+  context.pageRequestController.abort();
+  context.filter = 'all';
+  return true;
+};
+await context.triggerRefresh();
+assert.equal(context.loadCalls, 0);
+assert.equal(context.abortCalls, 0);
+assert.equal(context.filter, 'cat:Tech');
+assert.equal(context.pageRequestPendingSequence, 8);
+assert.equal(context.consumed, 0);
+assert.deepEqual(context.runningStates, [true, false]);
+assert.deepEqual(context.promptStates, [false]);
+""",
+    )
+
+
 def test_manual_refresh_application_guard_blocks_overlay_opened_mid_load():
     trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
     setup = trigger_context_setup(
@@ -184,8 +216,12 @@ def test_manual_refresh_application_guard_blocks_overlay_opened_mid_load():
 context.loadNewsPage = async (page, options) => {
   context.loadCalls++;
   assert.equal(typeof options.applicationGuard, 'function');
+  context.pageRequestSequence++;
+  context.pageRequestPendingSequence = context.pageRequestSequence;
   context.overlayOpen = true;
-  return options.applicationGuard();
+  const applied = options.applicationGuard();
+  context.pageRequestPendingSequence = 0;
+  return applied;
 };
 await context.triggerRefresh();
 assert.equal(context.loadCalls, 1);
@@ -213,8 +249,10 @@ context.consumePendingNewArticles = () => {
 context.loadNewsPage = async (page, options) => {
   context.loadCalls++;
   context.pageRequestSequence++;
+  context.pageRequestPendingSequence = context.pageRequestSequence;
   assert.equal(options.applicationGuard(), true);
   context.applied = true;
+  context.pageRequestPendingSequence = 0;
   return true;
 };
 await context.triggerRefresh();
@@ -300,6 +338,50 @@ const loaded = await context.loadNewsPage(1, {
 });
 assert.equal(loaded, false);
 assert.equal(context.applied, 0);
+""",
+    )
+
+
+def test_overlapping_list_request_finally_cannot_clear_newer_pending_marker():
+    load_page = source_between("async function loadNewsPage(", "function applyPageCalibrationWhenActive")
+    run_node(
+        load_page,
+        """
+context.pageRequestSequence = 0;
+context.pageRequestPendingSequence = 0;
+context.pageRequestController = null;
+context.news = [{ id: 1 }];
+context.readCachedNewsPage = async () => null;
+context.rememberBufferedPage = () => {};
+context.applyNewsPage = () => {};
+context.renderColdStartSkeleton = () => {};
+const resolvers = [];
+context.fetchNewsPage = () => new Promise(resolve => resolvers.push(resolve));
+context.writeCachedNewsPage = async () => {};
+context.scheduleAdjacentPagePrefetch = () => {};
+context.setPageLoading = () => {};
+context.renderColdStartError = () => {};
+context.showToast = () => {};
+context.currentTotal = 1;
+context.document = {
+  getElementById: () => ({ classList: { contains: () => false } }),
+};
+context.articleReturnInProgress = false;
+context.pendingLatestPage = null;
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
+const first = context.loadNewsPage(1, { activeFilter: 'all', useCache: false });
+await Promise.resolve();
+assert.equal(context.pageRequestPendingSequence, 1);
+const second = context.loadNewsPage(1, { activeFilter: 'cat:Tech', useCache: false });
+await Promise.resolve();
+assert.equal(context.pageRequestPendingSequence, 2);
+resolvers[0]({ items: [{ id: 2 }], total: 1 });
+await first;
+assert.equal(context.pageRequestPendingSequence, 2);
+resolvers[1]({ items: [{ id: 3 }], total: 1 });
+await second;
+assert.equal(context.pageRequestPendingSequence, 0);
 """,
     )
 
