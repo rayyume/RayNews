@@ -395,6 +395,7 @@ const events = [];
 let resolveNetwork;
 context.readNewsCacheEntry = async () => ({ data: { sources: ['cached'] } });
 context.withCacheTimeout = async value => value;
+context.withPromiseTimeout = async value => value;
 context.rebuildCategoryMap = sources => events.push(`rebuild:${sources[0]}`);
 context.renderFilters = () => events.push('render');
 context.isRestrictedUser = () => false;
@@ -416,7 +417,7 @@ assert.deepEqual(events, [
 
 
 def test_bootstrap_starts_source_news_and_count_requests_without_serial_waits():
-    bootstrap = source_between("async function bootstrapNews()", "// Initial load")
+    bootstrap = source_between("async function bootstrapNews(", "// Initial load")
     run_node(
         bootstrap,
         """
@@ -428,7 +429,9 @@ const pending = name => {
 };
 context.filter = 'all';
 context.currentPage = 9;
-context.location = { search: '' };
+context.location = { pathname: '/', search: '' };
+context.pageNavigationSequence = 0;
+context.pageRequestSequence = 0;
 context.listStateFromUrl = () => ({ activeFilter: 'cat:Tech' });
 context.renderTopCatBar = () => starts.push('topbar');
 context.loadSourceCategories = () => pending('sources');
@@ -459,17 +462,19 @@ assert.deepEqual(starts.slice(-3), ['filters', 'sync', 'scroll']);
 
 def test_bootstrap_resolves_source_label_deep_link_after_metadata_hydration():
     list_state = source_between("function listStateFromUrl()", "async function restoreListStateFromUrl")
-    bootstrap = source_between("async function bootstrapNews()", "// Initial load")
+    bootstrap = source_between("async function bootstrapNews(", "// Initial load")
     run_node(
         list_state + bootstrap,
         """
 const sourceKey = 'srcgrp:' + encodeURIComponent('财经早餐');
-context.location = { search: '?source=' + encodeURIComponent('财经早餐') + '&page=1' };
+context.location = { pathname: '/', search: '?source=' + encodeURIComponent('财经早餐') + '&page=1' };
 context.sourceFilterGroups = {};
 context.CATEGORY_ORDER = ['News', 'Tech', 'Biz', 'Info'];
 context.URLSearchParams = URLSearchParams;
 context.filter = 'all';
 context.currentPage = 9;
+context.pageNavigationSequence = 0;
+context.pageRequestSequence = 0;
 context.renderTopCatBar = () => {};
 context.loadSourceCategories = async ({ onMetadataReady } = {}) => {
   await Promise.resolve();
@@ -489,10 +494,217 @@ context.refreshTodayArticleCount = async () => {};
 context.renderFilters = () => {};
 context.syncListUrl = () => {};
 context.resetMobileColdStartScroll = () => {};
+context.renderSourceDeepLinkError = () => {};
 await context.bootstrapNews();
 assert.deepEqual(context.requested, { page: 1, activeFilter: sourceKey });
 assert.equal(context.filter, sourceKey);
 assert.equal(context.currentPage, 1);
+""",
+    )
+
+
+def test_source_deep_link_metadata_network_timeout_enters_dedicated_error_state():
+    load_sources = source_between("async function loadSourceCategories(", "function sourceLabel")
+    cache_timeout = source_between("async function withCacheTimeout(", "async function loadNewsPageRequest")
+    bootstrap = source_between("async function bootstrapNews(", "// Initial load")
+    run_node(
+        load_sources + cache_timeout + bootstrap,
+        """
+const originalSearch = '?source=' + encodeURIComponent('财经早餐') + '&page=1';
+context.location = { pathname: '/', search: originalSearch };
+context.filter = 'all';
+context.currentPage = 1;
+context.pageNavigationSequence = 0;
+context.pageRequestSequence = 0;
+context.listStateFromUrl = () => ({ activeFilter: 'all', page: 1 });
+context.readNewsCacheEntry = async () => null;
+context.rebuildCategoryMap = () => {};
+context.renderFilters = () => {};
+context.isRestrictedUser = () => false;
+context.apiFetch = () => new Promise(() => {});
+context.writeNewsCacheEntry = () => {};
+context.renderTopCatBar = () => {};
+context.newsCalls = 0;
+context.loadNewsPage = async () => { context.newsCalls++; return true; };
+context.refreshTodayArticleCount = async () => {};
+context.syncCalls = 0;
+context.syncListUrl = () => context.syncCalls++;
+context.resetMobileColdStartScroll = () => {};
+context.sourceErrors = [];
+context.renderSourceDeepLinkError = message => context.sourceErrors.push(message);
+context.genericErrors = [];
+context.renderColdStartError = message => context.genericErrors.push(message);
+context.setTimeout = callback => setTimeout(callback, 5);
+context.clearTimeout = clearTimeout;
+const loading = context.bootstrapNews();
+const outcome = await Promise.race([
+  loading.then(() => 'done'),
+  new Promise(resolve => setTimeout(() => resolve('hung'), 60)),
+]);
+assert.equal(outcome, 'done');
+assert.equal(context.newsCalls, 0);
+assert.equal(context.sourceErrors.length, 1);
+assert.equal(context.genericErrors.length, 0);
+assert.equal(context.location.search, originalSearch);
+assert.equal(context.syncCalls, 0);
+""",
+    )
+
+
+def test_source_deep_link_wait_does_not_override_newer_user_navigation():
+    list_state = source_between("function listStateFromUrl()", "async function restoreListStateFromUrl")
+    bootstrap = source_between("async function bootstrapNews(", "// Initial load")
+    run_node(
+        list_state + bootstrap,
+        """
+const sourceKey = 'srcgrp:' + encodeURIComponent('财经早餐');
+context.location = {
+  pathname: '/',
+  search: '?source=' + encodeURIComponent('财经早餐') + '&page=1',
+};
+context.sourceFilterGroups = {};
+context.CATEGORY_ORDER = ['News', 'Tech', 'Biz', 'Info'];
+context.filter = 'all';
+context.currentPage = 1;
+context.pageNavigationSequence = 4;
+context.pageRequestSequence = 7;
+context.renderTopCatBar = () => {};
+let notifyMetadata;
+let resolveSources;
+context.loadSourceCategories = ({ onMetadataReady } = {}) => {
+  notifyMetadata = onMetadataReady;
+  return new Promise(resolve => { resolveSources = resolve; });
+};
+context.newsCalls = [];
+context.loadNewsPage = async (page, options) => {
+  context.newsCalls.push({ page, activeFilter: options.activeFilter });
+  return true;
+};
+context.refreshTodayArticleCount = async () => {};
+context.renderFilters = () => {};
+context.syncListUrl = () => {};
+context.resetMobileColdStartScroll = () => {};
+context.renderSourceDeepLinkError = () => {};
+const loading = context.bootstrapNews();
+assert.equal(typeof notifyMetadata, 'function');
+context.location.search = '?category=Tech&page=1';
+context.filter = 'cat:Tech';
+context.currentPage = 1;
+context.pageNavigationSequence++;
+context.pageRequestSequence++;
+context.sourceFilterGroups[sourceKey] = {
+  key: sourceKey, label: '财经早餐', sources: ['财经早餐'],
+};
+notifyMetadata();
+resolveSources();
+await loading;
+assert.deepEqual(context.newsCalls, []);
+assert.equal(context.filter, 'cat:Tech');
+assert.equal(context.location.search, '?category=Tech&page=1');
+""",
+    )
+
+
+def test_source_deep_link_error_retry_refetches_metadata_and_reparses_original_url():
+    list_state = source_between("function listStateFromUrl()", "async function restoreListStateFromUrl")
+    cold_start = source_between("function resetMobileColdStartScroll()", "// Initial load")
+    run_node(
+        list_state + cold_start,
+        """
+const sourceKey = 'srcgrp:' + encodeURIComponent('财经早餐');
+const originalSearch = '?source=' + encodeURIComponent('财经早餐') + '&page=1';
+context.location = { pathname: '/', search: originalSearch };
+context.sourceFilterGroups = {};
+context.CATEGORY_ORDER = ['News', 'Tech', 'Biz', 'Info'];
+context.filter = 'all';
+context.currentPage = 1;
+context.pageNavigationSequence = 0;
+context.pageRequestSequence = 0;
+context.renderTopCatBar = () => {};
+context.metadataCalls = 0;
+context.loadSourceCategories = async ({ onMetadataReady } = {}) => {
+  context.metadataCalls++;
+  if (context.metadataCalls === 2) {
+    context.sourceFilterGroups[sourceKey] = {
+      key: sourceKey, label: '财经早餐', sources: ['财经早餐'],
+    };
+  }
+  if (onMetadataReady) onMetadataReady();
+};
+context.newsCalls = [];
+context.loadNewsPage = async (page, options) => {
+  context.newsCalls.push({ page, activeFilter: options.activeFilter });
+  return true;
+};
+context.refreshTodayArticleCount = async () => {};
+context.renderFilters = () => {};
+context.syncListUrl = () => {};
+context.resetMobileColdStartScroll = () => {};
+context.sourceErrors = [];
+context.renderSourceDeepLinkError = message => context.sourceErrors.push(message);
+context.renderColdStartError = () => {};
+context.loadDataCalls = 0;
+context.loadData = () => context.loadDataCalls++;
+await context.bootstrapNews();
+assert.equal(context.sourceErrors.length, 1);
+assert.equal(context.newsCalls.length, 0);
+assert.equal(context.location.search, originalSearch);
+assert.equal(typeof context.retrySourceDeepLink, 'function');
+await context.retrySourceDeepLink();
+assert.equal(context.metadataCalls, 2);
+assert.deepEqual(context.newsCalls, [{ page: 1, activeFilter: sourceKey }]);
+assert.equal(context.loadDataCalls, 0);
+assert.equal(context.location.search, originalSearch);
+""",
+    )
+
+
+def test_source_deep_link_snapshots_sources_before_metadata_revalidation_removes_group():
+    params = source_between("function buildNewsPageParams(", "function listUrlForState")
+    list_state = source_between("function listStateFromUrl()", "async function restoreListStateFromUrl")
+    bootstrap = source_between("async function bootstrapNews(", "// Initial load")
+    run_node(
+        params + list_state + bootstrap,
+        """
+const sourceKey = 'srcgrp:' + encodeURIComponent('财经早餐');
+context.location = {
+  pathname: '/',
+  search: '?source=' + encodeURIComponent('财经早餐') + '&page=1',
+};
+context.sourceFilterGroups = {};
+context.CATEGORY_ORDER = ['News', 'Tech', 'Biz', 'Info'];
+context.PAGE_SIZE = 30;
+context.filter = 'all';
+context.currentPage = 1;
+context.pageNavigationSequence = 0;
+context.pageRequestSequence = 0;
+context.renderTopCatBar = () => {};
+context.loadSourceCategories = ({ onMetadataReady } = {}) => {
+  context.sourceFilterGroups[sourceKey] = {
+    key: sourceKey,
+    label: '财经早餐',
+    sources: ['财经早餐', '财经早餐别名'],
+  };
+  if (onMetadataReady) onMetadataReady();
+  return new Promise(resolve => setImmediate(() => {
+    context.sourceFilterGroups = {};
+    resolve();
+  }));
+};
+context.requestSources = null;
+context.loadNewsPage = async (page, options) => {
+  await new Promise(resolve => setImmediate(resolve));
+  const built = context.buildNewsPageParams(page, options.activeFilter, options.sourceSnapshot);
+  context.requestSources = built.getAll('source');
+  return true;
+};
+context.refreshTodayArticleCount = async () => {};
+context.renderFilters = () => {};
+context.syncListUrl = () => {};
+context.resetMobileColdStartScroll = () => {};
+context.renderSourceDeepLinkError = () => {};
+await context.bootstrapNews();
+assert.deepEqual(context.requestSources, ['财经早餐', '财经早餐别名']);
 """,
     )
 

@@ -203,7 +203,8 @@ def test_blocking_list_loading_is_only_used_when_no_articles_are_available():
     load_block = html[load_start:load_end]
 
     assert "if (!cacheApplied && !news.length) renderColdStartSkeleton();" in load_block
-    assert "if (!cacheApplied && !news.length) renderColdStartError(message);" in load_block
+    assert "else if (!cacheApplied && !news.length)" in load_block
+    assert "coldStartErrorHandler || renderColdStartError" in load_block
     assert "list.innerHTML =" not in load_block
 
 
@@ -523,7 +524,7 @@ def test_mobile_pull_to_refresh_is_not_registered():
 def test_mobile_cold_start_resets_scroll_before_and_after_bootstrap():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     assert "function resetMobileColdStartScroll()" in html
-    start = html.index("async function bootstrapNews()")
+    start = html.index("async function bootstrapNews(")
     end = html.index("// Initial load", start)
     block = html[start:end]
     assert "resetMobileColdStartScroll();" in block
@@ -537,9 +538,10 @@ def test_mobile_cold_start_resets_scroll_before_and_after_bootstrap():
 
 def test_cold_start_renders_categories_immediately_and_runs_requests_in_parallel():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
-    boot = html[html.index("async function bootstrapNews()"):html.index("// Initial load")]
+    boot = html[html.index("async function bootstrapNews("):html.index("// Initial load")]
     assert boot.index("renderTopCatBar();") < boot.index("loadSourceCategories(")
-    assert "const sourcePromise = loadSourceCategories({ onMetadataReady: resolveSourceMetadata });" in boot
+    assert "const sourcePromise = loadSourceCategories({" in boot
+    assert "onMetadataReady: resolveSourceMetadata," in boot
     assert "const newsPromise = loadNewsPage(1, {" in boot
     assert "useCache: true," in boot
     assert "networkRetries: 1," in boot
@@ -562,7 +564,7 @@ def test_cold_start_retry_uses_a_fresh_abort_controller_and_preserves_cache():
     assert "for (let attempt = 0; attempt <= networkRetries; attempt++)" in load
     assert "pageRequestController = new AbortController();" in load
     assert "if (cacheApplied)" in load
-    assert "renderColdStartError(message)" in load
+    assert "coldStartErrorHandler || renderColdStartError" in load
 
 
 def test_desktop_scroll_to_top_uses_duration_controlled_animation():
@@ -598,7 +600,7 @@ def test_list_motion_reuses_cards_and_animates_insertions():
 
 def test_cold_start_bootstrap_has_loading_animation():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
-    boot_start = html.index("async function bootstrapNews()")
+    boot_start = html.index("async function bootstrapNews(")
     boot_end = html.index("// Initial load", boot_start)
     boot_block = html[boot_start:boot_end]
     # Cold start always lands on page 1, even if the URL has ?page=N (see

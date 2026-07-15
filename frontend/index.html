@@ -1589,27 +1589,32 @@ async function cleanupNewsCache() {
   } catch (e) {}
 }
 
-async function loadSourceCategories({ onMetadataReady = null } = {}) {
+async function loadSourceCategories({
+  onMetadataReady = null,
+  useCache = true,
+  networkTimeoutMs = 8000,
+} = {}) {
   let metadataNotified = false;
   const notifyMetadataReady = () => {
     if (metadataNotified) return;
     metadataNotified = true;
     if (onMetadataReady) onMetadataReady();
   };
-  const cached = await withCacheTimeout(readNewsCacheEntry('source-metadata'));
+  const cached = useCache
+    ? await withCacheTimeout(readNewsCacheEntry('source-metadata'))
+    : null;
   if (cached && cached.data && Array.isArray(cached.data.sources)) {
     rebuildCategoryMap(cached.data.sources);
   }
   renderFilters();
   if (cached && cached.data && Array.isArray(cached.data.sources)) notifyMetadataReady();
   try {
-    let data;
-    if (!isRestrictedUser()) {
-      data = await apiFetch('/sources');
-    } else {
+    const fetchFreshSources = async () => {
+      if (!isRestrictedUser()) return await apiFetch('/sources');
       const resp = await fetch('/api/sources');
-      data = await resp.json();
-    }
+      return await resp.json();
+    };
+    const data = await withPromiseTimeout(fetchFreshSources(), null, networkTimeoutMs);
     if (data && Array.isArray(data.sources)) {
       rebuildCategoryMap(data.sources);
       renderFilters();
@@ -4316,7 +4321,7 @@ function setRefreshRunning(isRunning) {
   }
 }
 
-function buildNewsPageParams(page = currentPage, activeFilter = filter) {
+function buildNewsPageParams(page = currentPage, activeFilter = filter, sourceSnapshot = null) {
   const params = new URLSearchParams();
   params.set('page', String(page));
   params.set('size', String(PAGE_SIZE));
@@ -4324,7 +4329,9 @@ function buildNewsPageParams(page = currentPage, activeFilter = filter) {
     params.set('category', activeFilter.slice(4));
   } else if (activeFilter !== 'all') {
     const group = sourceFilterGroups[activeFilter];
-    (group ? group.sources : []).forEach(source => params.append('source', source));
+    const sources = Array.isArray(sourceSnapshot) ? sourceSnapshot : (group && group.sources);
+    if (!sources || !sources.length) throw new Error('订阅源筛选已失效');
+    sources.forEach(source => params.append('source', source));
   }
   return params;
 }
@@ -4420,6 +4427,12 @@ function renderColdStartError(message) {
   list.innerHTML = '<div class="empty"><div class="empty-icon">📡</div><p>' + esc(message) + '</p><button class="refresh-btn" onclick="loadData()" style="margin-top:12px">重试</button></div>';
 }
 
+function renderSourceDeepLinkError(message) {
+  const list = document.getElementById('list');
+  if (!list || news.length || list.querySelector('.item[data-id]')) return;
+  list.innerHTML = '<div class="empty"><div class="empty-icon">📡</div><p>' + esc(message) + '</p><button class="refresh-btn" onclick="retrySourceDeepLink()" style="margin-top:12px">重试</button></div>';
+}
+
 function applyNewsPage(data, page, activeFilter, { animate = false, preserveDom = false } = {}) {
   news = Array.isArray(data.items) ? data.items : [];
   hasLoadedNewsOnce = true;
@@ -4447,8 +4460,8 @@ function applyNewsPage(data, page, activeFilter, { animate = false, preserveDom 
   pollTitleUpdates();
 }
 
-async function fetchNewsPage(page, activeFilter, signal) {
-  const params = buildNewsPageParams(page, activeFilter);
+async function fetchNewsPage(page, activeFilter, signal, sourceSnapshot = null) {
+  const params = buildNewsPageParams(page, activeFilter, sourceSnapshot);
   const resp = await fetch('/api/news?' + params.toString(), { signal });
   if (!resp.ok) throw new Error('HTTP ' + resp.status);
   const data = await resp.json();
@@ -4669,6 +4682,10 @@ async function loadNewsPage(page = 1, options = {}) {
 }
 
 async function withCacheTimeout(promise, fallback = null, timeoutMs = 500) {
+  return await withPromiseTimeout(promise, fallback, timeoutMs);
+}
+
+async function withPromiseTimeout(promise, fallback = null, timeoutMs = 500) {
   let timeout;
   try {
     return await Promise.race([
@@ -4690,6 +4707,8 @@ async function loadNewsPageRequest(requestSeq, page = 1, {
   animate = false,
   applicationGuard = null,
   networkRetries = 0,
+  sourceSnapshot = null,
+  coldStartErrorHandler = null,
 } = {}) {
   let cacheApplied = false;
   if (useCache) {
@@ -4722,7 +4741,7 @@ async function loadNewsPageRequest(requestSeq, page = 1, {
       const controller = pageRequestController;
       const timeout = setTimeout(() => controller.abort(), 12000);
       try {
-        const data = await fetchNewsPage(page, activeFilter, controller.signal);
+        const data = await fetchNewsPage(page, activeFilter, controller.signal, sourceSnapshot);
         await withCacheTimeout(writeCachedNewsPage(page, activeFilter, data));
         rememberBufferedPage(page, activeFilter, data);
         if (requestSeq !== pageRequestSequence) return false;
@@ -4760,7 +4779,9 @@ async function loadNewsPageRequest(requestSeq, page = 1, {
       ? '连接超时，请稍后重试'
       : '加载失败，请检查网络';
     if (cacheApplied) showToast(message);
-    else if (!cacheApplied && !news.length) renderColdStartError(message);
+    else if (!cacheApplied && !news.length) {
+      (coldStartErrorHandler || renderColdStartError)(message);
+    }
     else if (userInitiated) showToast(message);
     return cacheApplied;
   } finally {
@@ -6268,7 +6289,22 @@ function resetMobileColdStartScroll() {
   stabilizePageTop();
 }
 
-async function bootstrapNews() {
+let sourceDeepLinkRetryUrl = '';
+let sourceDeepLinkRetryInProgress = false;
+
+async function retrySourceDeepLink() {
+  if (sourceDeepLinkRetryInProgress) return false;
+  if (!sourceDeepLinkRetryUrl) return false;
+  if (location.pathname + location.search !== sourceDeepLinkRetryUrl) return false;
+  sourceDeepLinkRetryInProgress = true;
+  try {
+    return await bootstrapNews({ forceSourceMetadata: true });
+  } finally {
+    sourceDeepLinkRetryInProgress = false;
+  }
+}
+
+async function bootstrapNews({ forceSourceMetadata = false } = {}) {
   const requestedSource = new URLSearchParams(location.search).get('source');
   let resolveSourceMetadata;
   const sourceMetadataPromise = new Promise(resolve => {
@@ -6277,24 +6313,57 @@ async function bootstrapNews() {
   let initialState = listStateFromUrl();
   filter = initialState.activeFilter;
   currentPage = 1;  // always start at page 1 on fresh load
+  let ownedFilter = filter;
+  let ownedPage = currentPage;
+  let ownedRequestSequence = pageRequestSequence;
+  const initialView = {
+    path: location.pathname,
+    search: location.search,
+    navigationSequence: pageNavigationSequence,
+  };
+  const ownsInitialView = () => (
+    location.pathname === initialView.path
+    && location.search === initialView.search
+    && filter === ownedFilter
+    && currentPage === ownedPage
+    && pageNavigationSequence === initialView.navigationSequence
+    && pageRequestSequence === ownedRequestSequence
+  );
   renderTopCatBar();
-  const sourcePromise = loadSourceCategories({ onMetadataReady: resolveSourceMetadata });
+  if (requestedSource) sourceDeepLinkRetryUrl = initialView.path + initialView.search;
+  const sourcePromise = loadSourceCategories({
+    onMetadataReady: resolveSourceMetadata,
+    useCache: !forceSourceMetadata,
+  });
+  let sourceSnapshot = null;
   if (requestedSource) {
     await sourceMetadataPromise;
+    if (!ownsInitialView()) return false;
     initialState = listStateFromUrl();
     if (initialState.activeFilter === 'all') {
       await sourcePromise;
+      if (!ownsInitialView()) return false;
       initialState = listStateFromUrl();
     }
     if (initialState.activeFilter === 'all') {
-      renderColdStartError('未找到指定订阅源');
+      renderSourceDeepLinkError('订阅源元数据加载失败或未找到指定订阅源');
       const todayCountPromise = refreshTodayArticleCount();
       await Promise.allSettled([sourcePromise, todayCountPromise]);
+      if (!ownsInitialView()) return false;
       renderFilters();
       resetMobileColdStartScroll();
-      return;
+      return false;
+    }
+    const resolvedGroup = sourceFilterGroups[initialState.activeFilter];
+    sourceSnapshot = resolvedGroup && Array.isArray(resolvedGroup.sources)
+      ? [...resolvedGroup.sources]
+      : null;
+    if (!sourceSnapshot || !sourceSnapshot.length) {
+      renderSourceDeepLinkError('订阅源筛选已失效');
+      return false;
     }
     filter = initialState.activeFilter;
+    ownedFilter = filter;
     renderTopCatBar();
   }
   const newsPromise = loadNewsPage(1, {
@@ -6304,12 +6373,17 @@ async function bootstrapNews() {
     userInitiated: true,
     animate: true,
     networkRetries: 1,
+    sourceSnapshot,
+    coldStartErrorHandler: requestedSource ? renderSourceDeepLinkError : null,
   });
+  ownedRequestSequence = pageRequestSequence;
   const todayCountPromise = refreshTodayArticleCount();
   await Promise.allSettled([sourcePromise, newsPromise, todayCountPromise]);
+  if (!ownsInitialView()) return false;
   renderFilters();
-  syncListUrl({ replace: true });
+  if (!requestedSource || sourceFilterGroups[filter]) syncListUrl({ replace: true });
   resetMobileColdStartScroll();
+  return true;
 }
 
 // Initial load
