@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import json
+import shutil
 import sqlite3
 import threading
 import time
@@ -35,7 +36,10 @@ from models import (
 from auth import init_auth, create_token, require_auth, require_role
 from auth_validation import is_valid_email
 from ai_service import AIService
-from image_cache import enqueue_article_image_prefetch, unpin_article_images
+from image_cache import (
+    enqueue_article_image_prefetch, unpin_article_images,
+    cache_stats, evict_article_images,
+)
 from news_schema import ensure_deleted_articles_table
 from source_categories import (
     CATEGORY_NAMES, CATEGORY_ORDER, cleanup_stale_source_categories,
@@ -3297,6 +3301,209 @@ def delete_source_articles():
     ).fetchall()
     result = _delete_article_ids([int(row["id"]) for row in rows], deleted_by=g.user_id)
     return jsonify({"ok": True, "sources": sources, **result})
+
+
+# ─── Server statistics & storage maintenance (admin) ───────────
+
+def _path_size(path: str) -> int:
+    """Size of a single file plus its SQLite -wal/-shm sidecars, if present."""
+    total = 0
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            total += os.path.getsize(path + suffix)
+        except OSError:
+            pass
+    return total
+
+
+def _dir_size(path: str) -> int:
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+            except OSError:
+                pass
+    return total
+
+
+def _read_int_file(path: str) -> int | None:
+    try:
+        with open(path) as fh:
+            value = fh.read().strip()
+        return int(value)
+    except (OSError, ValueError):
+        return None
+
+
+def _container_resource_stats() -> dict:
+    """Container memory/CPU from cgroup files (v2 preferred, v1 fallback).
+
+    Fields that can't be read are returned as None so the UI shows N/A rather
+    than erroring; there is no psutil dependency."""
+    stats = {"mem_used_bytes": None, "mem_limit_bytes": None,
+             "cpu_percent": None, "cpu_count": None}
+    try:
+        stats["cpu_count"] = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        stats["cpu_count"] = os.cpu_count()
+
+    cgroup_v2 = os.path.exists("/sys/fs/cgroup/cgroup.controllers")
+
+    def cpu_usage_usec() -> int | None:
+        if cgroup_v2:
+            try:
+                with open("/sys/fs/cgroup/cpu.stat") as fh:
+                    for line in fh:
+                        if line.startswith("usage_usec"):
+                            return int(line.split()[1])
+            except (OSError, ValueError):
+                return None
+            return None
+        ns = _read_int_file("/sys/fs/cgroup/cpuacct/cpuacct.usage")
+        return ns // 1000 if ns is not None else None
+
+    if cgroup_v2:
+        stats["mem_used_bytes"] = _read_int_file("/sys/fs/cgroup/memory.current")
+        try:
+            with open("/sys/fs/cgroup/memory.max") as fh:
+                raw = fh.read().strip()
+            stats["mem_limit_bytes"] = None if raw == "max" else int(raw)
+        except (OSError, ValueError):
+            stats["mem_limit_bytes"] = None
+    else:
+        stats["mem_used_bytes"] = _read_int_file("/sys/fs/cgroup/memory/memory.usage_in_bytes")
+        limit = _read_int_file("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+        # cgroup v1 reports an absurd sentinel when unlimited.
+        if limit is not None and limit < (1 << 62):
+            stats["mem_limit_bytes"] = limit
+
+    start = cpu_usage_usec()
+    if start is not None:
+        time.sleep(0.3)
+        end = cpu_usage_usec()
+        if end is not None:
+            cpus = stats["cpu_count"] or 1
+            busy = (end - start) / (0.3 * 1_000_000 * cpus) * 100
+            stats["cpu_percent"] = round(max(0.0, busy), 1)
+    return stats
+
+
+def _count_scalar(conn, sql: str) -> int:
+    try:
+        row = conn.execute(sql).fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+    except sqlite3.OperationalError:
+        return 0
+
+
+@app.route("/admin/server-stats", methods=["GET"])
+@require_role("admin")
+def admin_server_stats():
+    news_db = _path_size(NEWS_DB)
+    app_db = _path_size(os.path.join(DATA_DIR, "raynews.db"))
+    image_cache_db = _path_size(os.path.join(DATA_DIR, "image_cache", "cache.db"))
+    avatars = _dir_size(os.path.join(DATA_DIR, "avatars"))
+    misc = sum(_path_size(os.path.join(DATA_DIR, name))
+               for name in ("news.json", "fetcher_state.json", "raynews_secret"))
+    cache = cache_stats()
+    image_cache_files = int(cache.get("used_bytes") or 0)
+    data_dir_total = news_db + app_db + image_cache_db + image_cache_files + avatars + misc
+
+    try:
+        du = shutil.disk_usage(DATA_DIR)
+        disk = {"total": du.total, "used": du.used, "free": du.free}
+    except OSError:
+        disk = {"total": None, "used": None, "free": None}
+
+    articles = cached_images = 0
+    news_conn = _get_news_db()
+    if news_conn is not None:
+        articles = _count_scalar(news_conn, "SELECT COUNT(*) FROM articles")
+    cached_images = int(cache.get("count") or 0)
+
+    try:
+        favorites = _count_scalar(get_db(), "SELECT COUNT(*) FROM favorites")
+    except Exception:
+        favorites = 0
+    try:
+        users = count_users()
+    except Exception:
+        users = 0
+
+    return jsonify({
+        "storage": {
+            "news_db": news_db,
+            "app_db": app_db,
+            "image_cache_db": image_cache_db,
+            "image_cache_files": image_cache_files,
+            "avatars": avatars,
+            "misc": misc,
+            "data_dir_total": data_dir_total,
+        },
+        "disk": disk,
+        "image_cache": cache,
+        "counts": {
+            "articles": articles,
+            "users": users,
+            "favorites": favorites,
+            "cached_images": cached_images,
+        },
+        "container": _container_resource_stats(),
+    })
+
+
+_PURGE_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _purge_articles_before(before_date: str, dry_run: bool,
+                           deleted_by: int | None = None) -> dict:
+    """Select articles dated on/before before_date, excluding any article
+    favorited by any user, and (unless dry_run) delete them plus their
+    non-shared cached images."""
+    conn = _get_news_db()
+    if not conn:
+        raise FileNotFoundError("news db not found")
+    favorited = set(get_all_favorite_article_ids())
+    rows = conn.execute(
+        "SELECT id, body_html, thumb FROM articles WHERE date != '' AND date <= ?",
+        (before_date,),
+    ).fetchall()
+    matched = len(rows)
+    candidates = [r for r in rows if int(r["id"]) not in favorited]
+    excluded = matched - len(candidates)
+    if dry_run or not candidates:
+        return {"matched": matched, "to_delete": len(candidates),
+                "favorites_excluded": excluded, "deleted": 0}
+
+    payloads = [(int(r["id"]), r["body_html"], r["thumb"]) for r in candidates]
+    result = _delete_article_ids([p[0] for p in payloads], deleted_by=deleted_by)
+
+    def _evict():
+        for article_id, body_html, thumb in payloads:
+            try:
+                evict_article_images(body_html, thumb, article_id)
+            except Exception as exc:
+                print(f"[purge] image eviction failed for {article_id}: {exc}")
+    threading.Thread(target=_evict, daemon=True).start()
+
+    return {"matched": matched, "favorites_excluded": excluded,
+            "deleted": result.get("deleted", 0), "images_eviction": "background"}
+
+
+@app.route("/admin/articles/purge", methods=["POST"])
+@require_role("admin")
+def admin_purge_articles():
+    data = request.get_json(silent=True) or {}
+    before_date = str(data.get("before_date") or "").strip()
+    if not _PURGE_DATE_RE.match(before_date):
+        return jsonify({"error": "before_date must be YYYY-MM-DD"}), 400
+    dry_run = bool(data.get("dry_run"))
+    try:
+        result = _purge_articles_before(before_date, dry_run, deleted_by=g.user_id)
+    except FileNotFoundError:
+        return jsonify({"error": "news db not found"}), 404
+    return jsonify({"ok": True, "before_date": before_date, "dry_run": dry_run, **result})
 
 
 @app.route("/sources", methods=["PUT"])

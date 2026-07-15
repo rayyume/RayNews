@@ -631,6 +631,8 @@ body.body-scroll-lock{overflow:hidden!important}
         <button class="admin-settings-tab" data-admin-tab="sources" onclick="switchAdminTab('sources')">订阅源</button>
         <button class="admin-settings-tab" data-admin-tab="translate" onclick="switchAdminTab('translate')">翻译</button>
         <button class="admin-settings-tab" data-admin-tab="systemapi" onclick="switchAdminTab('systemapi')">服务端API</button>
+        <button class="admin-settings-tab" data-admin-tab="server" onclick="switchAdminTab('server')">服务器</button>
+        <button class="admin-settings-tab" data-admin-tab="server" onclick="switchAdminTab('server')">服务器</button>
       </div>
       <div id="adminSettingsStatus" class="settings-toast" role="status" aria-live="polite"></div>
 
@@ -730,6 +732,28 @@ body.body-scroll-lock{overflow:hidden!important}
         <p class="ai-hint" style="margin:6px 0 0;text-align:center;font-size:11px;color:var(--text-3)">💡 修改配置后请先保存，再点击下方测试</p>
         <button class="ai-save-btn" onclick="testSystemAiConnection()" style="margin-top:10px;background:var(--bg-card);color:var(--text);border:1px solid var(--border)">🔌 测试 API 连接</button>
         <p class="ai-hint" style="margin-top:8px">此 Key 仅供后台自动摘要/自动翻译使用，与每个用户在"用户设置→AI"中配置的个人 Key 互相独立。</p>
+      </div>
+
+      <!-- Server Tab -->
+      <div id="adminTabServer" style="display:none">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+          <div class="source-step-title" style="margin:0">📊 服务器统计</div>
+          <button class="ai-save-btn" onclick="loadServerStats()" style="margin:0;width:auto;padding:6px 12px">🔄 刷新</button>
+        </div>
+        <div id="serverStatsBody">
+          <div class="admin-loading">加载中...</div>
+        </div>
+
+        <div class="source-step" style="margin-top:20px">
+          <div class="source-step-title">🗑️ 清理历史文章</div>
+          <p class="ai-hint">删除所选日期<strong>及之前</strong>的所有历史文章，连同其图片缓存一并删除。<strong>已被任何用户收藏的文章会被自动排除</strong>，不会删除。此操作不可撤销。</p>
+          <div class="source-step-actions source-admin-only" style="align-items:center">
+            <input class="ai-input" type="date" id="purgeBeforeDate" style="width:auto;margin:0">
+            <button class="ai-save-btn" id="purgePreviewBtn" onclick="previewPurge()" style="margin:0;width:auto;padding:8px 12px">预览</button>
+            <button class="ai-save-btn" id="purgeConfirmBtn" onclick="confirmPurge()" disabled style="margin:0;width:auto;padding:8px 12px;background:rgba(239,68,68,0.12);color:#ef4444;border:1px solid rgba(239,68,68,0.3)">确认删除</button>
+          </div>
+          <div id="purgeStatus" class="ai-hint" style="margin-top:8px"></div>
+        </div>
       </div>
     </div>
   </div>
@@ -1945,7 +1969,7 @@ function switchAdminTab(tab) {
   if (!authUser || authUser.role !== 'admin') return;
   document.querySelectorAll('.admin-settings-tab').forEach(t => t.classList.remove('active'));
   document.querySelector('.admin-settings-tab[data-admin-tab="' + tab + '"]').classList.add('active');
-  ['users','summary','sources','translate','systemapi'].forEach(t => {
+  ['users','summary','sources','translate','systemapi','server'].forEach(t => {
     document.getElementById('adminTab' + t.charAt(0).toUpperCase() + t.slice(1)).style.display = t === tab ? '' : 'none';
   });
   if (tab === 'users') loadAdminUsers();
@@ -1953,6 +1977,7 @@ function switchAdminTab(tab) {
   if (tab === 'sources') loadSourcesTab();
   if (tab === 'translate') loadGeneralSettings();
   if (tab === 'systemapi') loadSystemAiConfig();
+  if (tab === 'server') loadServerStats();
 }
 
 function loadAccountTab() {
@@ -2714,6 +2739,97 @@ async function saveShareConfig() {
     btn.disabled = false;
     btn.textContent = '💾 保存共享设置';
   }
+}
+
+// ─── Server statistics & storage maintenance (admin) ──
+
+function formatBytes(n) {
+  if (n === null || n === undefined) return 'N/A';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let v = n, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return (i === 0 ? v : v.toFixed(1)) + ' ' + units[i];
+}
+
+async function loadServerStats() {
+  const body = document.getElementById('serverStatsBody');
+  if (!body) return;
+  body.innerHTML = '<div class="admin-loading">加载中...</div>';
+  const data = await apiFetch('/admin/server-stats');
+  if (!data || data.error) {
+    body.innerHTML = '<div class="admin-loading">加载失败</div>';
+    return;
+  }
+  const s = data.storage, disk = data.disk, ic = data.image_cache, c = data.counts, ct = data.container;
+  const cachePct = ic && ic.max_bytes ? Math.min(100, Math.round(ic.used_bytes / ic.max_bytes * 100)) : 0;
+  const memPct = ct && ct.mem_limit_bytes ? Math.min(100, Math.round(ct.mem_used_bytes / ct.mem_limit_bytes * 100)) : null;
+  const box = (num, label) => `<div class="admin-stat-box"><div class="admin-stat-num">${num}</div><div class="admin-stat-label">${label}</div></div>`;
+  const row = (label, val) => `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);font-size:13px"><span style="color:var(--text-2)">${esc(label)}</span><span style="font-weight:700">${esc(val)}</span></div>`;
+  const bar = (pct) => `<div style="height:8px;border-radius:99px;background:var(--bg);overflow:hidden;margin-top:6px"><div style="height:100%;width:${pct}%;background:var(--accent)"></div></div>`;
+  body.innerHTML = `
+    <div class="admin-stat">
+      ${box(formatBytes(s.data_dir_total), '数据总占用')}
+      ${box(formatBytes(disk.free), '磁盘剩余')}
+      ${box(ct && ct.mem_used_bytes != null ? formatBytes(ct.mem_used_bytes) : 'N/A', '容器内存')}
+      ${box(ct && ct.cpu_percent != null ? ct.cpu_percent + '%' : 'N/A', '容器CPU')}
+    </div>
+    <div class="admin-stat">
+      ${box(c.articles, '文章')}
+      ${box(c.cached_images, '缓存图片')}
+      ${box(c.favorites, '收藏')}
+      ${box(c.users, '用户')}
+    </div>
+    <div style="margin-top:14px">
+      <div class="admin-stat-label" style="margin-bottom:4px">存储明细</div>
+      ${row('文章库 (news.db)', formatBytes(s.news_db))}
+      ${row('应用库 (raynews.db)', formatBytes(s.app_db))}
+      ${row('图片缓存文件', formatBytes(s.image_cache_files))}
+      ${row('图片缓存库 (cache.db)', formatBytes(s.image_cache_db))}
+      ${row('头像', formatBytes(s.avatars))}
+      ${row('其他 (快照/状态/密钥)', formatBytes(s.misc))}
+    </div>
+    <div style="margin-top:14px">
+      <div class="admin-stat-label">图片缓存用量 ${formatBytes(ic.used_bytes)} / ${formatBytes(ic.max_bytes)} (${cachePct}%)${ic.enabled ? '' : ' — 已禁用'}</div>
+      ${bar(cachePct)}
+    </div>
+    ${memPct !== null ? `<div style="margin-top:12px"><div class="admin-stat-label">容器内存 ${formatBytes(ct.mem_used_bytes)} / ${formatBytes(ct.mem_limit_bytes)} (${memPct}%)</div>${bar(memPct)}</div>` : ''}
+    <div style="margin-top:12px;font-size:12px;color:var(--text-3)">磁盘: 已用 ${formatBytes(disk.used)} / 共 ${formatBytes(disk.total)}${ct && ct.cpu_count ? ' · CPU 核心 ' + ct.cpu_count : ''}</div>
+  `;
+}
+
+async function previewPurge() {
+  const date = document.getElementById('purgeBeforeDate').value;
+  const status = document.getElementById('purgeStatus');
+  const confirmBtn = document.getElementById('purgeConfirmBtn');
+  confirmBtn.disabled = true;
+  if (!date) { status.textContent = '请先选择日期'; return; }
+  status.textContent = '⏳ 统计中...';
+  const data = await apiFetch('/admin/articles/purge', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ before_date: date, dry_run: true }),
+  });
+  if (!data || data.error) { status.textContent = '❌ ' + ((data && data.error) || '预览失败'); return; }
+  status.innerHTML = `将删除 <strong>${data.to_delete}</strong> 篇文章（${date} 及之前，共匹配 ${data.matched} 篇，已排除收藏 ${data.favorites_excluded} 篇）。`;
+  confirmBtn.disabled = data.to_delete === 0;
+}
+
+async function confirmPurge() {
+  const date = document.getElementById('purgeBeforeDate').value;
+  const status = document.getElementById('purgeStatus');
+  const confirmBtn = document.getElementById('purgeConfirmBtn');
+  if (!date) return;
+  if (!confirm(`确认删除 ${date} 及之前的所有非收藏历史文章及其图片缓存？此操作不可撤销。`)) return;
+  confirmBtn.disabled = true;
+  status.textContent = '⏳ 删除中...';
+  const data = await apiFetch('/admin/articles/purge', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ before_date: date, dry_run: false }),
+  });
+  if (!data || data.error) { status.textContent = '❌ ' + ((data && data.error) || '删除失败'); return; }
+  status.innerHTML = `✅ 已删除 <strong>${data.deleted}</strong> 篇文章（排除收藏 ${data.favorites_excluded} 篇），图片缓存正在后台清理。`;
+  loadServerStats();
 }
 
 // ─── System AI Config (admin-only, drives background jobs) ──

@@ -440,3 +440,67 @@ def prune_cache() -> int:
     finally:
         conn.close()
     return deleted
+
+
+def cache_stats() -> dict:
+    """Count and total size of cached images, plus the configured cap."""
+    stats = {
+        "enabled": IMAGE_CACHE_ENABLED,
+        "count": 0,
+        "used_bytes": 0,
+        "max_bytes": MAX_CACHE_BYTES,
+    }
+    if not IMAGE_CACHE_ENABLED:
+        return stats
+    try:
+        conn = _connect()
+    except Exception:
+        return stats
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(size_bytes), 0) AS total FROM image_cache_entries"
+        ).fetchone()
+        stats["count"] = int(row["n"] or 0)
+        stats["used_bytes"] = int(row["total"] or 0)
+    finally:
+        conn.close()
+    return stats
+
+
+def evict_article_images(body_html: str | None, thumb: str | None = "",
+                         article_id: int | None = None) -> int:
+    """Force-delete an article's cached image files and rows.
+
+    Entries still pinned (shared by a favorited article) are skipped so a
+    favorited article never loses its images. Unlike unpin_article_images this
+    actively frees disk instead of waiting for size-triggered prune_cache."""
+    if not IMAGE_CACHE_ENABLED:
+        return 0
+    conn = _connect()
+    deleted = 0
+    try:
+        hashes = {_url_hash(url) for url, _ in collect_image_urls(body_html, thumb, body_limit=None)}
+        if article_id is not None:
+            rows = conn.execute(
+                "SELECT url_hash FROM image_cache_article_images WHERE article_id = ?",
+                (article_id,),
+            ).fetchall()
+            hashes.update(r["url_hash"] for r in rows)
+        for url_hash in hashes:
+            row = conn.execute(
+                "SELECT path, pinned FROM image_cache_entries WHERE url_hash = ?",
+                (url_hash,),
+            ).fetchone()
+            if not row or row["pinned"]:
+                continue
+            try:
+                (CACHE_DIR / row["path"]).unlink(missing_ok=True)
+            except OSError:
+                pass
+            conn.execute("DELETE FROM image_cache_entries WHERE url_hash = ?", (url_hash,))
+            conn.execute("DELETE FROM image_cache_article_images WHERE url_hash = ?", (url_hash,))
+            deleted += 1
+        conn.commit()
+    finally:
+        conn.close()
+    return deleted
