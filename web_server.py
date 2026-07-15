@@ -1653,27 +1653,54 @@ def _parse_title_summary_result(raw: str | None) -> dict:
     return {"title": text, "valid": True, "reason": "legacy plain title summary"}
 
 
+_TITLE_PUNCTUATION_PAIRS = (
+    # ASCII/西文
+    ("(", ")"), ("[", "]"), ("{", "}"),
+    # 全角 / CJK
+    ("\uff08", "\uff09"),   # （）
+    ("\uff3b", "\uff3d"),   # ［］
+    ("\uff5b", "\uff5d"),   # ｛｝
+    # 中文专用
+    ("\u300a", "\u300b"),   # 《》
+    ("\u300c", "\u300d"),   # 「」
+    ("\u300e", "\u300f"),   # 『』
+    ("\u3010", "\u3011"),   # 【】
+    ("\u3014", "\u3015"),   # 〔〕
+    ("\u3016", "\u3017"),   # 〖〗
+    ("\u3008", "\u3009"),   # 〈〉
+    # 弯引号
+    ("\u201c", "\u201d"),   # ""
+    ("\u2018", "\u2019"),   # ''
+)
+
+
+def _strip_unbalanced_punctuation(title: str) -> str:
+    """Drop orphaned members of paired punctuation \u2014 a \u300b with no opening
+    \u300a, a dangling \u300c, etc. \u2014 so a title whose only defect is a stray
+    bracket/quote is cleaned up in place instead of being shown (or clipped)
+    with the orphan. Each pair type is matched independently with a depth
+    counter: unmatched closers and leftover openers are removed."""
+    remove: set[int] = set()
+    for left, right in _TITLE_PUNCTUATION_PAIRS:
+        if left == right:
+            continue
+        open_stack: list[int] = []
+        for i, ch in enumerate(title):
+            if ch == left:
+                open_stack.append(i)
+            elif ch == right:
+                if open_stack:
+                    open_stack.pop()
+                else:
+                    remove.add(i)
+        remove.update(open_stack)
+    if not remove:
+        return title
+    return "".join(ch for i, ch in enumerate(title) if i not in remove)
+
+
 def _balanced_title_punctuation(title: str) -> bool:
-    pairs = (
-        # ASCII/西文
-        ("(", ")"), ("[", "]"), ("{", "}"),
-        # 全角 / CJK
-        ("\uff08", "\uff09"),   # （）
-        ("\uff3b", "\uff3d"),   # ［］
-        ("\uff5b", "\uff5d"),   # ｛｝
-        # 中文专用
-        ("\u300a", "\u300b"),   # 《》
-        ("\u300c", "\u300d"),   # 「」
-        ("\u300e", "\u300f"),   # 『』
-        ("\u3010", "\u3011"),   # 【】
-        ("\u3014", "\u3015"),   # 〔〕
-        ("\u3016", "\u3017"),   # 〖〗
-        ("\u3008", "\u3009"),   # 〈〉
-        # 弯引号
-        ("\u201c", "\u201d"),   # ""
-        ("\u2018", "\u2019"),   # ''
-    )
-    for left, right in pairs:
+    for left, right in _TITLE_PUNCTUATION_PAIRS:
         if title.count(left) != title.count(right):
             return False
         if title.find(right) != -1 and (title.find(left) == -1 or title.find(right) < title.find(left)):
@@ -1881,6 +1908,14 @@ def _repair_title_summary(title: str | None) -> str:
     text = " ".join(text.split())
     if _is_valid_title_summary(text) and _balanced_title_punctuation(text):
         return text
+
+    # If the only defect is a dangling bracket/quote, drop the orphan(s) and
+    # keep the full title rather than slicing off content — a stray 》 must
+    # never survive into what the reader sees.
+    if not _balanced_title_punctuation(text):
+        stripped = _clean_title_summary(_strip_unbalanced_punctuation(text))
+        if _is_valid_title_summary(stripped) and _balanced_title_punctuation(stripped):
+            return stripped
 
     sentence_parts = [p.strip() for p in re.split(r"[。！？!?；;]\s*", text) if p.strip()]
     for part in sentence_parts:
