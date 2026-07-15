@@ -139,7 +139,7 @@ RAYNEWS_FROM_EMAIL=news@example.com
 docker compose up -d
 ```
 
-Open `http://<server-address>:8090`. The container fetches once at startup and refreshes every 15 minutes.
+Open `http://<server-address>:8090`. The container starts serving persisted content immediately, while its initial fetch runs in the background; it then refreshes every 15 minutes. A new deployment may have no articles until that first fetch completes, but the Web and API services do not wait for it before starting.
 
 The first successful registration becomes the administrator. It is recommended to use the same address as `RAYNEWS_ADMIN_EMAIL`.
 
@@ -252,7 +252,8 @@ Source labels and categories are global. Every user sees the source structure ma
 ## Common Endpoints
 
 - Health check: `GET /health`
-- Manual refresh: signed-in users and administrators can use the refresh control or call the protected `GET/POST /auth/refresh`
+- Manual refresh: signed-in users with the **User** or **Admin** role can use the refresh control or call the authenticated `POST /auth/refresh`. It returns the background-job state immediately instead of waiting for the fetch to finish, so reading remains available. The page polls the authenticated `GET /auth/refresh/status` endpoint and reports completion plus the number of new articles, when any are found.
+- Logo: this is only a lightweight return to the first **All** page, scroll to the top, and check for new articles; it does not start a full server-side fetch.
 - Article list: `GET /api/news`
 - Image cache: `GET /img-cache?url=<encoded-url>`
 
