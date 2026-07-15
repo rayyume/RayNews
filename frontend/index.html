@@ -4321,6 +4321,7 @@ async function triggerRefresh() {
     return;
   }
 
+  cancelStartupEmptyRevalidation();
   const flowGeneration = ++refreshFlowGeneration;
   const flowController = new AbortController();
   refreshFlowController = flowController;
@@ -4547,11 +4548,14 @@ function startStartupEmptyRevalidation(initialData, {
   sourceSnapshot = null,
   maxAttempts = 24,
   intervalMs = 5000,
+  requestTimeoutMs = 12000,
+  maxDurationMs = 120000,
 } = {}) {
   if (!isStartupInitializationResponse(initialData)) return false;
   cancelStartupEmptyRevalidation();
   const generation = ++startupCalibrationGeneration;
   let attempts = 0;
+  const deadline = Date.now() + Math.max(1, maxDurationMs);
   coldStartInitializationActive = true;
   coldStartInitializationTimedOut = false;
   const ownsView = () => (
@@ -4576,14 +4580,28 @@ function startStartupEmptyRevalidation(initialData, {
   };
   const scheduleNext = () => {
     if (!ownsView()) return;
-    startupCalibrationTimer = setTimeout(poll, intervalMs);
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      settle(null, true);
+      return;
+    }
+    startupCalibrationTimer = setTimeout(poll, Math.min(intervalMs, remainingMs));
   };
   const poll = async () => {
     startupCalibrationTimer = null;
     if (!ownsView()) return;
+    if (Date.now() >= deadline) {
+      settle(null, true);
+      return;
+    }
     attempts++;
     const controller = new AbortController();
     startupCalibrationController = controller;
+    let requestTimedOut = false;
+    const requestTimeout = setTimeout(() => {
+      requestTimedOut = true;
+      controller.abort();
+    }, Math.max(1, Math.min(requestTimeoutMs, deadline - Date.now())));
     try {
       const data = await fetchNewsPage(page, activeFilter, controller.signal, sourceSnapshot);
       if (!ownsView() || startupCalibrationController !== controller) return;
@@ -4596,7 +4614,7 @@ function startStartupEmptyRevalidation(initialData, {
         settle(data);
         return;
       }
-      if (attempts >= maxAttempts) {
+      if (attempts >= maxAttempts || Date.now() >= deadline) {
         settle(null, true);
         return;
       }
@@ -4604,9 +4622,11 @@ function startStartupEmptyRevalidation(initialData, {
     } catch (e) {
       if (!ownsView() || startupCalibrationController !== controller) return;
       startupCalibrationController = null;
-      if (e && e.name === 'AbortError') return;
-      if (attempts >= maxAttempts) settle(null, true);
+      if (e && e.name === 'AbortError' && !requestTimedOut) return;
+      if (attempts >= maxAttempts || Date.now() >= deadline) settle(null, true);
       else scheduleNext();
+    } finally {
+      clearTimeout(requestTimeout);
     }
   };
   renderList();

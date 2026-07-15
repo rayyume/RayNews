@@ -173,6 +173,7 @@ context.pageNavigationSequence = 3;
 context.pageRequestSequence = 8;
 context.pageRequestPendingSequence = 0;
 context.pageNavigationPending = false;
+context.cancelStartupEmptyRevalidation = () => {{}};
 context.hideNewArticlesPrompt = () => {{}};
 context.showToast = message => context.toasts.push(message);
 context.toasts = [];
@@ -341,6 +342,7 @@ context.pageRequestSequence = 0;
 context.pageRequestPendingSequence = 0;
 context.pageNavigationPending = false;
 context.document = { hidden: false };
+context.cancelStartupEmptyRevalidation = () => {};
 context.hideNewArticlesPrompt = () => {};
 context.promptCalls = 0;
 context.showNewArticlesPrompt = () => context.promptCalls++;
@@ -461,8 +463,16 @@ context.fetchNewsPage = async (page, activeFilter, signal) => {
 };
 context.fetchCalls = [];
 const scheduled = [];
-context.setTimeout = callback => { scheduled.push(callback); return scheduled.length; };
-context.clearTimeout = () => {};
+let nextTimer = 0;
+context.setTimeout = callback => {
+  const timer = { id: ++nextTimer, callback };
+  scheduled.push(timer);
+  return timer.id;
+};
+context.clearTimeout = id => {
+  const index = scheduled.findIndex(timer => timer.id === id);
+  if (index >= 0) scheduled.splice(index, 1);
+};
 const initial = {
   items: [], total: 0, page: 1,
   diagnostics: { refresh_job: { status: 'running', trigger: 'startup' } },
@@ -473,7 +483,7 @@ const started = context.startStartupEmptyRevalidation(initial, {
 assert.equal(started, true);
 assert.deepEqual(context.renders, ['initializing']);
 assert.equal(scheduled.length, 1);
-await scheduled.shift()();
+await scheduled.shift().callback();
 assert.equal(context.fetchCalls.length, 1);
 assert.equal(context.fetchCalls[0].page, 1);
 assert.equal(context.fetchCalls[0].activeFilter, 'all');
@@ -512,8 +522,16 @@ const initial = {
   diagnostics: { refresh_job: { status: 'running', trigger: 'startup' } },
 };
 const timers = [];
-context.setTimeout = callback => { timers.push(callback); return timers.length; };
-context.clearTimeout = () => {};
+let nextTimer = 0;
+context.setTimeout = callback => {
+  const timer = { id: ++nextTimer, callback };
+  timers.push(timer);
+  return timer.id;
+};
+context.clearTimeout = id => {
+  const index = timers.findIndex(timer => timer.id === id);
+  if (index >= 0) timers.splice(index, 1);
+};
 context.fetchNewsPage = async () => ({
   items: [], total: 0, page: 1,
   diagnostics: { refresh_job: { status: 'completed', trigger: 'startup' } },
@@ -521,7 +539,7 @@ context.fetchNewsPage = async () => ({
 context.startStartupEmptyRevalidation(initial, {
   page: 1, activeFilter: 'all', requestSeq: 3, maxAttempts: 2, intervalMs: 5000,
 });
-await timers.shift()();
+await timers.shift().callback();
 assert.equal(context.applied, 1);
 assert.equal(context.coldStartInitializationActive, false);
 assert.equal(timers.length, 0);
@@ -530,7 +548,7 @@ context.fetchNewsPage = async () => initial;
 context.startStartupEmptyRevalidation(initial, {
   page: 1, activeFilter: 'all', requestSeq: 3, maxAttempts: 1, intervalMs: 5000,
 });
-await timers.shift()();
+await timers.shift().callback();
 assert.equal(context.coldStartInitializationActive, false);
 assert.equal(context.coldStartInitializationTimedOut, true);
 assert.equal(timers.length, 0);
@@ -1417,6 +1435,87 @@ assert.deepEqual(context.requestSources, ['财经早餐', '财经早餐别名'])
     )
 
 
+def test_startup_empty_revalidation_times_out_hung_gets_and_reaches_bound():
+    startup = source_between(
+        "function isStartupInitializationResponse(",
+        "function renderSourceDeepLinkError",
+    )
+    run_node(
+        startup,
+        """
+context.coldStartInitializationActive = false;
+context.coldStartInitializationTimedOut = false;
+context.startupCalibrationGeneration = 0;
+context.startupCalibrationController = null;
+context.startupCalibrationTimer = null;
+context.filter = 'all';
+context.currentPage = 1;
+context.pageRequestSequence = 12;
+context.document = { hidden: false };
+context.renderList = () => {};
+context.applyNewsPage = () => { context.applied++; };
+context.applied = 0;
+context.scheduleAdjacentPagePrefetch = () => {};
+context.fetchSignals = [];
+context.fetchNewsPage = (page, activeFilter, signal) => {
+  context.fetchSignals.push(signal);
+  return new Promise((resolve, reject) => {
+    signal.addEventListener('abort', () => reject(
+      Object.assign(new Error('timed out'), { name: 'AbortError' })
+    ));
+  });
+};
+let nextTimer = 0;
+context.timers = [];
+context.cleared = [];
+context.setTimeout = (callback, timeout) => {
+  const timer = { id: ++nextTimer, callback, timeout };
+  context.timers.push(timer);
+  return timer.id;
+};
+context.clearTimeout = id => context.cleared.push(id);
+const initial = {
+  items: [], total: 0, page: 1,
+  diagnostics: { refresh_job: { status: 'running', trigger: 'startup' } },
+};
+context.startStartupEmptyRevalidation(initial, {
+  page: 1, activeFilter: 'all', requestSeq: 12,
+  maxAttempts: 2, intervalMs: 5000, requestTimeoutMs: 12000,
+});
+const firstInterval = context.timers.shift();
+assert.equal(firstInterval.timeout, 5000);
+const firstPoll = firstInterval.callback();
+await Promise.resolve();
+assert.equal(context.fetchSignals.length, 1);
+assert.equal(context.fetchSignals[0].aborted, false);
+assert.equal(context.timers.length, 1);
+const firstRequestTimeout = context.timers.shift();
+assert.equal(firstRequestTimeout.timeout, 12000);
+firstRequestTimeout.callback();
+await firstPoll;
+assert.equal(context.fetchSignals[0].aborted, true);
+assert.ok(context.cleared.includes(firstRequestTimeout.id));
+assert.equal(context.timers.length, 1);
+
+const secondInterval = context.timers.shift();
+assert.equal(secondInterval.timeout, 5000);
+const secondPoll = secondInterval.callback();
+await Promise.resolve();
+assert.equal(context.fetchSignals.length, 2);
+const secondRequestTimeout = context.timers.shift();
+assert.equal(secondRequestTimeout.timeout, 12000);
+secondRequestTimeout.callback();
+await secondPoll;
+assert.equal(context.fetchSignals[1].aborted, true);
+assert.ok(context.cleared.includes(secondRequestTimeout.id));
+assert.equal(context.coldStartInitializationActive, false);
+assert.equal(context.coldStartInitializationTimedOut, true);
+assert.equal(context.timers.length, 0);
+assert.equal(context.applied, 0);
+""",
+    )
+
+
 def test_cold_start_network_retry_uses_a_fresh_abort_controller():
     load_page = source_between("async function loadNewsPage(", "function applyPageCalibrationWhenActive")
     run_node(
@@ -1829,5 +1928,136 @@ context.handleLogoKeydown(event('Enter'));
 context.handleLogoKeydown(event(' '));
 assert.equal(context.activations, 2);
 assert.equal(prevented, 2);
+""",
+    )
+
+
+def test_manual_refresh_cancels_pending_startup_calibration_before_updating():
+    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    run_node(
+        trigger,
+        """
+context.refreshInProgress = false;
+context.refreshFlowGeneration = 0;
+context.refreshFlowController = null;
+context.authToken = 'token';
+context.filter = 'all';
+context.currentPage = 2;
+context.pageNavigationSequence = 2;
+context.pageRequestSequence = 4;
+context.pageRequestPendingSequence = 0;
+context.pageNavigationPending = false;
+context.document = { hidden: false };
+context.hideNewArticlesPrompt = () => {};
+context.promptCalls = 0;
+context.showNewArticlesPrompt = () => { context.promptCalls++; };
+context.toasts = [];
+context.showToast = message => context.toasts.push(message);
+context.refreshErrorMessage = error => error.message || error.error || 'failed';
+context.hasBlockingOverlayOpen = () => false;
+context.consumePendingNewArticles = () => {};
+context.loadNewsPage = async () => { throw new Error('page 2 must not calibrate'); };
+context.runningStates = [];
+context.setRefreshRunning = running => {
+  context.refreshInProgress = running;
+  context.runningStates.push(running);
+};
+const oldController = new AbortController();
+let oldApplied = 0;
+const oldGet = new Promise(resolve => {
+  oldController.signal.addEventListener('abort', () => resolve('aborted'));
+}).then(outcome => {
+  if (outcome !== 'aborted') oldApplied++;
+});
+context.cancelCalls = 0;
+context.cancelStartupEmptyRevalidation = () => {
+  context.cancelCalls++;
+  oldController.abort();
+};
+context.requestRefreshOnce = async () => ({ job_id: 'manual-job', status: 'running' });
+let resolveManual;
+let markManualPolling;
+const manualPolling = new Promise(resolve => { markManualPolling = resolve; });
+context.pollRefreshJob = () => new Promise(resolve => {
+  resolveManual = resolve;
+  markManualPolling();
+});
+const manual = context.triggerRefresh();
+await manualPolling;
+assert.equal(context.cancelCalls, 1);
+assert.equal(oldController.signal.aborted, true);
+await oldGet;
+assert.equal(oldApplied, 0);
+assert.equal(context.refreshInProgress, true);
+assert.deepEqual(context.runningStates, [true]);
+assert.deepEqual(context.toasts, ['🔄 正在后台抓取...']);
+assert.equal(context.promptCalls, 0);
+resolveManual({ job_id: 'manual-job', status: 'completed', new_count: 0 });
+await manual;
+assert.deepEqual(context.runningStates, [true, false]);
+assert.equal(context.refreshInProgress, false);
+assert.ok(context.toasts.includes('✅ 已是最新'));
+""",
+    )
+
+
+def test_startup_empty_revalidation_has_wall_clock_deadline_for_hung_get():
+    startup = source_between(
+        "function isStartupInitializationResponse(",
+        "function renderSourceDeepLinkError",
+    )
+    run_node(
+        startup,
+        """
+let now = 0;
+context.Date = { now: () => now };
+context.coldStartInitializationActive = false;
+context.coldStartInitializationTimedOut = false;
+context.startupCalibrationGeneration = 0;
+context.startupCalibrationController = null;
+context.startupCalibrationTimer = null;
+context.filter = 'all';
+context.currentPage = 1;
+context.pageRequestSequence = 1;
+context.document = { hidden: false };
+context.renderList = () => {};
+context.applyNewsPage = () => {};
+context.scheduleAdjacentPagePrefetch = () => {};
+context.fetchNewsPage = (page, activeFilter, signal) => new Promise((resolve, reject) => {
+  signal.addEventListener('abort', () => reject(
+    Object.assign(new Error('timed out'), { name: 'AbortError' })
+  ));
+});
+const timers = [];
+let timerId = 0;
+context.setTimeout = (callback, timeout) => {
+  const timer = { id: ++timerId, timeout, callback: () => { now += timeout; return callback(); } };
+  timers.push(timer);
+  return timer.id;
+};
+context.clearTimeout = id => {
+  const index = timers.findIndex(timer => timer.id === id);
+  if (index >= 0) timers.splice(index, 1);
+};
+const initial = {
+  items: [], total: 0,
+  diagnostics: { refresh_job: { status: 'running', trigger: 'startup' } },
+};
+context.startStartupEmptyRevalidation(initial, {
+  page: 1, activeFilter: 'all', requestSeq: 1,
+  maxAttempts: 24, intervalMs: 5, requestTimeoutMs: 12, maxDurationMs: 10,
+});
+const interval = timers.shift();
+assert.equal(interval.timeout, 5);
+const poll = interval.callback();
+await Promise.resolve();
+const requestTimeout = timers.shift();
+assert.equal(requestTimeout.timeout, 5);
+requestTimeout.callback();
+await poll;
+assert.equal(now, 10);
+assert.equal(context.coldStartInitializationActive, false);
+assert.equal(context.coldStartInitializationTimedOut, true);
+assert.equal(timers.length, 0);
 """,
     )
