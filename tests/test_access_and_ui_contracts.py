@@ -185,25 +185,15 @@ def test_mobile_back_button_is_excluded_from_edge_swipe_and_handles_touch_direct
     assert "e.stopPropagation();" in html
 
 
-def test_article_back_and_refresh_do_not_replace_the_whole_list():
+def test_article_back_does_not_replace_the_whole_list():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     close_start = html.index("function closeArticle(fromHistoryNavigation = false, forceInAppNavigation = false)")
     close_end = html.index("// Handle hash-based article links", close_start)
     close_block = html[close_start:close_end]
-    refresh_start = html.index("async function triggerRefresh(")
-    refresh_end = html.index("function setRefreshRunning", refresh_start)
-    refresh_block = html[refresh_start:refresh_end]
-
     assert "function reconcileVisibleArticles({ animate = false } = {})" in html
     assert "function flushPendingListUpdate()" not in html
     assert "flushPendingListUpdate();" not in close_block
     assert "renderList();" not in close_block
-    # triggerRefresh no longer reloads the list itself — it just kicks off the
-    # backend fetch and lets the normal auto-refresh cycle pick up new articles.
-    assert "data = await requestRefreshOnce();" in refresh_block
-    assert "if (!isTransientRefreshError(firstError)) throw firstError;" in refresh_block
-    assert "loadSince(" not in refresh_block
-    assert "const listResp = await fetch('/api/news?size='" not in refresh_block
 
 
 def test_blocking_list_loading_is_only_used_when_no_articles_are_available():
@@ -322,42 +312,65 @@ def test_cached_page_background_calibration_reuses_existing_cards():
     assert "const showPageProgress = !cacheApplied && userInitiated;" in load_block
 
 
-def test_logo_and_header_refresh_share_flow_while_scroll_top_is_quiet():
+def test_logo_is_lightweight_and_header_button_starts_refresh_job():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
-    # Logo and the header "刷新" button are the hard-refresh path: they always
-    # jump back to "all" and trigger a fresh backend scrape.
     assert 'class="logo" onclick="refreshHomepage()"' in html
-    assert 'id="refreshBtn" onclick="refreshHomepage()"' in html
-    start = html.index("async function refreshHomepage()")
-    end = html.index("async function scrollToTopAndCheckLatest", start)
-    block = html[start:end]
-    assert "setRefreshRunning(true);" in block
-    assert "preparePageNavigation(1, 'all')" in block
-    assert "scrollPageToTop({" in block
-    assert "applyNewsPage(targetData, 1, 'all', { animate: true, preserveDom: true });" in block
-    assert "await triggerRefresh({ stateAlreadySet: true, showStart: false });" in block
-
-    # The bottom-right ↑ button is a different, lighter-weight action: scroll to
-    # top and quietly check for new articles in whatever filter is active — it
-    # must NOT force filter back to "all" and must NOT trigger a backend scrape.
-    assert 'id="scrollTopBtn" onclick="scrollToTopAndCheckLatest()"' in html
-    quiet_start = html.index("async function scrollToTopAndCheckLatest()")
-    quiet_end = html.index("function articleDetailErrorText", quiet_start)
-    quiet_block = html[quiet_start:quiet_end]
-    assert "const activeFilter = filter;" in quiet_block
-    assert "loadSince(cursor, { forceApply: true })" in quiet_block
-    assert "filter = 'all'" not in quiet_block
-    assert "triggerRefresh(" not in quiet_block
+    assert 'id="refreshBtn" onclick="triggerRefresh()"' in html
+    logo = html[html.index("async function refreshHomepage()"):html.index("async function scrollToTopAndCheckLatest")]
+    assert "loadSince(cursor, { forceApply: true })" in logo
+    assert logo.count("loadSince(cursor, { forceApply: true })") == 1
+    assert "preparePageNavigation(1, 'all')" in logo
+    assert "scrollPageToTop({" in logo
+    assert "requestRefreshOnce" not in logo
+    assert "triggerRefresh(" not in logo
 
 
-def test_manual_refresh_has_no_unused_silent_start_mode():
+def test_manual_refresh_posts_once_then_polls_status():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
-    start = html.index("async function triggerRefresh(")
-    end = html.index("function setRefreshRunning(", start)
-    block = html[start:end]
-    assert "async function triggerRefresh({ stateAlreadySet = false, showStart = true } = {})" in block
-    assert "silentStart" not in block
-    assert "if (showStart) showToast('🔄 正在后台抓取...');" in block
+    block = html[html.index("async function triggerRefresh("):html.index("function setRefreshRunning", html.index("async function triggerRefresh("))]
+    assert block.count("await requestRefreshOnce()") == 1
+    assert "await pollRefreshJob(data.job_id)" in block
+    assert "isTransientRefreshError" not in block
+    assert "await delay(800)" not in block
+    assert "const activeFilter = filter;" in block
+    assert block.count("loadNewsPage(1, {") == 1
+    assert "currentPage === 1" in block
+    assert "filter === activeFilter" in block
+    assert "!hasBlockingOverlayOpen()" in block
+
+
+def test_refresh_status_polling_uses_authenticated_get_and_bounded_wait():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert "async function requestRefreshStatus()" in html
+    assert "async function pollRefreshJob(" in html
+    request = html[html.index("async function requestRefreshStatus()"):html.index("async function pollRefreshJob(")]
+    poll = html[html.index("async function pollRefreshJob("):html.index("function rebuildCategoryMap")]
+    assert "fetch('/auth/refresh/status'" in request
+    assert "'Authorization': 'Bearer ' + authToken" in request
+    assert "cache: 'no-store'" in request
+    assert "await delay(1200);" in poll
+    assert "const status = await requestRefreshStatus();" in poll
+    assert "status.job_id !== jobId && status.status === 'running'" in poll
+    assert "status.status === 'completed' || status.status === 'failed'" in poll
+    assert "throw new Error('刷新状态查询超时，请稍后查看最新文章');" in poll
+
+
+def test_refresh_running_state_only_disables_refresh_button():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    block = html[html.index("function setRefreshRunning("):html.index("function buildNewsPageParams")]
+    assert "btn.disabled = isRunning;" in block
+    assert "document.querySelector('.logo')" not in block
+    assert "scrollTopBtn" not in block
+    assert "manual-refreshing" not in block
+
+
+def test_manual_refresh_suppresses_competing_new_article_prompt():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    prompt = html[html.index("function showNewArticlesPrompt()"):html.index("function hideNewArticlesPrompt()")]
+    assert "if (refreshInProgress) return;" in prompt
+    trigger = html[html.index("async function triggerRefresh("):html.index("function setRefreshRunning")]
+    assert "consumePendingNewArticles(activeFilter);" in trigger
+    assert trigger.index("consumePendingNewArticles(activeFilter);") < trigger.index("setRefreshRunning(false);")
 
 
 def test_manual_refresh_uses_structured_error_messages():
@@ -369,11 +382,10 @@ def test_manual_refresh_uses_structured_error_messages():
     assert "function refreshErrorMessage" in html
     assert "async function parseRefreshResponse" in html
     assert "async function requestRefreshOnce()" in html
-    assert "function isTransientRefreshError" in html
+    assert "async function requestRefreshStatus()" in html
+    assert "async function pollRefreshJob(jobId" in html
     assert "await requestRefreshOnce();" in trigger_block
-    assert "await delay(800);" in trigger_block
-    assert "data = await requestRefreshOnce();" in trigger_block
-    assert "if (data && data.status === 'skipped') return data;" in html
+    assert "await pollRefreshJob(data.job_id);" in trigger_block
     assert "showToast('❌ 刷新失败: ' + (e.message || '网络错误'))" not in trigger_block
 
 

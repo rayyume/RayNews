@@ -88,7 +88,6 @@ a:hover{text-decoration:underline}
 .header{position:fixed;top:0;left:0;right:0;z-index:100;background:var(--header-bg);backdrop-filter:blur(20px) saturate(1.2);-webkit-backdrop-filter:blur(20px) saturate(1.2);border-bottom:1px solid var(--border);padding:env(safe-area-inset-top,0px) 20px 0}
 .header-inner{width:100%;max-width:960px;min-width:0;margin:0 auto;display:flex;align-items:center;justify-content:space-between;min-height:56px;position:relative}
 .logo{display:flex;align-items:center;gap:10px;font-weight:800;font-size:18px;letter-spacing:-0.02em;cursor:pointer;border-radius:8px}
-.logo.refresh-locked{pointer-events:none;opacity:.72}
 .logo-icon{width:28px;height:28px;border-radius:8px;overflow:hidden;flex-shrink:0}
 .logo-icon img{width:100%;height:100%;object-fit:cover}
 .header-right{display:flex;min-width:0;align-items:center;gap:10px;font-size:12px;color:var(--text-3);position:relative}
@@ -128,7 +127,6 @@ a:hover{text-decoration:underline}
 
 /* ═══ News List ═══════════════════════════════════ */
 .list{display:flex;flex-direction:column;gap:1px;background:var(--border);border-radius:var(--radius);overflow:hidden;margin-bottom:40px;position:relative}
-.list.manual-refreshing::before{content:'';position:absolute;z-index:4;left:0;top:0;width:36%;height:3px;background:linear-gradient(90deg,transparent,var(--accent),transparent);pointer-events:none;animation:listRefreshSweep 1.15s ease-in-out infinite}
 .list.page-loading::before{content:'';position:absolute;z-index:4;left:0;top:0;width:28%;height:3px;background:linear-gradient(90deg,transparent,var(--accent),transparent);pointer-events:none;animation:listRefreshSweep 1.15s ease-in-out infinite}
 .list.page-transitioning{overflow-anchor:none}
 .list.page-switching .item{animation:pageFadeIn .28s cubic-bezier(.22,.61,.36,1) both;animation-delay:calc(var(--motion-index,0) * 40ms)}
@@ -519,7 +517,7 @@ body.body-scroll-lock{overflow:hidden!important}
         <button class="icon-btn daily-summary-btn" id="dailySummaryBtn" onclick="showDailySummary()" title="每日总结" aria-label="每日总结">✨</button>
         <span class="status-text"><span class="status-dot"></span>实时更新</span>
         <span class="hide-m" id="count"></span>
-        <button class="refresh-btn" id="refreshBtn" onclick="refreshHomepage()"><span>刷新</span></button>
+        <button class="refresh-btn" id="refreshBtn" onclick="triggerRefresh()"><span>刷新</span></button>
         <div class="user-menu" id="userMenu">
       <div class="user-menu-inner">
         <div class="user-menu-header">
@@ -1306,11 +1304,6 @@ async function parseRefreshResponse(resp) {
   return data;
 }
 
-function isTransientRefreshError(error) {
-  const message = (error && error.message) || '';
-  return /Failed to fetch|NetworkError|Load failed|接口返回了 HTML|接口返回格式错误|超时|timeout|timed out|temporarily|Response|FetchError/i.test(message);
-}
-
 async function requestRefreshOnce() {
   const resp = await fetch('/auth/refresh', {
     method: 'POST',
@@ -1318,6 +1311,25 @@ async function requestRefreshOnce() {
     cache: 'no-store',
   });
   return parseRefreshResponse(resp);
+}
+
+async function requestRefreshStatus() {
+  const resp = await fetch('/auth/refresh/status', {
+    headers: { 'Authorization': 'Bearer ' + authToken },
+    cache: 'no-store',
+  });
+  return parseRefreshResponse(resp);
+}
+
+async function pollRefreshJob(jobId, timeoutMs = 135000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    await delay(1200);
+    const status = await requestRefreshStatus();
+    if (status.job_id !== jobId && status.status === 'running') continue;
+    if (status.status === 'completed' || status.status === 'failed') return status;
+  }
+  throw new Error('刷新状态查询超时，请稍后查看最新文章');
 }
 
 function rebuildCategoryMap(rows) {
@@ -4193,31 +4205,48 @@ function reconcileVisibleArticles({ animate = false } = {}) {
   if (animate) animateArticleLayout(list, previousRects, newIds);
 }
 
-async function triggerRefresh({ stateAlreadySet = false, showStart = true } = {}) {
-  if (refreshInProgress && !stateAlreadySet) {
-    return;
-  }
+async function triggerRefresh() {
+  if (refreshInProgress) return;
   // Unauthenticated users cannot refresh
   if (!authToken) {
     showToast('🔒 请先登录');
     return;
   }
 
-  if (!stateAlreadySet) setRefreshRunning(true);
-  if (showStart) showToast('🔄 正在后台抓取...');
+  const activeFilter = filter;
+  setRefreshRunning(true);
+  hideNewArticlesPrompt();
+  showToast('🔄 正在后台抓取...');
 
-  // Fire refresh request asynchronously — don't block the UI.
-  // Backend fetches in background; new articles appear on next auto-refresh cycle.
   try {
-    let data;
-    try {
-      data = await requestRefreshOnce();
-    } catch (firstError) {
-      if (!isTransientRefreshError(firstError)) throw firstError;
-      await delay(800);
-      data = await requestRefreshOnce();
+    const data = await requestRefreshOnce();
+    if (!data.job_id) throw new Error('刷新任务未返回编号');
+    const status = await pollRefreshJob(data.job_id);
+    if (status.status === 'failed') {
+      throw new Error(refreshErrorMessage(status));
     }
-    showToast(data.status === 'skipped' ? '已有刷新任务正在运行，请稍后查看' : '✅ 刷新完成');
+    if (
+      filter === activeFilter
+      && currentPage === 1
+      && !hasBlockingOverlayOpen()
+    ) {
+      const loaded = await loadNewsPage(1, {
+        activeFilter,
+        useCache: false,
+        forceNetwork: true,
+        animate: true,
+      });
+      if (
+        loaded
+        && filter === activeFilter
+        && currentPage === 1
+        && !hasBlockingOverlayOpen()
+      ) {
+        consumePendingNewArticles(activeFilter);
+      }
+    }
+    const count = Number(status.new_count || 0);
+    showToast(count > 0 ? `✅ 刷新完成，新增 ${count} 篇` : '✅ 刷新完成');
   } catch (e) {
     showToast('❌ ' + refreshErrorMessage(e));
   } finally {
@@ -4234,15 +4263,6 @@ function setRefreshRunning(isRunning) {
     const label = btn.querySelector('span') || btn;
     label.textContent = isRunning ? '刷新中' : '刷新';
   }
-  const logo = document.querySelector('.logo');
-  if (logo) {
-    logo.classList.toggle('refresh-locked', isRunning);
-    logo.setAttribute('aria-disabled', isRunning ? 'true' : 'false');
-  }
-  const scrollTopBtn = document.getElementById('scrollTopBtn');
-  if (scrollTopBtn) scrollTopBtn.disabled = isRunning;
-  const list = document.getElementById('list');
-  if (list) list.classList.toggle('manual-refreshing', isRunning);
 }
 
 function buildNewsPageParams(page = currentPage, activeFilter = filter) {
@@ -4509,6 +4529,7 @@ function consumePendingNewArticles(activeFilter) {
 }
 
 function showNewArticlesPrompt() {
+  if (refreshInProgress) return;
   const prompt = document.getElementById('newArticlesPrompt');
   if (!prompt) return;
   // Only surface the toast when the newly-arrived articles are actually relevant
@@ -4756,8 +4777,8 @@ async function loadSince(timestamp, { forceApply = false } = {}) {
     pendingNewItems = pendingNewItems.concat(newItems);
     refreshTodayArticleCount();
     await loadSourceCategories();
-    // Keep an "all"-scoped snapshot warm — refreshHomepage()/showHomepageAfterScroll()
-    // (the logo/顶部刷新 hard-refresh path) intentionally always jump to "all" and rely on this.
+    // Keep an "all"-scoped snapshot warm — the lightweight Logo/home flow
+    // intentionally jumps to "all" and can reuse it without starting a scrape.
     const latestAllData = await fetchNewsPage(1, 'all');
     pendingLatestPage = latestAllData;
     await writeCachedNewsPage(1, 'all', latestAllData);
@@ -5439,13 +5460,6 @@ async function showHomepageAfterScroll() {
 }
 
 async function refreshHomepage() {
-  if (!authToken) {
-    triggerRefresh();
-    return;
-  }
-  if (refreshInProgress) return;
-  setRefreshRunning(true);
-  showToast('🔄 正在后台抓取...');
   programmaticScrollUntil = Date.now() + 800;
   let targetData = null;
   let nearTop = false;
@@ -5478,28 +5492,17 @@ async function refreshHomepage() {
   nearTop = true;
   applyTarget();
   if (!targetDataResult || !applied) {
-    setRefreshRunning(false);
     showToast('❌ 刷新失败，请稍后重试');
     return;
   }
   stabilizePageTop();
-  await triggerRefresh({ stateAlreadySet: true, showStart: false });
-  // After backend scraping completes, reload the page with freshly scraped data
-  if (filter === 'all' && currentPage === 1) {
-    await loadNewsPage(1, {
-      activeFilter: 'all',
-      useCache: false,
-      forceNetwork: true,
-      userInitiated: false,
-      animate: true,
-    });
-  }
+  const cursor = latestKnownTimestamp || latestNewsTimestamp();
+  await loadSince(cursor, { forceApply: true });
 }
 
 // Bottom-right ↑ button: just "back to top" + a quiet check for new articles in
-// whatever category is currently selected. Unlike refreshHomepage() (logo / header
-// "刷新" button), this never forces filter back to "all" and never triggers a full
-// backend re-scrape — it only asks "is there anything new since last time?".
+// whatever category is currently selected. Unlike the Logo, it keeps the active
+// filter; unlike the header "刷新" button, neither lightweight flow starts a scrape.
 async function scrollToTopAndCheckLatest() {
   const activeFilter = filter;
   programmaticScrollUntil = Date.now() + 800;
