@@ -1589,12 +1589,19 @@ async function cleanupNewsCache() {
   } catch (e) {}
 }
 
-async function loadSourceCategories() {
-  const cached = await readNewsCacheEntry('source-metadata');
+async function loadSourceCategories({ onMetadataReady = null } = {}) {
+  let metadataNotified = false;
+  const notifyMetadataReady = () => {
+    if (metadataNotified) return;
+    metadataNotified = true;
+    if (onMetadataReady) onMetadataReady();
+  };
+  const cached = await withCacheTimeout(readNewsCacheEntry('source-metadata'));
   if (cached && cached.data && Array.isArray(cached.data.sources)) {
     rebuildCategoryMap(cached.data.sources);
   }
   renderFilters();
+  if (cached && cached.data && Array.isArray(cached.data.sources)) notifyMetadataReady();
   try {
     let data;
     if (!isRestrictedUser()) {
@@ -1606,6 +1613,7 @@ async function loadSourceCategories() {
     if (data && Array.isArray(data.sources)) {
       rebuildCategoryMap(data.sources);
       renderFilters();
+      notifyMetadataReady();
       writeNewsCacheEntry({
         key: 'source-metadata',
         kind: 'metadata',
@@ -1615,6 +1623,8 @@ async function loadSourceCategories() {
     }
   } catch (e) {
     // Keep the built-in fallback CATEGORY_MAP.
+  } finally {
+    notifyMetadataReady();
   }
 }
 
@@ -4658,6 +4668,20 @@ async function loadNewsPage(page = 1, options = {}) {
   }
 }
 
+async function withCacheTimeout(promise, fallback = null, timeoutMs = 500) {
+  let timeout;
+  try {
+    return await Promise.race([
+      Promise.resolve(promise).catch(() => fallback),
+      new Promise(resolve => {
+        timeout = setTimeout(() => resolve(fallback), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function loadNewsPageRequest(requestSeq, page = 1, {
   activeFilter = filter,
   useCache = true,
@@ -4669,7 +4693,7 @@ async function loadNewsPageRequest(requestSeq, page = 1, {
 } = {}) {
   let cacheApplied = false;
   if (useCache) {
-    const cached = await readCachedNewsPage(page, activeFilter);
+    const cached = await withCacheTimeout(readCachedNewsPage(page, activeFilter));
     if (cached && requestSeq === pageRequestSequence) {
       if (applicationGuard && !applicationGuard()) return false;
       rememberBufferedPage(page, activeFilter, cached);
@@ -4699,7 +4723,7 @@ async function loadNewsPageRequest(requestSeq, page = 1, {
       const timeout = setTimeout(() => controller.abort(), 12000);
       try {
         const data = await fetchNewsPage(page, activeFilter, controller.signal);
-        await writeCachedNewsPage(page, activeFilter, data);
+        await withCacheTimeout(writeCachedNewsPage(page, activeFilter, data));
         rememberBufferedPage(page, activeFilter, data);
         if (requestSeq !== pageRequestSequence) return false;
         if (applicationGuard && !applicationGuard()) return false;
@@ -6245,11 +6269,34 @@ function resetMobileColdStartScroll() {
 }
 
 async function bootstrapNews() {
-  const initialState = listStateFromUrl();
+  const requestedSource = new URLSearchParams(location.search).get('source');
+  let resolveSourceMetadata;
+  const sourceMetadataPromise = new Promise(resolve => {
+    resolveSourceMetadata = resolve;
+  });
+  let initialState = listStateFromUrl();
   filter = initialState.activeFilter;
   currentPage = 1;  // always start at page 1 on fresh load
   renderTopCatBar();
-  const sourcePromise = loadSourceCategories();
+  const sourcePromise = loadSourceCategories({ onMetadataReady: resolveSourceMetadata });
+  if (requestedSource) {
+    await sourceMetadataPromise;
+    initialState = listStateFromUrl();
+    if (initialState.activeFilter === 'all') {
+      await sourcePromise;
+      initialState = listStateFromUrl();
+    }
+    if (initialState.activeFilter === 'all') {
+      renderColdStartError('未找到指定订阅源');
+      const todayCountPromise = refreshTodayArticleCount();
+      await Promise.allSettled([sourcePromise, todayCountPromise]);
+      renderFilters();
+      resetMobileColdStartScroll();
+      return;
+    }
+    filter = initialState.activeFilter;
+    renderTopCatBar();
+  }
   const newsPromise = loadNewsPage(1, {
     activeFilter: initialState.activeFilter,
     useCache: true,

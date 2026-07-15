@@ -387,13 +387,14 @@ assert.equal(context.pageRequestPendingSequence, 0);
 
 
 def test_cached_source_metadata_renders_while_network_revalidation_is_pending():
-    load_sources = source_between("async function loadSourceCategories()", "function sourceLabel")
+    load_sources = source_between("async function loadSourceCategories(", "function sourceLabel")
     run_node(
         load_sources,
         """
 const events = [];
 let resolveNetwork;
 context.readNewsCacheEntry = async () => ({ data: { sources: ['cached'] } });
+context.withCacheTimeout = async value => value;
 context.rebuildCategoryMap = sources => events.push(`rebuild:${sources[0]}`);
 context.renderFilters = () => events.push('render');
 context.isRestrictedUser = () => false;
@@ -427,6 +428,7 @@ const pending = name => {
 };
 context.filter = 'all';
 context.currentPage = 9;
+context.location = { search: '' };
 context.listStateFromUrl = () => ({ activeFilter: 'cat:Tech' });
 context.renderTopCatBar = () => starts.push('topbar');
 context.loadSourceCategories = () => pending('sources');
@@ -455,6 +457,46 @@ assert.deepEqual(starts.slice(-3), ['filters', 'sync', 'scroll']);
     )
 
 
+def test_bootstrap_resolves_source_label_deep_link_after_metadata_hydration():
+    list_state = source_between("function listStateFromUrl()", "async function restoreListStateFromUrl")
+    bootstrap = source_between("async function bootstrapNews()", "// Initial load")
+    run_node(
+        list_state + bootstrap,
+        """
+const sourceKey = 'srcgrp:' + encodeURIComponent('财经早餐');
+context.location = { search: '?source=' + encodeURIComponent('财经早餐') + '&page=1' };
+context.sourceFilterGroups = {};
+context.CATEGORY_ORDER = ['News', 'Tech', 'Biz', 'Info'];
+context.URLSearchParams = URLSearchParams;
+context.filter = 'all';
+context.currentPage = 9;
+context.renderTopCatBar = () => {};
+context.loadSourceCategories = async ({ onMetadataReady } = {}) => {
+  await Promise.resolve();
+  context.sourceFilterGroups[sourceKey] = {
+    key: sourceKey,
+    label: '财经早餐',
+    sources: ['财经早餐'],
+  };
+  if (onMetadataReady) onMetadataReady();
+};
+context.requested = null;
+context.loadNewsPage = async (page, options) => {
+  context.requested = { page, activeFilter: options.activeFilter };
+  return true;
+};
+context.refreshTodayArticleCount = async () => {};
+context.renderFilters = () => {};
+context.syncListUrl = () => {};
+context.resetMobileColdStartScroll = () => {};
+await context.bootstrapNews();
+assert.deepEqual(context.requested, { page: 1, activeFilter: sourceKey });
+assert.equal(context.filter, sourceKey);
+assert.equal(context.currentPage, 1);
+""",
+    )
+
+
 def test_cold_start_network_retry_uses_a_fresh_abort_controller():
     load_page = source_between("async function loadNewsPage(", "function applyPageCalibrationWhenActive")
     run_node(
@@ -467,7 +509,10 @@ context.news = [];
 context.readCachedNewsPage = async () => ({ items: [{ id: 'cached' }], total: 1 });
 context.rememberBufferedPage = () => {};
 context.applied = [];
-context.applyNewsPage = data => context.applied.push(data.items[0].id);
+context.applyNewsPage = (data, page, activeFilter, options) => context.applied.push({
+  id: data.items[0].id,
+  preserveDom: options && options.preserveDom,
+});
 context.renderColdStartSkeleton = () => {};
 context.fetchSignals = [];
 context.fetchNewsPage = async (page, activeFilter, signal) => {
@@ -504,12 +549,182 @@ const loaded = await context.loadNewsPage(1, {
   networkRetries: 1,
 });
 assert.equal(loaded, true);
-assert.deepEqual(context.applied, ['cached', 'fresh']);
+assert.deepEqual(context.applied, [
+  { id: 'cached', preserveDom: undefined },
+  { id: 'fresh', preserveDom: true },
+]);
 assert.equal(context.fetchSignals.length, 2);
 assert.notEqual(context.fetchSignals[0], context.fetchSignals[1]);
 assert.deepEqual(context.fetchSignals.map(signal => signal.controller), [1, 2]);
 assert.deepEqual(context.delayCalls, [600]);
 assert.equal(context.pageRequestPendingSequence, 0);
+""",
+    )
+
+
+def test_hung_page_cache_read_cannot_block_cold_start_network():
+    load_page = source_between("async function loadNewsPage(", "function applyPageCalibrationWhenActive")
+    run_node(
+        load_page,
+        """
+context.pageRequestSequence = 0;
+context.pageRequestPendingSequence = 0;
+context.pageRequestController = null;
+context.news = [];
+context.readCachedNewsPage = () => new Promise(() => {});
+context.rememberBufferedPage = () => {};
+context.applied = [];
+context.applyNewsPage = data => context.applied.push(data.items[0].id);
+context.renderColdStartSkeleton = () => {};
+context.fetchCalls = 0;
+context.fetchNewsPage = async () => {
+  context.fetchCalls++;
+  return { items: [{ id: 'fresh' }], total: 1 };
+};
+context.writeCachedNewsPage = async () => {};
+context.scheduleAdjacentPagePrefetch = () => {};
+context.setPageLoading = () => {};
+context.renderColdStartError = () => {};
+context.showToast = () => {};
+context.currentTotal = 0;
+context.document = {
+  getElementById: () => ({ classList: { contains: () => false } }),
+};
+context.articleReturnInProgress = false;
+context.pendingLatestPage = null;
+context.setTimeout = callback => setTimeout(callback, 5);
+context.clearTimeout = clearTimeout;
+const loading = context.loadNewsPage(1, {
+  activeFilter: 'all', useCache: true, forceNetwork: true,
+});
+const outcome = await Promise.race([
+  loading.then(value => ({ state: 'done', value })),
+  new Promise(resolve => setTimeout(() => resolve({ state: 'hung' }), 40)),
+]);
+assert.deepEqual(outcome, { state: 'done', value: true });
+assert.equal(context.fetchCalls, 1);
+assert.deepEqual(context.applied, ['fresh']);
+""",
+    )
+
+
+def test_hung_page_cache_write_cannot_block_fresh_network_application():
+    load_page = source_between("async function loadNewsPage(", "function applyPageCalibrationWhenActive")
+    run_node(
+        load_page,
+        """
+context.pageRequestSequence = 0;
+context.pageRequestPendingSequence = 0;
+context.pageRequestController = null;
+context.news = [];
+context.readCachedNewsPage = async () => null;
+context.rememberBufferedPage = () => {};
+context.applied = [];
+context.applyNewsPage = data => context.applied.push(data.items[0].id);
+context.renderColdStartSkeleton = () => {};
+context.fetchNewsPage = async () => ({ items: [{ id: 'fresh' }], total: 1 });
+context.writeCachedNewsPage = () => new Promise(() => {});
+context.scheduleAdjacentPagePrefetch = () => {};
+context.setPageLoading = () => {};
+context.renderColdStartError = () => {};
+context.showToast = () => {};
+context.currentTotal = 0;
+context.document = {
+  getElementById: () => ({ classList: { contains: () => false } }),
+};
+context.articleReturnInProgress = false;
+context.pendingLatestPage = null;
+context.setTimeout = callback => setTimeout(callback, 5);
+context.clearTimeout = clearTimeout;
+const loading = context.loadNewsPage(1, {
+  activeFilter: 'all', useCache: true, forceNetwork: true,
+});
+const outcome = await Promise.race([
+  loading.then(value => ({ state: 'done', value })),
+  new Promise(resolve => setTimeout(() => resolve({ state: 'hung' }), 40)),
+]);
+assert.deepEqual(outcome, { state: 'done', value: true });
+assert.deepEqual(context.applied, ['fresh']);
+""",
+    )
+
+
+def test_network_timeout_aborts_first_attempt_then_retries_with_fresh_controller():
+    load_page = source_between("async function loadNewsPage(", "function applyPageCalibrationWhenActive")
+    run_node(
+        load_page,
+        """
+context.pageRequestSequence = 0;
+context.pageRequestPendingSequence = 0;
+context.pageRequestController = null;
+context.news = [];
+context.readCachedNewsPage = async () => null;
+context.rememberBufferedPage = () => {};
+context.applied = [];
+context.applyNewsPage = data => context.applied.push(data.items[0].id);
+context.renderColdStartSkeleton = () => {};
+context.controllers = [];
+context.AbortController = class {
+  constructor() {
+    const listeners = [];
+    this.signal = {
+      aborted: false,
+      addEventListener(type, listener) { if (type === 'abort') listeners.push(listener); },
+    };
+    this.listeners = listeners;
+    context.controllers.push(this);
+  }
+  abort() {
+    if (this.signal.aborted) return;
+    this.signal.aborted = true;
+    this.listeners.forEach(listener => listener());
+  }
+};
+context.fetchCalls = 0;
+context.fetchNewsPage = (page, activeFilter, signal) => {
+  context.fetchCalls++;
+  if (context.fetchCalls === 2) {
+    return Promise.resolve({ items: [{ id: 'fresh' }], total: 1 });
+  }
+  return new Promise((resolve, reject) => {
+    signal.addEventListener('abort', () => reject(
+      Object.assign(new Error('timed out'), { name: 'AbortError' })
+    ));
+  });
+};
+context.writeCachedNewsPage = async () => {};
+context.scheduleAdjacentPagePrefetch = () => {};
+context.setPageLoading = () => {};
+context.renderColdStartError = () => {};
+context.showToast = () => {};
+context.currentTotal = 0;
+context.document = {
+  getElementById: () => ({ classList: { contains: () => false } }),
+};
+context.articleReturnInProgress = false;
+context.pendingLatestPage = null;
+context.delay = async () => {};
+const cancelled = new Set();
+let nextTimer = 0;
+let networkTimers = 0;
+context.setTimeout = (callback, milliseconds) => {
+  const id = ++nextTimer;
+  if (milliseconds === 12000 && networkTimers++ === 0) {
+    setImmediate(() => { if (!cancelled.has(id)) callback(); });
+  }
+  return id;
+};
+context.clearTimeout = id => cancelled.add(id);
+const loaded = await context.loadNewsPage(1, {
+  activeFilter: 'all', useCache: false, forceNetwork: true, networkRetries: 1,
+});
+assert.equal(loaded, true);
+assert.equal(context.fetchCalls, 2);
+assert.equal(context.controllers.length, 2);
+assert.notEqual(context.controllers[0], context.controllers[1]);
+assert.equal(context.controllers[0].signal.aborted, true);
+assert.equal(context.controllers[1].signal.aborted, false);
+assert.deepEqual(context.applied, ['fresh']);
 """,
     )
 

@@ -538,8 +538,8 @@ def test_mobile_cold_start_resets_scroll_before_and_after_bootstrap():
 def test_cold_start_renders_categories_immediately_and_runs_requests_in_parallel():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     boot = html[html.index("async function bootstrapNews()"):html.index("// Initial load")]
-    assert boot.index("renderTopCatBar();") < boot.index("loadSourceCategories()")
-    assert "const sourcePromise = loadSourceCategories();" in boot
+    assert boot.index("renderTopCatBar();") < boot.index("loadSourceCategories(")
+    assert "const sourcePromise = loadSourceCategories({ onMetadataReady: resolveSourceMetadata });" in boot
     assert "const newsPromise = loadNewsPage(1, {" in boot
     assert "useCache: true," in boot
     assert "networkRetries: 1," in boot
@@ -549,7 +549,7 @@ def test_cold_start_renders_categories_immediately_and_runs_requests_in_parallel
 
 def test_cached_source_metadata_is_rendered_before_network_fetch():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
-    start = html.index("async function loadSourceCategories()")
+    start = html.index("async function loadSourceCategories(")
     block = html[start:html.index("function sourceLabel", start)]
     assert block.index("rebuildCategoryMap(cached.data.sources);") < block.index("await apiFetch('/sources')")
     assert block.index("renderFilters();") < block.index("await apiFetch('/sources')")
