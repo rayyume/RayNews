@@ -173,7 +173,7 @@ def _setup_daily_summary_test(monkeypatch, db_path, subscriber_rows, send_result
 
     sent_log = []
 
-    def fake_send(api_key, to_email, summary, stats):
+    def fake_send(api_key, to_email, summary, stats, idempotency_key=None):
         sent_log.append(to_email)
         outcome = send_results.get(to_email, True)
         if outcome is not True:
@@ -235,7 +235,7 @@ def test_daily_summary_retries_only_the_recipient_who_previously_failed(monkeypa
         sent_log.clear()
         monkeypatch.setattr(
             notifier, "send_daily_summary_email",
-            lambda api_key, to_email, summary, stats: sent_log.append(to_email),
+            lambda api_key, to_email, summary, stats, idempotency_key=None: sent_log.append(to_email),
         )
         result2 = web_server._broadcast_daily_summary(force=False)
         assert result2["status"] == "ok"

@@ -15,7 +15,11 @@ import web_server
 from ai_service import AIService
 
 SHORT_CHINESE_TITLE = "\u82f9\u679c\u53d1\u5e03 Vision Pro \u65b0\u7cfb\u7edf"
-LONG_CHINESE_TITLE = "\u8fd9\u662f\u4e00\u4e2a" + ("\u975e\u5e38" * 12) + "\u957f\u7684\u4e2d\u6587\u6807\u9898"
+# Long enough to clear both the (relaxed) summary trigger threshold
+# (_needs_title_summary, >39 CJK) and the lenient hard-reject weight cap
+# (_is_valid_title_summary, >180 weight \u21d2 >90 CJK), so it still stands in for
+# "a title too long to be an acceptable summary".
+LONG_CHINESE_TITLE = "\u8fd9\u662f\u4e00\u4e2a" + ("\u975e\u5e38" * 45) + "\u957f\u7684\u4e2d\u6587\u6807\u9898"
 SHORTENED_CHINESE_TITLE = "\u82f9\u679c\u53d1\u5e03\u65b0\u7cfb\u7edf"
 ORIGINAL_RESTAURANT_TITLE = "\u300a\u718a\u5bb6\u9910\u9986\u300b\u8ba9\u6700\u540e\u51e0\u79d2\u7269\u5c3d\u5176\u7528"
 SHORT_RESTAURANT_TITLE = "\u300a\u718a\u5bb6\u9910\u9986\u300b\u5229\u7528\u6700\u540e\u51e0\u79d2\u521b\u9020\u7b11\u70b9"
@@ -40,7 +44,8 @@ class TitleProcessingTests(unittest.TestCase):
         svc.summarize_title("OpenAI releases a very long title about GPT-4o", 30)
         prompt = "\n".join(message["content"] for message in svc.messages)
         self.assertIn("\u8d44\u6df1\u7684\u65b0\u95fb\u7f16\u8f91", prompt)
-        self.assertIn("\u53ea\u8f93\u51fa JSON", prompt)
+        # The pipeline now asks for a single plain-text line, not JSON.
+        self.assertIn("\u53ea\u8f93\u51fa\u4e00\u884c\u6700\u7ec8\u6807\u9898\u7684\u7eaf\u6587\u672c", prompt)
         self.assertNotIn("????????", prompt)
 
     def test_overlong_title_uses_chinese_character_budget(self):
@@ -70,11 +75,17 @@ class TitleProcessingTests(unittest.TestCase):
             )
             self.assertFalse(result["valid"], value)
 
-        broken = web_server._validate_ai_title_summary_result(
+        # A stray \u300b with no opening \u300a must be repaired away (not shown to the
+        # reader and not discarded): _validate runs _repair_title_summary first,
+        # which drops the orphan bracket and returns a balanced, valid title.
+        repaired = web_server._validate_ai_title_summary_result(
             {"title": "\u718a\u5bb6\u9910\u9986\u300b\u8ba9\u6700\u540e\u51e0\u79d2\u7269\u5c3d\u5176\u7528", "valid": True},
             original_title=ORIGINAL_RESTAURANT_TITLE,
         )
-        self.assertFalse(broken["valid"])
+        self.assertTrue(repaired["valid"])
+        self.assertNotIn("\u300b", repaired["title"])
+        self.assertTrue(web_server._balanced_title_punctuation(repaired["title"]))
+        self.assertEqual(repaired["title"], "\u718a\u5bb6\u9910\u9986\u8ba9\u6700\u540e\u51e0\u79d2\u7269\u5c3d\u5176\u7528")
 
         valid = web_server._validate_ai_title_summary_result(
             {"title": SHORT_RESTAURANT_TITLE, "valid": True},
@@ -118,6 +129,25 @@ class TitleProcessingTests(unittest.TestCase):
         legacy = web_server._parse_title_summary_result("\u82f9\u679c\u53d1\u5e03\u65b0\u7cfb\u7edf")
         self.assertEqual(legacy["title"], "\u82f9\u679c\u53d1\u5e03\u65b0\u7cfb\u7edf")
         self.assertTrue(legacy["valid"])
+
+    def test_strip_unbalanced_punctuation_removes_orphans_keeps_pairs(self):
+        # Stray closer, stray opener, and a legitimately paired title.
+        self.assertEqual(
+            web_server._strip_unbalanced_punctuation("熊家餐馆》让最后几秒物尽其用"),
+            "熊家餐馆让最后几秒物尽其用",
+        )
+        self.assertEqual(
+            web_server._strip_unbalanced_punctuation("《甲让最后几秒物尽其用"),
+            "甲让最后几秒物尽其用",
+        )
+        # A correctly matched pair is left untouched.
+        paired = "《熊家餐馆》让最后几秒物尽其用"
+        self.assertEqual(web_server._strip_unbalanced_punctuation(paired), paired)
+
+    def test_repair_title_summary_drops_dangling_bracket(self):
+        repaired = web_server._repair_title_summary("熊家餐馆》让最后几秒物尽其用")
+        self.assertEqual(repaired, "熊家餐馆让最后几秒物尽其用")
+        self.assertTrue(web_server._balanced_title_punctuation(repaired))
 
     def test_repair_title_summary_compacts_long_ai_output(self):
         raw = (
