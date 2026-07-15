@@ -340,11 +340,34 @@ def test_logo_is_lightweight_and_header_button_starts_refresh_job():
     assert "triggerRefresh(" not in logo
 
 
+def test_view_bound_refresh_work_is_cancelled_by_navigation_and_backgrounding():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    for start, end in (
+        ("async function restoreListStateFromUrl(", "function setPageLoading"),
+        ("async function selectFilter(", "function filteredNews"),
+        ("async function goToPage(", "function waitForScrollTop"),
+        ("function openArticle(", "function fetchArticleDetail"),
+    ):
+        block = html[html.index(start):html.index(end, html.index(start))]
+        assert "cancelViewBoundRefreshWork();" in block
+    visibility = html[
+        html.index("document.addEventListener('visibilitychange', () =>"):
+        html.index("window.addEventListener('focus', onReturnToForeground)")
+    ]
+    assert "if (document.hidden) cancelViewBoundRefreshWork();" in visibility
+    helper = html[
+        html.index("function cancelViewBoundRefreshWork()"):
+        html.index("function rebuildCategoryMap")
+    ]
+    assert "cancelRefreshFlow();" in helper
+    assert "cancelStartupEmptyRevalidation();" in helper
+
+
 def test_manual_refresh_posts_once_then_polls_status():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     block = html[html.index("async function triggerRefresh("):html.index("function setRefreshRunning", html.index("async function triggerRefresh("))]
-    assert block.count("await requestRefreshOnce()") == 1
-    assert "await pollRefreshJob(data.job_id)" in block
+    assert block.count("await requestRefreshOnce(flowController.signal)") == 1
+    assert "await pollRefreshJob(data.job_id, 135000, flowController.signal)" in block
     assert "isTransientRefreshError" not in block
     assert "await delay(800)" not in block
     assert "activeFilter: filter," in block
@@ -374,11 +397,11 @@ def test_refresh_status_polling_uses_authenticated_get_and_bounded_wait():
     assert "async function pollRefreshJob(" in html
     request = html[html.index("async function requestRefreshStatus("):html.index("async function pollRefreshJob(")]
     poll = html[html.index("async function pollRefreshJob("):html.index("function rebuildCategoryMap")]
-    assert "fetch('/auth/refresh/status'" in request
+    assert "fetch('/auth/refresh/status?job_id=' + encodeURIComponent(jobId)" in request
     assert "'Authorization': 'Bearer ' + authToken" in request
     assert "cache: 'no-store'" in request
-    assert "await delay(Math.min(1200, beforeDelayMs));" in poll
-    assert "const status = await requestRefreshStatus(remainingMs);" in poll
+    assert "await abortableDelay(Math.min(1200, beforeDelayMs), flowSignal);" in poll
+    assert "const status = await requestRefreshStatus(jobId, remainingMs, flowSignal);" in poll
     assert "if (status.job_id !== jobId)" in poll
     assert "status.status === 'completed' || status.status === 'failed'" in poll
     assert "throw new Error('刷新状态查询超时，请稍后查看最新文章');" in poll
@@ -414,11 +437,11 @@ def test_manual_refresh_uses_structured_error_messages():
 
     assert "function refreshErrorMessage" in html
     assert "async function parseRefreshResponse" in html
-    assert "async function requestRefreshOnce()" in html
+    assert "async function requestRefreshOnce(signal)" in html
     assert "async function requestRefreshStatus(" in html
     assert "async function pollRefreshJob(jobId" in html
-    assert "await requestRefreshOnce();" in trigger_block
-    assert "await pollRefreshJob(data.job_id);" in trigger_block
+    assert "await requestRefreshOnce(flowController.signal);" in trigger_block
+    assert "await pollRefreshJob(data.job_id, 135000, flowController.signal);" in trigger_block
     assert "showToast('❌ 刷新失败: ' + (e.message || '网络错误'))" not in trigger_block
 
 

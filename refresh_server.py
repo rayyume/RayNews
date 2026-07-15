@@ -12,6 +12,7 @@ import sqlite3
 import re
 import time
 import uuid
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -52,6 +53,8 @@ REFRESH_JOB = {
     "new_count": 0,
     "error": "",
 }
+REFRESH_JOB_HISTORY_LIMIT = 16
+REFRESH_JOB_HISTORY = OrderedDict()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [refresh] %(message)s")
 log = logging.getLogger("refresh")
@@ -220,6 +223,32 @@ def get_refresh_job_status() -> bytes:
         return _refresh_job_json_locked()
 
 
+def _remember_terminal_job_locked() -> None:
+    job_id = REFRESH_JOB.get("job_id") or ""
+    if not job_id or REFRESH_JOB.get("status") not in ("completed", "failed"):
+        return
+    REFRESH_JOB_HISTORY[job_id] = dict(REFRESH_JOB)
+    REFRESH_JOB_HISTORY.move_to_end(job_id)
+    while len(REFRESH_JOB_HISTORY) > REFRESH_JOB_HISTORY_LIMIT:
+        REFRESH_JOB_HISTORY.popitem(last=False)
+
+
+def get_refresh_job_status_response(job_id: str | None = None) -> tuple[bytes, int]:
+    """Return the current job, or a bounded terminal snapshot by exact ID."""
+    with REFRESH_JOB_LOCK:
+        if not job_id:
+            return _refresh_job_json_locked(), 200
+        if REFRESH_JOB.get("job_id") == job_id:
+            return _refresh_job_json_locked(), 200
+        terminal = REFRESH_JOB_HISTORY.get(job_id)
+        if terminal is not None:
+            return json.dumps(terminal).encode(), 200
+        return json.dumps({
+            "status": "not_found",
+            "error": "refresh job not found",
+        }).encode(), 404
+
+
 def _run_refresh_job(job_id: str) -> None:
     new_count = 0
     error = ""
@@ -250,6 +279,7 @@ def _run_refresh_job(job_id: str) -> None:
             "new_count": new_count,
             "error": error,
         })
+        _remember_terminal_job_locked()
 
 
 def start_refresh_job(trigger: str = "manual") -> tuple[bytes, int]:
@@ -282,6 +312,7 @@ def start_refresh_job(trigger: str = "manual") -> tuple[bytes, int]:
                     "finished_at": int(time.time()),
                     "error": "refresh failed",
                 })
+                _remember_terminal_job_locked()
             return _refresh_job_json_locked(), 500
     return body, 202
 
@@ -390,6 +421,11 @@ def _diagnostics(count: int | None = None) -> dict:
             state["last_seen_id"] = data.get("last_seen_id")
         except Exception as e:
             state["error"] = str(e)
+    with REFRESH_JOB_LOCK:
+        refresh_job = {
+            "status": REFRESH_JOB.get("status") or "idle",
+            "trigger": REFRESH_JOB.get("trigger") or "",
+        }
     return {
         "data_dir": str(DATA_DIR),
         "db_path": str(DB_FILE),
@@ -402,6 +438,7 @@ def _diagnostics(count: int | None = None) -> dict:
         "telegram_channel": channel if channel and channel != "your_channel" else "",
         "telegram_channel_default": not bool(channel and channel != "your_channel"),
         "last_fetch": dict(LAST_FETCH_STATUS),
+        "refresh_job": refresh_job,
     }
 
 
@@ -804,7 +841,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         if path == "/refresh/status":
-            send_json(self, get_refresh_job_status())
+            job_id = (params.get("job_id", [""])[0] or "").strip()
+            if job_id:
+                body, status = get_refresh_job_status_response(job_id)
+                send_json(self, body, status)
+            else:
+                send_json(self, get_refresh_job_status())
             return
 
         # ── Internal (loopback-only via nginx routing; not exposed under /api/) ──

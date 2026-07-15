@@ -1,5 +1,6 @@
 import json
 import threading
+from collections import OrderedDict
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ def reset_job(monkeypatch):
         "started_at": None, "finished_at": None,
         "new_count": 0, "error": "",
     })
+    monkeypatch.setattr(refresh_server, "REFRESH_JOB_HISTORY", OrderedDict())
 
 
 def wait_terminal():
@@ -320,6 +322,104 @@ def test_get_refresh_status_returns_job_snapshot(monkeypatch):
     refresh_server.Handler.do_GET(handler)
 
     assert calls == [(response, 200)]
+
+
+def test_terminal_job_remains_queryable_after_next_job_starts(monkeypatch):
+    reset_job(monkeypatch)
+    release_second = threading.Event()
+    fetch_count = 0
+
+    def fetcher():
+        nonlocal fetch_count
+        fetch_count += 1
+        if fetch_count == 2:
+            release_second.wait(2)
+        return json.dumps({"status": "ok"}).encode(), 200
+
+    monkeypatch.setattr(refresh_server, "run_fetcher", fetcher)
+    monkeypatch.setattr(refresh_server, "article_id_snapshot", lambda: set())
+
+    first_body, _ = refresh_server.start_refresh_job("manual")
+    first_id = json.loads(first_body)["job_id"]
+    first_terminal = wait_terminal()
+    second_body, second_status = refresh_server.start_refresh_job("manual")
+    second_id = json.loads(second_body)["job_id"]
+
+    first_lookup, first_status = refresh_server.get_refresh_job_status_response(first_id)
+    current_lookup, current_status = refresh_server.get_refresh_job_status_response(second_id)
+
+    assert second_status == 202
+    assert json.loads(first_lookup) == first_terminal
+    assert first_status == 200
+    assert json.loads(current_lookup)["status"] == "running"
+    assert current_status == 200
+    release_second.set()
+    assert wait_terminal()["status"] == "completed"
+
+
+def test_terminal_history_is_bounded_and_unknown_ids_are_private(monkeypatch):
+    reset_job(monkeypatch)
+    monkeypatch.setattr(refresh_server, "REFRESH_JOB_HISTORY_LIMIT", 2)
+    monkeypatch.setattr(refresh_server, "run_fetcher", lambda: (json.dumps({"status": "ok"}).encode(), 200))
+    monkeypatch.setattr(refresh_server, "article_id_snapshot", lambda: set())
+    completed_ids = []
+
+    for _ in range(3):
+        body, _ = refresh_server.start_refresh_job("manual")
+        completed_ids.append(json.loads(body)["job_id"])
+        assert wait_terminal()["status"] == "completed"
+
+    expired_body, expired_status = refresh_server.get_refresh_job_status_response(completed_ids[0])
+    retained_body, retained_status = refresh_server.get_refresh_job_status_response(completed_ids[-1])
+
+    assert expired_status == 404
+    assert json.loads(expired_body) == {
+        "status": "not_found",
+        "error": "refresh job not found",
+    }
+    assert completed_ids[0] not in expired_body.decode()
+    assert retained_status == 200
+    assert json.loads(retained_body)["job_id"] == completed_ids[-1]
+
+
+def test_get_refresh_status_route_looks_up_requested_job_id(monkeypatch):
+    calls = []
+    response = json.dumps({"job_id": "job-a", "status": "completed"}).encode()
+    monkeypatch.setattr(
+        refresh_server,
+        "get_refresh_job_status_response",
+        lambda job_id=None: (calls.append(job_id) or response, 200),
+    )
+    monkeypatch.setattr(
+        refresh_server,
+        "send_json",
+        lambda handler, body, status=200: calls.append((body, status)),
+    )
+    handler = refresh_server.Handler.__new__(refresh_server.Handler)
+    handler.path = "/refresh/status?job_id=job-a"
+
+    refresh_server.Handler.do_GET(handler)
+
+    assert calls == ["job-a", (response, 200)]
+
+
+def test_empty_news_diagnostics_expose_only_safe_startup_job_summary(monkeypatch):
+    reset_job(monkeypatch)
+    refresh_server.REFRESH_JOB.update({
+        "job_id": "private-job-id",
+        "status": "running",
+        "trigger": "startup",
+        "error": "/app/data/private.db",
+    })
+
+    diagnostics = refresh_server._diagnostics(0)
+
+    assert diagnostics["refresh_job"] == {
+        "status": "running",
+        "trigger": "startup",
+    }
+    assert "private-job-id" not in json.dumps(diagnostics)
+    assert "/app/data/private.db" not in json.dumps(diagnostics["refresh_job"])
 
 
 def test_periodic_refresh_starts_periodic_job_and_reschedules(monkeypatch):

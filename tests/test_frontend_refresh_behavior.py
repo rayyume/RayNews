@@ -40,7 +40,7 @@ def test_poll_refresh_job_rejects_terminal_status_for_another_job():
     run_node(
         poll,
         """
-context.delay = async () => {};
+context.abortableDelay = async () => {};
 context.requestRefreshStatus = async () => ({
   job_id: 'other-job', status: 'completed', new_count: 99,
 });
@@ -69,11 +69,11 @@ context.AbortController = class {
   abort() {}
 };
 context.fetch = async (url, options) => {
-  assert.equal(url, '/auth/refresh/status');
+  assert.equal(url, '/auth/refresh/status?job_id=job-1');
   fetchOptions = options;
   return {};
 };
-await context.requestRefreshStatus(37);
+await context.requestRefreshStatus('job-1', 37);
 assert.deepEqual(timers, [37]);
 assert.equal(fetchOptions.signal.marker, 'status-signal');
 """,
@@ -88,11 +88,12 @@ def test_poll_refresh_job_caps_each_status_request_to_remaining_deadline():
 let now = 0;
 let requestedTimeout = null;
 context.Date = { now: () => now };
-context.delay = async timeout => {
+context.abortableDelay = async timeout => {
   assert.equal(timeout, 1000);
   now = 600;
 };
-context.requestRefreshStatus = async timeout => {
+context.requestRefreshStatus = async (jobId, timeout) => {
+  assert.equal(jobId, 'job-1');
   requestedTimeout = timeout;
   return { job_id: 'job-1', status: 'completed', new_count: 2 };
 };
@@ -103,10 +104,69 @@ assert.equal(requestedTimeout, 400);
     )
 
 
+def test_status_poll_targets_exact_job_and_links_fetch_to_flow_abort():
+    request = source_between("async function requestRefreshStatus(", "async function pollRefreshJob(")
+    run_node(
+        request,
+        """
+const flow = new AbortController();
+let fetchUrl = '';
+let fetchSignal;
+context.authToken = 'token';
+context.parseRefreshResponse = async () => ({ job_id: 'job/a', status: 'running' });
+context.fetch = (url, options) => {
+  fetchUrl = url;
+  fetchSignal = options.signal;
+  return new Promise((resolve, reject) => {
+    options.signal.addEventListener('abort', () => reject(
+      Object.assign(new Error('cancelled'), { name: 'AbortError' })
+    ));
+  });
+};
+context.setTimeout = () => 9;
+context.clearTimeout = () => {};
+const pending = context.requestRefreshStatus('job/a', 5000, flow.signal);
+await Promise.resolve();
+assert.equal(fetchUrl, '/auth/refresh/status?job_id=job%2Fa');
+assert.notEqual(fetchSignal, flow.signal);
+flow.abort();
+await assert.rejects(pending, error => error.name === 'AbortError');
+""",
+    )
+
+
+def test_poll_refresh_job_passes_exact_job_id_to_every_status_request():
+    poll = source_between("async function pollRefreshJob(", "function rebuildCategoryMap")
+    run_node(
+        poll,
+        """
+let now = 0;
+const calls = [];
+const flow = new AbortController();
+context.Date = { now: () => now };
+context.abortableDelay = async (timeout, signal) => {
+  assert.equal(signal, flow.signal);
+  now += timeout;
+};
+context.requestRefreshStatus = async (jobId, timeout, signal) => {
+  calls.push([jobId, timeout, signal]);
+  return { job_id: jobId, status: 'completed', new_count: 0 };
+};
+await context.pollRefreshJob('job-a', 5000, flow.signal);
+assert.equal(calls.length, 1);
+assert.equal(calls[0][0], 'job-a');
+assert.equal(calls[0][2], flow.signal);
+""",
+    )
+
+
 def trigger_context_setup(poll_body):
     return f"""
 context.refreshInProgress = false;
+context.refreshFlowGeneration = 0;
+context.refreshFlowController = null;
 context.authToken = 'token';
+context.document = {{ hidden: false }};
 context.filter = 'all';
 context.currentPage = 1;
 context.pageNavigationSequence = 3;
@@ -264,6 +324,311 @@ assert.deepEqual(context.promptStates, [false]);
     )
 
 
+def test_manual_refresh_flow_cancellation_aborts_poller_and_suppresses_stale_toast():
+    helpers = source_between("function cancelRefreshFlow(", "function rebuildCategoryMap")
+    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    run_node(
+        helpers + trigger,
+        """
+context.refreshInProgress = false;
+context.refreshFlowGeneration = 0;
+context.refreshFlowController = null;
+context.authToken = 'token';
+context.filter = 'all';
+context.currentPage = 1;
+context.pageNavigationSequence = 0;
+context.pageRequestSequence = 0;
+context.pageRequestPendingSequence = 0;
+context.pageNavigationPending = false;
+context.document = { hidden: false };
+context.hideNewArticlesPrompt = () => {};
+context.promptCalls = 0;
+context.showNewArticlesPrompt = () => context.promptCalls++;
+context.toasts = [];
+context.showToast = message => context.toasts.push(message);
+context.refreshErrorMessage = error => error.message || 'failed';
+context.hasBlockingOverlayOpen = () => false;
+context.consumePendingNewArticles = () => {};
+context.loadNewsPage = async () => true;
+context.runningStates = [];
+context.setRefreshRunning = running => {
+  context.refreshInProgress = running;
+  context.runningStates.push(running);
+};
+context.requestRefreshOnce = async signal => {
+  assert.equal(signal, context.refreshFlowController.signal);
+  return { job_id: 'job-a', status: 'running' };
+};
+let markPollStarted;
+const pollStarted = new Promise(resolve => { markPollStarted = resolve; });
+context.pollRefreshJob = (jobId, timeout, signal) => new Promise((resolve, reject) => {
+  assert.equal(jobId, 'job-a');
+  assert.equal(signal, context.refreshFlowController.signal);
+  markPollStarted();
+  signal.addEventListener('abort', () => reject(
+    Object.assign(new Error('cancelled'), { name: 'AbortError' })
+  ));
+});
+const pending = context.triggerRefresh();
+await pollStarted;
+context.cancelRefreshFlow();
+await pending;
+assert.deepEqual(context.runningStates, [true, false]);
+assert.deepEqual(context.toasts, ['🔄 正在后台抓取...']);
+assert.equal(context.promptCalls, 0);
+assert.equal(context.refreshInProgress, false);
+assert.equal(context.refreshFlowController, null);
+""",
+    )
+
+
+def test_incremental_check_overlapping_manual_refresh_only_queues_pending_items():
+    incremental = source_between("async function loadSince(", "function rebuildSourceFilterGroups")
+    run_node(
+        incremental,
+        """
+context.refreshInProgress = true;
+context.INCREMENTAL_FETCH_LIMIT = 200;
+context.seenArticleIds = new Set();
+context.latestKnownTimestamp = 100;
+context.pendingNewArticleCount = 0;
+context.pendingNewItems = [];
+context.fetch = async () => ({
+  json: async () => ({ items: [{ id: 2, timestamp: 101, source: 's' }] }),
+});
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
+context.refreshTodayArticleCount = () => { context.countRefreshes++; };
+context.countRefreshes = 0;
+context.loadSourceCategories = async () => { context.sourceLoads++; };
+context.sourceLoads = 0;
+context.fetchNewsPage = async () => { context.pageFetches++; return { items: [] }; };
+context.pageFetches = 0;
+context.writeCachedNewsPage = async () => {};
+context.pendingRelevantCount = () => 1;
+context.showLatestAfterIdle = () => { context.applies++; };
+context.showNewArticlesPrompt = () => { context.applies++; };
+context.applyNewsPage = () => { context.applies++; };
+context.consumePendingNewArticles = () => { context.consumes++; };
+context.applies = 0;
+context.consumes = 0;
+context.filter = 'all';
+context.currentPage = 1;
+context.window = { scrollY: 0 };
+context.hasBlockingOverlayOpen = () => false;
+context.lastUserActivityAt = 0;
+context.IDLE_LATEST_DELAY_MS = 1;
+const added = await context.loadSince(100);
+assert.equal(added, 1);
+assert.equal(context.pendingNewArticleCount, 1);
+assert.deepEqual(Array.from(context.pendingNewItems, item => item.id), [2]);
+assert.equal(context.countRefreshes, 1);
+assert.equal(context.sourceLoads, 0);
+assert.equal(context.pageFetches, 0);
+assert.equal(context.applies, 0);
+assert.equal(context.consumes, 0);
+""",
+    )
+
+
+def test_successful_empty_cold_start_revalidates_with_get_until_articles_arrive():
+    startup = source_between(
+        "function isStartupInitializationResponse(",
+        "function renderSourceDeepLinkError",
+    )
+    run_node(
+        startup,
+        """
+context.coldStartInitializationActive = false;
+context.coldStartInitializationTimedOut = false;
+context.startupCalibrationGeneration = 0;
+context.startupCalibrationController = null;
+context.startupCalibrationTimer = null;
+context.filter = 'all';
+context.currentPage = 1;
+context.pageRequestSequence = 7;
+context.document = { hidden: false };
+context.renderList = () => context.renders.push(
+  context.coldStartInitializationActive ? 'initializing' : 'settled'
+);
+context.renders = [];
+context.applied = [];
+context.applyNewsPage = data => context.applied.push(data.items.map(item => item.id));
+context.scheduleAdjacentPagePrefetch = () => {};
+context.fetchNewsPage = async (page, activeFilter, signal) => {
+  context.fetchCalls.push({ page, activeFilter, signal });
+  return { items: [{ id: 9 }], total: 1, page: 1 };
+};
+context.fetchCalls = [];
+const scheduled = [];
+context.setTimeout = callback => { scheduled.push(callback); return scheduled.length; };
+context.clearTimeout = () => {};
+const initial = {
+  items: [], total: 0, page: 1,
+  diagnostics: { refresh_job: { status: 'running', trigger: 'startup' } },
+};
+const started = context.startStartupEmptyRevalidation(initial, {
+  page: 1, activeFilter: 'all', requestSeq: 7, maxAttempts: 3, intervalMs: 5000,
+});
+assert.equal(started, true);
+assert.deepEqual(context.renders, ['initializing']);
+assert.equal(scheduled.length, 1);
+await scheduled.shift()();
+assert.equal(context.fetchCalls.length, 1);
+assert.equal(context.fetchCalls[0].page, 1);
+assert.equal(context.fetchCalls[0].activeFilter, 'all');
+assert.ok(context.fetchCalls[0].signal);
+assert.deepEqual(context.applied, [[9]]);
+assert.equal(context.coldStartInitializationActive, false);
+assert.equal(scheduled.length, 0);
+""",
+    )
+
+
+def test_empty_cold_start_revalidation_stops_on_terminal_job_or_attempt_limit():
+    startup = source_between(
+        "function isStartupInitializationResponse(",
+        "function renderSourceDeepLinkError",
+    )
+    run_node(
+        startup,
+        """
+context.coldStartInitializationActive = false;
+context.coldStartInitializationTimedOut = false;
+context.startupCalibrationGeneration = 0;
+context.startupCalibrationController = null;
+context.startupCalibrationTimer = null;
+context.filter = 'all';
+context.currentPage = 1;
+context.pageRequestSequence = 3;
+context.document = { hidden: false };
+context.renderList = () => context.renders++;
+context.renders = 0;
+context.applied = 0;
+context.applyNewsPage = () => context.applied++;
+context.scheduleAdjacentPagePrefetch = () => {};
+const initial = {
+  items: [], total: 0, page: 1,
+  diagnostics: { refresh_job: { status: 'running', trigger: 'startup' } },
+};
+const timers = [];
+context.setTimeout = callback => { timers.push(callback); return timers.length; };
+context.clearTimeout = () => {};
+context.fetchNewsPage = async () => ({
+  items: [], total: 0, page: 1,
+  diagnostics: { refresh_job: { status: 'completed', trigger: 'startup' } },
+});
+context.startStartupEmptyRevalidation(initial, {
+  page: 1, activeFilter: 'all', requestSeq: 3, maxAttempts: 2, intervalMs: 5000,
+});
+await timers.shift()();
+assert.equal(context.applied, 1);
+assert.equal(context.coldStartInitializationActive, false);
+assert.equal(timers.length, 0);
+
+context.fetchNewsPage = async () => initial;
+context.startStartupEmptyRevalidation(initial, {
+  page: 1, activeFilter: 'all', requestSeq: 3, maxAttempts: 1, intervalMs: 5000,
+});
+await timers.shift()();
+assert.equal(context.coldStartInitializationActive, false);
+assert.equal(context.coldStartInitializationTimedOut, true);
+assert.equal(timers.length, 0);
+""",
+    )
+
+
+def test_view_navigation_cancels_startup_revalidation_and_hidden_work_without_posting():
+    startup = source_between(
+        "function isStartupInitializationResponse(",
+        "function renderSourceDeepLinkError",
+    )
+    run_node(
+        startup,
+        """
+context.coldStartInitializationActive = false;
+context.coldStartInitializationTimedOut = false;
+context.startupCalibrationGeneration = 0;
+context.startupCalibrationController = null;
+context.startupCalibrationTimer = null;
+context.filter = 'all';
+context.currentPage = 1;
+context.pageRequestSequence = 4;
+context.document = { hidden: false };
+context.renderList = () => {};
+context.applyNewsPage = () => context.applied++;
+context.applied = 0;
+context.scheduleAdjacentPagePrefetch = () => {};
+context.postCalls = 0;
+context.requestRefreshOnce = () => { context.postCalls++; };
+let resolveFetch;
+context.fetchNewsPage = (page, activeFilter, signal) => new Promise((resolve, reject) => {
+  resolveFetch = resolve;
+  signal.addEventListener('abort', () => reject(
+    Object.assign(new Error('cancelled'), { name: 'AbortError' })
+  ));
+});
+const timers = [];
+context.setTimeout = callback => { timers.push(callback); return timers.length; };
+context.clearTimeout = () => {};
+const initial = {
+  items: [], total: 0, page: 1,
+  diagnostics: { refresh_job: { status: 'running', trigger: 'startup' } },
+};
+context.startStartupEmptyRevalidation(initial, {
+  page: 1, activeFilter: 'all', requestSeq: 4, maxAttempts: 3, intervalMs: 5000,
+});
+const inFlight = timers.shift()();
+await Promise.resolve();
+context.cancelStartupEmptyRevalidation();
+await inFlight;
+resolveFetch({ items: [{ id: 1 }], total: 1 });
+await Promise.resolve();
+assert.equal(context.applied, 0);
+assert.equal(context.postCalls, 0);
+assert.equal(context.coldStartInitializationActive, false);
+""",
+    )
+
+
+def test_return_to_foreground_resumes_empty_startup_with_get_only():
+    foreground = source_between(
+        "function onReturnToForeground()",
+        "document.addEventListener('visibilitychange', () =>",
+    )
+    run_node(
+        foreground,
+        """
+context.Date = { now: () => 5000 };
+context.lastForegroundSyncAt = 0;
+context.pageVisibleSince = 0;
+context.lastUserActivityAt = 0;
+context.latestKnownTimestamp = 0;
+context.latestNewsTimestamp = () => 0;
+context.news = [];
+context.filter = 'all';
+context.currentPage = 1;
+context.lastNewsDiagnostics = {
+  refresh_job: { status: 'running', trigger: 'startup' },
+};
+context.loadSince = () => { context.incrementalCalls++; };
+context.incrementalCalls = 0;
+context.pollTitleUpdates = () => {};
+context.loadCalls = [];
+context.loadNewsPage = (page, options) => context.loadCalls.push([page, options]);
+context.postCalls = 0;
+context.requestRefreshOnce = () => { context.postCalls++; };
+context.onReturnToForeground();
+assert.equal(context.incrementalCalls, 0);
+assert.equal(context.loadCalls.length, 1);
+assert.equal(context.loadCalls[0][0], 1);
+assert.equal(context.loadCalls[0][1].activeFilter, 'all');
+assert.equal(context.loadCalls[0][1].forceNetwork, true);
+assert.equal(context.postCalls, 0);
+""",
+    )
+
+
 def test_load_news_page_checks_application_guard_before_mutating_visible_list():
     load_page = source_between("async function loadNewsPage(", "function applyPageCalibrationWhenActive")
     run_node(
@@ -299,6 +664,110 @@ const loaded = await context.loadNewsPage(1, {
 });
 assert.equal(loaded, false);
 assert.equal(context.applied, 0);
+""",
+    )
+
+
+def test_manual_refresh_completion_list_fetch_is_aborted_by_flow_signal():
+    load_page = source_between("async function loadNewsPage(", "function applyPageCalibrationWhenActive")
+    run_node(
+        load_page,
+        """
+context.pageRequestSequence = 0;
+context.pageRequestPendingSequence = 0;
+context.pageRequestController = null;
+context.news = [{ id: 1 }];
+context.readCachedNewsPage = async () => null;
+context.rememberBufferedPage = () => {};
+context.applyNewsPage = () => context.applied++;
+context.applied = 0;
+context.renderColdStartSkeleton = () => {};
+let capturedSignal;
+let resolveFetch;
+context.fetchNewsPage = (page, activeFilter, signal) => {
+  capturedSignal = signal;
+  return new Promise(resolve => { resolveFetch = resolve; });
+};
+context.writeCachedNewsPage = async () => {};
+context.scheduleAdjacentPagePrefetch = () => {};
+context.setPageLoading = () => {};
+context.renderColdStartError = () => {};
+context.showToast = () => {};
+context.currentTotal = 1;
+context.document = {
+  getElementById: () => ({ classList: { contains: () => false } }),
+};
+context.articleReturnInProgress = false;
+context.pendingLatestPage = null;
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
+const flow = new AbortController();
+const pending = context.loadNewsPage(1, {
+  activeFilter: 'all', useCache: false, forceNetwork: true,
+  externalSignal: flow.signal,
+});
+await Promise.resolve();
+assert.ok(capturedSignal);
+assert.equal(capturedSignal.aborted, false);
+flow.abort();
+await Promise.resolve();
+assert.equal(capturedSignal.aborted, true);
+resolveFetch({ items: [{ id: 2 }], total: 1 });
+const loaded = await pending;
+assert.equal(loaded, false);
+assert.equal(context.applied, 0);
+""",
+    )
+
+
+def test_startup_empty_network_response_keeps_nonempty_cached_articles_visible():
+    load_page = source_between("async function loadNewsPage(", "function applyPageCalibrationWhenActive")
+    run_node(
+        load_page,
+        """
+context.pageRequestSequence = 0;
+context.pageRequestPendingSequence = 0;
+context.pageRequestController = null;
+context.news = [];
+const cached = { items: [{ id: 1 }], total: 1, page: 1 };
+const initializing = {
+  items: [], total: 0, page: 1,
+  diagnostics: { refresh_job: { status: 'running', trigger: 'startup' } },
+};
+context.readCachedNewsPage = async () => cached;
+context.rememberBufferedPage = () => {};
+context.applied = [];
+context.applyNewsPage = data => {
+  context.applied.push(data.items.map(item => item.id));
+  context.news = data.items;
+};
+context.renderColdStartSkeleton = () => {};
+context.fetchNewsPage = async () => initializing;
+context.cacheWrites = 0;
+context.writeCachedNewsPage = async () => { context.cacheWrites++; };
+context.scheduleAdjacentPagePrefetch = () => {};
+context.setPageLoading = () => {};
+context.renderColdStartError = () => {};
+context.showToast = () => {};
+context.currentTotal = 1;
+context.document = {
+  getElementById: () => ({ classList: { contains: () => false } }),
+};
+context.articleReturnInProgress = false;
+context.pendingLatestPage = null;
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
+context.isStartupInitializationResponse = data => data === initializing;
+context.startCalls = 0;
+context.startStartupEmptyRevalidation = () => { context.startCalls++; };
+const loaded = await context.loadNewsPage(1, {
+  activeFilter: 'all', useCache: true, forceNetwork: true,
+});
+assert.equal(loaded, true);
+assert.deepEqual(context.applied, [[1]]);
+assert.deepEqual(Array.from(context.news, item => item.id), [1]);
+assert.equal(context.startCalls, 1);
+assert.equal(context.cacheWrites, 0);
 """,
     )
 
@@ -414,6 +883,36 @@ await loading;
 assert.deepEqual(events, [
   'rebuild:cached', 'render', 'network', 'rebuild:fresh', 'render',
 ]);
+""",
+    )
+
+
+def test_cached_source_metadata_network_failure_uses_quiet_nonblocking_hint():
+    load_sources = source_between("async function loadSourceCategories(", "function sourceLabel")
+    run_node(
+        load_sources,
+        """
+context.readNewsCacheEntry = async () => ({ data: { sources: ['cached'] } });
+context.withCacheTimeout = async value => value;
+context.rebuildCategoryMap = () => {};
+context.renderFilters = () => {};
+context.isRestrictedUser = () => false;
+context.apiFetch = async () => { throw new Error('offline'); };
+context.writeNewsCacheEntry = () => {};
+context.hasLoadedNewsOnce = true;
+context.document = { hidden: false };
+context.toasts = [];
+context.showToast = message => context.toasts.push(message);
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
+await context.loadSourceCategories();
+assert.deepEqual(context.toasts, ['来源信息暂未更新，已显示缓存内容']);
+context.toasts = [];
+await context.loadSourceCategories({ quietNetworkError: true });
+assert.deepEqual(context.toasts, []);
+context.apiFetch = async () => { throw Object.assign(new Error('cancelled'), { name: 'AbortError' }); };
+await context.loadSourceCategories();
+assert.deepEqual(context.toasts, []);
 """,
     )
 
@@ -1284,6 +1783,7 @@ def test_logo_is_keyboard_semantic_and_ignores_reentrant_activation():
         logo,
         """
 context.logoRefreshInProgress = false;
+context.cancelViewBoundRefreshWork = () => {};
 context.programmaticScrollUntil = 0;
 context.pendingLatestPage = null;
 context.filter = 'all';

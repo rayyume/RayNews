@@ -246,3 +246,39 @@ def test_refresh_status_serialization_error_returns_static_private_500(client, m
     assert response.get_json() == {"error": "internal server error"}
     assert "private" not in response.get_data(as_text=True)
     assert upstream.json_calls == 1
+
+
+def test_refresh_status_proxy_forwards_job_id_query_without_leaking_it_on_failure(
+    client,
+    monkeypatch,
+):
+    upstream = StubResponse({"job_id": "job-a", "status": "completed"}, 200)
+    calls = []
+
+    def request_stub(url, timeout, params=None):
+        calls.append((url, timeout, params))
+        return upstream
+
+    monkeypatch.setattr(web_server.requests, "get", request_stub)
+    response = client.get(
+        "/auth/refresh/status?job_id=job-a",
+        headers=_auth_headers(101, "user"),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"job_id": "job-a", "status": "completed"}
+    assert calls == [
+        ("http://127.0.0.1:8081/refresh/status", 5, {"job_id": "job-a"}),
+    ]
+
+    def fail_request(*args, **kwargs):
+        raise requests.RequestException("job-a private upstream detail")
+
+    monkeypatch.setattr(web_server.requests, "get", fail_request)
+    failed = client.get(
+        "/auth/refresh/status?job_id=job-a",
+        headers=_auth_headers(101, "user"),
+    )
+    assert failed.status_code == 502
+    assert failed.get_json() == {"error": "refresh service unavailable"}
+    assert "job-a" not in failed.get_data(as_text=True)

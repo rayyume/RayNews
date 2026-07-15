@@ -980,6 +980,13 @@ let lastUserActivityAt = Date.now();
 let pageVisibleSince = Date.now();
 let programmaticScrollUntil = 0;
 let refreshInProgress = false;
+let refreshFlowGeneration = 0;
+let refreshFlowController = null;
+let coldStartInitializationActive = false;
+let coldStartInitializationTimedOut = false;
+let startupCalibrationGeneration = 0;
+let startupCalibrationController = null;
+let startupCalibrationTimer = null;
 let logoRefreshInProgress = false;
 let activeScrollMotion = null;
 let pendingAuthAction = '';
@@ -1263,6 +1270,28 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function refreshAbortError() {
+  const error = new Error('refresh cancelled');
+  error.name = 'AbortError';
+  return error;
+}
+
+function abortableDelay(ms, signal) {
+  if (signal && signal.aborted) return Promise.reject(refreshAbortError());
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      if (signal) signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', onAbort);
+      reject(refreshAbortError());
+    };
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 function refreshErrorMessage(errorOrData, status = 0) {
   const data = (errorOrData && typeof errorOrData === 'object' && !(errorOrData instanceof Error))
     ? errorOrData
@@ -1306,21 +1335,25 @@ async function parseRefreshResponse(resp) {
   return data;
 }
 
-async function requestRefreshOnce() {
+async function requestRefreshOnce(signal) {
   const resp = await fetch('/auth/refresh', {
     method: 'POST',
     headers: { 'Authorization': 'Bearer ' + authToken },
     cache: 'no-store',
+    signal,
   });
   return parseRefreshResponse(resp);
 }
 
-async function requestRefreshStatus(timeoutMs = 5000) {
+async function requestRefreshStatus(jobId, timeoutMs = 5000, flowSignal = null) {
+  if (flowSignal && flowSignal.aborted) throw refreshAbortError();
   const controller = new AbortController();
   const boundedTimeoutMs = Math.max(1, Math.ceil(Number(timeoutMs) || 5000));
   const timeout = setTimeout(() => controller.abort(), boundedTimeoutMs);
+  const abortFromFlow = () => controller.abort();
+  if (flowSignal) flowSignal.addEventListener('abort', abortFromFlow, { once: true });
   try {
-    const resp = await fetch('/auth/refresh/status', {
+    const resp = await fetch('/auth/refresh/status?job_id=' + encodeURIComponent(jobId), {
       headers: { 'Authorization': 'Bearer ' + authToken },
       cache: 'no-store',
       signal: controller.signal,
@@ -1328,23 +1361,25 @@ async function requestRefreshStatus(timeoutMs = 5000) {
     return await parseRefreshResponse(resp);
   } catch (e) {
     if (e && e.name === 'AbortError') {
+      if (flowSignal && flowSignal.aborted) throw e;
       throw new Error('刷新状态查询超时，请稍后查看最新文章');
     }
     throw e;
   } finally {
     clearTimeout(timeout);
+    if (flowSignal) flowSignal.removeEventListener('abort', abortFromFlow);
   }
 }
 
-async function pollRefreshJob(jobId, timeoutMs = 135000) {
+async function pollRefreshJob(jobId, timeoutMs = 135000, flowSignal = null) {
   const deadline = Date.now() + timeoutMs;
   while (true) {
     const beforeDelayMs = deadline - Date.now();
     if (beforeDelayMs <= 0) break;
-    await delay(Math.min(1200, beforeDelayMs));
+    await abortableDelay(Math.min(1200, beforeDelayMs), flowSignal);
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) break;
-    const status = await requestRefreshStatus(remainingMs);
+    const status = await requestRefreshStatus(jobId, remainingMs, flowSignal);
     if (Date.now() >= deadline) break;
     if (status.job_id !== jobId) {
       throw new Error('刷新任务状态已被取代，请稍后查看最新文章');
@@ -1352,6 +1387,20 @@ async function pollRefreshJob(jobId, timeoutMs = 135000) {
     if (status.status === 'completed' || status.status === 'failed') return status;
   }
   throw new Error('刷新状态查询超时，请稍后查看最新文章');
+}
+
+function cancelRefreshFlow() {
+  const controller = refreshFlowController;
+  if (!controller && !refreshInProgress) return;
+  refreshFlowGeneration++;
+  refreshFlowController = null;
+  if (controller) controller.abort();
+  if (refreshInProgress) setRefreshRunning(false);
+}
+
+function cancelViewBoundRefreshWork() {
+  cancelRefreshFlow();
+  cancelStartupEmptyRevalidation();
 }
 
 function rebuildCategoryMap(rows) {
@@ -1593,6 +1642,7 @@ async function loadSourceCategories({
   onMetadataReady = null,
   useCache = true,
   networkTimeoutMs = 8000,
+  quietNetworkError = false,
 } = {}) {
   let metadataNotified = false;
   const notifyMetadataReady = () => {
@@ -1632,6 +1682,15 @@ async function loadSourceCategories({
     }
   } catch (e) {
     // Keep the built-in fallback CATEGORY_MAP.
+    if (
+      cached
+      && !quietNetworkError
+      && hasLoadedNewsOnce
+      && (!e || e.name !== 'AbortError')
+      && !document.hidden
+    ) {
+      showToast('来源信息暂未更新，已显示缓存内容');
+    }
   } finally {
     clearTimeout(timeout);
     notifyMetadataReady();
@@ -4262,6 +4321,15 @@ async function triggerRefresh() {
     return;
   }
 
+  const flowGeneration = ++refreshFlowGeneration;
+  const flowController = new AbortController();
+  refreshFlowController = flowController;
+  const flowIsCurrent = () => (
+    refreshFlowGeneration === flowGeneration
+    && refreshFlowController === flowController
+    && !flowController.signal.aborted
+    && !document.hidden
+  );
   const refreshView = {
     activeFilter: filter,
     page: currentPage,
@@ -4283,9 +4351,11 @@ async function triggerRefresh() {
   showToast('🔄 正在后台抓取...');
 
   try {
-    const data = await requestRefreshOnce();
+    const data = await requestRefreshOnce(flowController.signal);
+    if (!flowIsCurrent()) return;
     if (!data.job_id) throw new Error('刷新任务未返回编号');
-    const status = await pollRefreshJob(data.job_id);
+    const status = await pollRefreshJob(data.job_id, 135000, flowController.signal);
+    if (!flowIsCurrent()) return;
     if (status.status === 'failed') {
       throw new Error(refreshErrorMessage(status));
     }
@@ -4298,25 +4368,32 @@ async function triggerRefresh() {
       const applicationGuard = () => viewIsCurrent(
         completionRequestSequence,
         completionRequestSequence,
-      );
+      ) && flowIsCurrent();
       const loaded = await loadNewsPage(1, {
         activeFilter: refreshView.activeFilter,
         useCache: false,
         forceNetwork: true,
         animate: true,
         applicationGuard,
+        externalSignal: flowController.signal,
       });
       if (loaded && viewIsCurrent(completionRequestSequence, 0)) {
         consumePendingNewArticles(refreshView.activeFilter);
       }
     }
+    if (!flowIsCurrent()) return;
     const count = Number(status.new_count || 0);
-    showToast(count > 0 ? `✅ 刷新完成，新增 ${count} 篇` : '✅ 刷新完成');
+    showToast(count > 0 ? `✅ 更新完成，新增 ${count} 篇文章` : '✅ 已是最新');
   } catch (e) {
-    showToast('❌ ' + refreshErrorMessage(e));
+    if (flowIsCurrent() && (!e || e.name !== 'AbortError')) {
+      showToast('❌ ' + refreshErrorMessage(e));
+    }
   } finally {
-    setRefreshRunning(false);
-    showNewArticlesPrompt();
+    if (refreshFlowGeneration === flowGeneration && refreshFlowController === flowController) {
+      refreshFlowController = null;
+      setRefreshRunning(false);
+      showNewArticlesPrompt();
+    }
   }
 }
 
@@ -4327,7 +4404,7 @@ function setRefreshRunning(isRunning) {
     btn.classList.toggle('refresh-running', isRunning);
     btn.disabled = isRunning;
     const label = btn.querySelector('span') || btn;
-    label.textContent = isRunning ? '刷新中' : '刷新';
+    label.textContent = isRunning ? '更新中' : '刷新';
   }
 }
 
@@ -4397,6 +4474,7 @@ function listStateFromUrl() {
 }
 
 async function restoreListStateFromUrl({ restoreScroll = false } = {}) {
+  cancelViewBoundRefreshWork();
   const state = listStateFromUrl();
   restoringListHistory = true;
   filter = state.activeFilter;
@@ -4431,6 +4509,111 @@ function renderColdStartSkeleton() {
   list.innerHTML = `<div class="skeleton-item"><div class="skeleton-thumb"></div><div class="skeleton-lines"><div class="skeleton-line"></div><div class="skeleton-line"></div></div></div>`.repeat(3);
 }
 
+function isStartupInitializationResponse(data) {
+  const items = Array.isArray(data && data.items) ? data.items : [];
+  const job = data && data.diagnostics && data.diagnostics.refresh_job;
+  return items.length === 0
+    && Number(data && data.total || 0) === 0
+    && job
+    && job.trigger === 'startup'
+    && job.status === 'running';
+}
+
+function renderColdStartInitializing() {
+  const list = document.getElementById('list');
+  if (!list || news.length || list.querySelector('.item[data-id]')) return;
+  const detail = coldStartInitializationTimedOut
+    ? '初始化耗时较长，可稍后点击刷新查看最新内容'
+    : '正在初始化内容，文章将在后台抓取完成后自动出现';
+  list.innerHTML = `<div class="empty"><div class="empty-icon">⏳</div><p>${detail}</p>${coldStartInitializationTimedOut ? '<button class="refresh-btn" onclick="triggerRefresh()" style="margin-top:12px">刷新</button>' : ''}</div>`;
+  document.getElementById('count').textContent = '正在初始化';
+  renderPagination(0);
+}
+
+function cancelStartupEmptyRevalidation() {
+  startupCalibrationGeneration++;
+  if (startupCalibrationTimer !== null) clearTimeout(startupCalibrationTimer);
+  startupCalibrationTimer = null;
+  if (startupCalibrationController) startupCalibrationController.abort();
+  startupCalibrationController = null;
+  coldStartInitializationActive = false;
+  coldStartInitializationTimedOut = false;
+}
+
+function startStartupEmptyRevalidation(initialData, {
+  page = 1,
+  activeFilter = filter,
+  requestSeq = pageRequestSequence,
+  sourceSnapshot = null,
+  maxAttempts = 24,
+  intervalMs = 5000,
+} = {}) {
+  if (!isStartupInitializationResponse(initialData)) return false;
+  cancelStartupEmptyRevalidation();
+  const generation = ++startupCalibrationGeneration;
+  let attempts = 0;
+  coldStartInitializationActive = true;
+  coldStartInitializationTimedOut = false;
+  const ownsView = () => (
+    generation === startupCalibrationGeneration
+    && !document.hidden
+    && filter === activeFilter
+    && currentPage === page
+    && pageRequestSequence === requestSeq
+  );
+  const settle = (data = null, timedOut = false) => {
+    if (generation !== startupCalibrationGeneration) return;
+    startupCalibrationController = null;
+    startupCalibrationTimer = null;
+    coldStartInitializationActive = false;
+    coldStartInitializationTimedOut = timedOut;
+    if (data) {
+      applyNewsPage(data, page, activeFilter, { preserveDom: true });
+      scheduleAdjacentPagePrefetch(page, activeFilter, Number(data.total || 0));
+    } else {
+      renderList();
+    }
+  };
+  const scheduleNext = () => {
+    if (!ownsView()) return;
+    startupCalibrationTimer = setTimeout(poll, intervalMs);
+  };
+  const poll = async () => {
+    startupCalibrationTimer = null;
+    if (!ownsView()) return;
+    attempts++;
+    const controller = new AbortController();
+    startupCalibrationController = controller;
+    try {
+      const data = await fetchNewsPage(page, activeFilter, controller.signal, sourceSnapshot);
+      if (!ownsView() || startupCalibrationController !== controller) return;
+      startupCalibrationController = null;
+      if (Array.isArray(data.items) && data.items.length > 0) {
+        settle(data);
+        return;
+      }
+      if (!isStartupInitializationResponse(data)) {
+        settle(data);
+        return;
+      }
+      if (attempts >= maxAttempts) {
+        settle(null, true);
+        return;
+      }
+      scheduleNext();
+    } catch (e) {
+      if (!ownsView() || startupCalibrationController !== controller) return;
+      startupCalibrationController = null;
+      if (e && e.name === 'AbortError') return;
+      if (attempts >= maxAttempts) settle(null, true);
+      else scheduleNext();
+    }
+  };
+  renderList();
+  scheduleNext();
+  return true;
+}
+
 function renderColdStartError(message) {
   const list = document.getElementById('list');
   if (!list || news.length || list.querySelector('.item[data-id]')) return;
@@ -4445,6 +4628,9 @@ function renderSourceDeepLinkError(message) {
 
 function applyNewsPage(data, page, activeFilter, { animate = false, preserveDom = false } = {}) {
   news = Array.isArray(data.items) ? data.items : [];
+  coldStartInitializationActive = typeof isStartupInitializationResponse === 'function'
+    && isStartupInitializationResponse(data);
+  if (news.length || !coldStartInitializationActive) coldStartInitializationTimedOut = false;
   hasLoadedNewsOnce = true;
   currentPage = Number(data.page || page || 1);
   currentTotal = Number(data.total || 0);
@@ -4719,6 +4905,7 @@ async function loadNewsPageRequest(requestSeq, page = 1, {
   networkRetries = 0,
   sourceSnapshot = null,
   coldStartErrorHandler = null,
+  externalSignal = null,
 } = {}) {
   let cacheApplied = false;
   if (useCache) {
@@ -4742,6 +4929,7 @@ async function loadNewsPageRequest(requestSeq, page = 1, {
   try {
     for (let attempt = 0; attempt <= networkRetries; attempt++) {
       if (requestSeq !== pageRequestSequence) return false;
+      if (externalSignal && externalSignal.aborted) return false;
       if (attempt > 0) {
         await delay(600);
         if (requestSeq !== pageRequestSequence) return false;
@@ -4750,13 +4938,24 @@ async function loadNewsPageRequest(requestSeq, page = 1, {
       pageRequestController = new AbortController();
       const controller = pageRequestController;
       const timeout = setTimeout(() => controller.abort(), 12000);
+      const abortFromExternal = () => controller.abort();
+      if (externalSignal) externalSignal.addEventListener('abort', abortFromExternal, { once: true });
       try {
         const data = await fetchNewsPage(page, activeFilter, controller.signal, sourceSnapshot);
-        await withCacheTimeout(writeCachedNewsPage(page, activeFilter, data));
-        rememberBufferedPage(page, activeFilter, data);
+        if (externalSignal && externalSignal.aborted) return false;
+        const startupInitializing = typeof isStartupInitializationResponse === 'function'
+          && isStartupInitializationResponse(data);
+        if (!startupInitializing) {
+          await withCacheTimeout(writeCachedNewsPage(page, activeFilter, data));
+          rememberBufferedPage(page, activeFilter, data);
+        }
         if (requestSeq !== pageRequestSequence) return false;
         if (applicationGuard && !applicationGuard()) return false;
-        if (
+        if (startupInitializing && cacheApplied && news.length > 0) {
+          // A serve-first deployment may answer with an empty DB while its startup
+          // fetch is still running. Keep useful cached cards visible until the
+          // bounded GET-only calibration observes data or a terminal job state.
+        } else if (
           (
             document.getElementById('overlay').classList.contains('open')
             || articleReturnInProgress
@@ -4776,6 +4975,14 @@ async function loadNewsPageRequest(requestSeq, page = 1, {
             preserveDom: cacheApplied || (!userInitiated && news.length > 0),
           });
         }
+        if (startupInitializing) {
+          startStartupEmptyRevalidation(data, {
+            page,
+            activeFilter,
+            requestSeq,
+            sourceSnapshot,
+          });
+        }
         scheduleAdjacentPagePrefetch(page, activeFilter, Number(data.total || 0));
         return true;
       } catch (e) {
@@ -4783,6 +4990,7 @@ async function loadNewsPageRequest(requestSeq, page = 1, {
         if (requestSeq !== pageRequestSequence) return false;
       } finally {
         clearTimeout(timeout);
+        if (externalSignal) externalSignal.removeEventListener('abort', abortFromExternal);
       }
     }
     const message = lastError && lastError.name === 'AbortError'
@@ -4875,6 +5083,7 @@ async function loadData() {
 
 // Routine refresh path: detect only changed/new rows and prepare the latest first page.
 async function loadSince(timestamp, { forceApply = false } = {}) {
+  const deferForRefresh = refreshInProgress;
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 8000);
@@ -4902,6 +5111,7 @@ async function loadSince(timestamp, { forceApply = false } = {}) {
     pendingNewArticleCount += added;
     pendingNewItems = pendingNewItems.concat(newItems);
     refreshTodayArticleCount();
+    if (deferForRefresh || refreshInProgress) return added;
     await loadSourceCategories();
     // Keep an "all"-scoped snapshot warm — the lightweight Logo/home flow
     // intentionally jumps to "all" and can reuse it without starting a scrape.
@@ -5028,6 +5238,7 @@ function renderFilters() {
 }
 
 async function selectFilter(value) {
+  cancelViewBoundRefreshWork();
   const el = document.getElementById('filters');
   rememberCurrentListHistory();
   const previousFilter = filter;
@@ -5368,6 +5579,11 @@ function renderList() {
     return;
   }
 
+  if (!items.length && (coldStartInitializationActive || coldStartInitializationTimedOut)) {
+    renderColdStartInitializing();
+    return;
+  }
+
   const totalPages = Math.max(1, Math.ceil(currentTotal / PAGE_SIZE));
   if (currentPage > totalPages) currentPage = totalPages;
 
@@ -5460,6 +5676,7 @@ async function goToPage(page) {
   }
   const totalPages = Math.max(1, Math.ceil(currentTotal / PAGE_SIZE));
   if (page < 1 || page > totalPages) return;
+  cancelViewBoundRefreshWork();
   rememberCurrentListHistory();
   const activeFilter = filter;
   const navigationSeq = ++pageNavigationSequence;
@@ -5593,6 +5810,7 @@ function handleLogoKeydown(event) {
 
 async function refreshHomepage() {
   if (logoRefreshInProgress) return;
+  cancelViewBoundRefreshWork();
   logoRefreshInProgress = true;
   try {
     programmaticScrollUntil = Date.now() + 800;
@@ -5747,6 +5965,7 @@ function restoreArticleReturnState(onComplete) {
 }
 
 function openArticle(id) {
+  cancelViewBoundRefreshWork();
   const n = news.find(x => x.id === id);
   const wrap = document.getElementById('articleWrap');
   if (!document.getElementById('overlay').classList.contains('open')) {
@@ -6344,6 +6563,7 @@ async function bootstrapNews({ forceSourceMetadata = false } = {}) {
   const sourcePromise = loadSourceCategories({
     onMetadataReady: resolveSourceMetadata,
     useCache: !forceSourceMetadata,
+    quietNetworkError: true,
   });
   let sourceSnapshot = null;
   if (requestedSource) {
@@ -6473,10 +6693,24 @@ function onReturnToForeground() {
   lastUserActivityAt = now;
   const cursor = latestKnownTimestamp || latestNewsTimestamp();
   if (cursor > 0) loadSince(cursor);
+  const startupJob = lastNewsDiagnostics && lastNewsDiagnostics.refresh_job;
+  if (
+    news.length === 0
+    && startupJob
+    && startupJob.trigger === 'startup'
+    && startupJob.status === 'running'
+  ) {
+    loadNewsPage(currentPage, {
+      activeFilter: filter,
+      useCache: false,
+      forceNetwork: true,
+    });
+  }
   if (news.length > 0) pollTitleUpdates();
 }
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) onReturnToForeground();
+  if (document.hidden) cancelViewBoundRefreshWork();
+  else onReturnToForeground();
 });
 window.addEventListener('focus', onReturnToForeground);
 // ═══ Mobile: swipe-to-go-back on article overlay ════════

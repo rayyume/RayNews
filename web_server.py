@@ -4140,7 +4140,15 @@ def protected_refresh_status():
     """Return the current fetcher refresh job status."""
     import requests as http_req
     try:
-        resp = http_req.get("http://127.0.0.1:8081/refresh/status", timeout=5)
+        job_id = (request.args.get("job_id") or "").strip()
+        if job_id:
+            resp = http_req.get(
+                "http://127.0.0.1:8081/refresh/status",
+                params={"job_id": job_id},
+                timeout=5,
+            )
+        else:
+            resp = http_req.get("http://127.0.0.1:8081/refresh/status", timeout=5)
         payload = resp.json()
         return jsonify(payload), resp.status_code
     except (http_req.RequestException, ValueError):
