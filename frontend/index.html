@@ -508,7 +508,7 @@ body.body-scroll-lock{overflow:hidden!important}
 <div class="app">
   <header class="header">
     <div class="header-inner">
-      <div class="logo" onclick="refreshHomepage()" title="回到首页并刷新">
+      <div class="logo" onclick="refreshHomepage()" onkeydown="handleLogoKeydown(event)" role="button" tabindex="0" title="回到首页，检查新文章">
         <div class="logo-icon"><img src="/favicon-32x32.png?v=2" alt="RayNews"></div>
         <span>RayNews</span>
       </div>
@@ -979,6 +979,7 @@ let lastUserActivityAt = Date.now();
 let pageVisibleSince = Date.now();
 let programmaticScrollUntil = 0;
 let refreshInProgress = false;
+let logoRefreshInProgress = false;
 let activeScrollMotion = null;
 let pendingAuthAction = '';
 let savedArticleListState = null;
@@ -1313,20 +1314,40 @@ async function requestRefreshOnce() {
   return parseRefreshResponse(resp);
 }
 
-async function requestRefreshStatus() {
-  const resp = await fetch('/auth/refresh/status', {
-    headers: { 'Authorization': 'Bearer ' + authToken },
-    cache: 'no-store',
-  });
-  return parseRefreshResponse(resp);
+async function requestRefreshStatus(timeoutMs = 5000) {
+  const controller = new AbortController();
+  const boundedTimeoutMs = Math.max(1, Math.ceil(Number(timeoutMs) || 5000));
+  const timeout = setTimeout(() => controller.abort(), boundedTimeoutMs);
+  try {
+    const resp = await fetch('/auth/refresh/status', {
+      headers: { 'Authorization': 'Bearer ' + authToken },
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+    return await parseRefreshResponse(resp);
+  } catch (e) {
+    if (e && e.name === 'AbortError') {
+      throw new Error('刷新状态查询超时，请稍后查看最新文章');
+    }
+    throw e;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function pollRefreshJob(jobId, timeoutMs = 135000) {
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < timeoutMs) {
-    await delay(1200);
-    const status = await requestRefreshStatus();
-    if (status.job_id !== jobId && status.status === 'running') continue;
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const beforeDelayMs = deadline - Date.now();
+    if (beforeDelayMs <= 0) break;
+    await delay(Math.min(1200, beforeDelayMs));
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) break;
+    const status = await requestRefreshStatus(remainingMs);
+    if (Date.now() >= deadline) break;
+    if (status.job_id !== jobId) {
+      throw new Error('刷新任务状态已被取代，请稍后查看最新文章');
+    }
     if (status.status === 'completed' || status.status === 'failed') return status;
   }
   throw new Error('刷新状态查询超时，请稍后查看最新文章');
@@ -4213,7 +4234,20 @@ async function triggerRefresh() {
     return;
   }
 
-  const activeFilter = filter;
+  const refreshView = {
+    activeFilter: filter,
+    page: currentPage,
+    navigationSequence: pageNavigationSequence,
+    requestSequence: pageRequestSequence,
+  };
+  const viewIsCurrent = expectedRequestSequence => (
+    filter === refreshView.activeFilter
+    && currentPage === refreshView.page
+    && pageNavigationSequence === refreshView.navigationSequence
+    && pageRequestSequence === expectedRequestSequence
+    && !pageNavigationPending
+    && !hasBlockingOverlayOpen()
+  );
   setRefreshRunning(true);
   hideNewArticlesPrompt();
   showToast('🔄 正在后台抓取...');
@@ -4225,24 +4259,18 @@ async function triggerRefresh() {
     if (status.status === 'failed') {
       throw new Error(refreshErrorMessage(status));
     }
-    if (
-      filter === activeFilter
-      && currentPage === 1
-      && !hasBlockingOverlayOpen()
-    ) {
+    if (refreshView.page === 1 && viewIsCurrent(refreshView.requestSequence)) {
+      const completionRequestSequence = refreshView.requestSequence + 1;
+      const applicationGuard = () => viewIsCurrent(completionRequestSequence);
       const loaded = await loadNewsPage(1, {
-        activeFilter,
+        activeFilter: refreshView.activeFilter,
         useCache: false,
         forceNetwork: true,
         animate: true,
+        applicationGuard,
       });
-      if (
-        loaded
-        && filter === activeFilter
-        && currentPage === 1
-        && !hasBlockingOverlayOpen()
-      ) {
-        consumePendingNewArticles(activeFilter);
+      if (loaded && applicationGuard()) {
+        consumePendingNewArticles(refreshView.activeFilter);
       }
     }
     const count = Number(status.new_count || 0);
@@ -4251,6 +4279,7 @@ async function triggerRefresh() {
     showToast('❌ ' + refreshErrorMessage(e));
   } finally {
     setRefreshRunning(false);
+    showNewArticlesPrompt();
   }
 }
 
@@ -4611,12 +4640,14 @@ async function loadNewsPage(page = 1, {
   forceNetwork = false,
   userInitiated = false,
   animate = false,
+  applicationGuard = null,
 } = {}) {
   const requestSeq = ++pageRequestSequence;
   let cacheApplied = false;
   if (useCache) {
     const cached = await readCachedNewsPage(page, activeFilter);
     if (cached && requestSeq === pageRequestSequence) {
+      if (applicationGuard && !applicationGuard()) return false;
       rememberBufferedPage(page, activeFilter, cached);
       applyNewsPage(cached, page, activeFilter, { animate });
       cacheApplied = true;
@@ -4639,6 +4670,7 @@ async function loadNewsPage(page = 1, {
     await writeCachedNewsPage(page, activeFilter, data);
     rememberBufferedPage(page, activeFilter, data);
     if (requestSeq !== pageRequestSequence) return false;
+    if (applicationGuard && !applicationGuard()) return false;
     if (
       (
         document.getElementById('overlay').classList.contains('open')
@@ -5459,45 +5491,57 @@ async function showHomepageAfterScroll() {
   return loaded;
 }
 
+function handleLogoKeydown(event) {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  event.preventDefault();
+  refreshHomepage();
+}
+
 async function refreshHomepage() {
-  programmaticScrollUntil = Date.now() + 800;
-  let targetData = null;
-  let nearTop = false;
-  let applied = false;
-  const applyTarget = () => {
-    if (applied || !nearTop || !targetData) return;
-    applied = true;
-    filter = 'all';
-    currentPage = 1;
-    applyNewsPage(targetData, 1, 'all', { animate: true, preserveDom: true });
-    pendingLatestPage = null;
-    consumePendingNewArticles('all');
-    syncListUrl({ replace: true });
-  };
-  const targetPromise = (pendingLatestPage
-    ? Promise.resolve(pendingLatestPage)
-    : preparePageNavigation(1, 'all'))
-    .then(data => {
-      targetData = data;
-      applyTarget();
-      return data;
+  if (logoRefreshInProgress) return;
+  logoRefreshInProgress = true;
+  try {
+    programmaticScrollUntil = Date.now() + 800;
+    let targetData = null;
+    let nearTop = false;
+    let applied = false;
+    const applyTarget = () => {
+      if (applied || !nearTop || !targetData) return;
+      applied = true;
+      filter = 'all';
+      currentPage = 1;
+      applyNewsPage(targetData, 1, 'all', { animate: true, preserveDom: true });
+      pendingLatestPage = null;
+      consumePendingNewArticles('all');
+      syncListUrl({ replace: true });
+    };
+    const targetPromise = (pendingLatestPage
+      ? Promise.resolve(pendingLatestPage)
+      : preparePageNavigation(1, 'all'))
+      .then(data => {
+        targetData = data;
+        applyTarget();
+        return data;
+      });
+    const scrollPromise = scrollPageToTop({
+      onNearTop: () => {
+        nearTop = true;
+        applyTarget();
+      },
     });
-  const scrollPromise = scrollPageToTop({
-    onNearTop: () => {
-      nearTop = true;
-      applyTarget();
-    },
-  });
-  const [targetDataResult] = await Promise.all([targetPromise, scrollPromise]);
-  nearTop = true;
-  applyTarget();
-  if (!targetDataResult || !applied) {
-    showToast('❌ 刷新失败，请稍后重试');
-    return;
+    const [targetDataResult] = await Promise.all([targetPromise, scrollPromise]);
+    nearTop = true;
+    applyTarget();
+    if (!targetDataResult || !applied) {
+      showToast('❌ 刷新失败，请稍后重试');
+      return;
+    }
+    stabilizePageTop();
+    const cursor = latestKnownTimestamp || latestNewsTimestamp();
+    await loadSince(cursor, { forceApply: true });
+  } finally {
+    logoRefreshInProgress = false;
   }
-  stabilizePageTop();
-  const cursor = latestKnownTimestamp || latestNewsTimestamp();
-  await loadSince(cursor, { forceApply: true });
 }
 
 // Bottom-right ↑ button: just "back to top" + a quiet check for new articles in

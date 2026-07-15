@@ -332,27 +332,33 @@ def test_manual_refresh_posts_once_then_polls_status():
     assert "await pollRefreshJob(data.job_id)" in block
     assert "isTransientRefreshError" not in block
     assert "await delay(800)" not in block
-    assert "const activeFilter = filter;" in block
+    assert "activeFilter: filter," in block
+    assert "navigationSequence: pageNavigationSequence," in block
+    assert "requestSequence: pageRequestSequence," in block
+    assert "&& !pageNavigationPending" in block
     assert block.count("loadNewsPage(1, {") == 1
-    assert "currentPage === 1" in block
-    assert "filter === activeFilter" in block
+    assert "refreshView.page === 1" in block
+    assert "filter === refreshView.activeFilter" in block
     assert "!hasBlockingOverlayOpen()" in block
+    assert "applicationGuard," in block
 
 
 def test_refresh_status_polling_uses_authenticated_get_and_bounded_wait():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
-    assert "async function requestRefreshStatus()" in html
+    assert "async function requestRefreshStatus(" in html
     assert "async function pollRefreshJob(" in html
-    request = html[html.index("async function requestRefreshStatus()"):html.index("async function pollRefreshJob(")]
+    request = html[html.index("async function requestRefreshStatus("):html.index("async function pollRefreshJob(")]
     poll = html[html.index("async function pollRefreshJob("):html.index("function rebuildCategoryMap")]
     assert "fetch('/auth/refresh/status'" in request
     assert "'Authorization': 'Bearer ' + authToken" in request
     assert "cache: 'no-store'" in request
-    assert "await delay(1200);" in poll
-    assert "const status = await requestRefreshStatus();" in poll
-    assert "status.job_id !== jobId && status.status === 'running'" in poll
+    assert "await delay(Math.min(1200, beforeDelayMs));" in poll
+    assert "const status = await requestRefreshStatus(remainingMs);" in poll
+    assert "if (status.job_id !== jobId)" in poll
     assert "status.status === 'completed' || status.status === 'failed'" in poll
     assert "throw new Error('刷新状态查询超时，请稍后查看最新文章');" in poll
+    assert "signal: controller.signal" in request
+    assert "clearTimeout(timeout);" in request
 
 
 def test_refresh_running_state_only_disables_refresh_button():
@@ -369,8 +375,10 @@ def test_manual_refresh_suppresses_competing_new_article_prompt():
     prompt = html[html.index("function showNewArticlesPrompt()"):html.index("function hideNewArticlesPrompt()")]
     assert "if (refreshInProgress) return;" in prompt
     trigger = html[html.index("async function triggerRefresh("):html.index("function setRefreshRunning")]
-    assert "consumePendingNewArticles(activeFilter);" in trigger
-    assert trigger.index("consumePendingNewArticles(activeFilter);") < trigger.index("setRefreshRunning(false);")
+    consume = "consumePendingNewArticles(refreshView.activeFilter);"
+    assert consume in trigger
+    assert trigger.index(consume) < trigger.index("setRefreshRunning(false);")
+    assert trigger.index("setRefreshRunning(false);") < trigger.index("showNewArticlesPrompt();")
 
 
 def test_manual_refresh_uses_structured_error_messages():
@@ -382,7 +390,7 @@ def test_manual_refresh_uses_structured_error_messages():
     assert "function refreshErrorMessage" in html
     assert "async function parseRefreshResponse" in html
     assert "async function requestRefreshOnce()" in html
-    assert "async function requestRefreshStatus()" in html
+    assert "async function requestRefreshStatus(" in html
     assert "async function pollRefreshJob(jobId" in html
     assert "await requestRefreshOnce();" in trigger_block
     assert "await pollRefreshJob(data.job_id);" in trigger_block
