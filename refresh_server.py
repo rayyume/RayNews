@@ -360,6 +360,16 @@ def _sanitize_article_html(value: str | None) -> str | None:
     soup = BeautifulSoup(value, "html.parser")
     for tag in soup.find_all(["script", "style", "iframe", "object", "embed"]):
         tag.decompose()
+    # Telegraph separates blocks with standalone <br> tags (often several in a
+    # row) sitting directly between <p>/<figure> elements and between <img> and
+    # <figcaption>. Combined with our paragraph/figure margins these produce
+    # doubled or tripled gaps. Drop those spacer <br>s so spacing matches the
+    # original Telegraph layout, keeping genuine in-text line breaks inside
+    # <p>, <li>, headings, figcaption, etc.
+    for br in soup.find_all("br"):
+        parent = br.parent
+        if parent is not None and parent.name in {"article", "figure"}:
+            br.decompose()
     for tag in soup.find_all(True):
         for attr, attr_value in list(tag.attrs.items()):
             attr_l = attr.lower()

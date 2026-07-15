@@ -187,3 +187,25 @@ def test_schema_ready_is_guarded_by_event_instead_of_unsynchronized_fast_path():
     assert "_schema_ready_event" in source
     assert "_schema_ready_event.is_set()" in block
     assert "_schema_ready =" not in block
+
+
+def test_sanitize_strips_telegraph_spacer_brs_but_keeps_intext_breaks():
+    html = (
+        "<article>"
+        "<p>First paragraph.</p>"
+        "<br><p>Second paragraph.</p>"
+        "<br><br><br><p>Third after triple spacer.</p>"
+        "<figure><img src=\"https://x/i.jpg\"/><br>"
+        "<figcaption>Caption line one<br>line two</figcaption></figure>"
+        "</article>"
+    )
+    out = refresh_server._sanitize_article_html(html)
+
+    # All spacer <br>s directly between blocks / in the figure are gone,
+    # so paragraphs sit adjacent and rely on CSS margins for spacing.
+    assert "</p><p>" in out
+    assert "<br><p>" not in out
+    assert "<img" in out and "<figcaption>" in out
+    assert "<img/><figcaption>" in out.replace(' src="https://x/i.jpg"', "")
+    # Genuine in-text line break inside the figcaption is preserved.
+    assert "Caption line one<br/>line two" in out
