@@ -220,10 +220,11 @@ def get_refresh_job_status() -> bytes:
         return _refresh_job_json_locked()
 
 
-def _run_refresh_job(job_id: str, before_ids: set[int]) -> None:
+def _run_refresh_job(job_id: str) -> None:
     new_count = 0
     error = ""
     try:
+        before_ids = article_id_snapshot()
         body, status = run_fetcher()
         payload = json.loads(body)
         completed = 200 <= status < 300 and payload.get("status") == "ok"
@@ -256,7 +257,6 @@ def start_refresh_job(trigger: str = "manual") -> tuple[bytes, int]:
         if REFRESH_JOB["status"] == "running":
             return _refresh_job_json_locked(), 200
         job_id = uuid.uuid4().hex
-        before_ids = article_id_snapshot()
         REFRESH_JOB.update({
             "job_id": job_id,
             "status": "running",
@@ -270,7 +270,7 @@ def start_refresh_job(trigger: str = "manual") -> tuple[bytes, int]:
     try:
         threading.Thread(
             target=_run_refresh_job,
-            args=(job_id, before_ids),
+            args=(job_id,),
             name=f"refresh-job-{job_id[:8]}",
             daemon=True,
         ).start()

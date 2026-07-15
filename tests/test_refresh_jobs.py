@@ -47,6 +47,70 @@ def test_start_refresh_job_returns_before_worker_finishes(monkeypatch):
     assert wait_terminal()["status"] == "completed"
 
 
+def test_start_and_status_return_while_baseline_snapshot_is_slow(monkeypatch):
+    reset_job(monkeypatch)
+    snapshot_entered = threading.Event()
+    release_snapshot = threading.Event()
+    start_returned = threading.Event()
+    status_returned = threading.Event()
+    snapshots = iter(({1, 2}, {1, 2, 3}))
+
+    def slow_baseline_snapshot():
+        snapshot = next(snapshots)
+        if not snapshot_entered.is_set():
+            snapshot_entered.set()
+            release_snapshot.wait(2)
+        return snapshot
+
+    monkeypatch.setattr(refresh_server, "article_id_snapshot", slow_baseline_snapshot)
+    monkeypatch.setattr(
+        refresh_server,
+        "run_fetcher",
+        lambda: (json.dumps({"status": "ok"}).encode(), 200),
+    )
+
+    start_results = []
+
+    def start_job():
+        start_results.append(refresh_server.start_refresh_job("startup"))
+        start_returned.set()
+
+    starter = threading.Thread(target=start_job)
+    starter.start()
+    assert snapshot_entered.wait(1)
+
+    status_responses = []
+    monkeypatch.setattr(
+        refresh_server,
+        "send_json",
+        lambda handler, body, status=200: status_responses.append((body, status)),
+    )
+    handler = refresh_server.Handler.__new__(refresh_server.Handler)
+    handler.path = "/refresh/status"
+
+    def request_status():
+        refresh_server.Handler.do_GET(handler)
+        status_returned.set()
+
+    status_request = threading.Thread(target=request_status)
+    status_request.start()
+
+    start_was_immediate = start_returned.wait(0.5)
+    status_was_immediate = status_returned.wait(0.5)
+    release_snapshot.set()
+    starter.join(1)
+    status_request.join(1)
+
+    assert (start_was_immediate, status_was_immediate) == (True, True)
+    start_body, start_status = start_results[0]
+    assert start_status == 202
+    assert json.loads(start_body)["status"] == "running"
+    assert json.loads(status_responses[0][0])["status"] == "running"
+    payload = wait_terminal()
+    assert payload["status"] == "completed"
+    assert payload["new_count"] == 1
+
+
 def test_duplicate_start_returns_the_running_job(monkeypatch):
     reset_job(monkeypatch)
     release = threading.Event()
@@ -285,6 +349,8 @@ def test_startup_refresh_is_scheduled_after_server_creation():
     source = Path(refresh_server.__file__).read_text(encoding="utf-8")
     main = source[source.index('if __name__ == "__main__":'):]
 
-    assert main.index("server = RayNewsThreadingHTTPServer") < main.index(
-        'start_refresh_job("startup")'
-    )
+    server_created = main.index("server = RayNewsThreadingHTTPServer")
+    startup_scheduled = main.index('start_refresh_job("startup")')
+    server_serving = main.index("server.serve_forever()")
+
+    assert server_created < startup_scheduled < server_serving

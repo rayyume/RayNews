@@ -51,11 +51,16 @@ def test_nginx_proxies_article_delete_routes():
 
 def test_container_does_not_block_web_startup_on_initial_fetch():
     entrypoint = (ROOT / "entrypoint.sh").read_text(encoding="utf-8")
-    start_services = entrypoint.index("=== Starting refresh server ===")
-    assert "python fetcher.py" not in entrypoint[:start_services]
+    assert "fetcher.py" not in entrypoint
+    refresh_command = entrypoint.index("python3 /app/refresh_server.py &")
+    web_command = entrypoint.index("python3 /app/web_server.py &")
+    nginx_command = entrypoint.index("nginx -g 'daemon off;'")
+    assert refresh_command < web_command < nginx_command
     refresh = (ROOT / "refresh_server.py").read_text(encoding="utf-8")
     main = refresh[refresh.index('if __name__ == "__main__":'):]
-    assert 'start_refresh_job("startup")' in main
+    assert main.index('start_refresh_job("startup")') < main.index(
+        "server.serve_forever()"
+    )
 
 
 def test_admin_source_overrides_promote_to_shared_settings():
