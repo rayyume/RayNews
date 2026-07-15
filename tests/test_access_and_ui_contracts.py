@@ -360,6 +360,23 @@ def test_manual_refresh_has_no_unused_silent_start_mode():
     assert "if (showStart) showToast('🔄 正在后台抓取...');" in block
 
 
+def test_manual_refresh_uses_structured_error_messages():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    trigger_start = html.index("async function triggerRefresh(")
+    trigger_end = html.index("function setRefreshRunning(", trigger_start)
+    trigger_block = html[trigger_start:trigger_end]
+
+    assert "function refreshErrorMessage" in html
+    assert "async function parseRefreshResponse" in html
+    assert "async function requestRefreshOnce()" in html
+    assert "function isTransientRefreshError" in html
+    assert "await requestRefreshOnce();" in trigger_block
+    assert "await delay(800);" in trigger_block
+    assert "data = await requestRefreshOnce();" in trigger_block
+    assert "if (data && data.status === 'skipped') return data;" in html
+    assert "showToast('❌ 刷新失败: ' + (e.message || '网络错误'))" not in trigger_block
+
+
 def test_manual_refresh_proxies_short_start_and_status_requests():
     source = (ROOT / "web_server.py").read_text(encoding="utf-8")
     assert '@app.route("/auth/refresh", methods=["POST"])' in source

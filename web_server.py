@@ -4128,7 +4128,7 @@ def protected_refresh():
         resp = http_req.post("http://127.0.0.1:8081/refresh", timeout=5)
         payload = resp.json()
         return jsonify(payload), resp.status_code
-    except Exception:
+    except (http_req.RequestException, ValueError):
         return jsonify({"error": "refresh service unavailable"}), 502
 
 
@@ -4141,7 +4141,7 @@ def protected_refresh_status():
         resp = http_req.get("http://127.0.0.1:8081/refresh/status", timeout=5)
         payload = resp.json()
         return jsonify(payload), resp.status_code
-    except Exception:
+    except (http_req.RequestException, ValueError):
         return jsonify({"error": "refresh service unavailable"}), 502
 
 
