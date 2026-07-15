@@ -4130,6 +4130,8 @@ def protected_refresh():
         return jsonify(payload), resp.status_code
     except (http_req.RequestException, ValueError):
         return jsonify({"error": "refresh service unavailable"}), 502
+    except Exception:
+        return jsonify({"error": "internal server error"}), 500
 
 
 @app.route("/auth/refresh/status", methods=["GET"])
@@ -4143,6 +4145,8 @@ def protected_refresh_status():
         return jsonify(payload), resp.status_code
     except (http_req.RequestException, ValueError):
         return jsonify({"error": "refresh service unavailable"}), 502
+    except Exception:
+        return jsonify({"error": "internal server error"}), 500
 
 
 # ─── Health ───────────────────────────────────────────────────
