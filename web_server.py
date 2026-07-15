@@ -4119,16 +4119,30 @@ def test_notification():
 
 # ─── Authenticated Refresh ────────────────────────────────
 
-@app.route("/auth/refresh", methods=["POST", "GET"])
+@app.route("/auth/refresh", methods=["POST"])
 @require_role("user", "admin")
 def protected_refresh():
-    """Trigger fetcher refresh. Requires an authenticated user or admin."""
+    """Start a fetcher refresh job. Requires an authenticated user or admin."""
     import requests as http_req
     try:
-        resp = http_req.get("http://127.0.0.1:8081/refresh", timeout=150)
-        return jsonify(resp.json()), resp.status_code
-    except Exception as e:
-        return jsonify({"error": str(e)}), 502
+        resp = http_req.post("http://127.0.0.1:8081/refresh", timeout=5)
+        payload = resp.json()
+        return jsonify(payload), resp.status_code
+    except Exception:
+        return jsonify({"error": "refresh service unavailable"}), 502
+
+
+@app.route("/auth/refresh/status", methods=["GET"])
+@require_role("user", "admin")
+def protected_refresh_status():
+    """Return the current fetcher refresh job status."""
+    import requests as http_req
+    try:
+        resp = http_req.get("http://127.0.0.1:8081/refresh/status", timeout=5)
+        payload = resp.json()
+        return jsonify(payload), resp.status_code
+    except Exception:
+        return jsonify({"error": "refresh service unavailable"}), 502
 
 
 # ─── Health ───────────────────────────────────────────────────

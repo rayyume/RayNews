@@ -360,26 +360,21 @@ def test_manual_refresh_has_no_unused_silent_start_mode():
     assert "if (showStart) showToast('🔄 正在后台抓取...');" in block
 
 
-def test_manual_refresh_uses_structured_error_messages_and_long_backend_timeout():
-    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
-    web_source = (ROOT / "web_server.py").read_text(encoding="utf-8")
-    trigger_start = html.index("async function triggerRefresh(")
-    trigger_end = html.index("function setRefreshRunning(", trigger_start)
-    trigger_block = html[trigger_start:trigger_end]
-    protected_start = web_source.index("def protected_refresh")
-    protected_end = web_source.index("# ─── Health", protected_start)
-    protected_block = web_source[protected_start:protected_end]
+def test_manual_refresh_proxies_short_start_and_status_requests():
+    source = (ROOT / "web_server.py").read_text(encoding="utf-8")
+    assert '@app.route("/auth/refresh", methods=["POST"])' in source
+    assert 'http_req.post("http://127.0.0.1:8081/refresh", timeout=5)' in source
+    assert '@app.route("/auth/refresh/status", methods=["GET"])' in source
+    assert 'http_req.get("http://127.0.0.1:8081/refresh/status", timeout=5)' in source
+    assert "timeout=150" not in source[source.index("def protected_refresh"):source.index("# ─── Health", source.index("def protected_refresh"))]
 
-    assert "function refreshErrorMessage" in html
-    assert "async function parseRefreshResponse" in html
-    assert "async function requestRefreshOnce()" in html
-    assert "function isTransientRefreshError" in html
-    assert "await requestRefreshOnce();" in trigger_block
-    assert "await delay(800);" in trigger_block
-    assert "data = await requestRefreshOnce();" in trigger_block
-    assert "if (data && data.status === 'skipped') return data;" in html
-    assert "showToast('❌ 刷新失败: ' + (e.message || '网络错误'))" not in trigger_block
-    assert "http_req.get(\"http://127.0.0.1:8081/refresh\", timeout=150)" in protected_block
+
+def test_auth_proxy_has_explicit_short_timeouts():
+    nginx = (ROOT / "nginx.conf").read_text(encoding="utf-8")
+    block = nginx[nginx.index("location /auth/"):nginx.index("location ^~ /avatars/")]
+    assert "proxy_connect_timeout 5s;" in block
+    assert "proxy_send_timeout 30s;" in block
+    assert "proxy_read_timeout 30s;" in block
 
 
 def test_article_images_retry_with_cache_busting_when_mobile_runtime_loses_them():
