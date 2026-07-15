@@ -386,6 +386,242 @@ assert.equal(context.pageRequestPendingSequence, 0);
     )
 
 
+def test_cached_source_metadata_renders_while_network_revalidation_is_pending():
+    load_sources = source_between("async function loadSourceCategories()", "function sourceLabel")
+    run_node(
+        load_sources,
+        """
+const events = [];
+let resolveNetwork;
+context.readNewsCacheEntry = async () => ({ data: { sources: ['cached'] } });
+context.rebuildCategoryMap = sources => events.push(`rebuild:${sources[0]}`);
+context.renderFilters = () => events.push('render');
+context.isRestrictedUser = () => false;
+context.apiFetch = () => {
+  events.push('network');
+  return new Promise(resolve => { resolveNetwork = resolve; });
+};
+context.writeNewsCacheEntry = () => {};
+const loading = context.loadSourceCategories();
+await new Promise(resolve => setImmediate(resolve));
+assert.deepEqual(events, ['rebuild:cached', 'render', 'network']);
+resolveNetwork({ sources: ['fresh'] });
+await loading;
+assert.deepEqual(events, [
+  'rebuild:cached', 'render', 'network', 'rebuild:fresh', 'render',
+]);
+""",
+    )
+
+
+def test_bootstrap_starts_source_news_and_count_requests_without_serial_waits():
+    bootstrap = source_between("async function bootstrapNews()", "// Initial load")
+    run_node(
+        bootstrap,
+        """
+const starts = [];
+const resolvers = {};
+const pending = name => {
+  starts.push(name);
+  return new Promise(resolve => { resolvers[name] = resolve; });
+};
+context.filter = 'all';
+context.currentPage = 9;
+context.listStateFromUrl = () => ({ activeFilter: 'cat:Tech' });
+context.renderTopCatBar = () => starts.push('topbar');
+context.loadSourceCategories = () => pending('sources');
+context.loadNewsPage = (page, options) => {
+  assert.equal(page, 1);
+  assert.equal(options.activeFilter, 'cat:Tech');
+  assert.equal(options.useCache, true);
+  assert.equal(options.forceNetwork, true);
+  assert.equal(options.networkRetries, 1);
+  return pending('news');
+};
+context.refreshTodayArticleCount = () => pending('count');
+context.renderFilters = () => starts.push('filters');
+context.syncListUrl = () => starts.push('sync');
+context.resetMobileColdStartScroll = () => starts.push('scroll');
+const loading = context.bootstrapNews();
+assert.deepEqual(starts, ['topbar', 'sources', 'news', 'count']);
+assert.equal(context.filter, 'cat:Tech');
+assert.equal(context.currentPage, 1);
+resolvers.sources();
+resolvers.news();
+resolvers.count();
+await loading;
+assert.deepEqual(starts.slice(-3), ['filters', 'sync', 'scroll']);
+""",
+    )
+
+
+def test_cold_start_network_retry_uses_a_fresh_abort_controller():
+    load_page = source_between("async function loadNewsPage(", "function applyPageCalibrationWhenActive")
+    run_node(
+        load_page,
+        """
+context.pageRequestSequence = 0;
+context.pageRequestPendingSequence = 0;
+context.pageRequestController = null;
+context.news = [];
+context.readCachedNewsPage = async () => ({ items: [{ id: 'cached' }], total: 1 });
+context.rememberBufferedPage = () => {};
+context.applied = [];
+context.applyNewsPage = data => context.applied.push(data.items[0].id);
+context.renderColdStartSkeleton = () => {};
+context.fetchSignals = [];
+context.fetchNewsPage = async (page, activeFilter, signal) => {
+  context.fetchSignals.push(signal);
+  if (context.fetchSignals.length === 1) throw new Error('offline');
+  return { items: [{ id: 'fresh' }], total: 1 };
+};
+context.writeCachedNewsPage = async () => {};
+context.scheduleAdjacentPagePrefetch = () => {};
+context.loading = [];
+context.setPageLoading = state => context.loading.push(state);
+context.renderColdStartError = () => { throw new Error('must preserve cache'); };
+context.showToast = () => {};
+context.currentTotal = 1;
+context.document = {
+  getElementById: () => ({ classList: { contains: () => false } }),
+};
+context.articleReturnInProgress = false;
+context.pendingLatestPage = null;
+context.delayCalls = [];
+context.delay = async milliseconds => context.delayCalls.push(milliseconds);
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
+let nextController = 0;
+context.AbortController = class {
+  constructor() { this.signal = { controller: ++nextController }; }
+  abort() {}
+};
+const loaded = await context.loadNewsPage(1, {
+  activeFilter: 'all',
+  useCache: true,
+  forceNetwork: true,
+  userInitiated: true,
+  networkRetries: 1,
+});
+assert.equal(loaded, true);
+assert.deepEqual(context.applied, ['cached', 'fresh']);
+assert.equal(context.fetchSignals.length, 2);
+assert.notEqual(context.fetchSignals[0], context.fetchSignals[1]);
+assert.deepEqual(context.fetchSignals.map(signal => signal.controller), [1, 2]);
+assert.deepEqual(context.delayCalls, [600]);
+assert.equal(context.pageRequestPendingSequence, 0);
+""",
+    )
+
+
+def test_retry_stops_when_an_overlapping_request_supersedes_the_owner():
+    load_page = source_between("async function loadNewsPage(", "function applyPageCalibrationWhenActive")
+    run_node(
+        load_page,
+        """
+context.pageRequestSequence = 0;
+context.pageRequestPendingSequence = 0;
+context.pageRequestController = null;
+context.news = [{ id: 'visible' }];
+context.readCachedNewsPage = async () => null;
+context.rememberBufferedPage = () => {};
+context.applied = [];
+context.applyNewsPage = data => context.applied.push(data.items[0].id);
+context.renderColdStartSkeleton = () => {};
+context.fetches = [];
+context.fetchNewsPage = async (page, activeFilter) => {
+  context.fetches.push(activeFilter);
+  if (activeFilter === 'all') throw new Error('offline');
+  return { items: [{ id: 'tech' }], total: 1 };
+};
+context.writeCachedNewsPage = async () => {};
+context.scheduleAdjacentPagePrefetch = () => {};
+context.setPageLoading = () => {};
+context.errors = [];
+context.renderColdStartError = message => context.errors.push(message);
+context.toasts = [];
+context.showToast = message => context.toasts.push(message);
+context.currentTotal = 1;
+context.document = {
+  getElementById: () => ({ classList: { contains: () => false } }),
+};
+context.articleReturnInProgress = false;
+context.pendingLatestPage = null;
+let releaseRetry;
+context.delay = () => new Promise(resolve => { releaseRetry = resolve; });
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
+const first = context.loadNewsPage(1, {
+  activeFilter: 'all', useCache: false, userInitiated: true, networkRetries: 1,
+});
+for (let turn = 0; turn < 5 && !releaseRetry; turn++) await Promise.resolve();
+assert.equal(typeof releaseRetry, 'function');
+const second = context.loadNewsPage(1, {
+  activeFilter: 'cat:Tech', useCache: false, userInitiated: true,
+});
+assert.equal(await second, true);
+releaseRetry();
+assert.equal(await first, false);
+assert.deepEqual(context.fetches, ['all', 'cat:Tech']);
+assert.deepEqual(context.applied, ['tech']);
+assert.deepEqual(context.errors, []);
+assert.deepEqual(context.toasts, []);
+assert.equal(context.pageRequestPendingSequence, 0);
+""",
+    )
+
+
+def test_final_cold_start_failure_keeps_cached_articles_visible():
+    load_page = source_between("async function loadNewsPage(", "function applyPageCalibrationWhenActive")
+    run_node(
+        load_page,
+        """
+context.pageRequestSequence = 0;
+context.pageRequestPendingSequence = 0;
+context.pageRequestController = null;
+context.news = [];
+context.readCachedNewsPage = async () => ({ items: [{ id: 'cached' }], total: 1 });
+context.rememberBufferedPage = () => {};
+context.applied = [];
+context.applyNewsPage = data => context.applied.push(data.items[0].id);
+context.renderColdStartSkeleton = () => {};
+context.fetchCalls = 0;
+context.fetchNewsPage = async () => {
+  context.fetchCalls++;
+  throw Object.assign(new Error('timeout'), { name: 'AbortError' });
+};
+context.writeCachedNewsPage = async () => {};
+context.scheduleAdjacentPagePrefetch = () => {};
+context.setPageLoading = () => {};
+context.errors = [];
+context.renderColdStartError = message => context.errors.push(message);
+context.toasts = [];
+context.showToast = message => context.toasts.push(message);
+context.currentTotal = 1;
+context.document = {
+  getElementById: () => ({ classList: { contains: () => false } }),
+};
+context.articleReturnInProgress = false;
+context.pendingLatestPage = null;
+context.delay = async () => {};
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
+const loaded = await context.loadNewsPage(1, {
+  activeFilter: 'all',
+  useCache: true,
+  forceNetwork: true,
+  userInitiated: true,
+  networkRetries: 1,
+});
+assert.equal(loaded, true);
+assert.equal(context.fetchCalls, 2);
+assert.deepEqual(context.applied, ['cached']);
+assert.deepEqual(context.errors, []);
+assert.deepEqual(context.toasts, ['连接超时，请稍后重试']);
+""",
+    )
+
+
 def test_manual_refresh_failure_restores_prompt_only_after_running_state_clears():
     trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
     setup = trigger_context_setup("throw Object.assign(new Error('timeout'), { name: 'AbortError' });")

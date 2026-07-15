@@ -535,6 +535,36 @@ def test_mobile_cold_start_resets_scroll_before_and_after_bootstrap():
     assert "pageshow" not in initial_block
 
 
+def test_cold_start_renders_categories_immediately_and_runs_requests_in_parallel():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    boot = html[html.index("async function bootstrapNews()"):html.index("// Initial load")]
+    assert boot.index("renderTopCatBar();") < boot.index("loadSourceCategories()")
+    assert "const sourcePromise = loadSourceCategories();" in boot
+    assert "const newsPromise = loadNewsPage(1, {" in boot
+    assert "useCache: true," in boot
+    assert "networkRetries: 1," in boot
+    assert "await Promise.allSettled([sourcePromise, newsPromise, todayCountPromise]);" in boot
+    assert "await loadSourceCategories();" not in boot
+
+
+def test_cached_source_metadata_is_rendered_before_network_fetch():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    start = html.index("async function loadSourceCategories()")
+    block = html[start:html.index("function sourceLabel", start)]
+    assert block.index("rebuildCategoryMap(cached.data.sources);") < block.index("await apiFetch('/sources')")
+    assert block.index("renderFilters();") < block.index("await apiFetch('/sources')")
+
+
+def test_cold_start_retry_uses_a_fresh_abort_controller_and_preserves_cache():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    load = html[html.index("async function loadNewsPage("):html.index("function applyPageCalibrationWhenActive")]
+    assert "networkRetries = 0" in load
+    assert "for (let attempt = 0; attempt <= networkRetries; attempt++)" in load
+    assert "pageRequestController = new AbortController();" in load
+    assert "if (cacheApplied)" in load
+    assert "renderColdStartError(message)" in load
+
+
 def test_desktop_scroll_to_top_uses_duration_controlled_animation():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     start = html.index("function scrollPageToTop(")
@@ -579,7 +609,8 @@ def test_cold_start_bootstrap_has_loading_animation():
     assert "loadNewsPage(1, {" in boot_block
     assert "userInitiated: true," in boot_block
     assert "animate: true," in boot_block
-    assert "useCache: false," in boot_block
+    assert "useCache: true," in boot_block
+    assert "networkRetries: 1," in boot_block
     assert "resetMobileColdStartScroll" in boot_block
 
 

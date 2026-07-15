@@ -1594,6 +1594,7 @@ async function loadSourceCategories() {
   if (cached && cached.data && Array.isArray(cached.data.sources)) {
     rebuildCategoryMap(cached.data.sources);
   }
+  renderFilters();
   try {
     let data;
     if (!isRestrictedUser()) {
@@ -1604,6 +1605,7 @@ async function loadSourceCategories() {
     }
     if (data && Array.isArray(data.sources)) {
       rebuildCategoryMap(data.sources);
+      renderFilters();
       writeNewsCacheEntry({
         key: 'source-metadata',
         kind: 'metadata',
@@ -4663,6 +4665,7 @@ async function loadNewsPageRequest(requestSeq, page = 1, {
   userInitiated = false,
   animate = false,
   applicationGuard = null,
+  networkRetries = 0,
 } = {}) {
   let cacheApplied = false;
   if (useCache) {
@@ -4678,47 +4681,62 @@ async function loadNewsPageRequest(requestSeq, page = 1, {
   if (!forceNetwork && cacheApplied) {
     scheduleAdjacentPagePrefetch(page, activeFilter, currentTotal);
   }
+  if (requestSeq !== pageRequestSequence) return false;
   if (!cacheApplied && !news.length) renderColdStartSkeleton();
-  if (pageRequestController) pageRequestController.abort();
-  pageRequestController = new AbortController();
-  const controller = pageRequestController;
-  const timeout = setTimeout(() => controller.abort(), 12000);
   const showPageProgress = !cacheApplied && userInitiated;
   setPageLoading(showPageProgress);
+  let lastError = null;
   try {
-    const data = await fetchNewsPage(page, activeFilter, controller.signal);
-    clearTimeout(timeout);
-    await writeCachedNewsPage(page, activeFilter, data);
-    rememberBufferedPage(page, activeFilter, data);
-    if (requestSeq !== pageRequestSequence) return false;
-    if (applicationGuard && !applicationGuard()) return false;
-    if (
-      (
-        document.getElementById('overlay').classList.contains('open')
-        || articleReturnInProgress
-      )
-      && !userInitiated
-    ) {
-      pendingLatestPage = activeFilter === 'all' && page === 1 ? data : pendingLatestPage;
-    } else {
-      applyNewsPage(data, page, activeFilter, {
-        // Don't force-disable animation just because the cache pass already
-        // animated: preserveDom's reconcileVisibleArticles() uses a separate,
-        // targeted FLIP transition (only diffed cards move/fade), not the
-        // page-switching cascade — so if the network response differs from
-        // what the cache showed, that diff should still animate smoothly
-        // instead of hard-swapping with zero transition.
-        animate,
-        preserveDom: cacheApplied || (!userInitiated && news.length > 0),
-      });
+    for (let attempt = 0; attempt <= networkRetries; attempt++) {
+      if (requestSeq !== pageRequestSequence) return false;
+      if (attempt > 0) {
+        await delay(600);
+        if (requestSeq !== pageRequestSequence) return false;
+      }
+      if (pageRequestController) pageRequestController.abort();
+      pageRequestController = new AbortController();
+      const controller = pageRequestController;
+      const timeout = setTimeout(() => controller.abort(), 12000);
+      try {
+        const data = await fetchNewsPage(page, activeFilter, controller.signal);
+        await writeCachedNewsPage(page, activeFilter, data);
+        rememberBufferedPage(page, activeFilter, data);
+        if (requestSeq !== pageRequestSequence) return false;
+        if (applicationGuard && !applicationGuard()) return false;
+        if (
+          (
+            document.getElementById('overlay').classList.contains('open')
+            || articleReturnInProgress
+          )
+          && !userInitiated
+        ) {
+          pendingLatestPage = activeFilter === 'all' && page === 1 ? data : pendingLatestPage;
+        } else {
+          applyNewsPage(data, page, activeFilter, {
+            // Don't force-disable animation just because the cache pass already
+            // animated: preserveDom's reconcileVisibleArticles() uses a separate,
+            // targeted FLIP transition (only diffed cards move/fade), not the
+            // page-switching cascade — so if the network response differs from
+            // what the cache showed, that diff should still animate smoothly
+            // instead of hard-swapping with zero transition.
+            animate,
+            preserveDom: cacheApplied || (!userInitiated && news.length > 0),
+          });
+        }
+        scheduleAdjacentPagePrefetch(page, activeFilter, Number(data.total || 0));
+        return true;
+      } catch (e) {
+        lastError = e;
+        if (requestSeq !== pageRequestSequence) return false;
+      } finally {
+        clearTimeout(timeout);
+      }
     }
-    scheduleAdjacentPagePrefetch(page, activeFilter, Number(data.total || 0));
-    return true;
-  } catch (e) {
-    clearTimeout(timeout);
-    if (e.name === 'AbortError' && requestSeq !== pageRequestSequence) return false;
-    const message = e.name === 'AbortError' ? '连接超时，请稍后重试' : '加载失败，请检查网络';
-    if (!cacheApplied && !news.length) renderColdStartError(message);
+    const message = lastError && lastError.name === 'AbortError'
+      ? '连接超时，请稍后重试'
+      : '加载失败，请检查网络';
+    if (cacheApplied) showToast(message);
+    else if (!cacheApplied && !news.length) renderColdStartError(message);
     else if (userInitiated) showToast(message);
     return cacheApplied;
   } finally {
@@ -6227,20 +6245,21 @@ function resetMobileColdStartScroll() {
 }
 
 async function bootstrapNews() {
-  await loadSourceCategories();
-  renderFilters();
-  const todayCountPromise = refreshTodayArticleCount();
   const initialState = listStateFromUrl();
   filter = initialState.activeFilter;
   currentPage = 1;  // always start at page 1 on fresh load
-  await loadNewsPage(1, {
+  renderTopCatBar();
+  const sourcePromise = loadSourceCategories();
+  const newsPromise = loadNewsPage(1, {
     activeFilter: initialState.activeFilter,
-    useCache: false,
+    useCache: true,
     forceNetwork: true,
     userInitiated: true,
     animate: true,
+    networkRetries: 1,
   });
-  await todayCountPromise;
+  const todayCountPromise = refreshTodayArticleCount();
+  await Promise.allSettled([sourcePromise, newsPromise, todayCountPromise]);
   renderFilters();
   syncListUrl({ replace: true });
   resetMobileColdStartScroll();
