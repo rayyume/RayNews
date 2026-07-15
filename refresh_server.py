@@ -267,12 +267,22 @@ def start_refresh_job(trigger: str = "manual") -> tuple[bytes, int]:
             "error": "",
         })
         body = _refresh_job_json_locked()
-    threading.Thread(
-        target=_run_refresh_job,
-        args=(job_id, before_ids),
-        name=f"refresh-job-{job_id[:8]}",
-        daemon=True,
-    ).start()
+    try:
+        threading.Thread(
+            target=_run_refresh_job,
+            args=(job_id, before_ids),
+            name=f"refresh-job-{job_id[:8]}",
+            daemon=True,
+        ).start()
+    except Exception:
+        with REFRESH_JOB_LOCK:
+            if REFRESH_JOB["job_id"] == job_id and REFRESH_JOB["status"] == "running":
+                REFRESH_JOB.update({
+                    "status": "failed",
+                    "finished_at": int(time.time()),
+                    "error": "refresh failed",
+                })
+            return _refresh_job_json_locked(), 500
     return body, 202
 
 

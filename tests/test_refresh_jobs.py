@@ -2,6 +2,8 @@ import json
 import threading
 from pathlib import Path
 
+import pytest
+
 import refresh_server
 
 
@@ -64,6 +66,68 @@ def test_duplicate_start_returns_the_running_job(monkeypatch):
     assert json.loads(first)["job_id"] == json.loads(second)["job_id"]
     release.set()
     assert wait_terminal()["status"] == "completed"
+
+
+def test_concurrent_starts_coalesce_to_one_job(monkeypatch):
+    reset_job(monkeypatch)
+    callers_ready = threading.Barrier(3)
+    release_worker = threading.Event()
+    results = []
+    results_lock = threading.Lock()
+
+    def slow_fetcher():
+        release_worker.wait(2)
+        return json.dumps({"status": "ok"}).encode(), 200
+
+    def start_job():
+        callers_ready.wait()
+        result = refresh_server.start_refresh_job("manual")
+        with results_lock:
+            results.append(result)
+
+    monkeypatch.setattr(refresh_server, "run_fetcher", slow_fetcher)
+    monkeypatch.setattr(refresh_server, "article_id_snapshot", lambda: set())
+    callers = [threading.Thread(target=start_job) for _ in range(2)]
+    for caller in callers:
+        caller.start()
+
+    callers_ready.wait()
+    for caller in callers:
+        caller.join(1)
+    release_worker.set()
+
+    assert all(not caller.is_alive() for caller in callers)
+    assert sorted(status for _, status in results) == [200, 202]
+    assert len({json.loads(body)["job_id"] for body, _ in results}) == 1
+    assert wait_terminal()["status"] == "completed"
+
+
+@pytest.mark.parametrize("failure_point", ["construct", "start"])
+def test_thread_launch_failure_transitions_job_to_failed(monkeypatch, failure_point):
+    reset_job(monkeypatch)
+    monkeypatch.setattr(refresh_server, "article_id_snapshot", lambda: set())
+
+    class FailingThread:
+        def __init__(self, **kwargs):
+            if failure_point == "construct":
+                raise RuntimeError("internal path: /app/data/news.db")
+
+        def start(self):
+            raise RuntimeError("internal path: /app/data/news.db")
+
+    monkeypatch.setattr(refresh_server.threading, "Thread", FailingThread)
+
+    body, status = refresh_server.start_refresh_job("manual")
+    payload = json.loads(body)
+    current = json.loads(refresh_server.get_refresh_job_status())
+
+    assert status == 500
+    assert payload == current
+    assert payload["job_id"]
+    assert payload["status"] == "failed"
+    assert payload["finished_at"] is not None
+    assert payload["error"] == "refresh failed"
+    assert "/app/data" not in json.dumps(payload)
 
 
 def test_refresh_job_reports_new_count(monkeypatch):
