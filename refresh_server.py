@@ -11,6 +11,7 @@ import os
 import sqlite3
 import re
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -40,6 +41,16 @@ LAST_FETCH_STATUS = {
     "stdout": "",
     "stderr": "",
     "updated_at": None,
+}
+REFRESH_JOB_LOCK = threading.Lock()
+REFRESH_JOB = {
+    "job_id": "",
+    "status": "idle",
+    "trigger": "",
+    "started_at": None,
+    "finished_at": None,
+    "new_count": 0,
+    "error": "",
 }
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [refresh] %(message)s")
@@ -200,6 +211,71 @@ def article_id_snapshot() -> set[int]:
             conn.close()
 
 
+def _refresh_job_json_locked() -> bytes:
+    return json.dumps(REFRESH_JOB).encode()
+
+
+def get_refresh_job_status() -> bytes:
+    with REFRESH_JOB_LOCK:
+        return _refresh_job_json_locked()
+
+
+def _run_refresh_job(job_id: str, before_ids: set[int]) -> None:
+    new_count = 0
+    error = ""
+    try:
+        body, status = run_fetcher()
+        payload = json.loads(body)
+        completed = 200 <= status < 300 and payload.get("status") == "ok"
+        if completed:
+            new_count = len(article_id_snapshot() - before_ids)
+        else:
+            payload_error = payload.get("error")
+            error = (
+                payload_error
+                if payload_error in ("timeout", "fetcher already running")
+                else "refresh failed"
+            )
+    except Exception:
+        completed = False
+        error = "refresh failed"
+
+    with REFRESH_JOB_LOCK:
+        if REFRESH_JOB["job_id"] != job_id:
+            return
+        REFRESH_JOB.update({
+            "status": "completed" if completed else "failed",
+            "finished_at": int(time.time()),
+            "new_count": new_count,
+            "error": error,
+        })
+
+
+def start_refresh_job(trigger: str = "manual") -> tuple[bytes, int]:
+    with REFRESH_JOB_LOCK:
+        if REFRESH_JOB["status"] == "running":
+            return _refresh_job_json_locked(), 200
+        job_id = uuid.uuid4().hex
+        before_ids = article_id_snapshot()
+        REFRESH_JOB.update({
+            "job_id": job_id,
+            "status": "running",
+            "trigger": trigger,
+            "started_at": int(time.time()),
+            "finished_at": None,
+            "new_count": 0,
+            "error": "",
+        })
+        body = _refresh_job_json_locked()
+    threading.Thread(
+        target=_run_refresh_job,
+        args=(job_id, before_ids),
+        name=f"refresh-job-{job_id[:8]}",
+        daemon=True,
+    ).start()
+    return body, 202
+
+
 def enqueue_new_article_images(existing_article_ids: set[int]) -> None:
     """Queue image cache warmup for newly fetched articles without blocking refresh."""
     conn = None
@@ -275,7 +351,7 @@ def enqueue_today_wsrv_article_images() -> dict[str, int]:
 
 def periodic_refresh():
     """Run fetcher periodically in the background."""
-    body, _ = run_fetcher()
+    start_refresh_job("periodic")
     threading.Timer(REFRESH_INTERVAL, periodic_refresh).start()
 
 
@@ -675,6 +751,14 @@ def send_text(handler, text: str, status=200):
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        path = urllib.parse.urlparse(self.path).path.rstrip("/")
+        if path == "/refresh":
+            body, status = start_refresh_job("manual")
+            send_json(self, body, status)
+            return
+        send_text(self, "not found", 404)
+
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path.rstrip("/")
@@ -705,8 +789,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         # ── Legacy routes ──
         if path == "/refresh":
-            body, status = run_fetcher()
+            body, status = start_refresh_job("manual")
             send_json(self, body, status)
+            return
+
+        if path == "/refresh/status":
+            send_json(self, get_refresh_job_status())
             return
 
         # ── Internal (loopback-only via nginx routing; not exposed under /api/) ──
@@ -783,9 +871,10 @@ if __name__ == "__main__":
     )
     if diag["telegram_channel_default"]:
         log.warning("TELEGRAM_CHANNEL is not configured or still equals your_channel")
+    server = RayNewsThreadingHTTPServer(("127.0.0.1", port), Handler)
+    start_refresh_job("startup")
     # Start periodic refresh in background
     threading.Timer(REFRESH_INTERVAL, periodic_refresh).start()
-    server = RayNewsThreadingHTTPServer(("127.0.0.1", port), Handler)
     log.info(f"Refresh + API server listening on {port} (auto-refresh every {REFRESH_INTERVAL}s)")
     threading.Thread(
         target=enqueue_today_wsrv_article_images,
