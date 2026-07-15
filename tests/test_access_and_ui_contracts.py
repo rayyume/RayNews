@@ -49,6 +49,15 @@ def test_nginx_proxies_article_delete_routes():
     assert "proxy_pass http://127.0.0.1:8082" in section
 
 
+def test_container_does_not_block_web_startup_on_initial_fetch():
+    entrypoint = (ROOT / "entrypoint.sh").read_text(encoding="utf-8")
+    start_services = entrypoint.index("=== Starting refresh server ===")
+    assert "python fetcher.py" not in entrypoint[:start_services]
+    refresh = (ROOT / "refresh_server.py").read_text(encoding="utf-8")
+    main = refresh[refresh.index('if __name__ == "__main__":'):]
+    assert 'start_refresh_job("startup")' in main
+
+
 def test_admin_source_overrides_promote_to_shared_settings():
     conn = _source_db()
     conn.executemany(
