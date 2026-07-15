@@ -1608,13 +1608,17 @@ async function loadSourceCategories({
   }
   renderFilters();
   if (cached && cached.data && Array.isArray(cached.data.sources)) notifyMetadataReady();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), networkTimeoutMs);
   try {
     const fetchFreshSources = async () => {
-      if (!isRestrictedUser()) return await apiFetch('/sources');
-      const resp = await fetch('/api/sources');
+      if (!isRestrictedUser()) {
+        return await apiFetch('/sources', { signal: controller.signal });
+      }
+      const resp = await fetch('/api/sources', { signal: controller.signal });
       return await resp.json();
     };
-    const data = await withPromiseTimeout(fetchFreshSources(), null, networkTimeoutMs);
+    const data = await fetchFreshSources();
     if (data && Array.isArray(data.sources)) {
       rebuildCategoryMap(data.sources);
       renderFilters();
@@ -1629,6 +1633,7 @@ async function loadSourceCategories({
   } catch (e) {
     // Keep the built-in fallback CATEGORY_MAP.
   } finally {
+    clearTimeout(timeout);
     notifyMetadataReady();
   }
 }
@@ -3152,16 +3157,21 @@ function countTodayArticles() {
   return news.filter(n => n.date === todayStr).length;
 }
 
-async function refreshTodayArticleCount() {
+async function refreshTodayArticleCount(timeoutMs = 8000) {
   const date = beijingDateString();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const params = new URLSearchParams({ page: '1', size: '1', date });
-    const resp = await fetch('/api/news?' + params.toString());
-    if (!resp.ok) return countTodayArticles();
-    const data = await resp.json();
-    if (data.error) return countTodayArticles();
-    todayArticleCount = Number(data.total || 0);
-  } catch (e) {}
+    const resp = await fetch('/api/news?' + params.toString(), { signal: controller.signal });
+    if (resp.ok) {
+      const data = await resp.json();
+      if (!data.error) todayArticleCount = Number(data.total || 0);
+    }
+  } catch (e) {
+  } finally {
+    clearTimeout(timeout);
+  }
   return countTodayArticles();
 }
 

@@ -553,8 +553,9 @@ def test_cached_source_metadata_is_rendered_before_network_fetch():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     start = html.index("async function loadSourceCategories(")
     block = html[start:html.index("function sourceLabel", start)]
-    assert block.index("rebuildCategoryMap(cached.data.sources);") < block.index("await apiFetch('/sources')")
-    assert block.index("renderFilters();") < block.index("await apiFetch('/sources')")
+    source_fetch = "await apiFetch('/sources', { signal: controller.signal })"
+    assert block.index("rebuildCategoryMap(cached.data.sources);") < block.index(source_fetch)
+    assert block.index("renderFilters();") < block.index(source_fetch)
 
 
 def test_cold_start_retry_uses_a_fresh_abort_controller_and_preserves_cache():

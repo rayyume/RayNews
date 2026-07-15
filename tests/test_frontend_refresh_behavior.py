@@ -404,6 +404,8 @@ context.apiFetch = () => {
   return new Promise(resolve => { resolveNetwork = resolve; });
 };
 context.writeNewsCacheEntry = () => {};
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
 const loading = context.loadSourceCategories();
 await new Promise(resolve => setImmediate(resolve));
 assert.deepEqual(events, ['rebuild:cached', 'render', 'network']);
@@ -521,7 +523,13 @@ context.readNewsCacheEntry = async () => null;
 context.rebuildCategoryMap = () => {};
 context.renderFilters = () => {};
 context.isRestrictedUser = () => false;
-context.apiFetch = () => new Promise(() => {});
+context.apiFetch = (url, options = {}) => new Promise((resolve, reject) => {
+  if (options.signal) {
+    options.signal.addEventListener('abort', () => reject(
+      Object.assign(new Error('timed out'), { name: 'AbortError' })
+    ));
+  }
+});
 context.writeNewsCacheEntry = () => {};
 context.renderTopCatBar = () => {};
 context.newsCalls = 0;
@@ -547,6 +555,67 @@ assert.equal(context.sourceErrors.length, 1);
 assert.equal(context.genericErrors.length, 0);
 assert.equal(context.location.search, originalSearch);
 assert.equal(context.syncCalls, 0);
+""",
+    )
+
+
+def test_each_fresh_source_timeout_aborts_its_fetch_and_clears_its_timer():
+    load_sources = source_between("async function loadSourceCategories(", "function sourceLabel")
+    cache_timeout = source_between("async function withCacheTimeout(", "async function loadNewsPageRequest")
+    run_node(
+        load_sources + cache_timeout,
+        """
+context.readNewsCacheEntry = async () => null;
+context.rebuildCategoryMap = () => {};
+context.renderFilters = () => {};
+context.isRestrictedUser = () => false;
+context.writeNewsCacheEntry = () => {};
+context.controllers = [];
+context.AbortController = class {
+  constructor() {
+    const listeners = [];
+    this.signal = {
+      aborted: false,
+      addEventListener(type, listener) { if (type === 'abort') listeners.push(listener); },
+    };
+    this.listeners = listeners;
+    context.controllers.push(this);
+  }
+  abort() {
+    if (this.signal.aborted) return;
+    this.signal.aborted = true;
+    this.listeners.forEach(listener => listener());
+  }
+};
+context.activeFetches = 0;
+context.receivedSignals = [];
+context.apiFetch = (url, options) => {
+  context.receivedSignals.push(options && options.signal);
+  context.activeFetches++;
+  return new Promise((resolve, reject) => {
+    options.signal.addEventListener('abort', () => {
+      context.activeFetches--;
+      reject(Object.assign(new Error('timed out'), { name: 'AbortError' }));
+    });
+  });
+};
+let timerId = 0;
+context.clearedTimers = [];
+context.setTimeout = callback => {
+  const id = ++timerId;
+  setImmediate(callback);
+  return id;
+};
+context.clearTimeout = id => context.clearedTimers.push(id);
+await context.loadSourceCategories({ useCache: false, networkTimeoutMs: 5 });
+await context.loadSourceCategories({ useCache: false, networkTimeoutMs: 5 });
+assert.equal(context.controllers.length, 2);
+assert.equal(context.receivedSignals.length, 2);
+assert.equal(context.receivedSignals[0], context.controllers[0].signal);
+assert.equal(context.receivedSignals[1], context.controllers[1].signal);
+assert.deepEqual(context.controllers.map(controller => controller.signal.aborted), [true, true]);
+assert.equal(context.activeFetches, 0);
+assert.deepEqual(context.clearedTimers, [1, 2]);
 """,
     )
 
@@ -605,6 +674,91 @@ assert.equal(context.location.search, '?category=Tech&page=1');
     )
 
 
+def test_source_retry_lock_releases_after_hung_today_count_is_aborted():
+    list_state = source_between("function listStateFromUrl()", "async function restoreListStateFromUrl")
+    today_count = source_between("async function refreshTodayArticleCount(", "let dailySummaryState")
+    cold_start = source_between("function resetMobileColdStartScroll()", "// Initial load")
+    run_node(
+        list_state + today_count + cold_start,
+        """
+const originalSearch = '?source=' + encodeURIComponent('财经早餐') + '&page=1';
+context.location = { pathname: '/', search: originalSearch };
+context.sourceFilterGroups = {};
+context.CATEGORY_ORDER = ['News', 'Tech', 'Biz', 'Info'];
+context.filter = 'all';
+context.currentPage = 1;
+context.pageNavigationSequence = 0;
+context.pageRequestSequence = 0;
+context.renderTopCatBar = () => {};
+context.metadataCalls = 0;
+context.loadSourceCategories = async ({ onMetadataReady } = {}) => {
+  context.metadataCalls++;
+  if (onMetadataReady) onMetadataReady();
+};
+context.loadNewsPage = async () => { throw new Error('must not load All'); };
+context.renderFilters = () => {};
+context.syncListUrl = () => {};
+context.resetMobileColdStartScroll = () => {};
+context.renderSourceDeepLinkError = () => {};
+context.beijingDateString = () => '2026-07-16';
+context.countTodayArticles = () => 0;
+context.todayArticleCount = null;
+context.countControllers = [];
+context.AbortController = class {
+  constructor() {
+    const listeners = [];
+    this.signal = {
+      aborted: false,
+      addEventListener(type, listener) { if (type === 'abort') listeners.push(listener); },
+    };
+    this.listeners = listeners;
+    context.countControllers.push(this);
+  }
+  abort() {
+    if (this.signal.aborted) return;
+    this.signal.aborted = true;
+    this.listeners.forEach(listener => listener());
+  }
+};
+context.countFetchCalls = 0;
+context.fetch = (url, options = {}) => {
+  context.countFetchCalls++;
+  if (context.countFetchCalls === 1) return Promise.resolve({ ok: false });
+  return new Promise((resolve, reject) => {
+    if (options.signal) {
+      options.signal.addEventListener('abort', () => reject(
+        Object.assign(new Error('timed out'), { name: 'AbortError' })
+      ));
+    }
+  });
+};
+let nextTimer = 0;
+const cancelledTimers = new Set();
+context.setTimeout = callback => {
+  const id = ++nextTimer;
+  setImmediate(() => { if (!cancelledTimers.has(id)) callback(); });
+  return id;
+};
+context.clearTimeout = id => cancelledTimers.add(id);
+await context.bootstrapNews();
+const first = context.retrySourceDeepLink();
+const outcome = await Promise.race([
+  first.then(value => ({ state: 'done', value })),
+  new Promise(resolve => setTimeout(() => resolve({ state: 'hung' }), 60)),
+]);
+assert.deepEqual(outcome, { state: 'done', value: false });
+assert.equal(context.countControllers.length, 2);
+assert.equal(context.countControllers[0].signal.aborted, false);
+assert.equal(context.countControllers[1].signal.aborted, true);
+const second = await context.retrySourceDeepLink();
+assert.equal(second, false);
+assert.equal(context.metadataCalls, 3);
+assert.equal(context.countControllers.length, 3);
+assert.equal(context.countControllers[2].signal.aborted, true);
+""",
+    )
+
+
 def test_source_deep_link_error_retry_refetches_metadata_and_reparses_original_url():
     list_state = source_between("function listStateFromUrl()", "async function restoreListStateFromUrl")
     cold_start = source_between("function resetMobileColdStartScroll()", "// Initial load")
@@ -655,6 +809,61 @@ assert.equal(context.metadataCalls, 2);
 assert.deepEqual(context.newsCalls, [{ page: 1, activeFilter: sourceKey }]);
 assert.equal(context.loadDataCalls, 0);
 assert.equal(context.location.search, originalSearch);
+""",
+    )
+
+
+def test_real_load_news_page_forwards_source_snapshot_to_fetch_query():
+    params = source_between("function buildNewsPageParams(", "function listUrlForState")
+    fetch_page = source_between("async function fetchNewsPage(", "function warmPageCoverImages")
+    load_page = source_between("async function loadNewsPage(", "function applyPageCalibrationWhenActive")
+    run_node(
+        params + fetch_page + load_page,
+        """
+const sourceKey = 'srcgrp:' + encodeURIComponent('财经早餐');
+const sourceSnapshot = ['财经早餐', '财经早餐别名'];
+context.PAGE_SIZE = 30;
+context.sourceFilterGroups = {};
+context.pageRequestSequence = 0;
+context.pageRequestPendingSequence = 0;
+context.pageRequestController = null;
+context.news = [];
+context.readCachedNewsPage = async () => null;
+context.rememberBufferedPage = () => {};
+context.applyNewsPage = () => {};
+context.renderColdStartSkeleton = () => {};
+context.writeCachedNewsPage = async () => {};
+context.scheduleAdjacentPagePrefetch = () => {};
+context.setPageLoading = () => {};
+context.renderColdStartError = () => {};
+context.showToast = () => {};
+context.currentTotal = 0;
+context.document = {
+  getElementById: () => ({ classList: { contains: () => false } }),
+};
+context.articleReturnInProgress = false;
+context.pendingLatestPage = null;
+context.requestUrl = '';
+context.fetch = async (url, options) => {
+  context.requestUrl = url;
+  assert.ok(options.signal);
+  return {
+    ok: true,
+    json: async () => ({ items: [{ id: 1 }], total: 1 }),
+  };
+};
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
+const loaded = await context.loadNewsPage(1, {
+  activeFilter: sourceKey,
+  useCache: false,
+  forceNetwork: true,
+  sourceSnapshot,
+});
+assert.equal(loaded, true);
+const query = new URLSearchParams(context.requestUrl.split('?')[1]);
+assert.deepEqual(query.getAll('source'), sourceSnapshot);
+assert.equal(context.pageRequestPendingSequence, 0);
 """,
     )
 
