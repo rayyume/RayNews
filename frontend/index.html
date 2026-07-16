@@ -1640,14 +1640,28 @@ async function writeNewsCacheEntry(record) {
 async function readCachedNewsPage(page = currentPage, activeFilter = filter) {
   const record = await readNewsCacheEntry(newsPageCacheKey(page, activeFilter));
   if (!record || !record.data || Date.now() - record.updatedAt > NEWS_CACHE_MAX_AGE_MS) return null;
+  // Reject records stamped with an older content epoch: the known article set has
+  // changed since this record was written (see bumpContentEpoch()), so it may be
+  // missing articles that were bumped onto this page from an earlier one. Checked
+  // here — at read time, against the live epoch — rather than only at write time, so
+  // there's no TOCTOU window between "epoch looked current" and the write finishing.
+  // Records written before this field existed carry no epoch (undefined -> 0), which
+  // only matches a session that also hasn't bumped past epoch 0 yet — the correct
+  // behavior for pre-existing/no-bump-yet data.
+  if ((record.epoch || 0) !== contentEpoch) return null;
   return record.data;
 }
 
-async function writeCachedNewsPage(page, activeFilter, data) {
+// `epoch` must be the contentEpoch that was live when this page was *requested*
+// (captured by the caller before any await), not whatever contentEpoch happens to be
+// when the write actually lands — otherwise a bump that occurs mid-fetch would get
+// masked by a write that runs after it.
+async function writeCachedNewsPage(page, activeFilter, data, epoch = contentEpoch) {
   await writeNewsCacheEntry({
     key: newsPageCacheKey(page, activeFilter),
     kind: 'page',
     updatedAt: Date.now(),
+    epoch,
     data,
   });
 }
@@ -4862,12 +4876,17 @@ function warmPageCoverImages(data) {
   });
 }
 
-// Invalidates every page snapshot (buffered + IndexedDB) currently held, because the
-// known article set just changed underneath them (a background refresh detected new
-// articles, a streamed-in refresh batch landed, etc). In-flight prefetch/network
-// requests started before this call are still allowed to resolve and hand their data
-// to whoever is awaiting them directly, but they must not write it back into the
-// buffer/cache — see the epoch checks in prefetchNewsPage() and preparePageNavigation().
+// Bumped whenever the known article set changes underneath already-fetched page
+// snapshots (a background refresh detected new articles, a streamed-in refresh batch
+// landed, etc). Every cached page record is stamped with the epoch that was live when
+// it was fetched (see rememberBufferedPage()/writeCachedNewsPage()), and every read
+// path (readBufferedPage()/readCachedNewsPage()) rejects a record whose stamped epoch
+// no longer matches the live one — that per-record check, not this function, is what
+// actually guarantees pagination never hands out a stale page; it holds regardless of
+// when a bump lands relative to an in-flight read/write, so there's no TOCTOU window.
+// Clearing the buffer/prefetch map/IndexedDB store here is just hygiene on top of that
+// (reclaim memory, stop reusing now-pointless in-flight dedup slots) — not required
+// for correctness.
 function bumpContentEpoch() {
   contentEpoch++;
   pageMemoryBuffer.clear();
@@ -4875,11 +4894,15 @@ function bumpContentEpoch() {
   clearCachedNewsPages();
 }
 
-function rememberBufferedPage(page, activeFilter, data) {
+// `epoch` must be the contentEpoch that was live when this page was *requested*
+// (captured by the caller before any await), not whatever contentEpoch happens to be
+// when the write actually lands — otherwise a bump that occurs mid-fetch would get
+// masked by a write that runs after it.
+function rememberBufferedPage(page, activeFilter, data, epoch = contentEpoch) {
   if (!data || !Array.isArray(data.items)) return data;
   const key = newsPageCacheKey(page, activeFilter);
   pageMemoryBuffer.delete(key);
-  pageMemoryBuffer.set(key, data);
+  pageMemoryBuffer.set(key, { data, epoch });
   while (pageMemoryBuffer.size > PAGE_MEMORY_BUFFER_LIMIT) {
     pageMemoryBuffer.delete(pageMemoryBuffer.keys().next().value);
   }
@@ -4889,11 +4912,15 @@ function rememberBufferedPage(page, activeFilter, data) {
 
 function readBufferedPage(page, activeFilter) {
   const key = newsPageCacheKey(page, activeFilter);
-  const data = pageMemoryBuffer.get(key);
-  if (!data) return null;
+  const entry = pageMemoryBuffer.get(key);
+  if (!entry) return null;
+  if (entry.epoch !== contentEpoch) {
+    pageMemoryBuffer.delete(key);
+    return null;
+  }
   pageMemoryBuffer.delete(key);
-  pageMemoryBuffer.set(key, data);
-  return data;
+  pageMemoryBuffer.set(key, entry);
+  return entry.data;
 }
 
 async function prefetchNewsPage(page, activeFilter) {
@@ -4909,10 +4936,12 @@ async function prefetchNewsPage(page, activeFilter) {
     if (cached) return rememberBufferedPage(page, activeFilter, cached);
     try {
       const data = await fetchNewsPage(page, activeFilter);
-      if (epochAtStart === contentEpoch) {
-        await writeCachedNewsPage(page, activeFilter, data);
-        rememberBufferedPage(page, activeFilter, data);
-      }
+      // Stamp with epochAtStart (captured before the fetch), not whatever contentEpoch
+      // happens to be once the fetch resolves — see rememberBufferedPage()'s doc. No
+      // need to gate the write on a "still current?" check here: a stale stamp is
+      // simply rejected by readBufferedPage()/readCachedNewsPage() on the next read.
+      await writeCachedNewsPage(page, activeFilter, data, epochAtStart);
+      rememberBufferedPage(page, activeFilter, data, epochAtStart);
       return data;
     } catch (e) {
       return null;
@@ -5038,10 +5067,11 @@ async function showLatestAfterIdle() {
   if (!pendingRelevantCount(activeFilter)) return;
   if (document.hidden || hasBlockingOverlayOpen()) return;
   if (Date.now() - lastUserActivityAt < IDLE_LATEST_DELAY_MS) return;
+  const epochAtStart = contentEpoch;
   let latestPage;
   try {
     latestPage = await fetchNewsPage(1, activeFilter);
-    await writeCachedNewsPage(1, activeFilter, latestPage);
+    await writeCachedNewsPage(1, activeFilter, latestPage, epochAtStart);
   } catch (e) {
     return;
   }
@@ -5111,6 +5141,10 @@ async function loadNewsPageRequest(requestSeq, page = 1, {
   externalSignal = null,
 } = {}) {
   let cacheApplied = false;
+  // Captured once, up front, so every write below stamps the epoch that was live when
+  // this load was requested — not whatever contentEpoch happens to be once each retry's
+  // network round-trip resolves. See rememberBufferedPage()'s doc for why.
+  const epochAtStart = contentEpoch;
   if (useCache) {
     const cached = await withCacheTimeout(readCachedNewsPage(page, activeFilter));
     if (cached && requestSeq === pageRequestSequence) {
@@ -5149,8 +5183,8 @@ async function loadNewsPageRequest(requestSeq, page = 1, {
         const startupInitializing = typeof isStartupInitializationResponse === 'function'
           && isStartupInitializationResponse(data);
         if (!startupInitializing) {
-          await withCacheTimeout(writeCachedNewsPage(page, activeFilter, data));
-          rememberBufferedPage(page, activeFilter, data);
+          await withCacheTimeout(writeCachedNewsPage(page, activeFilter, data, epochAtStart));
+          rememberBufferedPage(page, activeFilter, data, epochAtStart);
         }
         if (requestSeq !== pageRequestSequence) return false;
         if (applicationGuard && !applicationGuard()) return false;
@@ -5236,10 +5270,11 @@ async function preparePageNavigation(page, activeFilter) {
     return fetchNewsPage(page, activeFilter, controller.signal)
       .then(async data => {
         clearTimeout(timeout);
-        if (epochAtStart === contentEpoch) {
-          await writeCachedNewsPage(page, activeFilter, data);
-          rememberBufferedPage(page, activeFilter, data);
-        }
+        // Stamp with epochAtStart, not the live contentEpoch — see
+        // rememberBufferedPage()'s doc. A stale stamp is simply rejected by the read
+        // paths later, so there's no need to gate the write itself on a live check.
+        await writeCachedNewsPage(page, activeFilter, data, epochAtStart);
+        rememberBufferedPage(page, activeFilter, data, epochAtStart);
         return { data, error: null };
       })
       .catch(error => {
@@ -5340,6 +5375,7 @@ async function loadSince(timestamp, { forceApply = false } = {}) {
     // The article set just changed underneath any page snapshot fetched before now —
     // invalidate them so pagination doesn't hand out stale pages (see bumpContentEpoch()).
     bumpContentEpoch();
+    const epochAtStart = contentEpoch;
     refreshTodayArticleCount();
     if (deferForRefresh || refreshInProgress) return added;
     await loadSourceCategories();
@@ -5347,7 +5383,7 @@ async function loadSince(timestamp, { forceApply = false } = {}) {
     // intentionally jumps to "all" and can reuse it without starting a scrape.
     const latestAllData = await fetchNewsPage(1, 'all');
     pendingLatestPage = latestAllData;
-    await writeCachedNewsPage(1, 'all', latestAllData);
+    await writeCachedNewsPage(1, 'all', latestAllData, epochAtStart);
 
     const activeFilter = filter;
     const relevantCount = pendingRelevantCount(activeFilter);

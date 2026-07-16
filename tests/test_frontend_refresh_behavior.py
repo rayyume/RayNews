@@ -492,6 +492,7 @@ context.authToken = 'token';
 context.filter = 'all';
 context.currentPage = 1;
 context.pageNavigationSequence = 0;
+context.contentEpoch = 0;
 context.pageRequestSequence = 0;
 context.pageRequestPendingSequence = 0;
 context.pageNavigationPending = false;
@@ -549,6 +550,7 @@ context.seenArticleIds = new Set();
 context.latestKnownTimestamp = 100;
 context.pendingNewArticleCount = 0;
 context.pendingNewItems = [];
+context.contentEpoch = 0;
 context.bumpContentEpoch = () => { context.epochBumps = (context.epochBumps || 0) + 1; };
 context.fetch = async () => ({
   json: async () => ({ items: [{ id: 2, timestamp: 101, source: 's' }] }),
@@ -585,6 +587,176 @@ assert.equal(context.sourceLoads, 0);
 assert.equal(context.pageFetches, 0);
 assert.equal(context.applies, 0);
 assert.equal(context.consumes, 0);
+""",
+    )
+
+
+# ─── contentEpoch: per-record stamping closes the TOCTOU window ───────────
+#
+# Code review (P1 x2) found that the original design — checking
+# `epochAtStart === contentEpoch` immediately before an async cache write —
+# left a race: a bump landing during that write's own await still let stale
+# data reach the cache, and loadNewsPageRequest (the plain page-load path,
+# not just pagination) never checked epoch at all. The fix stamps every
+# stored record with the epoch that was live when the underlying fetch was
+# *requested*, and rejects mismatched records at *read* time instead —
+# closing the window regardless of when a bump lands, and covering every
+# caller uniformly since the check lives in the shared read helpers.
+
+def test_read_buffered_page_rejects_a_record_stamped_with_a_stale_epoch():
+    buffer_fns = source_between("function rememberBufferedPage(", "async function prefetchNewsPage")
+    run_node(
+        buffer_fns,
+        """
+context.newsPageCacheKey = (page, activeFilter) => `page:${activeFilter}:${page}`;
+context.PAGE_MEMORY_BUFFER_LIMIT = 10;
+context.pageMemoryBuffer = new Map();
+context.warmPageCoverImages = () => {};
+context.contentEpoch = 1;
+context.rememberBufferedPage(1, 'all', { items: [{ id: 1 }] });
+context.contentEpoch = 2; // a bump landed after the record was stored
+const stale = context.readBufferedPage(1, 'all');
+assert.equal(stale, null);
+// The stale entry must also be evicted, not just skipped, so it can't be
+// served again after another read re-bumps back to the same epoch value.
+assert.equal(context.pageMemoryBuffer.has('page:all:1'), false);
+""",
+    )
+
+
+def test_read_buffered_page_accepts_a_record_stamped_with_the_live_epoch():
+    buffer_fns = source_between("function rememberBufferedPage(", "async function prefetchNewsPage")
+    run_node(
+        buffer_fns,
+        """
+context.newsPageCacheKey = (page, activeFilter) => `page:${activeFilter}:${page}`;
+context.PAGE_MEMORY_BUFFER_LIMIT = 10;
+context.pageMemoryBuffer = new Map();
+context.warmPageCoverImages = () => {};
+context.contentEpoch = 3;
+context.rememberBufferedPage(1, 'all', { items: [{ id: 1 }] });
+const fresh = context.readBufferedPage(1, 'all');
+assert.deepEqual(fresh, { items: [{ id: 1 }] });
+""",
+    )
+
+
+def test_remember_buffered_page_stamps_the_epoch_passed_by_the_caller_not_the_live_one():
+    buffer_fns = source_between("function rememberBufferedPage(", "async function prefetchNewsPage")
+    run_node(
+        buffer_fns,
+        """
+context.newsPageCacheKey = (page, activeFilter) => `page:${activeFilter}:${page}`;
+context.PAGE_MEMORY_BUFFER_LIMIT = 10;
+context.pageMemoryBuffer = new Map();
+context.warmPageCoverImages = () => {};
+context.contentEpoch = 9; // live epoch has already moved on by the time this lands
+context.rememberBufferedPage(1, 'all', { items: [{ id: 1 }] }, 5); // stamped with the epoch at request time
+const rejected = context.readBufferedPage(1, 'all');
+assert.equal(rejected, null);
+""",
+    )
+
+
+def test_read_cached_news_page_rejects_a_record_stamped_with_a_stale_epoch():
+    cache_fns = source_between("async function readCachedNewsPage(", "async function cleanupNewsCache")
+    run_node(
+        cache_fns,
+        """
+const store = {};
+context.newsPageCacheKey = (page, activeFilter) => `page:${activeFilter}:${page}`;
+context.readNewsCacheEntry = async key => store[key] || null;
+context.writeNewsCacheEntry = async record => { store[record.key] = record; };
+context.NEWS_CACHE_MAX_AGE_MS = 999999999;
+context.contentEpoch = 5;
+await context.writeCachedNewsPage(1, 'all', { items: [{ id: 1 }] }); // stamps epoch=5 (default = live)
+context.contentEpoch = 6; // a bump landed after the write completed
+const result = await context.readCachedNewsPage(1, 'all');
+assert.equal(result, null);
+""",
+    )
+
+
+def test_write_cached_news_page_stamps_the_epoch_passed_by_the_caller_not_the_live_one():
+    cache_fns = source_between("async function readCachedNewsPage(", "async function cleanupNewsCache")
+    run_node(
+        cache_fns,
+        """
+const store = {};
+context.newsPageCacheKey = (page, activeFilter) => `page:${activeFilter}:${page}`;
+context.readNewsCacheEntry = async key => store[key] || null;
+context.writeNewsCacheEntry = async record => { store[record.key] = record; };
+context.NEWS_CACHE_MAX_AGE_MS = 999999999;
+context.contentEpoch = 9; // live epoch has already moved on by the time this write lands
+await context.writeCachedNewsPage(1, 'all', { items: [{ id: 1 }] }, 5); // epoch at request time
+assert.equal(store['page:all:1'].epoch, 5);
+const rejected = await context.readCachedNewsPage(1, 'all');
+assert.equal(rejected, null);
+""",
+    )
+
+
+def test_read_cached_news_page_treats_a_pre_epoch_record_as_valid_at_epoch_zero():
+    cache_fns = source_between("async function readCachedNewsPage(", "async function cleanupNewsCache")
+    run_node(
+        cache_fns,
+        """
+const store = {
+  'page:all:1': { key: 'page:all:1', kind: 'page', updatedAt: Date.now(), data: { items: [{ id: 1 }] } },
+};
+context.newsPageCacheKey = (page, activeFilter) => `page:${activeFilter}:${page}`;
+context.readNewsCacheEntry = async key => store[key] || null;
+context.writeNewsCacheEntry = async record => { store[record.key] = record; };
+context.NEWS_CACHE_MAX_AGE_MS = 999999999;
+context.contentEpoch = 0; // fresh session, no bump has ever happened yet
+const result = await context.readCachedNewsPage(1, 'all');
+assert.deepEqual(result, { items: [{ id: 1 }] });
+""",
+    )
+
+
+def test_load_news_page_stamps_cache_writes_with_the_epoch_captured_at_request_start():
+    load_page = source_between("async function loadNewsPage(", "function applyPageCalibrationWhenActive")
+    run_node(
+        load_page,
+        """
+context.contentEpoch = 5;
+context.pageRequestSequence = 0;
+context.pageRequestController = null;
+context.news = [];
+context.readCachedNewsPage = async () => null;
+context.writeCalls = [];
+context.rememberCalls = [];
+context.writeCachedNewsPage = async (page, activeFilter, data, epoch) => {
+  context.writeCalls.push(epoch);
+  context.contentEpoch = 9; // simulate a bump landing while this write is in flight
+};
+context.rememberBufferedPage = (page, activeFilter, data, epoch) => { context.rememberCalls.push(epoch); };
+context.applyNewsPage = () => {};
+context.renderColdStartSkeleton = () => {};
+context.fetchNewsPage = async () => ({ items: [{ id: 1 }], total: 1 });
+context.scheduleAdjacentPagePrefetch = () => {};
+context.setPageLoading = () => {};
+context.renderColdStartError = () => {};
+context.showToast = () => {};
+context.currentTotal = 1;
+context.document = { getElementById: () => ({ classList: { contains: () => false } }) };
+context.articleReturnInProgress = false;
+context.pendingLatestPage = null;
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
+const loaded = await context.loadNewsPage(1, {
+  activeFilter: 'all',
+  useCache: false,
+  forceNetwork: true,
+  userInitiated: true,
+});
+assert.equal(loaded, true);
+// Must stamp with the epoch captured before the fetch (5), not the live value (9)
+// a concurrent bump moved contentEpoch to while the write was in flight — otherwise
+// stale data fetched under the old assumption would be marked fresh for the new epoch.
+assert.deepEqual(context.writeCalls, [5]);
+assert.deepEqual(context.rememberCalls, [5]);
 """,
     )
 
@@ -808,6 +980,7 @@ def test_load_news_page_checks_application_guard_before_mutating_visible_list():
     run_node(
         load_page,
         """
+context.contentEpoch = 0;
 context.pageRequestSequence = 0;
 context.pageRequestController = null;
 context.news = [{ id: 1 }];
@@ -847,6 +1020,7 @@ def test_manual_refresh_completion_list_fetch_is_aborted_by_flow_signal():
     run_node(
         load_page,
         """
+context.contentEpoch = 0;
 context.pageRequestSequence = 0;
 context.pageRequestPendingSequence = 0;
 context.pageRequestController = null;
@@ -899,6 +1073,7 @@ def test_startup_empty_network_response_keeps_nonempty_cached_articles_visible()
     run_node(
         load_page,
         """
+context.contentEpoch = 0;
 context.pageRequestSequence = 0;
 context.pageRequestPendingSequence = 0;
 context.pageRequestController = null;
@@ -951,6 +1126,7 @@ def test_load_news_page_checks_application_guard_before_applying_cached_list():
     run_node(
         load_page,
         """
+context.contentEpoch = 0;
 context.pageRequestSequence = 0;
 context.pageRequestController = null;
 context.news = [{ id: 1 }];
@@ -990,6 +1166,7 @@ def test_overlapping_list_request_finally_cannot_clear_newer_pending_marker():
     run_node(
         load_page,
         """
+context.contentEpoch = 0;
 context.pageRequestSequence = 0;
 context.pageRequestPendingSequence = 0;
 context.pageRequestController = null;
@@ -1106,6 +1283,7 @@ context.filter = 'all';
 context.currentPage = 9;
 context.location = { pathname: '/', search: '' };
 context.pageNavigationSequence = 0;
+context.contentEpoch = 0;
 context.pageRequestSequence = 0;
 context.listStateFromUrl = () => ({ activeFilter: 'cat:Tech' });
 context.renderTopCatBar = () => starts.push('topbar');
@@ -1149,6 +1327,7 @@ context.URLSearchParams = URLSearchParams;
 context.filter = 'all';
 context.currentPage = 9;
 context.pageNavigationSequence = 0;
+context.contentEpoch = 0;
 context.pageRequestSequence = 0;
 context.renderTopCatBar = () => {};
 context.loadSourceCategories = async ({ onMetadataReady } = {}) => {
@@ -1190,6 +1369,7 @@ context.location = { pathname: '/', search: originalSearch };
 context.filter = 'all';
 context.currentPage = 1;
 context.pageNavigationSequence = 0;
+context.contentEpoch = 0;
 context.pageRequestSequence = 0;
 context.listStateFromUrl = () => ({ activeFilter: 'all', page: 1 });
 context.readNewsCacheEntry = async () => null;
@@ -1361,6 +1541,7 @@ context.CATEGORY_ORDER = ['News', 'Tech', 'Biz', 'Info'];
 context.filter = 'all';
 context.currentPage = 1;
 context.pageNavigationSequence = 0;
+context.contentEpoch = 0;
 context.pageRequestSequence = 0;
 context.renderTopCatBar = () => {};
 context.metadataCalls = 0;
@@ -1446,6 +1627,7 @@ context.CATEGORY_ORDER = ['News', 'Tech', 'Biz', 'Info'];
 context.filter = 'all';
 context.currentPage = 1;
 context.pageNavigationSequence = 0;
+context.contentEpoch = 0;
 context.pageRequestSequence = 0;
 context.renderTopCatBar = () => {};
 context.metadataCalls = 0;
@@ -1497,6 +1679,7 @@ const sourceKey = 'srcgrp:' + encodeURIComponent('财经早餐');
 const sourceSnapshot = ['财经早餐', '财经早餐别名'];
 context.PAGE_SIZE = 30;
 context.sourceFilterGroups = {};
+context.contentEpoch = 0;
 context.pageRequestSequence = 0;
 context.pageRequestPendingSequence = 0;
 context.pageRequestController = null;
@@ -1559,6 +1742,7 @@ context.PAGE_SIZE = 30;
 context.filter = 'all';
 context.currentPage = 1;
 context.pageNavigationSequence = 0;
+context.contentEpoch = 0;
 context.pageRequestSequence = 0;
 context.renderTopCatBar = () => {};
 context.loadSourceCategories = ({ onMetadataReady } = {}) => {
@@ -1677,6 +1861,7 @@ def test_cold_start_network_retry_uses_a_fresh_abort_controller():
     run_node(
         load_page,
         """
+context.contentEpoch = 0;
 context.pageRequestSequence = 0;
 context.pageRequestPendingSequence = 0;
 context.pageRequestController = null;
@@ -1742,6 +1927,7 @@ def test_hung_page_cache_read_cannot_block_cold_start_network():
     run_node(
         load_page,
         """
+context.contentEpoch = 0;
 context.pageRequestSequence = 0;
 context.pageRequestPendingSequence = 0;
 context.pageRequestController = null;
@@ -1788,6 +1974,7 @@ def test_hung_page_cache_write_cannot_block_fresh_network_application():
     run_node(
         load_page,
         """
+context.contentEpoch = 0;
 context.pageRequestSequence = 0;
 context.pageRequestPendingSequence = 0;
 context.pageRequestController = null;
@@ -1829,6 +2016,7 @@ def test_network_timeout_aborts_first_attempt_then_retries_with_fresh_controller
     run_node(
         load_page,
         """
+context.contentEpoch = 0;
 context.pageRequestSequence = 0;
 context.pageRequestPendingSequence = 0;
 context.pageRequestController = null;
@@ -1909,6 +2097,7 @@ def test_retry_stops_when_an_overlapping_request_supersedes_the_owner():
     run_node(
         load_page,
         """
+context.contentEpoch = 0;
 context.pageRequestSequence = 0;
 context.pageRequestPendingSequence = 0;
 context.pageRequestController = null;
@@ -1966,6 +2155,7 @@ def test_final_cold_start_failure_keeps_cached_articles_visible():
     run_node(
         load_page,
         """
+context.contentEpoch = 0;
 context.pageRequestSequence = 0;
 context.pageRequestPendingSequence = 0;
 context.pageRequestController = null;
