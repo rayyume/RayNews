@@ -50,6 +50,7 @@ def _insert_entry(cache_dir, url, *, pinned):
     )
     conn.commit()
     conn.close()
+
     return url_hash, fpath
 
 
@@ -103,11 +104,29 @@ def test_unpin_article_images_accepts_a_batch_and_recomputes_once(tmp_path, monk
     conn.close()
 
     image_cache.unpin_article_images([1, 2])
-
     conn = sqlite3.connect(cache_dir / "cache.db")
     assert conn.execute("SELECT COUNT(*) FROM image_cache_article_images").fetchone()[0] == 0
     assert conn.execute("SELECT pinned FROM image_cache_entries WHERE url_hash = ?", (url_hash,)).fetchone()[0] == 0
     conn.close()
+
+
+def test_orphan_sweep_preserves_hashes_mapped_to_favorited_articles(tmp_path, monkeypatch):
+    cache_dir = _make_cache(tmp_path, monkeypatch)
+    url_hash, cached_file = _insert_entry(cache_dir, "https://example.com/favorite-only.jpg", pinned=True)
+    conn = image_cache.open_cache_connection()
+    try:
+        conn.execute(
+            "INSERT INTO image_cache_article_images (article_id, url_hash) VALUES (?, ?)",
+            (99, url_hash),
+        )
+        conn.commit()
+        deleted = image_cache.evict_unreferenced_images(set(), conn=conn)
+    finally:
+        conn.close()
+
+    assert deleted == 0
+    assert cached_file.exists()
+
 
 
 def test_cache_stats_reports_count_and_size(tmp_path, monkeypatch):

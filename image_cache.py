@@ -556,9 +556,14 @@ def evict_unreferenced_images(referenced_hashes: set[str], *, conn: sqlite3.Conn
     conn = conn or _connect()
     deleted = 0
     try:
+        mapped_hashes = {
+            row[0] for row in conn.execute("SELECT DISTINCT url_hash FROM image_cache_article_images")
+        }
         rows = conn.execute("SELECT url_hash, path FROM image_cache_entries").fetchall()
         for row in rows:
-            if row["url_hash"] in referenced_hashes:
+            # Mappings are created for pinned/favorited articles.  Preserve
+            # them even if their historic body HTML no longer carries the URL.
+            if row["url_hash"] in referenced_hashes or row["url_hash"] in mapped_hashes:
                 continue
             try:
                 (CACHE_DIR / row["path"]).unlink(missing_ok=True)
