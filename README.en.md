@@ -36,7 +36,7 @@ The responsive PWA supports system, light, and dark themes.
 - Article filtering by source and four fixed categories
 - Search across article titles, sources, and summaries
 - Account-based favorites synchronized across devices
-- Admin tools for source detection, categorization, merging, and article deletion
+- Admin tools for source detection, categorization, merging, and article deletion; the **Resource Usage** page shows live resource and storage details
 - Deletion tombstones prevent removed articles from returning after a later refresh
 
 ### AI
@@ -62,7 +62,7 @@ The responsive PWA supports system, light, and dark themes.
 - The first registered account becomes the administrator
 - Later registrations require an invitation code and start with the preview role
 - Administrators manage user roles, global sources, and global article deletion
-- Resend can deliver invitation codes, registration notices, test messages, and scheduled daily digests
+- Resend can deliver invitation codes, registration notices, test messages, scheduled daily digests, and historical-purge result emails
 
 ## Architecture
 
@@ -188,8 +188,8 @@ volumes:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RESEND_API_KEY` | empty | Resend key for invitations, registration notices, test email, and daily digests |
-| `RAYNEWS_ADMIN_EMAIL` | first admin email | Receives invitation requests and new-registration notices |
+| `RESEND_API_KEY` | empty | Resend key for invitations, registration notices, test email, daily digests, and historical-purge result emails |
+| `RAYNEWS_ADMIN_EMAIL` | first admin email | Receives invitation requests, new-registration notices, and historical-purge results |
 | `RAYNEWS_FROM_EMAIL` | `onboarding@resend.dev` | Sender address; use a verified Resend domain in production |
 
 ### AI and background jobs
@@ -225,7 +225,9 @@ Additional `AI_DAILY_*` variables tune daily-digest candidate and output limits.
 | `IMAGE_CACHE_PREFETCH_WORKERS` | `2` | Number of image prefetch workers |
 | `IMAGE_CACHE_PREFETCH_QUEUE_SIZE` | `3000` | Image prefetch queue capacity |
 
-Favorited article images are excluded from `IMAGE_CACHE_MAX_MB` eviction, so the actual directory size may exceed the configured limit.
+Favorited article images are excluded from `IMAGE_CACHE_MAX_MB` eviction, so the actual directory size may exceed the configured limit. Date-based historical purges preserve favorited articles and their image caches; they run in background batches, show progress in the UI, and attempt to email the initiating administrator on completion, partial failure, or failure. Purges cannot be undone: always use the preview to verify the date and count first.
+
+To remove historical unreferenced image cache entries, run the orphan-cache scan through a backend maintenance operation. Do not directly delete the `image_cache` directory or `cache.db`, as that can leave files and cache indexes inconsistent.
 
 ### Page and network
 
