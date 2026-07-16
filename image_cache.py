@@ -312,23 +312,39 @@ def pin_article_images(article_id: int, body_html: str | None, thumb: str | None
     return count
 
 
-def unpin_article_images(article_id: int) -> None:
-    conn = _connect()
-    try:
-        conn.execute("DELETE FROM image_cache_article_images WHERE article_id = ?", (article_id,))
-        conn.execute(
-            """
-            UPDATE image_cache_entries
-            SET pinned = CASE
-                WHEN EXISTS (
-                    SELECT 1 FROM image_cache_article_images m
-                    WHERE m.url_hash = image_cache_entries.url_hash
-                ) THEN 1 ELSE 0 END
-            """
-        )
-        conn.commit()
-    finally:
-        conn.close()
+def unpin_article_images(article_ids: int | list[int] | tuple[int, ...]) -> None:
+    """Remove one batch of article mappings and recompute pins once.
+
+    Callers must pass all ids from a deletion batch.  This avoids competing
+    full-table pin recalculations from one daemon thread per article.
+    """
+    ids = [article_ids] if isinstance(article_ids, int) else sorted({int(i) for i in article_ids})
+    if not ids:
+        return
+    for attempt in range(4):
+        conn = _connect()
+        try:
+            conn.execute("PRAGMA busy_timeout = 5000")
+            placeholders = ",".join("?" * len(ids))
+            conn.execute(f"DELETE FROM image_cache_article_images WHERE article_id IN ({placeholders})", ids)
+            conn.execute(
+                """
+                UPDATE image_cache_entries
+                SET pinned = CASE
+                    WHEN EXISTS (
+                        SELECT 1 FROM image_cache_article_images m
+                        WHERE m.url_hash = image_cache_entries.url_hash
+                    ) THEN 1 ELSE 0 END
+                """
+            )
+            conn.commit()
+            break
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower() and "busy" not in str(exc).lower() or attempt == 3:
+                raise
+            time.sleep(0.1 * (2 ** attempt))
+        finally:
+            conn.close()
     prune_cache()
 
 

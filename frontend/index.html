@@ -360,6 +360,10 @@ body.body-scroll-lock{overflow:hidden!important}
 .admin-stat-box{flex:1;background:var(--bg);border-radius:10px;padding:12px 16px;text-align:center}
 .admin-stat-num{font-size:22px;font-weight:800;color:var(--accent)}
 .admin-stat-label{font-size:11px;color:var(--text-3);margin-top:2px}
+.admin-stat-ring{width:72px;height:72px;border-radius:50%;display:grid;place-items:center;margin:0 auto 8px;background:conic-gradient(var(--accent) calc(var(--pct) * 1%),var(--border) 0)}
+.admin-stat-ring::before{content:"";grid-area:1/1;width:58px;height:58px;border-radius:50%;background:var(--bg)}
+.admin-stat-ring span{grid-area:1/1;z-index:1;font-size:13px;font-weight:800;color:var(--accent)}
+.admin-stat-detail{font-size:11px;color:var(--text-2);margin-top:5px;white-space:nowrap}
 .admin-table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
 .admin-table{width:100%;min-width:520px;border-collapse:collapse;font-size:13px}
 .admin-table th{text-align:left;padding:8px 6px;color:var(--text-3);font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:0.05em;border-bottom:1px solid var(--border)}
@@ -2908,14 +2912,21 @@ async function loadServerStats() {
   const cachePct = ic && ic.max_bytes ? Math.min(100, Math.round(ic.used_bytes / ic.max_bytes * 100)) : 0;
   const memPct = ct && ct.mem_limit_bytes ? Math.min(100, Math.round(ct.mem_used_bytes / ct.mem_limit_bytes * 100)) : null;
   const box = (num, label) => `<div class="admin-stat-box"><div class="admin-stat-num">${num}</div><div class="admin-stat-label">${label}</div></div>`;
+  const ring = (pct, label, detail) => `<div class="admin-stat-box"><div class="admin-stat-ring" style="--pct:${Math.max(0, Math.min(100, pct || 0))}"><span>${Math.round(pct || 0)}%</span></div><div class="admin-stat-label">${label}</div><div class="admin-stat-detail">${detail}</div></div>`;
+  const diskPct = disk && disk.total ? Math.round(disk.used / disk.total * 100) : 0;
+  const storageRows = [
+    ['文章库 (news.db)', s.news_db], ['应用库 (raynews.db)', s.app_db],
+    ['图片缓存文件', s.image_cache_files], ['图片缓存库 (cache.db)', s.image_cache_db],
+    ['头像', s.avatars], ['其他 (快照/状态/密钥)', s.misc],
+  ].sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0));
   const row = (label, val) => `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);font-size:13px"><span style="color:var(--text-2)">${esc(label)}</span><span style="font-weight:700">${esc(val)}</span></div>`;
   const bar = (pct) => `<div style="height:8px;border-radius:99px;background:var(--bg);overflow:hidden;margin-top:6px"><div style="height:100%;width:${pct}%;background:var(--accent)"></div></div>`;
   body.innerHTML = `
     <div class="admin-stat">
+      ${ring(ct && ct.cpu_percent, '容器CPU', (ct && ct.cpu_percent != null ? ct.cpu_percent + '% / 100%' : '采样中'))}
+      ${ring(memPct, '容器内存', memPct !== null ? `${formatBytes(ct.mem_used_bytes)} / ${formatBytes(ct.mem_limit_bytes)}` : 'N/A')}
+      ${ring(diskPct, '磁盘剩余', `${formatBytes(disk.used)} / ${formatBytes(disk.total)}`)}
       ${box(formatBytes(s.data_dir_total), '数据总占用')}
-      ${box(formatBytes(disk.free), '磁盘剩余')}
-      ${box(ct && ct.mem_used_bytes != null ? formatBytes(ct.mem_used_bytes) : 'N/A', '容器内存')}
-      ${box(ct && ct.cpu_percent != null ? ct.cpu_percent + '%' : 'N/A', '容器CPU')}
     </div>
     <div class="admin-stat">
       ${box(c.articles, '文章')}
@@ -2925,12 +2936,7 @@ async function loadServerStats() {
     </div>
     <div style="margin-top:14px">
       <div class="admin-stat-label" style="margin-bottom:4px">存储明细</div>
-      ${row('文章库 (news.db)', formatBytes(s.news_db))}
-      ${row('应用库 (raynews.db)', formatBytes(s.app_db))}
-      ${row('图片缓存文件', formatBytes(s.image_cache_files))}
-      ${row('图片缓存库 (cache.db)', formatBytes(s.image_cache_db))}
-      ${row('头像', formatBytes(s.avatars))}
-      ${row('其他 (快照/状态/密钥)', formatBytes(s.misc))}
+      ${storageRows.map(([label, bytes]) => row(label, `${formatBytes(bytes)} (${disk && disk.total ? (bytes / disk.total * 100).toFixed(2) : '0.00'}%)`)).join('')}
     </div>
     <div style="margin-top:14px">
       <div class="admin-stat-label">图片缓存用量 ${formatBytes(ic.used_bytes)} / ${formatBytes(ic.max_bytes)} (${cachePct}%)${ic.enabled ? '' : ' — 已禁用'}</div>
@@ -2972,8 +2978,17 @@ async function confirmPurge() {
     body: JSON.stringify({ before_date: date, dry_run: false }),
   });
   if (!data || data.error) { status.textContent = '❌ ' + ((data && data.error) || '删除失败'); return; }
-  status.innerHTML = `✅ 已删除 <strong>${data.deleted}</strong> 篇文章（排除收藏 ${data.favorites_excluded} 篇），图片缓存正在后台清理。`;
-  loadServerStats();
+  const poll = async () => {
+    const task = await apiFetch('/admin/articles/purge/' + encodeURIComponent(data.task_id));
+    if (!task || task.error) { status.textContent = '❌ 无法获取清理进度'; return; }
+    status.innerHTML = `⏳ 清理中：${task.processed || 0} / ${task.total || data.to_delete} 篇文章，已删除图片 ${task.images_deleted || 0} 张。`;
+    if (task.status === 'running') { setTimeout(poll, 1000); return; }
+    status.innerHTML = task.status === 'completed'
+      ? `✅ 清理完成：已删除 <strong>${task.deleted}</strong> 篇文章、${task.images_deleted || 0} 张图片缓存；结果已邮件通知管理员。`
+      : `❌ 清理结束：${task.status}${task.error ? '（' + esc(task.error) + '）' : ''}；结果已邮件通知管理员。`;
+    loadServerStats();
+  };
+  poll();
 }
 
 // ─── System AI Config (admin-only, drives background jobs) ──

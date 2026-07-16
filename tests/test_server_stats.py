@@ -90,6 +90,26 @@ def test_evict_article_images_keeps_image_referenced_by_another_article(tmp_path
     assert cached_file.exists()
 
 
+def test_unpin_article_images_accepts_a_batch_and_recomputes_once(tmp_path, monkeypatch):
+    cache_dir = _make_cache(tmp_path, monkeypatch)
+    url = "https://example.com/pinned.jpg"
+    url_hash, _ = _insert_entry(cache_dir, url, pinned=True)
+    conn = sqlite3.connect(cache_dir / "cache.db")
+    conn.executemany(
+        "INSERT INTO image_cache_article_images (article_id, url_hash) VALUES (?, ?)",
+        [(1, url_hash), (2, url_hash)],
+    )
+    conn.commit()
+    conn.close()
+
+    image_cache.unpin_article_images([1, 2])
+
+    conn = sqlite3.connect(cache_dir / "cache.db")
+    assert conn.execute("SELECT COUNT(*) FROM image_cache_article_images").fetchone()[0] == 0
+    assert conn.execute("SELECT pinned FROM image_cache_entries WHERE url_hash = ?", (url_hash,)).fetchone()[0] == 0
+    conn.close()
+
+
 def test_cache_stats_reports_count_and_size(tmp_path, monkeypatch):
     cache_dir = _make_cache(tmp_path, monkeypatch)
     _insert_entry(cache_dir, "https://example.com/a.jpg", pinned=False)

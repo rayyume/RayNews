@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify, g
 from flask_cors import CORS
+from notifier import send_email
 
 # Ensure the project root is on the path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -3200,7 +3201,9 @@ def list_source_articles():
     })
 
 
-def _delete_article_ids(article_ids: list[int], deleted_by: int | None = None) -> dict:
+def _delete_article_ids(article_ids: list[int], deleted_by: int | None = None,
+                        *, maintain_image_cache: bool = True,
+                        cleanup_sources: bool = True) -> dict:
     ids = sorted({int(article_id) for article_id in article_ids if int(article_id) > 0})
     if not ids:
         return {"deleted": 0, "deleted_sources": 0}
@@ -3236,14 +3239,14 @@ def _delete_article_ids(article_ids: list[int], deleted_by: int | None = None) -
     except sqlite3.OperationalError:
         pass
     conn.commit()
-    deleted_sources = cleanup_stale_source_categories(conn)
+    deleted_sources = cleanup_stale_source_categories(conn) if cleanup_sources else 0
 
     # Favorites live in raynews.db; remove global references to deleted articles.
     app_db = get_db()
     app_db.execute(f"DELETE FROM favorites WHERE article_id IN ({existing_placeholders})", existing_ids)
     app_db.commit()
-    for article_id in existing_ids:
-        threading.Thread(target=unpin_article_images, args=(article_id,), daemon=True).start()
+    if maintain_image_cache:
+        threading.Thread(target=unpin_article_images, args=(existing_ids,), daemon=True).start()
     return {"deleted": cur.rowcount, "deleted_sources": deleted_sources}
 
 
@@ -3343,7 +3346,7 @@ def _container_resource_stats() -> dict:
     Fields that can't be read are returned as None so the UI shows N/A rather
     than erroring; there is no psutil dependency."""
     stats = {"mem_used_bytes": None, "mem_limit_bytes": None,
-             "cpu_percent": None, "cpu_count": None}
+             "cpu_percent": 0.0, "cpu_count": None}
     try:
         stats["cpu_count"] = len(os.sched_getaffinity(0))
     except (AttributeError, OSError):
@@ -3464,6 +3467,9 @@ _PURGE_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 _container_cpu_sample_lock = threading.Lock()
 _container_cpu_sample: list[tuple[int, float] | None] = [None]
+PURGE_BATCH_SIZE = 200
+_purge_tasks: dict[str, dict] = {}
+_purge_tasks_lock = threading.Lock()
 
 
 def _parse_purge_before_date(value: str) -> date | None:
@@ -3507,29 +3513,76 @@ def _purge_articles_before(before_date: str, dry_run: bool,
             _url_hash(url)
             for url, _is_cover in collect_image_urls(row["body_html"], row["thumb"], body_limit=None)
         )
-    result = _delete_article_ids([p[0] for p in payloads], deleted_by=deleted_by)
+    task_id = uuid.uuid4().hex
+    task = {
+        "task_id": task_id, "status": "running", "total": len(payloads), "processed": 0,
+        "deleted": 0, "images_deleted": 0, "errors": 0, "started_at": int(time.time()),
+        "favorites_excluded": excluded,
+    }
+    with _purge_tasks_lock:
+        _purge_tasks[task_id] = task
 
-    def _evict():
+    def _notify(final_task: dict) -> None:
+        try:
+            user = get_user(deleted_by) if deleted_by else None
+            to_email = (user or {}).get("email") if user else _admin_email_address()
+            api_key = os.environ.get("RESEND_API_KEY", "")
+            if not api_key or not to_email:
+                print("[purge] completion email not configured")
+                return
+            elapsed = max(0, int(final_task["finished_at"] - final_task["started_at"]))
+            send_email(api_key, to_email, f"RayNews 清理任务{final_task['status']}",
+                       f"<h2>RayNews 清理任务{final_task['status']}</h2>"
+                       f"<p>已删除文章：{final_task['deleted']} / {final_task['total']}</p>"
+                       f"<p>已删除图片缓存：{final_task['images_deleted']}<br>耗时：{elapsed} 秒<br>错误：{final_task['errors']}</p>",
+                       idempotency_key=f"purge-{task_id}")
+        except Exception as exc:
+            print(f"[purge] completion email failed: {exc}")
+
+    def _run_purge():
+        cache_conn = None
         try:
             cache_conn = open_cache_connection()
-            try:
-                for article_id, body_html, thumb in payloads:
+            cache_conn.execute("PRAGMA busy_timeout = 5000")
+            for start in range(0, len(payloads), PURGE_BATCH_SIZE):
+                batch = payloads[start:start + PURGE_BATCH_SIZE]
+                result = _delete_article_ids(
+                    [article_id for article_id, _body, _thumb in batch], deleted_by=deleted_by,
+                    maintain_image_cache=False, cleanup_sources=False,
+                )
+                deleted_images = 0
+                for article_id, body_html, thumb in batch:
                     try:
-                        evict_article_images(
+                        deleted_images += evict_article_images(
                             body_html, thumb, article_id,
                             protected_hashes=protected_hashes, conn=cache_conn,
                         )
                     except Exception as exc:
+                        task["errors"] += 1
                         print(f"[purge] image eviction failed for {article_id}: {exc}")
                 cache_conn.commit()
-            finally:
-                cache_conn.close()
+                with _purge_tasks_lock:
+                    task["processed"] += len(batch)
+                    task["deleted"] += result.get("deleted", 0)
+                    task["images_deleted"] += deleted_images
+                time.sleep(0.02)
+            cleanup_stale_source_categories(conn)
+            task["status"] = "completed" if not task["errors"] else "completed_with_errors"
         except Exception as exc:
-            print(f"[purge] image cache batch failed: {exc}")
-    threading.Thread(target=_evict, daemon=True).start()
+            task["status"] = "failed"
+            task["errors"] += 1
+            task["error"] = str(exc)[:240]
+            print(f"[purge] task failed: {exc}")
+        finally:
+            if cache_conn:
+                cache_conn.close()
+            task["finished_at"] = int(time.time())
+            _notify(task)
 
-    return {"matched": matched, "favorites_excluded": excluded,
-            "deleted": result.get("deleted", 0), "images_eviction": "background"}
+    threading.Thread(target=_run_purge, daemon=True, name=f"article-purge-{task_id[:8]}").start()
+
+    return {"matched": matched, "favorites_excluded": excluded, "to_delete": len(payloads),
+            "deleted": 0, "task_id": task_id, "status": "running"}
 
 
 @app.route("/admin/articles/purge", methods=["POST"])
@@ -3545,6 +3598,14 @@ def admin_purge_articles():
     except FileNotFoundError:
         return jsonify({"error": "news db not found"}), 404
     return jsonify({"ok": True, "before_date": before_date, "dry_run": dry_run, **result})
+
+
+@app.route("/admin/articles/purge/<task_id>", methods=["GET"])
+@require_role("admin")
+def admin_purge_status(task_id):
+    with _purge_tasks_lock:
+        task = _purge_tasks.get(task_id)
+        return jsonify(dict(task)) if task else (jsonify({"error": "purge task not found"}), 404)
 
 
 @app.route("/sources", methods=["PUT"])
