@@ -739,7 +739,6 @@ body.body-scroll-lock{overflow:hidden!important}
       <div id="adminTabServer" style="display:none">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
           <div class="source-step-title" style="margin:0">📊 服务器统计</div>
-          <button class="ai-save-btn" onclick="loadServerStats()" style="margin:0;width:auto;padding:6px 12px">🔄 刷新</button>
         </div>
         <div id="serverStatsBody">
           <div class="admin-loading">加载中...</div>
@@ -749,7 +748,7 @@ body.body-scroll-lock{overflow:hidden!important}
           <div class="source-step-title">🗑️ 清理历史文章</div>
           <p class="ai-hint">删除所选日期<strong>及之前</strong>的所有历史文章，连同其图片缓存一并删除。<strong>已被任何用户收藏的文章会被自动排除</strong>，不会删除。此操作不可撤销。</p>
           <div class="source-step-actions source-admin-only" style="align-items:center">
-            <input class="ai-input" type="date" id="purgeBeforeDate" style="width:auto;margin:0">
+            <input class="ai-input" type="text" id="purgeBeforeDate" placeholder="YYYY/MM/DD" inputmode="numeric" pattern="\d{4}/\d{2}/\d{2}" style="width:auto;margin:0">
             <button class="ai-save-btn" id="purgePreviewBtn" onclick="previewPurge()" style="margin:0;width:auto;padding:8px 12px">预览</button>
             <button class="ai-save-btn" id="purgeConfirmBtn" onclick="confirmPurge()" disabled style="margin:0;width:auto;padding:8px 12px;background:rgba(239,68,68,0.12);color:#ef4444;border:1px solid rgba(239,68,68,0.3)">确认删除</button>
           </div>
@@ -2110,6 +2109,7 @@ function openAdminSettings() {
 
 function closeAdminSettings() {
   document.getElementById('adminSettingsOverlay').classList.remove('open');
+  stopServerStatsPolling();
   unlockBodyScroll();
 }
 
@@ -2125,7 +2125,8 @@ function switchAdminTab(tab) {
   if (tab === 'sources') loadSourcesTab();
   if (tab === 'translate') loadGeneralSettings();
   if (tab === 'systemapi') loadSystemAiConfig();
-  if (tab === 'server') loadServerStats();
+  if (tab === 'server') startServerStatsPolling();
+  else stopServerStatsPolling();
 }
 
 function loadAccountTab() {
@@ -2899,10 +2900,13 @@ function formatBytes(n) {
   return (i === 0 ? v : v.toFixed(1)) + ' ' + units[i];
 }
 
+let serverStatsTimer = null;
+function stopServerStatsPolling() { if (serverStatsTimer) clearInterval(serverStatsTimer); serverStatsTimer = null; }
+function startServerStatsPolling() { stopServerStatsPolling(); loadServerStats(); serverStatsTimer = setInterval(loadServerStats, 2000); }
 async function loadServerStats() {
   const body = document.getElementById('serverStatsBody');
   if (!body) return;
-  body.innerHTML = '<div class="admin-loading">加载中...</div>';
+  if (!body.dataset.loaded) body.innerHTML = '<div class="admin-loading">加载中...</div>';
   const data = await apiFetch('/admin/server-stats');
   if (!data || data.error) {
     body.innerHTML = '<div class="admin-loading">加载失败</div>';
@@ -2926,7 +2930,7 @@ async function loadServerStats() {
       ${ring(ct && ct.cpu_percent, '容器CPU', (ct && ct.cpu_percent != null ? ct.cpu_percent + '% / 100%' : '采样中'))}
       ${ring(memPct, '容器内存', memPct !== null ? `${formatBytes(ct.mem_used_bytes)} / ${formatBytes(ct.mem_limit_bytes)}` : 'N/A')}
       ${ring(diskPct, '磁盘剩余', `${formatBytes(disk.used)} / ${formatBytes(disk.total)}`)}
-      ${box(formatBytes(s.data_dir_total), '数据总占用')}
+      ${ring(disk && disk.total ? Math.round(s.data_dir_total / disk.total * 100) : 0, '数据总占用', `${formatBytes(s.data_dir_total)} / ${formatBytes(disk.total)}`)}
     </div>
     <div class="admin-stat">
       ${box(c.articles, '文章')}
@@ -2936,7 +2940,7 @@ async function loadServerStats() {
     </div>
     <div style="margin-top:14px">
       <div class="admin-stat-label" style="margin-bottom:4px">存储明细</div>
-      ${storageRows.map(([label, bytes]) => row(label, `${formatBytes(bytes)} (${disk && disk.total ? (bytes / disk.total * 100).toFixed(2) : '0.00'}%)`)).join('')}
+      ${storageRows.map(([label, bytes]) => row(label, `${formatBytes(bytes)} (${s.data_dir_total ? (bytes / s.data_dir_total * 100).toFixed(2) : '0.00'}%)`)).join('')}
     </div>
     <div style="margin-top:14px">
       <div class="admin-stat-label">图片缓存用量 ${formatBytes(ic.used_bytes)} / ${formatBytes(ic.max_bytes)} (${cachePct}%)${ic.enabled ? '' : ' — 已禁用'}</div>
@@ -2945,10 +2949,18 @@ async function loadServerStats() {
     ${memPct !== null ? `<div style="margin-top:12px"><div class="admin-stat-label">容器内存 ${formatBytes(ct.mem_used_bytes)} / ${formatBytes(ct.mem_limit_bytes)} (${memPct}%)</div>${bar(memPct)}</div>` : ''}
     <div style="margin-top:12px;font-size:12px;color:var(--text-3)">磁盘: 已用 ${formatBytes(disk.used)} / 共 ${formatBytes(disk.total)}${ct && ct.cpu_count ? ' · CPU 核心 ' + ct.cpu_count : ''}</div>
   `;
+  body.dataset.loaded = '1';
+}
+
+function normalizedPurgeDate() {
+  const input = document.getElementById('purgeBeforeDate');
+  const value = input.value.trim();
+  if (!/^\d{4}\/\d{2}\/\d{2}$/.test(value)) return '';
+  return value.replaceAll('/', '-');
 }
 
 async function previewPurge() {
-  const date = document.getElementById('purgeBeforeDate').value;
+  const date = normalizedPurgeDate();
   const status = document.getElementById('purgeStatus');
   const confirmBtn = document.getElementById('purgeConfirmBtn');
   confirmBtn.disabled = true;
@@ -2965,7 +2977,7 @@ async function previewPurge() {
 }
 
 async function confirmPurge() {
-  const date = document.getElementById('purgeBeforeDate').value;
+  const date = normalizedPurgeDate();
   const status = document.getElementById('purgeStatus');
   const confirmBtn = document.getElementById('purgeConfirmBtn');
   if (!date) return;

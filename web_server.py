@@ -40,7 +40,7 @@ from auth_validation import is_valid_email
 from ai_service import AIService
 from image_cache import (
     enqueue_article_image_prefetch, unpin_article_images,
-    cache_stats, evict_article_images, collect_image_urls, open_cache_connection, _url_hash,
+    cache_stats, evict_article_images, evict_unreferenced_images, collect_image_urls, open_cache_connection, _url_hash,
 )
 from news_schema import ensure_deleted_articles_table
 from source_categories import (
@@ -3340,6 +3340,17 @@ def _read_int_file(path: str) -> int | None:
         return None
 
 
+def _host_memory_total_bytes() -> int | None:
+    try:
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
 def _container_resource_stats() -> dict:
     """Container memory/CPU from cgroup files (v2 preferred, v1 fallback).
 
@@ -3372,7 +3383,7 @@ def _container_resource_stats() -> dict:
         try:
             with open("/sys/fs/cgroup/memory.max") as fh:
                 raw = fh.read().strip()
-            stats["mem_limit_bytes"] = None if raw == "max" else int(raw)
+            stats["mem_limit_bytes"] = _host_memory_total_bytes() if raw == "max" else int(raw)
         except (OSError, ValueError):
             stats["mem_limit_bytes"] = None
     else:
@@ -3381,6 +3392,8 @@ def _container_resource_stats() -> dict:
         # cgroup v1 reports an absurd sentinel when unlimited.
         if limit is not None and limit < (1 << 62):
             stats["mem_limit_bytes"] = limit
+        elif stats["mem_used_bytes"] is not None:
+            stats["mem_limit_bytes"] = _host_memory_total_bytes()
 
     usage = cpu_usage_usec()
     now = time.monotonic()
@@ -3470,6 +3483,7 @@ _container_cpu_sample: list[tuple[int, float] | None] = [None]
 PURGE_BATCH_SIZE = 200
 _purge_tasks: dict[str, dict] = {}
 _purge_tasks_lock = threading.Lock()
+_purge_previews: dict[str, dict] = {}
 
 
 def _parse_purge_before_date(value: str) -> date | None:
@@ -3492,16 +3506,22 @@ def _purge_articles_before(before_date: str, dry_run: bool,
     if not conn:
         raise FileNotFoundError("news db not found")
     favorited = set(get_all_favorite_article_ids())
-    rows = conn.execute(
-        "SELECT id, body_html, thumb FROM articles WHERE date != '' AND date <= ?",
-        (before_date,),
-    ).fetchall()
+    rows = []
+    skipped_invalid_dates = 0
+    for row in conn.execute("SELECT id, body_html, thumb, date FROM articles WHERE date != ''").fetchall():
+        try:
+            article_date = datetime.strptime(str(row["date"]), "%Y-%m-%d").date()
+        except ValueError:
+            skipped_invalid_dates += 1
+            continue
+        if article_date <= datetime.strptime(before_date, "%Y-%m-%d").date():
+            rows.append(row)
     matched = len(rows)
     candidates = [r for r in rows if int(r["id"]) not in favorited]
     excluded = matched - len(candidates)
     if dry_run or not candidates:
         return {"matched": matched, "to_delete": len(candidates),
-                "favorites_excluded": excluded, "deleted": 0}
+                "favorites_excluded": excluded, "skipped_invalid_dates": skipped_invalid_dates, "deleted": 0}
 
     payloads = [(int(r["id"]), r["body_html"], r["thumb"]) for r in candidates]
     candidate_ids = {article_id for article_id, _body, _thumb in payloads}
@@ -3566,6 +3586,9 @@ def _purge_articles_before(before_date: str, dry_run: bool,
                     task["deleted"] += result.get("deleted", 0)
                     task["images_deleted"] += deleted_images
                 time.sleep(0.02)
+            orphaned = evict_unreferenced_images(protected_hashes, conn=cache_conn)
+            cache_conn.commit()
+            task["images_deleted"] += orphaned
             cleanup_stale_source_categories(conn)
             task["status"] = "completed" if not task["errors"] else "completed_with_errors"
         except Exception as exc:
@@ -3593,6 +3616,10 @@ def admin_purge_articles():
     if _parse_purge_before_date(before_date) is None:
         return jsonify({"error": "before_date must be a real YYYY-MM-DD date not later than today"}), 400
     dry_run = bool(data.get("dry_run"))
+    if not dry_run:
+        with _purge_tasks_lock:
+            if any(task.get("status") == "running" for task in _purge_tasks.values()):
+                return jsonify({"error": "another purge task is already running"}), 409
     try:
         result = _purge_articles_before(before_date, dry_run, deleted_by=g.user_id)
     except FileNotFoundError:

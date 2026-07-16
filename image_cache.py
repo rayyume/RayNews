@@ -543,3 +543,33 @@ def evict_article_images(body_html: str | None, thumb: str | None = "",
         if owns_connection:
             conn.close()
     return deleted
+
+
+def evict_unreferenced_images(referenced_hashes: set[str], *, conn: sqlite3.Connection | None = None) -> int:
+    """Delete cached files not referenced by any retained article.
+
+    This also clears stale pinned entries left behind by previously deleted
+    favorites; the caller supplies hashes derived from the authoritative news
+    database snapshot.
+    """
+    owns_connection = conn is None
+    conn = conn or _connect()
+    deleted = 0
+    try:
+        rows = conn.execute("SELECT url_hash, path FROM image_cache_entries").fetchall()
+        for row in rows:
+            if row["url_hash"] in referenced_hashes:
+                continue
+            try:
+                (CACHE_DIR / row["path"]).unlink(missing_ok=True)
+            except OSError:
+                pass
+            conn.execute("DELETE FROM image_cache_entries WHERE url_hash = ?", (row["url_hash"],))
+            conn.execute("DELETE FROM image_cache_article_images WHERE url_hash = ?", (row["url_hash"],))
+            deleted += 1
+        if owns_connection:
+            conn.commit()
+    finally:
+        if owns_connection:
+            conn.close()
+    return deleted
