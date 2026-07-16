@@ -241,15 +241,20 @@ To remove historical unreferenced image cache entries, run the orphan-cache scan
 
 ## Permissions
 
-| Capability | Guest | Preview | User | Admin |
-|------------|-------|---------|------|-------|
-| Read the front page and articles | ✓ | ✓ | ✓ | ✓ |
-| Pagination, favorites, personal AI and notification settings | — | limited | ✓ | ✓ |
-| Detect, categorize, and merge sources | — | — | — | ✓ |
-| Delete sources and historical articles | — | — | — | ✓ |
-| Manage users and roles | — | — | — | ✓ |
+The current project has only two signed-in roles: **User** and **Admin**. The retired **Preview** role is automatically migrated to User.
 
-Source labels and categories are global. Every user sees the source structure maintained by the administrator.
+| Capability | Guest | User | Admin |
+|------------|-------|------|-------|
+| Browse, search, paginate, and read articles | ✓ | ✓ | ✓ |
+| Read cached images | ✓ | ✓ | ✓ |
+| Manual refresh | — | ✓ | ✓ |
+| Favorites, personal AI configuration, and AI actions | — | ✓ | ✓ |
+| Profile, notification, and sharing settings | — | ✓ | ✓ |
+| Source management, global AI settings, and resource usage | — | — | ✓ |
+| Delete sources and historical articles | — | — | ✓ |
+| Manage users, roles, invitation codes, and invitation review | — | — | ✓ |
+
+Source labels and categories are global. Every user sees the source structure maintained by the administrator. API authorization always uses the current role from the database rather than a stale JWT role claim.
 
 ## Common Endpoints
 
