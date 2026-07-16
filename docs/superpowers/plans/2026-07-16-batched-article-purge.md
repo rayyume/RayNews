@@ -176,3 +176,20 @@ Expected: all tests pass.
 ```bash
 git add -A && git commit -m "test: verify batched purge and resource stats"
 ```
+
+### Task 5: Purge safety and orphan-cache recovery
+
+**Files:** `web_server.py`, `image_cache.py`, `frontend/index.html`, `tests/test_server_stats.py`.
+
+- [ ] Test that invalid/noncanonical stored dates are excluded, preview token is required and expires, a >50% purge requires explicit broad confirmation, and a second purge cannot start while one runs.
+- [ ] Implement token-backed candidate snapshots, strict Python date parsing, a single active-task lock, and an orphan cache sweep that corrects stale pins.
+- [ ] Test and implement article-image mapping for every cached/pre-fetched image.
+- [ ] Run `python3 -m pytest -q tests/test_server_stats.py`.
+
+### Task 6: Live server-stat UI
+
+**Files:** `web_server.py`, `frontend/index.html`, `tests/test_frontend_refresh_behavior.py`.
+
+- [ ] Test fallback memory capacity, all four ring cards, storage percentages against data total, and lifecycle-managed two-second polling.
+- [ ] Implement background CPU sampling, memory fallback, no-refresh-button live UI, and the forced `YYYY/MM/DD` date input normalization.
+- [ ] Run `python3 -m pytest -q tests/test_frontend_refresh_behavior.py tests/test_server_stats.py`.
