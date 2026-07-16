@@ -41,13 +41,22 @@ The responsive PWA supports system, light, and dark themes.
 
 ### AI
 
-- Per-user OpenAI-compatible or Claude/Anthropic API configuration
-- Manual and background article summarization
-- Automatic translation of English titles and article bodies
-- Automatic shortening of long titles for list display
-- Daily editorial selection and categorized digest generation from hundreds of articles
-- Stored AI results can be reused when permissions and feature settings allow it
-- AI source classification is admin-only and uses the administrator's own AI API
+RayNews has two independent AI paths: **user AI** and **server AI**. They use different API keys, execution locations, and billing owners.
+
+| Aspect | User AI | Server AI |
+|--------|---------|-----------|
+| Configuration | **Settings → AI** | **Admin Settings → Server API** |
+| Who can configure it | User or Admin | Admin only |
+| Supported protocols | OpenAI-compatible and Claude/Anthropic | OpenAI-compatible and Claude/Anthropic |
+| API key and billing | The current user's own key; manual summary/translation calls the provider directly from the browser | The admin-managed system key; calls run in server background jobs |
+| Main uses | Manual summary, manual translation, on-demand daily digest | Automatic summaries, title/body translation, title shortening, global daily digest, and AI source classification |
+| Result scope | The user can opt in to sharing summary, translation, and title results after a connectivity check | Results are stored in the shared cache for every user to reuse |
+
+**User AI:** Configure and enable your own endpoint, model, protocol, and key under **Settings → AI**. You can manually summarize or translate an article and request an on-demand daily digest. The browser uses the key to call your selected provider directly, so configure it only on trusted devices. Generated results are saved in RayNews; enabling **Share AI results** requires a live connectivity check and is periodically revalidated.
+
+**Server AI:** An administrator configures the system endpoint, model, protocol, and key under **Admin Settings → Server API**, then enables the needed background jobs under the summary and translation settings. The server processes new articles in small batches for automatic summaries, English title/body translation, and long-title shortening. The same system AI generates the global daily digest once before it is emailed to subscribed users. The server AI key is never sent to regular-user browsers.
+
+AI results are stored in the database to avoid duplicate calls. Administrators should evaluate their selected provider's privacy policy, quota, and billing before enabling automatic jobs.
 
 ### Image cache
 
@@ -60,7 +69,7 @@ The responsive PWA supports system, light, and dark themes.
 ### Users and email
 
 - The first registered account becomes the administrator
-- Later registrations require an invitation code and start with the preview role
+- Later registrations require an invitation code and start with the User role
 - Administrators manage user roles, global sources, and global article deletion
 - Resend can deliver invitation codes, registration notices, test messages, scheduled daily digests, and historical-purge result emails
 
