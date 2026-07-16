@@ -11,6 +11,7 @@ import time
 import calendar
 import uuid
 import requests
+from datetime import date, datetime
 from urllib.parse import urlsplit
 
 from bs4 import BeautifulSoup
@@ -38,7 +39,7 @@ from auth_validation import is_valid_email
 from ai_service import AIService
 from image_cache import (
     enqueue_article_image_prefetch, unpin_article_images,
-    cache_stats, evict_article_images,
+    cache_stats, evict_article_images, collect_image_urls, open_cache_connection, _url_hash,
 )
 from news_schema import ensure_deleted_articles_table
 from source_categories import (
@@ -3378,14 +3379,19 @@ def _container_resource_stats() -> dict:
         if limit is not None and limit < (1 << 62):
             stats["mem_limit_bytes"] = limit
 
-    start = cpu_usage_usec()
-    if start is not None:
-        time.sleep(0.3)
-        end = cpu_usage_usec()
-        if end is not None:
-            cpus = stats["cpu_count"] or 1
-            busy = (end - start) / (0.3 * 1_000_000 * cpus) * 100
-            stats["cpu_percent"] = round(max(0.0, busy), 1)
+    usage = cpu_usage_usec()
+    now = time.monotonic()
+    if usage is not None:
+        with _container_cpu_sample_lock:
+            previous = _container_cpu_sample[0]
+            _container_cpu_sample[0] = (usage, now)
+        if previous is not None:
+            previous_usage, previous_at = previous
+            elapsed = now - previous_at
+            if elapsed > 0:
+                cpus = stats["cpu_count"] or 1
+                busy = (usage - previous_usage) / (elapsed * 1_000_000 * cpus) * 100
+                stats["cpu_percent"] = round(max(0.0, busy), 1)
     return stats
 
 
@@ -3456,6 +3462,21 @@ def admin_server_stats():
 _PURGE_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
+_container_cpu_sample_lock = threading.Lock()
+_container_cpu_sample: list[tuple[int, float] | None] = [None]
+
+
+def _parse_purge_before_date(value: str) -> date | None:
+    """Accept only real calendar dates up to today for destructive purges."""
+    if not _PURGE_DATE_RE.fullmatch(value):
+        return None
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+    return parsed if parsed <= date.today() else None
+
+
 def _purge_articles_before(before_date: str, dry_run: bool,
                            deleted_by: int | None = None) -> dict:
     """Select articles dated on/before before_date, excluding any article
@@ -3477,14 +3498,34 @@ def _purge_articles_before(before_date: str, dry_run: bool,
                 "favorites_excluded": excluded, "deleted": 0}
 
     payloads = [(int(r["id"]), r["body_html"], r["thumb"]) for r in candidates]
+    candidate_ids = {article_id for article_id, _body, _thumb in payloads}
+    protected_hashes: set[str] = set()
+    for row in conn.execute("SELECT id, body_html, thumb FROM articles").fetchall():
+        if int(row["id"]) in candidate_ids:
+            continue
+        protected_hashes.update(
+            _url_hash(url)
+            for url, _is_cover in collect_image_urls(row["body_html"], row["thumb"], body_limit=None)
+        )
     result = _delete_article_ids([p[0] for p in payloads], deleted_by=deleted_by)
 
     def _evict():
-        for article_id, body_html, thumb in payloads:
+        try:
+            cache_conn = open_cache_connection()
             try:
-                evict_article_images(body_html, thumb, article_id)
-            except Exception as exc:
-                print(f"[purge] image eviction failed for {article_id}: {exc}")
+                for article_id, body_html, thumb in payloads:
+                    try:
+                        evict_article_images(
+                            body_html, thumb, article_id,
+                            protected_hashes=protected_hashes, conn=cache_conn,
+                        )
+                    except Exception as exc:
+                        print(f"[purge] image eviction failed for {article_id}: {exc}")
+                cache_conn.commit()
+            finally:
+                cache_conn.close()
+        except Exception as exc:
+            print(f"[purge] image cache batch failed: {exc}")
     threading.Thread(target=_evict, daemon=True).start()
 
     return {"matched": matched, "favorites_excluded": excluded,
@@ -3496,8 +3537,8 @@ def _purge_articles_before(before_date: str, dry_run: bool,
 def admin_purge_articles():
     data = request.get_json(silent=True) or {}
     before_date = str(data.get("before_date") or "").strip()
-    if not _PURGE_DATE_RE.match(before_date):
-        return jsonify({"error": "before_date must be YYYY-MM-DD"}), 400
+    if _parse_purge_before_date(before_date) is None:
+        return jsonify({"error": "before_date must be a real YYYY-MM-DD date not later than today"}), 400
     dry_run = bool(data.get("dry_run"))
     try:
         result = _purge_articles_before(before_date, dry_run, deleted_by=g.user_id)

@@ -81,7 +81,7 @@ self.addEventListener('fetch', event => {
                 });
               }
               return network;
-            }).catch(() => cached);
+            }).catch(error => { if (cached) return cached; throw error; });
             return cached || fetchPromise;
           });
         })
@@ -100,8 +100,11 @@ self.addEventListener('fetch', event => {
           });
         }
         return network;
-      }).catch(() => {
-        return caches.open(API_CACHE).then(cache => cache.match(cacheRequest));
+      }).catch(error => {
+        return caches.open(API_CACHE).then(cache => cache.match(cacheRequest)).then(cached => {
+          if (cached) return cached;
+          throw error;
+        });
       })
     );
     return;
@@ -136,8 +139,11 @@ self.addEventListener('fetch', event => {
           });
           return network;
         });
-      }).catch(() => {
-        return caches.match(event.request).then(cached => cached || caches.match('/index.html'));
+      }).catch(error => {
+        return caches.match(event.request).then(cached => cached || caches.match('/index.html')).then(fallback => {
+          if (fallback) return fallback;
+          throw error;
+        });
       })
     );
     return;
@@ -145,6 +151,9 @@ self.addEventListener('fetch', event => {
 
   // ── Everything else: network-first ──
   event.respondWith(
-    fetch(event.request).catch(() => caches.match(event.request))
+    fetch(event.request).catch(error => caches.match(event.request).then(cached => {
+      if (cached) return cached;
+      throw error;
+    }))
   );
 });

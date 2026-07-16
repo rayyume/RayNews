@@ -87,6 +87,11 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+def open_cache_connection() -> sqlite3.Connection:
+    """Return a cache connection for a caller performing a batch operation."""
+    return _connect()
+
+
 def normalize_image_url(url: str) -> str:
     url = html.unescape((url or "").strip())
     if url.startswith("//"):
@@ -468,7 +473,9 @@ def cache_stats() -> dict:
 
 
 def evict_article_images(body_html: str | None, thumb: str | None = "",
-                         article_id: int | None = None) -> int:
+                         article_id: int | None = None, *,
+                         protected_hashes: set[str] | None = None,
+                         conn: sqlite3.Connection | None = None) -> int:
     """Force-delete an article's cached image files and rows.
 
     Entries still pinned (shared by a favorited article) are skipped so a
@@ -476,7 +483,8 @@ def evict_article_images(body_html: str | None, thumb: str | None = "",
     actively frees disk instead of waiting for size-triggered prune_cache."""
     if not IMAGE_CACHE_ENABLED:
         return 0
-    conn = _connect()
+    owns_connection = conn is None
+    conn = conn or _connect()
     deleted = 0
     try:
         hashes = {_url_hash(url) for url, _ in collect_image_urls(body_html, thumb, body_limit=None)}
@@ -487,6 +495,17 @@ def evict_article_images(body_html: str | None, thumb: str | None = "",
             ).fetchall()
             hashes.update(r["url_hash"] for r in rows)
         for url_hash in hashes:
+            # A cache entry can be used by articles other than the one being
+            # removed.  ``pinned`` only tracks favorites, so it is not a safe
+            # proxy for that relationship.
+            if protected_hashes and url_hash in protected_hashes:
+                continue
+            if article_id is not None and conn.execute(
+                "SELECT 1 FROM image_cache_article_images "
+                "WHERE url_hash = ? AND article_id != ? LIMIT 1",
+                (url_hash, article_id),
+            ).fetchone():
+                continue
             row = conn.execute(
                 "SELECT path, pinned FROM image_cache_entries WHERE url_hash = ?",
                 (url_hash,),
@@ -500,7 +519,11 @@ def evict_article_images(body_html: str | None, thumb: str | None = "",
             conn.execute("DELETE FROM image_cache_entries WHERE url_hash = ?", (url_hash,))
             conn.execute("DELETE FROM image_cache_article_images WHERE url_hash = ?", (url_hash,))
             deleted += 1
-        conn.commit()
+        if article_id is not None:
+            conn.execute("DELETE FROM image_cache_article_images WHERE article_id = ?", (article_id,))
+        if owns_connection:
+            conn.commit()
     finally:
-        conn.close()
+        if owns_connection:
+            conn.close()
     return deleted

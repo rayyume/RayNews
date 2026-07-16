@@ -1,8 +1,10 @@
 import os
+import inspect
 import sqlite3
 import sys
 import time
 import uuid
+from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -70,6 +72,24 @@ def test_evict_article_images_skips_pinned(tmp_path, monkeypatch):
     assert keep_hash in rows and drop_hash not in rows
 
 
+def test_evict_article_images_keeps_image_referenced_by_another_article(tmp_path, monkeypatch):
+    cache_dir = _make_cache(tmp_path, monkeypatch)
+    url = "https://example.com/shared.jpg"
+    url_hash, cached_file = _insert_entry(cache_dir, url, pinned=False)
+    conn = sqlite3.connect(cache_dir / "cache.db")
+    conn.executemany(
+        "INSERT INTO image_cache_article_images (article_id, url_hash) VALUES (?, ?)",
+        [(1, url_hash), (2, url_hash)],
+    )
+    conn.commit()
+    conn.close()
+
+    deleted = image_cache.evict_article_images(f'<img src="{url}">', article_id=1)
+
+    assert deleted == 0
+    assert cached_file.exists()
+
+
 def test_cache_stats_reports_count_and_size(tmp_path, monkeypatch):
     cache_dir = _make_cache(tmp_path, monkeypatch)
     _insert_entry(cache_dir, "https://example.com/a.jpg", pinned=False)
@@ -118,3 +138,15 @@ def test_purge_rejects_bad_date_and_routes_registered():
     assert web_server._PURGE_DATE_RE.match("2026-07-15")
     assert not web_server._PURGE_DATE_RE.match("2026/07/15")
     assert not web_server._PURGE_DATE_RE.match("bad")
+
+
+def test_purge_date_parser_rejects_invalid_and_future_dates(monkeypatch):
+    monkeypatch.setattr(web_server, "date", type("Today", (), {"today": staticmethod(lambda: date(2026, 7, 16))}))
+
+    assert web_server._parse_purge_before_date("2026-07-16") == date(2026, 7, 16)
+    for value in ("9999-99-99", "2026-02-30", "2026-07-17"):
+        assert web_server._parse_purge_before_date(value) is None
+
+
+def test_container_stats_does_not_sleep_while_serving_request():
+    assert "time.sleep" not in inspect.getsource(web_server._container_resource_stats)

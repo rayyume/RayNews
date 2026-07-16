@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import threading
 from collections import OrderedDict
 from pathlib import Path
@@ -420,6 +421,20 @@ def test_empty_news_diagnostics_expose_only_safe_startup_job_summary(monkeypatch
     }
     assert "private-job-id" not in json.dumps(diagnostics)
     assert "/app/data/private.db" not in json.dumps(diagnostics["refresh_job"])
+
+
+def test_empty_filtered_result_diagnostics_include_global_article_count(tmp_path, monkeypatch):
+    db_path = tmp_path / "news.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE articles (id INTEGER PRIMARY KEY)")
+    conn.executemany("INSERT INTO articles (id) VALUES (?)", [(1,), (2,)])
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(refresh_server, "DB_FILE", db_path)
+
+    diagnostics = refresh_server._diagnostics(0)
+
+    assert diagnostics["global_article_count"] == 2
 
 
 def test_periodic_refresh_starts_periodic_job_and_reschedules(monkeypatch):

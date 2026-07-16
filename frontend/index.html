@@ -630,7 +630,6 @@ body.body-scroll-lock{overflow:hidden!important}
         <button class="admin-settings-tab" data-admin-tab="translate" onclick="switchAdminTab('translate')">翻译</button>
         <button class="admin-settings-tab" data-admin-tab="systemapi" onclick="switchAdminTab('systemapi')">服务端API</button>
         <button class="admin-settings-tab" data-admin-tab="server" onclick="switchAdminTab('server')">服务器</button>
-        <button class="admin-settings-tab" data-admin-tab="server" onclick="switchAdminTab('server')">服务器</button>
       </div>
       <div id="adminSettingsStatus" class="settings-toast" role="status" aria-live="polite"></div>
 
@@ -987,7 +986,6 @@ let coldStartInitializationTimedOut = false;
 let startupCalibrationGeneration = 0;
 let startupCalibrationController = null;
 let startupCalibrationTimer = null;
-let logoRefreshInProgress = false;
 let activeScrollMotion = null;
 let pendingAuthAction = '';
 let savedArticleListState = null;
@@ -996,6 +994,8 @@ let articleReturnInProgress = false;
 // In-memory cache for article bodies — avoids re-fetching on re-open
 let articleBodyCache = {};
 let articleBodyPromises = {};
+let articleBodyControllers = {};
+let articleDetailRetryInProgress = new Set();
 let activeArticleRequestId = 0;
 let searchDebounceTimer = null;
 let titleUpdateCursor = '';
@@ -1301,6 +1301,7 @@ function refreshErrorMessage(errorOrData, status = 0) {
     : ((errorOrData && errorOrData.message) || '');
   const detail = compactRefreshDetail(rawMessage);
   if (detail.includes('fetcher already running')) return '已有刷新任务正在运行，请稍后查看';
+  if (detail === 'refresh failed') return '刷新失败，请稍后重试';
   if (/timeout|timed out|Read timed out|HTTPConnectionPool/i.test(detail)) {
     return '刷新耗时较长或服务暂时无响应，请稍后查看最新文章';
   }
@@ -1335,17 +1336,45 @@ async function parseRefreshResponse(resp) {
   return data;
 }
 
+function isTransientRefreshError(error) {
+  if (!error || error.name === 'AbortError') return false;
+  return /network|failed to fetch|timeout|temporar|HTTP 5\d\d/i.test(error.message || '');
+}
+
+async function retryTransientRefreshRequest(request, signal) {
+  try {
+    return await request();
+  } catch (error) {
+    if (!isTransientRefreshError(error)) throw error;
+    await abortableDelay(800, signal);
+    return request();
+  }
+}
+
 async function requestRefreshOnce(signal) {
-  const resp = await fetch('/auth/refresh', {
-    method: 'POST',
-    headers: { 'Authorization': 'Bearer ' + authToken },
-    cache: 'no-store',
-    signal,
-  });
-  return parseRefreshResponse(resp);
+  return retryTransientRefreshRequest(async () => {
+    const resp = await fetch('/auth/refresh', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + authToken },
+      cache: 'no-store',
+      signal,
+    });
+    return parseRefreshResponse(resp);
+  }, signal);
 }
 
 async function requestRefreshStatus(jobId, timeoutMs = 5000, flowSignal = null) {
+  try {
+    return await requestRefreshStatusOnce(jobId, timeoutMs, flowSignal);
+  } catch (error) {
+    if (error && error.name === 'AbortError') throw error;
+    if (!isTransientRefreshError(error)) throw error;
+    await abortableDelay(800, flowSignal);
+    return requestRefreshStatusOnce(jobId, timeoutMs, flowSignal);
+  }
+}
+
+async function requestRefreshStatusOnce(jobId, timeoutMs = 5000, flowSignal = null) {
   if (flowSignal && flowSignal.aborted) throw refreshAbortError();
   const controller = new AbortController();
   const boundedTimeoutMs = Math.max(1, Math.ceil(Number(timeoutMs) || 5000));
@@ -4314,7 +4343,7 @@ function reconcileVisibleArticles({ animate = false } = {}) {
 }
 
 async function triggerRefresh() {
-  if (refreshInProgress) return;
+  if (refreshInProgress || (typeof logoRefreshInProgress !== 'undefined' && logoRefreshInProgress)) return;
   // Unauthenticated users cannot refresh
   if (!authToken) {
     showToast('🔒 请先登录');
@@ -4513,8 +4542,12 @@ function renderColdStartSkeleton() {
 function isStartupInitializationResponse(data) {
   const items = Array.isArray(data && data.items) ? data.items : [];
   const job = data && data.diagnostics && data.diagnostics.refresh_job;
+  const globalArticleCount = data && data.diagnostics && data.diagnostics.global_article_count;
   return items.length === 0
     && Number(data && data.total || 0) === 0
+    // Older cached/API responses do not carry this field.  New responses do,
+    // and only those may prove that the database itself is empty.
+    && (globalArticleCount === undefined || Number(globalArticleCount) === 0)
     && job
     && job.trigger === 'startup'
     && job.status === 'running';
@@ -4674,6 +4707,11 @@ function applyNewsPage(data, page, activeFilter, { animate = false, preserveDom 
     }
   }
   pollTitleUpdates();
+  // Every caller (including the logo path) that renders a startup-empty
+  // response must also own the bounded recovery poll.
+  if (coldStartInitializationActive && !startupCalibrationTimer && !startupCalibrationController) {
+    startStartupEmptyRevalidation(data, { page, activeFilter, requestSeq: pageRequestSequence });
+  }
 }
 
 async function fetchNewsPage(page, activeFilter, signal, sourceSnapshot = null) {
@@ -5829,7 +5867,7 @@ function handleLogoKeydown(event) {
 }
 
 async function refreshHomepage() {
-  if (logoRefreshInProgress) return;
+  if (logoRefreshInProgress || (typeof refreshInProgress !== 'undefined' && refreshInProgress)) return;
   cancelViewBoundRefreshWork();
   logoRefreshInProgress = true;
   try {
@@ -5912,10 +5950,19 @@ function renderArticleRetry(targetEl, id, e, isFullPage) {
   `;
 }
 
-function retryArticleDetail(id) {
+async function retryArticleDetail(id) {
+  if (articleDetailRetryInProgress.has(id)) return;
+  articleDetailRetryInProgress.add(id);
+  try {
+    const controller = articleBodyControllers[id];
+    if (controller) controller.abort();
   delete articleBodyCache[id];
   delete articleBodyPromises[id];
+    await delay(750);
   openArticle(id);
+  } finally {
+    articleDetailRetryInProgress.delete(id);
+  }
 }
 
 function usesMobileArticleNavigation() {
@@ -6101,8 +6148,9 @@ function fetchArticleDetail(id, timeoutMs = 8000) {
   if (articleBodyCache[id]) return Promise.resolve(articleBodyCache[id]);
   if (articleBodyPromises[id]) return articleBodyPromises[id];
   const controller = new AbortController();
+  articleBodyControllers[id] = controller;
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  articleBodyPromises[id] = fetch('/api/news/' + id + '?t=' + Date.now(), { signal: controller.signal, cache: 'no-store' })
+  const promise = fetch('/api/news/' + id + '?t=' + Date.now(), { signal: controller.signal, cache: 'no-store' })
     .then(r => {
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return r.json();
@@ -6114,9 +6162,11 @@ function fetchArticleDetail(id, timeoutMs = 8000) {
     })
     .finally(() => {
       clearTimeout(timeout);
-      delete articleBodyPromises[id];
+      if (articleBodyPromises[id] === promise) delete articleBodyPromises[id];
+      if (articleBodyControllers[id] === controller) delete articleBodyControllers[id];
     });
-  return articleBodyPromises[id];
+  articleBodyPromises[id] = promise;
+  return promise;
 }
 
 function renderArticleBody(wrap, data, id) {
@@ -6727,6 +6777,13 @@ function onReturnToForeground() {
     });
   }
   if (news.length > 0) pollTitleUpdates();
+  if (typeof document !== 'undefined') {
+    const overlay = document.getElementById('overlay');
+    const articleId = Number(overlay && overlay.dataset.articleId);
+    if (overlay && overlay.classList.contains('open') && articleId && !articleBodyCache[articleId]) {
+      retryArticleDetail(articleId);
+    }
+  }
 }
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) cancelViewBoundRefreshWork();

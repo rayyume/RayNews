@@ -7,6 +7,26 @@ ROOT = Path(__file__).resolve().parents[1]
 HTML = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
 
 
+def test_review_hardening_frontend_contracts():
+    assert HTML.count('data-admin-tab="server"') == 1
+    assert "detail === 'refresh failed'" in HTML
+    assert "global_article_count" in source_between(
+        "function isStartupInitializationResponse(",
+        "function renderColdStartInitializing",
+    )
+    assert "startStartupEmptyRevalidation" in source_between(
+        "function applyNewsPage(",
+        "async function fetchNewsPage",
+    )
+    assert "await delay(" in source_between("function retryArticleDetail(", "function usesMobileArticleNavigation")
+    assert "retryArticleDetail" in source_between("function onReturnToForeground()", "document.addEventListener('visibilitychange'")
+
+
+def test_service_worker_rethrows_network_errors_without_a_cached_response():
+    source = (ROOT / "frontend" / "sw.js").read_text(encoding="utf-8")
+    assert ".catch(error => { if (cached) return cached; throw error; })" in source
+
+
 def source_between(start, end):
     return HTML[HTML.index(start):HTML.index(end, HTML.index(start))]
 

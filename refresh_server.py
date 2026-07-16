@@ -426,12 +426,23 @@ def _diagnostics(count: int | None = None) -> dict:
             "status": REFRESH_JOB.get("status") or "idle",
             "trigger": REFRESH_JOB.get("trigger") or "",
         }
+    global_article_count = None
+    if exists:
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            try:
+                global_article_count = int(conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0])
+            finally:
+                conn.close()
+        except (sqlite3.Error, OSError, TypeError):
+            pass
     return {
         "data_dir": str(DATA_DIR),
         "db_path": str(DB_FILE),
         "db_exists": exists,
         "db_size": db_size,
         "article_count": count,
+        "global_article_count": global_article_count,
         "news_json": news_json,
         "fetcher_state": state,
         "telegram_channel_configured": bool(channel and channel != "your_channel"),
