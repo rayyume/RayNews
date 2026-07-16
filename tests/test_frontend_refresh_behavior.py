@@ -36,6 +36,15 @@ def test_ipad_pwa_trackpad_back_gesture_is_isolated_from_other_platforms():
     assert "closeArticleFromButton()" in HTML[HTML.index("overlay.addEventListener('wheel'"):]
 
 
+def test_mobile_article_header_has_a_dedicated_double_tap_top_scroll_zone():
+    assert 'id="articleTopScrollZone"' in HTML
+    assert "function scrollArticleDetailToTop()" in HTML
+    zone = source_between("const articleTopScrollZone", "document.getElementById('lb').addEventListener")
+    assert "usesMobileArticleNavigation()" in zone
+    assert "touchend" in zone
+    assert "scrollArticleDetailToTop()" in zone
+
+
 def test_service_worker_rethrows_network_errors_without_a_cached_response():
     source = (ROOT / "frontend" / "sw.js").read_text(encoding="utf-8")
     assert ".catch(error => { if (cached) return cached; throw error; })" in source

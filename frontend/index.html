@@ -191,6 +191,7 @@ a:hover{text-decoration:underline}
 .overlay.open{transform:translateX(0)}
 .overlay-header{position:sticky;top:0;z-index:10;background:var(--header-bg);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-bottom:1px solid var(--border);padding-top:env(safe-area-inset-top,0px)}
 .overlay-header-inner{max-width:720px;margin:0 auto;display:flex;align-items:center;min-height:48px;padding:0 20px}
+.article-top-scroll-zone{flex:1;align-self:stretch;min-width:24px;touch-action:manipulation}
 .back-btn{display:flex;align-items:center;gap:6px;min-height:44px;background:none;border:none;color:var(--accent);font-size:13px;font-weight:600;cursor:pointer;font-family:var(--font);padding:0 8px 0 0;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
 .back-btn:hover{text-decoration:underline}
 .share-btn{display:flex;align-items:center;gap:6px;background:none;border:none;color:var(--text-2);font-size:13px;font-weight:600;cursor:pointer;font-family:var(--font);padding:4px 12px;border-radius:6px;transition:all 0.15s}
@@ -584,7 +585,7 @@ body.body-scroll-lock{overflow:hidden!important}
 </div>
 
 <div class="overlay" id="overlay">
-  <header class="overlay-header"><div class="overlay-header-inner"><button class="back-btn" id="backBtn"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 12L6 8l4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>返回</button><div style="display:flex;align-items:center;gap:4px;margin-left:auto"><button class="share-btn" id="favBtn" onclick="toggleFavorite()" style="display:none" title="收藏"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg><span>收藏</span></button><button class="share-btn" id="shareBtn" onclick="shareArticle()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>分享</button></div></div></header>
+  <header class="overlay-header"><div class="overlay-header-inner"><button class="back-btn" id="backBtn"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 12L6 8l4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>返回</button><div class="article-top-scroll-zone" id="articleTopScrollZone" aria-hidden="true"></div><div style="display:flex;align-items:center;gap:4px"><button class="share-btn" id="favBtn" onclick="toggleFavorite()" style="display:none" title="收藏"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg><span>收藏</span></button><button class="share-btn" id="shareBtn" onclick="shareArticle()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>分享</button></div></div></header>
   <div class="article-wrap" id="articleWrap"></div>
 </div>
 
@@ -6393,6 +6394,30 @@ document.addEventListener('click', e => {
 });
 
 document.getElementById('backBtn').addEventListener('click', closeArticleFromButton);
+function scrollArticleDetailToTop() {
+  const overlay = document.getElementById('overlay');
+  if (overlay && overlay.classList.contains('open')) {
+    overlay.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+}
+const articleTopScrollZone = document.getElementById('articleTopScrollZone');
+let articleTopScrollLastTap = 0;
+articleTopScrollZone.addEventListener('dblclick', e => {
+  if (!usesMobileArticleNavigation()) return;
+  e.preventDefault();
+  scrollArticleDetailToTop();
+});
+articleTopScrollZone.addEventListener('touchend', e => {
+  if (!usesMobileArticleNavigation()) return;
+  const now = Date.now();
+  if (now - articleTopScrollLastTap <= 320) {
+    e.preventDefault();
+    articleTopScrollLastTap = 0;
+    scrollArticleDetailToTop();
+    return;
+  }
+  articleTopScrollLastTap = now;
+}, { passive: false });
 document.getElementById('lb').addEventListener('click', closeLightbox);
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
