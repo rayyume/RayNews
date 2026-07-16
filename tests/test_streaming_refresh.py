@@ -18,12 +18,14 @@ def _patch_fetcher_paths(monkeypatch, tmp_path):
 
 def test_write_fetch_progress_writes_atomic_json(tmp_path, monkeypatch):
     _patch_fetcher_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(fetcher, "FETCH_JOB_ID", "job-42")
 
     fetcher.write_fetch_progress(3, 10)
 
     payload = json.loads(fetcher.PROGRESS_FILE.read_text(encoding="utf-8"))
     assert payload["inserted"] == 3
     assert payload["total_messages"] == 10
+    assert payload["job_id"] == "job-42"
     assert payload["updated_at"] > 0
     assert not fetcher.PROGRESS_FILE.with_suffix(".json.tmp").exists()
 
@@ -173,7 +175,7 @@ def test_status_reports_new_count_so_far_while_running(tmp_path, monkeypatch):
     _reset_running_job(monkeypatch, started_at)
     monkeypatch.setattr(refresh_server, "PROGRESS_FILE", tmp_path / "fetch_progress.json")
     (tmp_path / "fetch_progress.json").write_text(
-        json.dumps({"inserted": 7, "total_messages": 12, "updated_at": started_at + 1}),
+        json.dumps({"job_id": "job-1", "inserted": 7, "total_messages": 12, "updated_at": started_at + 1}),
         encoding="utf-8",
     )
 
@@ -182,13 +184,32 @@ def test_status_reports_new_count_so_far_while_running(tmp_path, monkeypatch):
     assert payload["new_count_so_far"] == 7
 
 
-def test_status_ignores_progress_file_older_than_current_job(tmp_path, monkeypatch):
+def test_status_ignores_progress_file_from_a_different_job_id(tmp_path, monkeypatch):
     started_at = int(time.time())
     _reset_running_job(monkeypatch, started_at)
     monkeypatch.setattr(refresh_server, "PROGRESS_FILE", tmp_path / "fetch_progress.json")
-    # Stale progress left over from a previous cycle/crash, predating this job.
+    # A previous job's progress file, left over from a job that finished — or started —
+    # within the same wall-clock second as this one. A timestamp-only comparison
+    # (updated_at >= started_at) would have wrongly accepted this; only the job_id
+    # mismatch should reject it.
     (tmp_path / "fetch_progress.json").write_text(
-        json.dumps({"inserted": 99, "total_messages": 99, "updated_at": started_at - 100}),
+        json.dumps({"job_id": "job-0", "inserted": 99, "total_messages": 99, "updated_at": started_at}),
+        encoding="utf-8",
+    )
+
+    payload = json.loads(refresh_server.get_refresh_job_status())
+
+    assert "new_count_so_far" not in payload
+
+
+def test_status_ignores_progress_file_with_no_job_id(tmp_path, monkeypatch):
+    started_at = int(time.time())
+    _reset_running_job(monkeypatch, started_at)
+    monkeypatch.setattr(refresh_server, "PROGRESS_FILE", tmp_path / "fetch_progress.json")
+    # A progress file written by a fetcher.py invocation that never received
+    # FETCH_JOB_ID (e.g. run standalone) must not be attributed to any job.
+    (tmp_path / "fetch_progress.json").write_text(
+        json.dumps({"job_id": "", "inserted": 5, "total_messages": 5, "updated_at": started_at}),
         encoding="utf-8",
     )
 
@@ -205,7 +226,7 @@ def test_status_omits_new_count_so_far_when_job_not_running(tmp_path, monkeypatc
     })
     monkeypatch.setattr(refresh_server, "PROGRESS_FILE", tmp_path / "fetch_progress.json")
     (tmp_path / "fetch_progress.json").write_text(
-        json.dumps({"inserted": 3, "total_messages": 3, "updated_at": int(time.time())}),
+        json.dumps({"job_id": "job-1", "inserted": 3, "total_messages": 3, "updated_at": int(time.time())}),
         encoding="utf-8",
     )
 
@@ -223,3 +244,53 @@ def test_status_handles_missing_progress_file(monkeypatch, tmp_path):
 
     assert "new_count_so_far" not in payload
     assert payload["status"] == "running"
+
+
+def test_run_fetcher_passes_current_job_id_to_fetcher_subprocess_env(monkeypatch):
+    monkeypatch.setattr(refresh_server, "CURRENT_FETCH_JOB_ID", "job-xyz")
+    monkeypatch.setattr(refresh_server, "acquire_lock", lambda: True)
+    monkeypatch.setattr(refresh_server, "release_lock", lambda: None)
+    monkeypatch.setattr(refresh_server, "article_id_snapshot", lambda: set())
+    monkeypatch.setattr(refresh_server, "clear_article_cache", lambda: None)
+
+    captured_env = {}
+
+    class FakeResult:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(*args, **kwargs):
+        captured_env.update(kwargs.get("env") or {})
+        return FakeResult()
+
+    monkeypatch.setattr(refresh_server.subprocess, "run", fake_run)
+    monkeypatch.setattr(refresh_server.threading, "Thread", lambda **kwargs: type(
+        "T", (), {"start": lambda self: None},
+    )())
+
+    refresh_server.run_fetcher()
+
+    assert captured_env.get("FETCH_JOB_ID") == "job-xyz"
+
+
+def test_run_refresh_job_sets_current_fetch_job_id_before_running(monkeypatch):
+    monkeypatch.setattr(refresh_server, "REFRESH_JOB", {
+        "job_id": "job-abc", "status": "running", "trigger": "manual",
+        "started_at": int(time.time()), "finished_at": None,
+        "new_count": 0, "error": "",
+    })
+    monkeypatch.setattr(refresh_server, "CURRENT_FETCH_JOB_ID", "")
+    seen_job_id = {}
+
+    def fake_run_fetcher():
+        seen_job_id["value"] = refresh_server.CURRENT_FETCH_JOB_ID
+        return json.dumps({"status": "ok"}).encode(), 200
+
+    monkeypatch.setattr(refresh_server, "run_fetcher", fake_run_fetcher)
+    monkeypatch.setattr(refresh_server, "article_id_snapshot", lambda: set())
+
+    refresh_server._run_refresh_job("job-abc")
+
+    assert seen_job_id["value"] == "job-abc"
+    assert refresh_server.CURRENT_FETCH_JOB_ID == "job-abc"

@@ -56,6 +56,12 @@ REFRESH_JOB = {
 }
 REFRESH_JOB_HISTORY_LIMIT = 16
 REFRESH_JOB_HISTORY = OrderedDict()
+# Set by _run_refresh_job() right before calling run_fetcher(), so run_fetcher() can
+# pass it to the fetcher.py subprocess as FETCH_JOB_ID — letting the progress file it
+# writes be matched to a job by exact ID instead of a second-granularity timestamp
+# heuristic. Safe as a bare global: REFRESH_JOB_LOCK already ensures only one fetch job
+# runs (and thus one subprocess is spawned) at a time.
+CURRENT_FETCH_JOB_ID = ""
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [refresh] %(message)s")
 log = logging.getLogger("refresh")
@@ -136,9 +142,10 @@ def run_fetcher():
     existing_article_ids = article_id_snapshot()
     try:
         log.info("Triggering fetcher...")
+        env = {**os.environ, "FETCH_JOB_ID": CURRENT_FETCH_JOB_ID}
         result = subprocess.run(
             ["python3", "/app/fetcher.py"],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, timeout=120, env=env,
         )
         is_ok = result.returncode == 0
         body = json.dumps({
@@ -229,12 +236,12 @@ def _read_fetch_progress() -> dict | None:
 def _refresh_job_json_locked() -> bytes:
     payload = dict(REFRESH_JOB)
     if payload.get("status") == "running":
-        started_at = payload.get("started_at")
         progress = _read_fetch_progress()
-        # Guard against a stale progress file from a previous cycle (crash, or a
-        # cycle that finished between the fetcher process writing progress and this
-        # job being marked running) being mistaken for this job's progress.
-        if progress and started_at is not None and progress.get("updated_at", 0) >= started_at:
+        # Match by exact job_id (fetcher.py stamps it from FETCH_JOB_ID) rather than a
+        # second-granularity timestamp comparison — two jobs finishing/starting within
+        # the same wall-clock second could otherwise let a previous cycle's progress
+        # file be mistaken for this job's progress.
+        if progress and progress.get("job_id") and progress.get("job_id") == payload.get("job_id"):
             payload["new_count_so_far"] = progress.get("inserted", 0)
     return json.dumps(payload).encode()
 
@@ -271,10 +278,12 @@ def get_refresh_job_status_response(job_id: str | None = None) -> tuple[bytes, i
 
 
 def _run_refresh_job(job_id: str) -> None:
+    global CURRENT_FETCH_JOB_ID
     new_count = 0
     error = ""
     try:
         before_ids = article_id_snapshot()
+        CURRENT_FETCH_JOB_ID = job_id
         body, status = run_fetcher()
         payload = json.loads(body)
         completed = 200 <= status < 300 and payload.get("status") == "ok"

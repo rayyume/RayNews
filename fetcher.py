@@ -57,6 +57,11 @@ OUTPUT_FILE = OUTPUT_DIR / "news.json"
 STATE_FILE = OUTPUT_DIR / "fetcher_state.json"
 DB_FILE = OUTPUT_DIR / "news.db"
 PROGRESS_FILE = OUTPUT_DIR / "fetch_progress.json"
+# Set by refresh_server.py via subprocess env when it launches this fetch cycle, so the
+# progress file we write can be matched to a job by exact ID rather than a
+# second-granularity timestamp heuristic. Empty when run standalone (e.g. manually,
+# or by tests) — write_fetch_progress() then just omits job_id from the payload.
+FETCH_JOB_ID = os.environ.get("FETCH_JOB_ID", "")
 MAX_WORKERS = 15
 REQUEST_TIMEOUT = 20
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -164,6 +169,7 @@ def write_fetch_progress(inserted: int, total: int) -> None:
     pattern as news.json, so a concurrent reader never sees a half-written file."""
     payload = {
         "pid": os.getpid(),
+        "job_id": FETCH_JOB_ID,
         "inserted": inserted,
         "total_messages": total,
         "updated_at": int(time.time()),
