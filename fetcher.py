@@ -11,6 +11,7 @@ import os
 import re
 import sqlite3
 import logging
+import time
 import html as html_mod
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,12 +56,18 @@ OUTPUT_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
 OUTPUT_FILE = OUTPUT_DIR / "news.json"
 STATE_FILE = OUTPUT_DIR / "fetcher_state.json"
 DB_FILE = OUTPUT_DIR / "news.db"
+PROGRESS_FILE = OUTPUT_DIR / "fetch_progress.json"
 MAX_WORKERS = 15
 REQUEST_TIMEOUT = 20
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 HEADERS = {"User-Agent": USER_AGENT}
 # Max historical pages to fetch on initial full sync
 MAX_HISTORY_PAGES = 200
+# Stream articles into SQLite in small batches during processing (instead of one big
+# upsert at the end) so they become visible to readers as soon as they're ready, rather
+# than waiting for the whole fetch cycle (all pages + all full-text fetches) to finish.
+STREAM_BATCH_SIZE = 5
+STREAM_BATCH_SECONDS = 2.0
 CST = dt_timezone(timedelta(hours=8))
 
 logging.basicConfig(
@@ -140,6 +147,26 @@ def upsert_articles(conn: sqlite3.Connection, entries: list[dict]):
     conn.commit()
     log.info(f"SQLite: upserted {len(rows)} articles"
              f" (total: {conn.execute('SELECT COUNT(*) FROM articles').fetchone()[0]})")
+
+
+def write_fetch_progress(inserted: int, total: int) -> None:
+    """Record streaming-ingest progress for the current fetch cycle so
+    /refresh/status can report how many articles have already landed in SQLite
+    while the cycle is still running. Written atomically (temp + rename), same
+    pattern as news.json, so a concurrent reader never sees a half-written file."""
+    payload = {
+        "pid": os.getpid(),
+        "inserted": inserted,
+        "total_messages": total,
+        "updated_at": int(time.time()),
+    }
+    try:
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = PROGRESS_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(PROGRESS_FILE)
+    except Exception as e:
+        log.warning(f"Could not write fetch progress: {e}")
 
 
 def migrate_news_json(conn: sqlite3.Connection):
@@ -995,18 +1022,53 @@ def run():
             log.error(f"SQLite init failed: {e}")
         return
 
-    # Process new messages with thread pool
+    # Reset progress for this cycle before streaming starts, so a stale value from a
+    # previous run/crash is never mistaken for current progress (see
+    # write_fetch_progress() / refresh_server.py's started_at guard).
+    write_fetch_progress(0, len(messages))
+
+    # Process new messages with thread pool, streaming completed articles into SQLite
+    # in small batches as they finish (rather than one big upsert at the end) so
+    # readers can see new articles well before the whole cycle — including every
+    # full-text fetch — has finished.
     new_entries = []
     failed_count = 0
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(process_message, msg, msg["id"]): msg for msg in messages}
-        for future in as_completed(futures):
-            try:
-                new_entries.append(future.result())
-            except Exception as e:
-                failed_count += 1
-                msg_id = futures[future].get("id", "?")
-                log.error(f"Message processing failed (ID={msg_id}): {e}")
+    stream_conn = None
+    stream_batch = []
+    inserted_total = 0
+    last_commit_at = time.monotonic()
+    try:
+        stream_conn = init_db()
+        stream_conn.execute("PRAGMA busy_timeout=30000")
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = {executor.submit(process_message, msg, msg["id"]): msg for msg in messages}
+            for future in as_completed(futures):
+                try:
+                    entry = future.result()
+                    new_entries.append(entry)
+                    stream_batch.append(entry)
+                except Exception as e:
+                    failed_count += 1
+                    msg_id = futures[future].get("id", "?")
+                    log.error(f"Message processing failed (ID={msg_id}): {e}")
+                if stream_batch and (
+                    len(stream_batch) >= STREAM_BATCH_SIZE
+                    or time.monotonic() - last_commit_at >= STREAM_BATCH_SECONDS
+                ):
+                    upsert_articles(stream_conn, stream_batch)
+                    inserted_total += len(stream_batch)
+                    stream_batch = []
+                    last_commit_at = time.monotonic()
+                    write_fetch_progress(inserted_total, len(messages))
+        if stream_batch:
+            upsert_articles(stream_conn, stream_batch)
+            inserted_total += len(stream_batch)
+            write_fetch_progress(inserted_total, len(messages))
+    except Exception as e:
+        log.error(f"Streaming SQLite ingest failed: {e}")
+    finally:
+        if stream_conn:
+            stream_conn.close()
 
     # Merge with existing data (accumulate)
     existing_data = {"items": []}

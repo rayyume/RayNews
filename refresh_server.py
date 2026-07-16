@@ -36,6 +36,7 @@ DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
 DB_FILE = DATA_DIR / "news.db"
 NEWS_JSON_FILE = DATA_DIR / "news.json"
 STATE_FILE = DATA_DIR / "fetcher_state.json"
+PROGRESS_FILE = DATA_DIR / "fetch_progress.json"
 LAST_FETCH_STATUS = {
     "status": "never",
     "returncode": None,
@@ -214,8 +215,28 @@ def article_id_snapshot() -> set[int]:
             conn.close()
 
 
+def _read_fetch_progress() -> dict | None:
+    """Read the streaming-ingest progress file fetcher.py writes during a fetch cycle.
+    Returns None if missing/unreadable — the caller must still work without it."""
+    try:
+        if not PROGRESS_FILE.exists():
+            return None
+        return json.loads(PROGRESS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
 def _refresh_job_json_locked() -> bytes:
-    return json.dumps(REFRESH_JOB).encode()
+    payload = dict(REFRESH_JOB)
+    if payload.get("status") == "running":
+        started_at = payload.get("started_at")
+        progress = _read_fetch_progress()
+        # Guard against a stale progress file from a previous cycle (crash, or a
+        # cycle that finished between the fetcher process writing progress and this
+        # job being marked running) being mistaken for this job's progress.
+        if progress and started_at is not None and progress.get("updated_at", 0) >= started_at:
+            payload["new_count_so_far"] = progress.get("inserted", 0)
+    return json.dumps(payload).encode()
 
 
 def get_refresh_job_status() -> bytes:
