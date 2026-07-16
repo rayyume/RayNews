@@ -438,6 +438,7 @@ context.seenArticleIds = new Set();
 context.latestKnownTimestamp = 100;
 context.pendingNewArticleCount = 0;
 context.pendingNewItems = [];
+context.bumpContentEpoch = () => { context.epochBumps = (context.epochBumps || 0) + 1; };
 context.fetch = async () => ({
   json: async () => ({ items: [{ id: 2, timestamp: 101, source: 's' }] }),
 });
@@ -465,6 +466,7 @@ context.lastUserActivityAt = 0;
 context.IDLE_LATEST_DELAY_MS = 1;
 const added = await context.loadSince(100);
 assert.equal(added, 1);
+assert.equal(context.epochBumps, 1);
 assert.equal(context.pendingNewArticleCount, 1);
 assert.deepEqual(Array.from(context.pendingNewItems, item => item.id), [2]);
 assert.equal(context.countRefreshes, 1);

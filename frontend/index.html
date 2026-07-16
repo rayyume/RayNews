@@ -979,6 +979,12 @@ let pendingNewArticleCount = 0;
 let pendingNewItems = [];
 let seenArticleIds = new Set();
 let pendingLatestPage = null;
+// Session-scoped counter bumped whenever the known article set changes underneath
+// already-fetched page snapshots (new articles detected, streamed-in refresh batches,
+// etc). Anything that reads/writes a page snapshot should stamp it with the epoch that
+// was current when the read/write started, so stale results from slower in-flight
+// requests never overwrite fresher ones. See bumpContentEpoch().
+let contentEpoch = 0;
 let lastUserActivityAt = Date.now();
 let pageVisibleSince = Date.now();
 let programmaticScrollUntil = 0;
@@ -1664,6 +1670,32 @@ async function cleanupNewsCache() {
         const tx = db.transaction(NEWS_CACHE_STORE, 'readwrite');
         const store = tx.objectStore(NEWS_CACHE_STORE);
         remove.forEach(item => store.delete(item.key));
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+      });
+    }
+    db.close();
+  } catch (e) {}
+}
+
+// Wipes every cached page:* entry (source-metadata and other non-page kinds are left
+// intact). Used when the known article set changes underneath already-fetched page
+// snapshots — see bumpContentEpoch().
+async function clearCachedNewsPages() {
+  try {
+    const db = await openNewsCache();
+    const records = await new Promise((resolve, reject) => {
+      const tx = db.transaction(NEWS_CACHE_STORE, 'readonly');
+      const request = tx.objectStore(NEWS_CACHE_STORE).getAll();
+      request.onsuccess = () => resolve(request.result || []);
+      request.onerror = () => reject(request.error);
+    });
+    const pageKeys = records.filter(item => item.kind === 'page').map(item => item.key);
+    if (pageKeys.length) {
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(NEWS_CACHE_STORE, 'readwrite');
+        const store = tx.objectStore(NEWS_CACHE_STORE);
+        pageKeys.forEach(key => store.delete(key));
         tx.oncomplete = resolve;
         tx.onerror = () => reject(tx.error);
       });
@@ -4763,6 +4795,19 @@ function warmPageCoverImages(data) {
   });
 }
 
+// Invalidates every page snapshot (buffered + IndexedDB) currently held, because the
+// known article set just changed underneath them (a background refresh detected new
+// articles, a streamed-in refresh batch landed, etc). In-flight prefetch/network
+// requests started before this call are still allowed to resolve and hand their data
+// to whoever is awaiting them directly, but they must not write it back into the
+// buffer/cache — see the epoch checks in prefetchNewsPage() and preparePageNavigation().
+function bumpContentEpoch() {
+  contentEpoch++;
+  pageMemoryBuffer.clear();
+  pagePrefetchPromises.clear();
+  clearCachedNewsPages();
+}
+
 function rememberBufferedPage(page, activeFilter, data) {
   if (!data || !Array.isArray(data.items)) return data;
   const key = newsPageCacheKey(page, activeFilter);
@@ -4789,6 +4834,7 @@ async function prefetchNewsPage(page, activeFilter) {
   const key = newsPageCacheKey(page, activeFilter);
   const existing = pagePrefetchPromises.get(key);
   if (existing) return existing;
+  const epochAtStart = contentEpoch;
   const task = (async () => {
     const buffered = readBufferedPage(page, activeFilter);
     if (buffered) return buffered;
@@ -4796,8 +4842,11 @@ async function prefetchNewsPage(page, activeFilter) {
     if (cached) return rememberBufferedPage(page, activeFilter, cached);
     try {
       const data = await fetchNewsPage(page, activeFilter);
-      await writeCachedNewsPage(page, activeFilter, data);
-      return rememberBufferedPage(page, activeFilter, data);
+      if (epochAtStart === contentEpoch) {
+        await writeCachedNewsPage(page, activeFilter, data);
+        rememberBufferedPage(page, activeFilter, data);
+      }
+      return data;
     } catch (e) {
       return null;
     }
@@ -5111,6 +5160,43 @@ function applyPageCalibrationWhenActive(data, page, activeFilter, requestSeq) {
 async function preparePageNavigation(page, activeFilter) {
   const requestSeq = ++pageRequestSequence;
   if (pageRequestController) pageRequestController.abort();
+  const epochAtStart = contentEpoch;
+
+  const startNetworkFetch = () => {
+    pageRequestController = new AbortController();
+    const controller = pageRequestController;
+    const timeout = setTimeout(() => controller.abort(), 12000);
+    return fetchNewsPage(page, activeFilter, controller.signal)
+      .then(async data => {
+        clearTimeout(timeout);
+        if (epochAtStart === contentEpoch) {
+          await writeCachedNewsPage(page, activeFilter, data);
+          rememberBufferedPage(page, activeFilter, data);
+        }
+        return { data, error: null };
+      })
+      .catch(error => {
+        clearTimeout(timeout);
+        return { data: null, error };
+      });
+  };
+
+  // A pending/known-relevant new article means any snapshot fetched before this
+  // navigation started is stale — e.g. articles bumped off page 1 by a background
+  // refresh may already be sitting at the top of what page 2 used to look like. Skip
+  // buffered/cached snapshots entirely and wait for the real network response, so the
+  // scroll-to-top animation that follows renders the final content on its first paint
+  // instead of correcting itself after the animation completes.
+  const mustBeFresh = pendingRelevantCount(activeFilter) > 0;
+  if (mustBeFresh) {
+    const result = await startNetworkFetch();
+    if (requestSeq !== pageRequestSequence) return null;
+    if (result.data) return result.data;
+    const error = result.error || new Error('load failed');
+    showToast(error.name === 'AbortError' ? '连接超时，请稍后重试' : '加载失败，请检查网络');
+    return null;
+  }
+
   const key = newsPageCacheKey(page, activeFilter);
   const buffered = readBufferedPage(page, activeFilter);
   const pendingPrefetch = pagePrefetchPromises.get(key);
@@ -5119,21 +5205,8 @@ async function preparePageNavigation(page, activeFilter) {
     if (requestSeq !== pageRequestSequence) return null;
     if (prefetched) return prefetched;
   }
-  pageRequestController = new AbortController();
-  const controller = pageRequestController;
-  const timeout = setTimeout(() => controller.abort(), 12000);
+  const networkPromise = startNetworkFetch();
   const cachedPromise = readCachedNewsPage(page, activeFilter);
-  const networkPromise = fetchNewsPage(page, activeFilter, controller.signal)
-    .then(async data => {
-      clearTimeout(timeout);
-      await writeCachedNewsPage(page, activeFilter, data);
-      rememberBufferedPage(page, activeFilter, data);
-      return { data, error: null };
-    })
-    .catch(error => {
-      clearTimeout(timeout);
-      return { data: null, error };
-    });
 
   if (buffered && requestSeq === pageRequestSequence) {
     networkPromise.then(result => {
@@ -5197,6 +5270,9 @@ async function loadSince(timestamp, { forceApply = false } = {}) {
     latestKnownTimestamp = Math.max(latestKnownTimestamp, ...newItems.map(item => Number(item.timestamp) || 0));
     pendingNewArticleCount += added;
     pendingNewItems = pendingNewItems.concat(newItems);
+    // The article set just changed underneath any page snapshot fetched before now —
+    // invalidate them so pagination doesn't hand out stale pages (see bumpContentEpoch()).
+    bumpContentEpoch();
     refreshTodayArticleCount();
     if (deferForRefresh || refreshInProgress) return added;
     await loadSourceCategories();
