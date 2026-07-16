@@ -6783,6 +6783,12 @@ window.addEventListener('scroll', markUserActivity, { passive: true });
 // iOS sometimes fires only 'focus' (not 'visibilitychange') on PWA resume, so
 // listen for both and dedupe the work behind a short guard.
 let lastForegroundSyncAt = 0;
+function usesIpadPwaTrackpadNavigation() {
+  return navigator.platform === 'MacIntel'
+    && navigator.maxTouchPoints > 0
+    && window.matchMedia
+    && window.matchMedia('(display-mode: standalone)').matches;
+}
 function onReturnToForeground() {
   const now = Date.now();
   if (now - lastForegroundSyncAt < 1000) return;
@@ -6822,6 +6828,8 @@ window.addEventListener('focus', onReturnToForeground);
 (function() {
   const overlay = document.getElementById('overlay');
   let sx = 0, sy = 0, swiping = false, edgeCandidate = false;
+  let trackpadRightDistance = 0;
+  let trackpadResetTimer = null;
 
   function resetArticleSwipe() {
     overlay.style.transition = '';
@@ -6882,6 +6890,25 @@ window.addEventListener('focus', onReturnToForeground);
   }, { passive: true });
 
   overlay.addEventListener('touchcancel', resetArticleSwipe, { passive: true });
+
+  // iPadOS PWA receives Magic Keyboard two-finger swipes as horizontal wheel
+  // events, unlike the touch edge swipe handled above.  Keep this path tightly
+  // scoped so desktop and ordinary iOS browser gestures remain native.
+  overlay.addEventListener('wheel', e => {
+    if (!usesIpadPwaTrackpadNavigation()) return;
+    if (!overlay.classList.contains('open')) return;
+    if (document.getElementById('lb').classList.contains('open')) return;
+    if (Math.abs(e.deltaX) < Math.abs(e.deltaY) * 1.5) return;
+    // A physical two-finger swipe right reports negative horizontal scrolling.
+    if (e.deltaX >= 0) { trackpadRightDistance = 0; return; }
+    trackpadRightDistance += -e.deltaX;
+    clearTimeout(trackpadResetTimer);
+    trackpadResetTimer = setTimeout(() => { trackpadRightDistance = 0; }, 180);
+    if (trackpadRightDistance < 80) return;
+    e.preventDefault();
+    trackpadRightDistance = 0;
+    closeArticleFromButton();
+  }, { passive: false });
 })();
 
 </script>
