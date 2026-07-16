@@ -112,8 +112,15 @@ def init_db() -> sqlite3.Connection:
     return conn
 
 
-def upsert_articles(conn: sqlite3.Connection, entries: list[dict]):
-    """Batch insert or update articles into SQLite."""
+def upsert_articles(conn: sqlite3.Connection, entries: list[dict], sync_sources: bool = True):
+    """Batch insert or update articles into SQLite.
+
+    ensure_article_sources() does a full-table alias UPDATE plus a DISTINCT scan over
+    every article, so it's expensive relative to a handful of row upserts. The
+    streaming-ingest loop in run() calls this once per small batch (every few seconds)
+    — pass sync_sources=False there and let the caller run it once after the whole
+    cycle finishes, instead of repeating a full-table pass per batch.
+    """
     sql = """INSERT OR REPLACE INTO articles
         (id, title, source, feed_source, origin_source, time, date, timestamp, thumb,
          has_full_content, telegraph_url, body_html, summary)
@@ -143,7 +150,8 @@ def upsert_articles(conn: sqlite3.Connection, entries: list[dict]):
             e.get("summary", ""),
         ))
     conn.executemany(sql, rows)
-    ensure_article_sources(conn)
+    if sync_sources:
+        ensure_article_sources(conn)
     conn.commit()
     log.info(f"SQLite: upserted {len(rows)} articles"
              f" (total: {conn.execute('SELECT COUNT(*) FROM articles').fetchone()[0]})")
@@ -1055,13 +1063,13 @@ def run():
                     len(stream_batch) >= STREAM_BATCH_SIZE
                     or time.monotonic() - last_commit_at >= STREAM_BATCH_SECONDS
                 ):
-                    upsert_articles(stream_conn, stream_batch)
+                    upsert_articles(stream_conn, stream_batch, sync_sources=False)
                     inserted_total += len(stream_batch)
                     stream_batch = []
                     last_commit_at = time.monotonic()
                     write_fetch_progress(inserted_total, len(messages))
         if stream_batch:
-            upsert_articles(stream_conn, stream_batch)
+            upsert_articles(stream_conn, stream_batch, sync_sources=False)
             inserted_total += len(stream_batch)
             write_fetch_progress(inserted_total, len(messages))
     except Exception as e:

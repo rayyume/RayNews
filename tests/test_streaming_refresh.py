@@ -44,11 +44,13 @@ def test_run_streams_articles_into_sqlite_in_batches_before_cycle_completes(tmp_
     )
 
     batch_sizes = []
+    sync_sources_flags = []
     original_upsert = fetcher.upsert_articles
 
-    def tracking_upsert(conn, entries):
+    def tracking_upsert(conn, entries, sync_sources=True):
         batch_sizes.append(len(entries))
-        return original_upsert(conn, entries)
+        sync_sources_flags.append(sync_sources)
+        return original_upsert(conn, entries, sync_sources=sync_sources)
 
     monkeypatch.setattr(fetcher, "upsert_articles", tracking_upsert)
 
@@ -60,6 +62,10 @@ def test_run_streams_articles_into_sqlite_in_batches_before_cycle_completes(tmp_
     assert len(batch_sizes) >= 2
     assert sum(batch_sizes[:-1]) == 6
     assert batch_sizes[-1] == 6
+    # Every streamed batch skips the expensive full-table source sync; only the
+    # trailing end-of-cycle self-heal pass should run it.
+    assert sync_sources_flags[:-1] == [False] * (len(sync_sources_flags) - 1)
+    assert sync_sources_flags[-1] is True
 
     conn = sqlite3.connect(fetcher.DB_FILE)
     count = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
@@ -69,6 +75,28 @@ def test_run_streams_articles_into_sqlite_in_batches_before_cycle_completes(tmp_
     progress = json.loads(fetcher.PROGRESS_FILE.read_text(encoding="utf-8"))
     assert progress["inserted"] == 6
     assert progress["total_messages"] == 6
+
+
+def test_upsert_articles_skips_source_sync_when_disabled(tmp_path, monkeypatch):
+    _patch_fetcher_paths(monkeypatch, tmp_path)
+    conn = fetcher.init_db()
+
+    sync_calls = []
+    monkeypatch.setattr(fetcher, "ensure_article_sources", lambda c: sync_calls.append(c) or 0)
+
+    fetcher.upsert_articles(conn, [
+        {"id": 1, "title": "t1", "source": "s", "feed_source": "s", "timestamp": 1},
+    ], sync_sources=False)
+    assert sync_calls == []
+
+    fetcher.upsert_articles(conn, [
+        {"id": 2, "title": "t2", "source": "s", "feed_source": "s", "timestamp": 2},
+    ])  # default stays True
+    assert sync_calls == [conn]
+
+    count = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
+    conn.close()
+    assert count == 2
 
 
 def test_streaming_ingest_still_respects_deleted_articles(tmp_path, monkeypatch):
