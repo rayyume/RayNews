@@ -254,8 +254,8 @@ The current project has only two signed-in roles: **User** and **Admin**. The re
 
 | Capability | Guest | User | Admin |
 |------------|-------|------|-------|
-| Browse, search, paginate, and read articles | ✓ | ✓ | ✓ |
-| Read cached images | ✓ | ✓ | ✓ |
+| Browse and read articles | First 3 home-page articles only; remaining content is locked | ✓ | ✓ |
+| Search and pagination | — | ✓ | ✓ |
 | Manual refresh | — | ✓ | ✓ |
 | Favorites, personal AI configuration, and AI actions | — | ✓ | ✓ |
 | Profile, notification, and sharing settings | — | ✓ | ✓ |
