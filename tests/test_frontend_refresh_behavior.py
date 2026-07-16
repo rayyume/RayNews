@@ -22,6 +22,10 @@ def test_review_hardening_frontend_contracts():
     assert "retryArticleDetail" in source_between("function onReturnToForeground()", "document.addEventListener('visibilitychange'")
 
 
+def test_logo_refresh_state_is_declared_before_click_handler_uses_it():
+    assert "let logoRefreshInProgress = false;" in HTML
+
+
 def test_service_worker_rethrows_network_errors_without_a_cached_response():
     source = (ROOT / "frontend" / "sw.js").read_text(encoding="utf-8")
     assert ".catch(error => { if (cached) return cached; throw error; })" in source
