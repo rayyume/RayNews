@@ -368,6 +368,117 @@ assert.deepEqual(context.promptStates, [false]);
     )
 
 
+def test_manual_refresh_reports_streaming_progress_on_button_label():
+    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    setup = trigger_context_setup(
+        "return { job_id: 'job-1', status: 'completed', new_count: 3 };"
+    )
+    run_node(
+        trigger,
+        setup
+        + """
+context.window = { scrollY: 0 };
+context.labels = [];
+context.setRefreshProgressLabel = count => context.labels.push(count);
+context.applyStreamedRefreshBatch = async () => { context.applyCalls++; };
+context.applyCalls = 0;
+context.pollRefreshJob = async (jobId, timeout, signal, onProgress) => {
+  onProgress({ new_count_so_far: 2 });
+  onProgress({ new_count_so_far: 2 }); // no increase — must not relabel or reapply
+  return { job_id: 'job-1', status: 'completed', new_count: 3 };
+};
+await context.triggerRefresh();
+assert.deepEqual(context.labels, [2]);
+assert.equal(context.applyCalls, 1);
+""",
+    )
+
+
+def test_manual_refresh_skips_streamed_apply_when_scrolled_away_from_top():
+    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    setup = trigger_context_setup(
+        "return { job_id: 'job-1', status: 'completed', new_count: 1 };"
+    )
+    run_node(
+        trigger,
+        setup
+        + """
+context.window = { scrollY: 200 };
+context.labels = [];
+context.setRefreshProgressLabel = count => context.labels.push(count);
+context.applyStreamedRefreshBatch = async () => { context.applyCalls++; };
+context.applyCalls = 0;
+context.pollRefreshJob = async (jobId, timeout, signal, onProgress) => {
+  onProgress({ new_count_so_far: 4 });
+  return { job_id: 'job-1', status: 'completed', new_count: 4 };
+};
+await context.triggerRefresh();
+assert.deepEqual(context.labels, [4]);
+assert.equal(context.applyCalls, 0);
+""",
+    )
+
+
+def test_manual_refresh_skips_streamed_apply_after_page_navigation_changed_view():
+    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    setup = trigger_context_setup(
+        "return { job_id: 'job-1', status: 'completed', new_count: 1 };"
+    )
+    run_node(
+        trigger,
+        setup
+        + """
+context.window = { scrollY: 0 };
+context.applyStreamedRefreshBatch = async () => { context.applyCalls++; };
+context.applyCalls = 0;
+context.setRefreshProgressLabel = () => {};
+context.pollRefreshJob = async (jobId, timeout, signal, onProgress) => {
+  context.pageNavigationSequence += 1;
+  onProgress({ new_count_so_far: 2 });
+  return { job_id: 'job-1', status: 'completed', new_count: 2 };
+};
+await context.triggerRefresh();
+assert.equal(context.applyCalls, 0);
+""",
+    )
+
+
+def test_manual_refresh_streamed_apply_is_throttled_to_one_per_three_seconds():
+    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    setup = trigger_context_setup(
+        "return { job_id: 'job-1', status: 'completed', new_count: 1 };"
+    )
+    run_node(
+        trigger,
+        setup
+        + """
+context.window = { scrollY: 0 };
+context.setRefreshProgressLabel = () => {};
+let now = 10000; // start well past 0 so the first tick isn't starved by lastStreamedApplyAt=0
+context.Date = { now: () => now };
+context.applyStreamedRefreshBatch = async () => { context.applyCalls++; return true; };
+context.applyCalls = 0;
+// applyStreamedRefreshBatch is fire-and-forget (not awaited by handleRefreshProgress),
+// so give its .finally() a couple of microtask turns to clear streamApplyInFlight
+// between ticks, same as would happen across real pollRefreshJob's ~1.2s delay.
+const flushMicrotasks = async () => { await Promise.resolve(); await Promise.resolve(); };
+context.pollRefreshJob = async (jobId, timeout, signal, onProgress) => {
+  onProgress({ new_count_so_far: 2 });
+  await flushMicrotasks();
+  now += 500; // well under the 3000ms throttle window
+  onProgress({ new_count_so_far: 4 });
+  await flushMicrotasks();
+  now += 3000;
+  onProgress({ new_count_so_far: 6 });
+  await flushMicrotasks();
+  return { job_id: 'job-1', status: 'completed', new_count: 6 };
+};
+await context.triggerRefresh();
+assert.equal(context.applyCalls, 2);
+""",
+    )
+
+
 def test_manual_refresh_flow_cancellation_aborts_poller_and_suppresses_stale_toast():
     helpers = source_between("function cancelRefreshFlow(", "function rebuildCategoryMap")
     trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")

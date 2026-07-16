@@ -1411,7 +1411,7 @@ async function requestRefreshStatusOnce(jobId, timeoutMs = 5000, flowSignal = nu
   }
 }
 
-async function pollRefreshJob(jobId, timeoutMs = 135000, flowSignal = null) {
+async function pollRefreshJob(jobId, timeoutMs = 135000, flowSignal = null, onProgress = null) {
   const deadline = Date.now() + timeoutMs;
   while (true) {
     const beforeDelayMs = deadline - Date.now();
@@ -1425,6 +1425,7 @@ async function pollRefreshJob(jobId, timeoutMs = 135000, flowSignal = null) {
       throw new Error('刷新任务状态已被取代，请稍后查看最新文章');
     }
     if (status.status === 'completed' || status.status === 'failed') return status;
+    if (onProgress) onProgress(status);
   }
   throw new Error('刷新状态查询超时，请稍后查看最新文章');
 }
@@ -4441,11 +4442,42 @@ async function triggerRefresh() {
   hideNewArticlesPrompt();
   showToast('🔄 正在后台抓取...');
 
+  // While the fetch job is running, fetcher.py now streams completed articles into
+  // SQLite in small batches (see fetch_progress.json / new_count_so_far) instead of
+  // committing everything at the very end. Surface that progress on the button label,
+  // and — only when it's safe to touch the DOM without surprising the user — apply
+  // the newly-visible articles early instead of making them wait for the job's
+  // terminal state.
+  let lastStreamedCount = 0;
+  let lastStreamedApplyAt = 0;
+  let streamApplyInFlight = false;
+  const handleRefreshProgress = status => {
+    const soFar = Number(status.new_count_so_far || 0);
+    if (soFar <= lastStreamedCount) return;
+    setRefreshProgressLabel(soFar);
+    const now = Date.now();
+    const canApply = !streamApplyInFlight
+      && now - lastStreamedApplyAt >= 3000
+      && refreshView.page === 1
+      && refreshView.pendingRequestSequence === 0
+      && viewIsCurrent(refreshView.requestSequence, 0)
+      && window.scrollY <= 4;
+    if (!canApply) return;
+    lastStreamedCount = soFar;
+    lastStreamedApplyAt = now;
+    streamApplyInFlight = true;
+    applyStreamedRefreshBatch(refreshView.activeFilter, () => (
+      flowIsCurrent()
+      && viewIsCurrent(refreshView.requestSequence, 0)
+      && window.scrollY <= 4
+    )).finally(() => { streamApplyInFlight = false; });
+  };
+
   try {
     const data = await requestRefreshOnce(flowController.signal);
     if (!flowIsCurrent()) return;
     if (!data.job_id) throw new Error('刷新任务未返回编号');
-    const status = await pollRefreshJob(data.job_id, 135000, flowController.signal);
+    const status = await pollRefreshJob(data.job_id, 135000, flowController.signal, handleRefreshProgress);
     if (!flowIsCurrent()) return;
     if (status.status === 'failed') {
       throw new Error(refreshErrorMessage(status));
@@ -4497,6 +4529,41 @@ function setRefreshRunning(isRunning) {
     const label = btn.querySelector('span') || btn;
     label.textContent = isRunning ? '更新中' : '刷新';
   }
+}
+
+// Reflects fetcher.py's streaming-ingest progress (new_count_so_far) on the refresh
+// button label while a job is running, so "转圈" reads as "still working" rather than
+// "nothing has happened yet" when articles have already started landing.
+function setRefreshProgressLabel(count) {
+  if (!refreshInProgress) return;
+  const btn = document.getElementById('refreshBtn');
+  if (!btn) return;
+  const label = btn.querySelector('span') || btn;
+  label.textContent = count > 0 ? `已获取 ${count} 篇` : '更新中';
+}
+
+// Applies a refresh job's in-progress articles to page 1 ahead of the job's terminal
+// state — only called when triggerRefresh()'s handleRefreshProgress has already
+// confirmed it's safe (page 1, top of scroll, no navigation/overlay in the way).
+// `shouldApply` is re-checked after the network round-trip since the user's view can
+// change while this fetch is in flight (navigate away, scroll down, open an article).
+async function applyStreamedRefreshBatch(activeFilter, shouldApply) {
+  let data;
+  try {
+    data = await fetchNewsPage(1, activeFilter);
+  } catch (e) {
+    return;
+  }
+  if (shouldApply && !shouldApply()) return;
+  // The known article set just changed — invalidate any page snapshot fetched before
+  // this landed (see bumpContentEpoch()) so pagination never hands out a stale page.
+  bumpContentEpoch();
+  applyNewsPage(data, 1, activeFilter, { animate: true, preserveDom: true });
+  (data.items || []).forEach(item => {
+    const id = Number(item.id);
+    if (id) seenArticleIds.add(id);
+  });
+  consumePendingNewArticles(activeFilter);
 }
 
 function buildNewsPageParams(page = currentPage, activeFilter = filter, sourceSnapshot = null) {

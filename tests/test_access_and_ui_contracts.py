@@ -367,7 +367,7 @@ def test_manual_refresh_posts_once_then_polls_status():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     block = html[html.index("async function triggerRefresh("):html.index("function setRefreshRunning", html.index("async function triggerRefresh("))]
     assert block.count("await requestRefreshOnce(flowController.signal)") == 1
-    assert "await pollRefreshJob(data.job_id, 135000, flowController.signal)" in block
+    assert "await pollRefreshJob(data.job_id, 135000, flowController.signal, handleRefreshProgress)" in block
     assert "isTransientRefreshError" not in block
     assert "await delay(800)" not in block
     assert "activeFilter: filter," in block
@@ -441,7 +441,7 @@ def test_manual_refresh_uses_structured_error_messages():
     assert "async function requestRefreshStatus(" in html
     assert "async function pollRefreshJob(jobId" in html
     assert "await requestRefreshOnce(flowController.signal);" in trigger_block
-    assert "await pollRefreshJob(data.job_id, 135000, flowController.signal);" in trigger_block
+    assert "await pollRefreshJob(data.job_id, 135000, flowController.signal, handleRefreshProgress);" in trigger_block
     assert "showToast('❌ 刷新失败: ' + (e.message || '网络错误'))" not in trigger_block
 
 
