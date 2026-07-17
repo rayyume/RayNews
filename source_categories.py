@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import threading
+import time
 from datetime import datetime
 
 
@@ -353,6 +355,45 @@ def ensure_article_sources(conn: sqlite3.Connection) -> int:
     return inserted
 
 
+def _ensure_source_tables(conn: sqlite3.Connection) -> None:
+    """Create the source tables if a fresh deployment hasn't seeded them yet.
+
+    Cheap no-op once they exist, so it's safe on the read path — unlike the full
+    init_source_categories(), which also seeds rows and commits.
+    """
+    table = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'source_categories'"
+    ).fetchone()
+    if not table:
+        init_source_categories(conn)
+
+
+MAINTENANCE_THROTTLE_SECONDS = 60
+_maintenance_lock = threading.Lock()
+_maintenance_last_run = 0.0
+
+
+def maintain_source_categories(conn: sqlite3.Connection, force: bool = False) -> dict:
+    """Run the write-heavy source bookkeeping: discover new sources, drop stale ones.
+
+    Both steps scan the whole articles table, so they must stay off the read path of
+    GET /sources — that request has to stay fast even while a fetch cycle holds the
+    write lock. Call this after a fetch cycle instead. Throttled to one pass per
+    MAINTENANCE_THROTTLE_SECONDS per process; pass force=True to bypass (write paths
+    that just changed articles need their changes reflected immediately).
+    """
+    global _maintenance_last_run
+    if not force:
+        with _maintenance_lock:
+            if time.monotonic() - _maintenance_last_run < MAINTENANCE_THROTTLE_SECONDS:
+                return {"ran": False, "discovered": 0, "deleted": 0}
+    discovered = ensure_article_sources(conn)
+    deleted = cleanup_stale_source_categories(conn)
+    with _maintenance_lock:
+        _maintenance_last_run = time.monotonic()
+    return {"ran": True, "discovered": discovered, "deleted": deleted}
+
+
 def cleanup_stale_source_categories(conn: sqlite3.Connection) -> int:
     """Remove discovered source rows that no longer have articles."""
     table = conn.execute(
@@ -561,8 +602,15 @@ def merge_source(conn: sqlite3.Connection, source: str, target_source: str,
 
 
 def source_rows(conn: sqlite3.Connection) -> list[dict]:
-    ensure_article_sources(conn)
-    cleanup_stale_source_categories(conn)
+    """Read-only snapshot of source metadata.
+
+    Deliberately does no bookkeeping: the full-table discover/cleanup passes live in
+    maintain_source_categories() and run after a fetch cycle. Keeping them here made
+    every GET /sources scan the articles table, which timed out the frontend's cold
+    start whenever a fetch cycle held the write lock. Sources discovered since the
+    last maintenance pass still show up via the `unlinked` query below.
+    """
+    _ensure_source_tables(conn)
     # Include article sources not yet in source_categories (e.g. misdetected titles)
     # so they don't silently disappear from the settings page.
     unlinked = conn.execute(

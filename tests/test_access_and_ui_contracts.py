@@ -589,10 +589,49 @@ def test_cold_start_renders_categories_immediately_and_runs_requests_in_parallel
 def test_cached_source_metadata_is_rendered_before_network_fetch():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     start = html.index("async function loadSourceCategories(")
-    block = html[start:html.index("function sourceLabel", start)]
-    source_fetch = "await apiFetch('/sources', { signal: controller.signal })"
+    block = html[start:html.index("async function scheduleSourceMetadataRetry", start)]
+    # The network fetch now lives in a helper; the cache must still be applied first.
+    source_fetch = "await fetchSourceMetadata(networkTimeoutMs)"
     assert block.index("rebuildCategoryMap(cached.data.sources);") < block.index(source_fetch)
     assert block.index("renderFilters();") < block.index(source_fetch)
+
+
+def test_cold_start_source_metadata_cache_read_is_not_capped_at_page_timeout():
+    """The cold-start metadata cache read must use a larger budget than the 500ms
+    used for page snapshots, or a slow first IndexedDB open leaves the drawer empty."""
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    start = html.index("async function loadSourceCategories(")
+    block = html[start:html.index("async function scheduleSourceMetadataRetry", start)]
+    assert "cacheTimeoutMs = 5000" in block
+    assert "readNewsCacheEntry('source-metadata'), null, cacheTimeoutMs" in block
+
+
+def test_source_metadata_retry_is_scheduled_on_failure():
+    """A failed/aborted bootstrap fetch must queue a backoff retry so the drawer
+    repopulates without the user opening the admin Sources tab."""
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert "if (!succeeded) scheduleSourceMetadataRetry();" in html
+    assert "async function scheduleSourceMetadataRetry(" in html
+    # The admin Sources tab must also warm the cold-start cache.
+    tab = html[html.index("async function loadSourcesTab("):
+               html.index("async function refreshSourceDependentViews(")]
+    assert "persistSourceMetadata(data);" in tab
+
+
+def test_source_metadata_recovers_on_foreground_and_redrives_deep_link():
+    """A PWA backgrounded through the whole retry window must self-heal on resume,
+    and a successful retry must re-drive any stuck source deep link."""
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    # Foreground resume re-attempts while metadata never loaded.
+    fg = html[html.index("function onReturnToForeground()"):
+              html.index("document.addEventListener('visibilitychange', () =>")]
+    assert "if (!sourceMetadataNetworkOk) scheduleSourceMetadataRetry({ immediate: true });" in fg
+    # The retry loop bails (doesn't consume the slot) while hidden, and re-drives the
+    # deep link on success.
+    retry = html[html.index("async function scheduleSourceMetadataRetry("):
+                 html.index("function sourceLabel")]
+    assert "if (document.hidden) return;" in retry
+    assert "retrySourceDeepLink();" in retry
 
 
 def test_cold_start_retry_uses_a_fresh_abort_controller_and_preserves_cache():

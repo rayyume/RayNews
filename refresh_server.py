@@ -26,8 +26,8 @@ from image_cache import (
 )
 from news_schema import ensure_deleted_articles_table
 from source_categories import (
-    CATEGORY_NAMES, CATEGORY_ORDER, cleanup_stale_source_categories,
-    ensure_article_source_columns, source_rows,
+    CATEGORY_NAMES, CATEGORY_ORDER, ensure_article_source_columns,
+    maintain_source_categories, source_rows,
 )
 
 REFRESH_INTERVAL = 900  # 15 minutes
@@ -168,11 +168,14 @@ def run_fetcher():
                 conn = sqlite3.connect(str(DB_FILE))
                 conn.row_factory = sqlite3.Row
                 ensure_article_source_columns(conn)
-                deleted = cleanup_stale_source_categories(conn)
+                result = maintain_source_categories(conn, force=True)
                 conn.commit()
                 conn.close()
-                if deleted:
-                    log.info(f"Cleaned up {deleted} stale source(s)")
+                if result.get("discovered") or result.get("deleted"):
+                    log.info(
+                        f"Source maintenance: discovered {result.get('discovered', 0)}, "
+                        f"cleaned up {result.get('deleted', 0)} stale source(s)"
+                    )
             except Exception as e:
                 log.warning(f"Source cleanup failed: {e}")
             threading.Thread(

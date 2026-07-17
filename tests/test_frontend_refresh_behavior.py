@@ -964,6 +964,9 @@ context.loadCalls = [];
 context.loadNewsPage = (page, options) => context.loadCalls.push([page, options]);
 context.postCalls = 0;
 context.requestRefreshOnce = () => { context.postCalls++; };
+context.sourceMetadataNetworkOk = false;
+context.metadataRetries = [];
+context.scheduleSourceMetadataRetry = opts => context.metadataRetries.push(opts);
 context.onReturnToForeground();
 assert.equal(context.incrementalCalls, 0);
 assert.equal(context.loadCalls.length, 1);
@@ -971,6 +974,8 @@ assert.equal(context.loadCalls[0][0], 1);
 assert.equal(context.loadCalls[0][1].activeFilter, 'all');
 assert.equal(context.loadCalls[0][1].forceNetwork, true);
 assert.equal(context.postCalls, 0);
+// Metadata never loaded → foreground resume re-attempts immediately.
+assert.deepEqual(context.metadataRetries, [{ immediate: true }]);
 """,
     )
 
@@ -1207,7 +1212,7 @@ assert.equal(context.pageRequestPendingSequence, 0);
 
 
 def test_cached_source_metadata_renders_while_network_revalidation_is_pending():
-    load_sources = source_between("async function loadSourceCategories(", "function sourceLabel")
+    load_sources = source_between("function persistSourceMetadata(", "function sourceLabel")
     run_node(
         load_sources,
         """
@@ -1224,6 +1229,7 @@ context.apiFetch = () => {
   return new Promise(resolve => { resolveNetwork = resolve; });
 };
 context.writeNewsCacheEntry = () => {};
+context.delay = () => new Promise(() => {});
 context.setTimeout = () => 1;
 context.clearTimeout = () => {};
 const loading = context.loadSourceCategories();
@@ -1239,7 +1245,7 @@ assert.deepEqual(events, [
 
 
 def test_cached_source_metadata_network_failure_uses_quiet_nonblocking_hint():
-    load_sources = source_between("async function loadSourceCategories(", "function sourceLabel")
+    load_sources = source_between("function persistSourceMetadata(", "function sourceLabel")
     run_node(
         load_sources,
         """
@@ -1250,6 +1256,7 @@ context.renderFilters = () => {};
 context.isRestrictedUser = () => false;
 context.apiFetch = async () => { throw new Error('offline'); };
 context.writeNewsCacheEntry = () => {};
+context.delay = () => new Promise(() => {});
 context.hasLoadedNewsOnce = true;
 context.document = { hidden: false };
 context.toasts = [];
@@ -1358,7 +1365,7 @@ assert.equal(context.currentPage, 1);
 
 
 def test_source_deep_link_metadata_network_timeout_enters_dedicated_error_state():
-    load_sources = source_between("async function loadSourceCategories(", "function sourceLabel")
+    load_sources = source_between("function persistSourceMetadata(", "function sourceLabel")
     cache_timeout = source_between("async function withCacheTimeout(", "async function loadNewsPageRequest")
     bootstrap = source_between("async function bootstrapNews(", "// Initial load")
     run_node(
@@ -1384,6 +1391,7 @@ context.apiFetch = (url, options = {}) => new Promise((resolve, reject) => {
   }
 });
 context.writeNewsCacheEntry = () => {};
+context.delay = () => new Promise(() => {});
 context.renderTopCatBar = () => {};
 context.newsCalls = 0;
 context.loadNewsPage = async () => { context.newsCalls++; return true; };
@@ -1413,7 +1421,7 @@ assert.equal(context.syncCalls, 0);
 
 
 def test_each_fresh_source_timeout_aborts_its_fetch_and_clears_its_timer():
-    load_sources = source_between("async function loadSourceCategories(", "function sourceLabel")
+    load_sources = source_between("function persistSourceMetadata(", "function sourceLabel")
     cache_timeout = source_between("async function withCacheTimeout(", "async function loadNewsPageRequest")
     run_node(
         load_sources + cache_timeout,
@@ -1423,6 +1431,7 @@ context.rebuildCategoryMap = () => {};
 context.renderFilters = () => {};
 context.isRestrictedUser = () => false;
 context.writeNewsCacheEntry = () => {};
+context.delay = () => new Promise(() => {});
 context.controllers = [];
 context.AbortController = class {
   constructor() {

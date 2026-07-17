@@ -46,7 +46,8 @@ from news_schema import ensure_deleted_articles_table
 from source_categories import (
     CATEGORY_NAMES, CATEGORY_ORDER, cleanup_stale_source_categories,
     clamp_weighted, ensure_article_source_columns, ensure_article_sources,
-    find_merge_target, merge_source, promote_user_source_settings,
+    find_merge_target, maintain_source_categories, merge_source,
+    promote_user_source_settings,
     recent_titles_for_source, source_aliases_for_target, source_rows,
     update_source_category, extract_domains_from_html,
 )
@@ -2644,18 +2645,21 @@ def _auto_source_classification_loop():
             _run_auto_source_classification_once()
         except Exception as e:
             print(f"[source-classify] Error in loop: {e}")
-        # Periodically clean up sources with 0 articles (every 10 cycles)
+        # Periodically discover new sources and clean up empty ones (every 10 cycles)
         cleanup_counter += 1
         if cleanup_counter % 10 == 0:
             try:
                 conn = _get_news_db()
                 if conn:
-                    deleted = cleanup_stale_source_categories(conn)
+                    result = maintain_source_categories(conn, force=True)
                     conn.commit()
-                    if deleted:
-                        print(f"[source-cleanup] removed {deleted} stale source(s)")
+                    if result.get("discovered") or result.get("deleted"):
+                        print(
+                            f"[source-maintenance] discovered {result.get('discovered', 0)}, "
+                            f"removed {result.get('deleted', 0)} stale source(s)"
+                        )
             except Exception as e:
-                print(f"[source-cleanup] Error: {e}")
+                print(f"[source-maintenance] Error: {e}")
         _time.sleep(AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS)
 
 

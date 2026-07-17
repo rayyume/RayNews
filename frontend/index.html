@@ -1729,11 +1729,61 @@ async function clearCachedNewsPages() {
   } catch (e) {}
 }
 
+// Persist a fresh /sources payload to IndexedDB so the next cold start can render
+// the drawer + labels before the network responds. Shared by loadSourceCategories()
+// and the admin Sources tab (loadSourcesTab) so both keep the cold-start cache warm.
+function persistSourceMetadata(data) {
+  if (!data || !Array.isArray(data.sources)) return;
+  writeNewsCacheEntry({
+    key: 'source-metadata',
+    kind: 'metadata',
+    updatedAt: Date.now(),
+    data,
+  });
+}
+
+// Fetch /sources with an abortable timeout. Logged-in users hit the authenticated
+// endpoint; if the token has expired mid-session, fall back to the public /api/sources
+// so the drawer still populates instead of silently staying empty.
+async function fetchSourceMetadata(networkTimeoutMs) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), networkTimeoutMs);
+  try {
+    if (!isRestrictedUser()) {
+      const data = await apiFetch('/sources', { signal: controller.signal });
+      if (data && data.error === 'auth_expired') {
+        const resp = await fetch('/api/sources', { signal: controller.signal });
+        return await resp.json();
+      }
+      return data;
+    }
+    const resp = await fetch('/api/sources', { signal: controller.signal });
+    return await resp.json();
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// Guards against multiple bootstrap paths each queuing their own retry chain.
+let sourceMetadataRetryScheduled = false;
+// True once a network fetch of /sources has succeeded. Drives foreground-resume
+// recovery: while false, returning to the foreground re-attempts, so a PWA that was
+// backgrounded through the whole backoff window doesn't stay stuck with an empty
+// drawer / wrong labels.
+let sourceMetadataNetworkOk = false;
+// Backoff schedule (ms) for retries after the first network attempt fails. Later
+// rounds also get a longer per-attempt timeout — deploys leave the backend inside a
+// fetch cycle for a while, so an 8s first attempt keeps the first paint snappy while
+// slower retries tolerate the busy window.
+const SOURCE_METADATA_RETRY_DELAYS = [10000, 30000];
+const SOURCE_METADATA_RETRY_TIMEOUT_MS = 25000;
+
 async function loadSourceCategories({
   onMetadataReady = null,
   useCache = true,
   networkTimeoutMs = 8000,
   quietNetworkError = false,
+  cacheTimeoutMs = 5000,
 } = {}) {
   let metadataNotified = false;
   const notifyMetadataReady = () => {
@@ -1741,35 +1791,28 @@ async function loadSourceCategories({
     metadataNotified = true;
     if (onMetadataReady) onMetadataReady();
   };
+  // Cold start: opening IndexedDB for the first time (racing the SW boot + the first
+  // article request) routinely takes longer than the 500ms used for page snapshots,
+  // so give the metadata read a much larger budget — losing the cache here is exactly
+  // what leaves the drawer empty and the labels wrong on first paint.
   const cached = useCache
-    ? await withCacheTimeout(readNewsCacheEntry('source-metadata'))
+    ? await withCacheTimeout(readNewsCacheEntry('source-metadata'), null, cacheTimeoutMs)
     : null;
   if (cached && cached.data && Array.isArray(cached.data.sources)) {
     rebuildCategoryMap(cached.data.sources);
   }
   renderFilters();
   if (cached && cached.data && Array.isArray(cached.data.sources)) notifyMetadataReady();
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), networkTimeoutMs);
+  let succeeded = false;
   try {
-    const fetchFreshSources = async () => {
-      if (!isRestrictedUser()) {
-        return await apiFetch('/sources', { signal: controller.signal });
-      }
-      const resp = await fetch('/api/sources', { signal: controller.signal });
-      return await resp.json();
-    };
-    const data = await fetchFreshSources();
+    const data = await fetchSourceMetadata(networkTimeoutMs);
     if (data && Array.isArray(data.sources)) {
       rebuildCategoryMap(data.sources);
       renderFilters();
       notifyMetadataReady();
-      writeNewsCacheEntry({
-        key: 'source-metadata',
-        kind: 'metadata',
-        updatedAt: Date.now(),
-        data,
-      });
+      persistSourceMetadata(data);
+      succeeded = true;
+      sourceMetadataNetworkOk = true;
     }
   } catch (e) {
     // Keep the built-in fallback CATEGORY_MAP.
@@ -1783,8 +1826,43 @@ async function loadSourceCategories({
       showToast('来源信息暂未更新，已显示缓存内容');
     }
   } finally {
-    clearTimeout(timeout);
     notifyMetadataReady();
+  }
+  // On failure, quietly retry with backoff so a deploy-time slow/aborted request
+  // eventually repopulates the drawer without the user having to open the admin page.
+  if (!succeeded) scheduleSourceMetadataRetry();
+}
+
+async function scheduleSourceMetadataRetry({ immediate = false } = {}) {
+  if (sourceMetadataRetryScheduled) return;
+  sourceMetadataRetryScheduled = true;
+  try {
+    // `immediate` (foreground resume) tries once right away before the backoff chain,
+    // so a PWA that missed the whole backoff window while hidden recovers promptly.
+    const delays = immediate ? [0, ...SOURCE_METADATA_RETRY_DELAYS] : SOURCE_METADATA_RETRY_DELAYS;
+    for (const delayMs of delays) {
+      if (delayMs) await delay(delayMs);
+      // Don't burn an attempt while backgrounded — bail and let onReturnToForeground
+      // re-arm the chain on resume instead of silently consuming the retry budget.
+      if (document.hidden) return;
+      try {
+        const data = await fetchSourceMetadata(SOURCE_METADATA_RETRY_TIMEOUT_MS);
+        if (data && Array.isArray(data.sources)) {
+          rebuildCategoryMap(data.sources);
+          renderFilters();
+          persistSourceMetadata(data);
+          sourceMetadataNetworkOk = true;
+          // If a source deep link is still stuck on its error state, re-drive it now
+          // that the metadata is available (no-op when there's no pending deep link).
+          retrySourceDeepLink();
+          return;
+        }
+      } catch (e) {
+        // Try the next backoff step.
+      }
+    }
+  } finally {
+    sourceMetadataRetryScheduled = false;
   }
 }
 
@@ -2261,6 +2339,10 @@ async function loadSourcesTab() {
     rebuildCategoryMap(data.sources);
     renderSourceManager(sourceRows);
     renderFilters();
+    // Keep the cold-start cache warm — this admin fetch has no timeout, so it often
+    // succeeds when the bootstrap request didn't, and would otherwise only fix the
+    // current session (the drawer regresses again on the next cold start).
+    persistSourceMetadata(data);
   } catch (e) {
     list.innerHTML = '<div class="fav-empty">订阅源加载失败</div>';
   }
@@ -7065,6 +7147,10 @@ function onReturnToForeground() {
   lastUserActivityAt = now;
   const cursor = latestKnownTimestamp || latestNewsTimestamp();
   if (cursor > 0) loadSince(cursor);
+  // If source metadata never loaded (e.g. backgrounded through the whole retry
+  // window), recover now so the drawer/labels — and any stuck source deep link —
+  // don't stay broken until a manual refresh.
+  if (!sourceMetadataNetworkOk) scheduleSourceMetadataRetry({ immediate: true });
   const startupJob = lastNewsDiagnostics && lastNewsDiagnostics.refresh_job;
   if (
     news.length === 0
