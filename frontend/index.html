@@ -336,9 +336,6 @@ body.body-scroll-lock{overflow:hidden!important}
 .auth-error{color:#ef4444;font-size:12px;min-height:18px;margin:0 0 8px}
 .auth-switch{text-align:center;font-size:12px;color:var(--text-3);margin:12px 0 0}
 .auth-switch a{color:var(--accent);cursor:pointer}
-.auth-skip{text-align:center;font-size:12px;margin:8px 0 0}
-.auth-skip a{color:var(--text-3);cursor:pointer}
-.auth-skip a:hover{color:var(--accent)}
 
 /* ═══ User Menu ═════════════════════════════════════ */
 .user-menu{position:absolute;right:0;top:100%;z-index:150;opacity:0;pointer-events:none;transform:translateY(-4px);transition:all 0.2s}
@@ -624,7 +621,6 @@ body.body-scroll-lock{overflow:hidden!important}
         <p id="authError" class="auth-error"></p>
         <button class="auth-btn" id="authSubmitBtn" onclick="submitAuth()">登录</button>
         <p class="auth-switch" id="authSwitch">没有账号？<a href="#" onclick="toggleAuthMode()">注册</a></p>
-        <p class="auth-skip" id="authSkip"><a href="#" onclick="closeAuth()">跳过，先浏览</a></p>
       </div>
     </div>
   </div>
@@ -1903,7 +1899,6 @@ function setAuthInputsEnabled(enabled) {
 function showAuth(context = '') {
   pendingAuthAction = context;
   document.getElementById('authModal').classList.add('open');
-  document.getElementById('authSkip').style.display = context === 'search' ? 'none' : '';
   setAuthInputsEnabled(true);
   lockBodyScroll();
   document.getElementById('authLogin').value = '';

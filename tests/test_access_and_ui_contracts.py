@@ -739,7 +739,6 @@ def test_search_login_context_and_result_progress_are_explicit():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     assert "showAuth('search');" in html
     assert "登录后才能搜索文章" in html
-    assert "context === 'search' ? 'none' : ''" in html
     assert "if (nextAction === 'search') openSearch();" in html
     assert "已显示 ${searchItems.length} / ${searchTotal} 条" in html
 
