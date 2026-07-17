@@ -879,6 +879,19 @@ def test_admin_user_tables_scroll_horizontally_instead_of_clipping_on_narrow_pwa
     assert render_block.count('<div class="admin-table-wrap"><table class="admin-table">') == 2
 
 
+def test_refresh_button_progress_text_never_wraps_to_two_lines():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    # The pill's height is intrinsic to its content, so if the progress text ever
+    # wrapped, it would stretch the pill vertically instead of just looking cramped.
+    assert ".refresh-btn{" in html
+    rule = html[html.index(".refresh-btn{"):html.index("}", html.index(".refresh-btn{"))]
+    assert "white-space:nowrap" in rule
+    # The visible label must stay short regardless of how large the count gets — the
+    # full sentence is only allowed to live in the title attribute (hover/long-press).
+    assert "label.textContent = count > 0 ? `+${count}` : '更新中';" in html
+    assert "btn.title = count > 0 ? `已获取 ${count} 篇` : '';" in html
+
+
 def test_admin_resource_usage_stats_grid_on_narrow_viewports():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     # 4 equal-weight stat boxes in a single flex row (the desktop .admin-stat

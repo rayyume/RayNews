@@ -2409,6 +2409,81 @@ assert.equal(timers.length, 0);
     )
 
 
+# ─── Refresh button progress label ─────────────────────────────────────
+#
+# The pill is a fixed-width container and the fetched-article count grows
+# unpredictably as a refresh streams in, so a full sentence ("已获取 N 篇")
+# could wrap to two lines on narrow (mobile) widths, stretching the pill
+# vertically. Switched to a short "+N" with the full sentence moved to the
+# title attribute (hover/long-press) instead.
+
+def _refresh_label_fns():
+    return source_between("function setRefreshRunning(", "async function applyStreamedRefreshBatch(")
+
+
+def test_set_refresh_progress_label_shows_short_plus_count_with_full_text_in_title():
+    fns = _refresh_label_fns()
+    run_node(
+        fns,
+        """
+context.refreshInProgress = true;
+const span = { textContent: '' };
+const btn = { title: '', querySelector: () => span };
+context.document = { getElementById: () => btn };
+context.setRefreshProgressLabel(12);
+assert.equal(span.textContent, '+12');
+assert.equal(btn.title, '已获取 12 篇');
+""",
+    )
+
+
+def test_set_refresh_progress_label_falls_back_to_running_text_when_count_is_zero():
+    fns = _refresh_label_fns()
+    run_node(
+        fns,
+        """
+context.refreshInProgress = true;
+const span = { textContent: '' };
+const btn = { title: 'stale', querySelector: () => span };
+context.document = { getElementById: () => btn };
+context.setRefreshProgressLabel(0);
+assert.equal(span.textContent, '更新中');
+assert.equal(btn.title, '');
+""",
+    )
+
+
+def test_set_refresh_progress_label_does_nothing_when_refresh_is_not_running():
+    fns = _refresh_label_fns()
+    run_node(
+        fns,
+        """
+context.refreshInProgress = false;
+const span = { textContent: 'unchanged' };
+const btn = { title: 'unchanged', querySelector: () => span };
+context.document = { getElementById: () => btn };
+context.setRefreshProgressLabel(5);
+assert.equal(span.textContent, 'unchanged');
+assert.equal(btn.title, 'unchanged');
+""",
+    )
+
+
+def test_set_refresh_running_clears_any_stale_progress_title():
+    fns = _refresh_label_fns()
+    run_node(
+        fns,
+        """
+const span = { textContent: '' };
+const btn = { title: '已获取 12 篇', querySelector: () => span, classList: { toggle: () => {} } };
+context.document = { getElementById: () => btn };
+context.setRefreshRunning(false);
+assert.equal(btn.title, '');
+assert.equal(span.textContent, '刷新');
+""",
+    )
+
+
 # ─── Admin purge date picker ────────────────────────────────────────────
 
 def _purge_picker_fns():

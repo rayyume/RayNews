@@ -93,7 +93,7 @@ a:hover{text-decoration:underline}
 .header-right{display:flex;min-width:0;align-items:center;gap:10px;font-size:12px;color:var(--text-3);position:relative}
 .status-dot{width:6px;height:6px;background:#22c55e;border-radius:50%;display:inline-block;margin-right:4px;animation:pulse 2s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
-.refresh-btn{background:none;border:1px solid var(--border);color:var(--text-2);padding:4px 12px;border-radius:100px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font);transition:all 0.15s}
+.refresh-btn{background:none;border:1px solid var(--border);color:var(--text-2);padding:4px 12px;border-radius:100px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font);transition:all 0.15s;white-space:nowrap}
 .refresh-btn:hover{border-color:var(--accent);color:var(--accent)}
 .refresh-btn.refresh-running{position:relative;overflow:hidden;border-color:var(--accent);color:var(--accent);pointer-events:none}
 .refresh-btn.refresh-running::before{content:'';position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(110,142,251,0.28),transparent);animation:refreshSweep 1.2s infinite}
@@ -4600,6 +4600,7 @@ function setRefreshRunning(isRunning) {
     btn.disabled = isRunning;
     const label = btn.querySelector('span') || btn;
     label.textContent = isRunning ? '更新中' : '刷新';
+    btn.title = '';
   }
 }
 
@@ -4611,7 +4612,13 @@ function setRefreshProgressLabel(count) {
   const btn = document.getElementById('refreshBtn');
   if (!btn) return;
   const label = btn.querySelector('span') || btn;
-  label.textContent = count > 0 ? `已获取 ${count} 篇` : '更新中';
+  // Short "+N" instead of "已获取 N 篇" — the pill is a fixed-width container and N
+  // grows unpredictably as the fetch streams in, so a full sentence wraps to two
+  // lines on narrow (mobile) widths, stretching the pill vertically. The completion
+  // toast ("✅ 更新完成，新增 N 篇文章") still spells it out in full once; the button
+  // itself is a title attribute away from the same wording for hover/long-press.
+  label.textContent = count > 0 ? `+${count}` : '更新中';
+  btn.title = count > 0 ? `已获取 ${count} 篇` : '';
 }
 
 // Applies a refresh job's in-progress articles to page 1 ahead of the job's terminal
