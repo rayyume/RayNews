@@ -929,22 +929,23 @@ def is_from_today(datetime_str: str) -> bool:
 
 
 def fetch_all_new_messages(state: dict) -> list[dict]:
-    """Fetch new messages since last seen ID. On first run, fetch all of today's messages."""
+    """Fetch new messages since last seen ID, scoped to today (Beijing time) only.
+
+    Scope is fixed regardless of whether this is the very first successful fetch or a
+    routine incremental one: only id > last_seen_id (incremental) AND is_from_today()
+    (today-only) messages are kept. Anything from before today is discarded — including
+    backlog accumulated while periodic refresh was failing — rather than being pulled
+    in wholesale on the next successful run. last_seen_id still advances to the highest
+    id actually kept, so once discarded, a pre-today message is never revisited.
+    """
     last_id = state.get("last_seen_id", 0)
     all_msgs: list[dict] = []
     before = ""
     pages_fetched = 0
 
     log.info(f"Last seen message ID: {last_id}")
-    is_first_run = last_id == 0
 
-    if is_first_run:
-        log.info("First run: fetching only today's messages (Beijing time)")
-        pages_limit = MAX_HISTORY_PAGES
-    else:
-        pages_limit = MAX_HISTORY_PAGES
-
-    while pages_fetched < pages_limit:
+    while pages_fetched < MAX_HISTORY_PAGES:
         html = fetch_telegram_page(before)
         if not html:
             break
@@ -956,36 +957,30 @@ def fetch_all_new_messages(state: dict) -> list[dict]:
 
         pages_fetched += 1
 
-        # Filter only new messages (id > last_id)
-        new_msgs = [m for m in msgs if m["id"] > last_id]
-
-        if is_first_run:
-            # On first run: only keep unique messages from today (Beijing time)
-            seen_ids = {m["id"] for m in all_msgs}
-            today_msgs = [m for m in new_msgs if is_from_today(m["datetime"]) and m["id"] not in seen_ids]
-            if today_msgs:
-                log.info(f"  Page {pages_fetched}: {len(today_msgs)} unique today's msgs (IDs {today_msgs[0]['id']}~{today_msgs[-1]['id']})")
-                all_msgs.extend(today_msgs)
-            else:
-                log.info(f"  Page {pages_fetched}: all already fetched (no new IDs) — stopping")
-                break
-
-            # If even the newest message on this page is from before today, we're past today
-            if not is_from_today(msgs[-1]["datetime"]):
-                log.info(f"  Newest message is from before today — stopping")
-                break
+        # Filter to new (id > last_id), not-yet-collected, today-only messages.
+        seen_ids = {m["id"] for m in all_msgs}
+        today_new = [
+            m for m in msgs
+            if m["id"] > last_id and m["id"] not in seen_ids and is_from_today(m["datetime"])
+        ]
+        if today_new:
+            log.info(f"  Page {pages_fetched}: {len(today_new)} new today's msgs (IDs {today_new[0]['id']}~{today_new[-1]['id']})")
+            all_msgs.extend(today_new)
         else:
-            if new_msgs:
-                log.info(f"  Page {pages_fetched}: {len(msgs)} messages, {len(new_msgs)} new (IDs {new_msgs[0]['id']}~{new_msgs[-1]['id']})")
-                all_msgs.extend(new_msgs)
-            else:
-                log.info(f"  Page {pages_fetched}: {len(msgs)} messages, all already seen")
-                if all(m["id"] < last_id for m in msgs):
-                    log.info("  Caught up — stopping")
-                    break
-                existing_ids = {m["id"] for m in all_msgs}
-                if all(m["id"] in existing_ids for m in msgs):
-                    break
+            log.info(f"  Page {pages_fetched}: no new today's messages")
+
+        # Stop condition 1: every message on this page is already at/behind the
+        # incremental cursor — we've caught up, no need to page further back.
+        if all(m["id"] <= last_id for m in msgs):
+            log.info("  Caught up — stopping")
+            break
+
+        # Stop condition 2: the newest message on this page (msgs are oldest-first)
+        # already predates today — paging further back can only find older messages,
+        # so anything beyond this point is out of scope and gets discarded.
+        if not is_from_today(msgs[-1]["datetime"]):
+            log.info("  Newest message on page is from before today — stopping")
+            break
 
         # Paginate for next page — always use OLDEST message ID
         # Telegram before=X returns messages with ID < X, so using the oldest
