@@ -31,8 +31,19 @@ RayNews 目前对 Telegram 频道的信息获取是**纯拉取（Pull）**模式
 - RayNews 收到后立即触发一次**现有的**增量抓取管线（新消息），或单帖重抓（编辑）；
 - 兜底轮询间隔放宽为可配置（建议 2 小时），继续承担补漏、历史回填职责。
 
-**核心原则：serverless 侧只做"事件转发"，所有解析、入库、AI 逻辑全部留在现有 Python
-管线中，webhook 不可用时系统无损退化为纯轮询模式。**
+**核心原则：serverless 侧只做"事件转发"，所有解析、入库、AI 逻辑——包括 Telegraph
+与微信公众号（mp.weixin.qq.com）全文抓取（`fetch_wechat_article` 等）——全部留在现有
+Python 管线中，webhook 不可用时系统无损退化为纯轮询模式。**
+
+**部署环境事实（开发时必须以此为准）**：生产环境通过
+`TELEGRAM_CHANNEL_URL=https://telegram.me/s/raysrss` 配置频道，即：
+
+- 域名是 **`telegram.me` 镜像而非 `t.me`**，所有对 Telegram 网页的请求（列表页、
+  Phase 2 单帖 embed 页）都必须走 `_resolve_telegram_urls`（`fetcher.py:35`）派生的
+  URL，**任何新代码不得硬编码 `t.me`**；
+- 频道用户名由 URL 最后一个路径段解析得出（此处为 `raysrss`，`/s/` 前缀会被正确剥离，
+  `fetcher.py:46-47`）；webhook 的来源校验、serverless 侧的 `CHANNEL_USERNAME`
+  都必须用这个解析结果——Bot API 的 `chat.username` 与域名无关，两边天然可比。
 
 关键事实（去重基础）：Bot API 的 `channel_post.message_id` 与公开页
 `t.me/<channel>/<id>` 的帖子编号是**同一个 ID**，即现有 `articles.id`
@@ -41,6 +52,9 @@ RayNews 目前对 Telegram 频道的信息获取是**纯拉取（Pull）**模式
 ### 1.3 明确不做（本方案边界）
 
 - ❌ 不在 serverless 侧解析/清洗消息内容（没有 npm/BeautifulSoup，且会产生第二套解析逻辑）；
+- ❌ **不在 serverless 侧抓取微信公众号/Telegraph 全文**——全文提取依赖
+  `fetch_wechat_article` / `fetch_telegraph` 的 Python 解析逻辑与反爬处理，
+  且结果需直接写入本地 SQLite，全部保留在服务器端 `fetcher.py` 中；
 - ❌ 不在 serverless 侧下载任何文件字节（平台限制：只能复用 file_id，不支持二进制）；
 - ❌ 不移除 `t.me/s` 抓取路径（历史回填、webhook 丢失补漏都依赖它）；
 - ❌ 不做 inline search / `/daily` 伴侣 bot（另立方案，见 §8 展望）；
@@ -114,7 +128,9 @@ refresh_server.py: start_refresh_job("webhook") → 现有 fetcher 增量管线
 4. **来源校验**：`msg["chat"]["username"]`（小写比较）必须等于配置的频道名。
    频道名从环境变量解析：复用 `fetcher.py:35` `_resolve_telegram_urls` 的逻辑
    （建议把该函数挪到一个可共享的位置或在 web_server 里做同等解析，实现时二选一，
-   不要复制粘贴两份规则）。不匹配 → `200 {"status":"ignored"}`（不给探测者信号）；
+   不要复制粘贴两份规则）。生产环境下 `TELEGRAM_CHANNEL_URL=https://telegram.me/s/raysrss`
+   解析结果为 `raysrss`，与 Bot API 的 `chat.username` 直接可比（与访问域名无关）。
+   不匹配 → `200 {"status":"ignored"}`（不给探测者信号）；
 5. **限频**：进程内简单滑动窗口，每 60 秒最多接受 30 次有效请求，超出 → `429`；
 6. 分派：
    - `channel_post` → 内部 `POST http://127.0.0.1:8081/refresh?trigger=webhook`
@@ -144,7 +160,10 @@ location /webhook/ {
 
 1. `fetcher.py` 新增函数 `refetch_single_post(msg_id: int) -> bool`：
    - 请求 `TELEGRAM_POST_URL.format(id=msg_id)`（`?embed=1&mode=tme` 单帖嵌入页），
-     沿用 `HEADERS` / `REQUEST_TIMEOUT`；
+     沿用 `HEADERS` / `REQUEST_TIMEOUT`。注意 `TELEGRAM_POST_URL` 由
+     `TELEGRAM_CHANNEL_URL` 派生，生产环境实际为
+     `https://telegram.me/raysrss/{id}?embed=1&mode=tme`——embed 页的可用性与
+     DOM 结构验证要在 **telegram.me 镜像域**上做，不要只在 t.me 上验证；
    - 用现有 `parse_messages`（`fetcher.py:240`）解析（embed 页与列表页的消息 DOM 结构
      一致性需在开发时用真实频道验证；若不一致，为 embed 页写最小适配，**复用**现有的
      字段提取函数而非新写解析器）；
@@ -183,6 +202,8 @@ serverless/relay/
 │   ├── forward.js         # 共享转发逻辑
 │   ├── config.js          # 真实配置（gitignore）
 │   └── config.example.js  # 模板：RAYNEWS_WEBHOOK_URL / WEBHOOK_TOKEN / CHANNEL_USERNAME
+│                          #（CHANNEL_USERNAME 必须与 TELEGRAM_CHANNEL_URL 解析出的
+│                          # 频道名一致，生产环境为 "raysrss"）
 └── README.md              # 部署步骤（见 §5.3）
 ```
 
