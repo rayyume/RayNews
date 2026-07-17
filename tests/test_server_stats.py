@@ -179,6 +179,54 @@ def test_purge_rejects_bad_date_and_routes_registered():
     assert not web_server._PURGE_DATE_RE.match("bad")
 
 
+def test_server_stats_reports_server_date_matching_purge_validation_today(monkeypatch):
+    # The purge date picker's max must come from the same "today" the server itself
+    # validates against (_parse_purge_before_date's date.today(), which respects the
+    # process's TZ env var) — not the browser's own UTC/local date, which can disagree
+    # with the server's around midnight in either timezone.
+    import models
+
+    monkeypatch.setattr(models, "get_user", lambda user_id: {"id": 202, "role": "admin"})
+    monkeypatch.setattr(models, "record_access", lambda user_id: None)
+    monkeypatch.setattr(web_server, "_path_size", lambda path: 0)
+    monkeypatch.setattr(web_server, "_dir_size", lambda path: 0)
+    monkeypatch.setattr(
+        web_server, "cache_stats",
+        lambda: {"enabled": True, "count": 0, "used_bytes": 0, "max_bytes": 0},
+    )
+    monkeypatch.setattr(
+        web_server.shutil, "disk_usage",
+        lambda path: type("Usage", (), {"total": 0, "used": 0, "free": 0})(),
+    )
+    monkeypatch.setattr(web_server, "_get_news_db", lambda: None)
+
+    class FakeCursor:
+        def fetchone(self):
+            return (0,)
+
+    class FakeConn:
+        def execute(self, *args, **kwargs):
+            return FakeCursor()
+
+    monkeypatch.setattr(web_server, "get_db", lambda: FakeConn())
+    monkeypatch.setattr(web_server, "count_users", lambda: 0)
+    monkeypatch.setattr(web_server, "_container_resource_stats", lambda: {})
+    monkeypatch.setattr(
+        web_server, "date",
+        type("Today", (), {"today": staticmethod(lambda: date(2026, 7, 16))}),
+    )
+
+    client = web_server.app.test_client()
+    token = web_server.create_token(202, "admin")
+    resp = client.get(
+        "/admin/server-stats",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.get_json()["server_date"] == "2026-07-16"
+
+
 def test_purge_date_parser_rejects_invalid_and_future_dates(monkeypatch):
     monkeypatch.setattr(web_server, "date", type("Today", (), {"today": staticmethod(lambda: date(2026, 7, 16))}))
 

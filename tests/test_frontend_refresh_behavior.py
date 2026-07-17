@@ -2415,7 +2415,7 @@ def _purge_picker_fns():
     return source_between("function normalizedPurgeDate(", "async function previewPurge(")
 
 
-def test_open_purge_date_picker_prefills_from_text_field_and_caps_at_today():
+def test_open_purge_date_picker_prefills_from_text_field_and_caps_at_server_today():
     fns = _purge_picker_fns()
     run_node(
         fns,
@@ -2425,12 +2425,37 @@ const elements = {
   purgeDatePicker: { value: '', max: '', style: {}, showPicker: () => { context.pickerShown = true; } },
 };
 context.document = { getElementById: id => elements[id] };
-context.Date = Date; // use the real Date so toISOString().slice(0, 10) behaves normally
+// The server's own "today" (see loadServerStats()'s server_date), not the browser's
+// UTC/local date — they can disagree around midnight in either timezone.
+context.serverTodayDate = '2026-07-16';
 context.pickerShown = false;
 context.openPurgeDatePicker();
 assert.equal(elements.purgeDatePicker.value, '2026-07-10');
-assert.equal(elements.purgeDatePicker.max, new Date().toISOString().slice(0, 10));
+assert.equal(elements.purgeDatePicker.max, '2026-07-16');
 assert.equal(context.pickerShown, true);
+""",
+    )
+
+
+def test_open_purge_date_picker_leaves_max_unset_when_server_today_is_unknown():
+    fns = _purge_picker_fns()
+    run_node(
+        fns,
+        """
+const removedAttrs = [];
+const elements = {
+  purgeBeforeDate: { value: '' },
+  purgeDatePicker: {
+    value: '', max: 'stale-value', style: {},
+    showPicker: () => { context.pickerShown = true; },
+    removeAttribute: name => removedAttrs.push(name),
+  },
+};
+context.document = { getElementById: id => elements[id] };
+context.serverTodayDate = ''; // hasn't arrived yet (stats poll hasn't succeeded)
+context.pickerShown = false;
+context.openPurgeDatePicker();
+assert.deepEqual(removedAttrs, ['max']);
 """,
     )
 
@@ -2446,7 +2471,7 @@ const elements = {
   purgeDatePicker: { value: '', max: '', style: {}, focus: () => calls.push('focus'), click: () => calls.push('click') },
 };
 context.document = { getElementById: id => elements[id] };
-context.Date = Date;
+context.serverTodayDate = '2026-07-16';
 context.openPurgeDatePicker();
 assert.deepEqual(calls, ['focus', 'click']);
 assert.equal(elements.purgeDatePicker.style.pointerEvents, 'auto');

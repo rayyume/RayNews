@@ -2962,6 +2962,13 @@ function formatBytes(n) {
 }
 
 let serverStatsTimer = null;
+// The server's own "today" (date.today(), respecting the process's TZ env var) —
+// same value /admin/articles/purge validates "not after today" against. Used as the
+// purge date picker's max instead of the browser's own UTC/local date, which can
+// disagree with the server's around midnight in either timezone. Populated whenever
+// the server-stats poll succeeds (fired continuously while the Server tab — the only
+// tab with the purge UI — is open), left stale/empty otherwise as a safe fallback.
+let serverTodayDate = '';
 function stopServerStatsPolling() { if (serverStatsTimer) clearInterval(serverStatsTimer); serverStatsTimer = null; }
 function startServerStatsPolling() { stopServerStatsPolling(); loadServerStats(); serverStatsTimer = setInterval(loadServerStats, 2000); }
 async function loadServerStats() {
@@ -2973,6 +2980,7 @@ async function loadServerStats() {
     body.innerHTML = '<div class="admin-loading">加载失败</div>';
     return;
   }
+  if (data.server_date) serverTodayDate = data.server_date;
   const s = data.storage, disk = data.disk, ic = data.image_cache, c = data.counts, ct = data.container;
   const cachePct = ic && ic.max_bytes ? Math.min(100, Math.round(ic.used_bytes / ic.max_bytes * 100)) : 0;
   const memPct = ct && ct.mem_limit_bytes ? Math.min(100, Math.round(ct.mem_used_bytes / ct.mem_limit_bytes * 100)) : null;
@@ -3027,7 +3035,12 @@ function normalizedPurgeDate() {
 function openPurgeDatePicker() {
   const picker = document.getElementById('purgeDatePicker');
   if (!picker) return;
-  picker.max = new Date().toISOString().slice(0, 10); // matches the server's "not after today" rule
+  // Use the server's own "today" (see loadServerStats()), not the browser's UTC/local
+  // date — they can disagree around midnight in either timezone. If it hasn't arrived
+  // yet, leave max unset rather than guess: the server still enforces "not after
+  // today" on submit regardless of what the picker itself allows.
+  if (serverTodayDate) picker.max = serverTodayDate;
+  else picker.removeAttribute('max');
   const current = normalizedPurgeDate();
   if (current) picker.value = current;
   if (typeof picker.showPicker === 'function') {

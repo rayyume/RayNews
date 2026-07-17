@@ -3472,6 +3472,11 @@ def admin_server_stats():
             "cached_images": cached_images,
         },
         "container": _container_resource_stats(),
+        # Same date.today() the purge endpoint's "not after today" validation uses
+        # (_parse_purge_before_date), which respects the process's TZ env var. The
+        # admin UI's date picker uses this instead of the browser's own UTC/local
+        # date so the two never disagree about what "today" means.
+        "server_date": date.today().isoformat(),
     })
 
 

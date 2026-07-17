@@ -925,6 +925,14 @@ def test_purge_before_date_has_a_native_date_picker_alongside_the_text_field():
     assert "confirmPurge()" not in apply_fn
     assert "purgeConfirmBtn" in apply_fn
     assert ".disabled = true" in apply_fn
+    # The picker's max must come from the server's own "today" (server_date, which
+    # respects the process's TZ env var and matches what /admin/articles/purge itself
+    # validates against) — not the browser's own UTC/local date, which can disagree
+    # with the server's around midnight in either timezone.
+    open_fn = html[html.index("function openPurgeDatePicker()"):html.index("\n}\n", html.index("function openPurgeDatePicker()"))]
+    assert "serverTodayDate" in open_fn
+    assert "toISOString" not in open_fn
+    assert "data.server_date" in html
 
 
 def test_legacy_admin_source_promotion_is_guarded_after_success():
