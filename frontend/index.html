@@ -366,14 +366,16 @@ body.body-scroll-lock{overflow:hidden!important}
 .admin-stat-ring span{grid-area:1/1;z-index:1;font-size:13px;font-weight:800;color:var(--accent)}
 .admin-stat-detail{font-size:11px;color:var(--text-2);margin-top:5px;white-space:nowrap}
 .admin-table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
-.admin-table{width:100%;min-width:520px;border-collapse:collapse;font-size:13px}
-.admin-table th{text-align:left;padding:8px 6px;color:var(--text-3);font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:0.05em;border-bottom:1px solid var(--border)}
+.admin-table{width:100%;min-width:440px;border-collapse:collapse;font-size:13px}
+.admin-table th{text-align:left;padding:8px 6px;color:var(--text-3);font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:0.05em;border-bottom:1px solid var(--border);white-space:nowrap}
 .admin-table td{padding:10px 6px;border-bottom:1px solid var(--border);vertical-align:middle}
 .admin-role-badge{display:inline-block;padding:2px 8px;border-radius:100px;font-size:11px;font-weight:700}
 .admin-role-badge.admin{background:rgba(239,68,68,0.12);color:#ef4444}
 .admin-role-badge.user{background:rgba(59,130,246,0.12);color:#3b82f6}
 .admin-role-select{background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 8px;font-size:12px;font-family:var(--font);cursor:pointer;outline:none}
 .admin-role-select:focus{border-color:var(--accent)}
+.admin-role-select-admin{border-color:rgba(239,68,68,0.3);color:#ef4444}
+.admin-role-select-user{border-color:rgba(59,130,246,0.3);color:#3b82f6}
 .admin-del-btn{background:none;border:1px solid rgba(239,68,68,0.3);color:#ef4444;padding:4px 10px;border-radius:6px;font-size:11px;cursor:pointer;font-family:var(--font);transition:all 0.15s}
 .admin-del-btn:hover{background:rgba(239,68,68,0.12)}
 .admin-loading{text-align:center;padding:40px;color:var(--text-3);font-size:13px}
@@ -4224,18 +4226,20 @@ function renderAdminUsers(data, invitationData) {
   const rows = users.map(u => {
     const roleClass = u.role === 'admin' ? 'admin' : 'user';
     const canModify = u.id !== authUser.id; // can't modify yourself
-    return `<tr>
-      <td><strong>${esc(u.nickname || u.email.split('@')[0])}</strong><br><span style="font-size:11px;color:var(--text-3)">${esc(u.email)}</span></td>
-      <td><span class="admin-role-badge ${roleClass}">${u.role}</span></td>
-      <td style="font-size:11px;color:var(--text-3)">${formatBeijingDateTime(u.created_at, false)}</td>
-      <td style="font-size:11px;color:var(--text-3);text-align:center">${u.visit_count || 0}</td>
-      <td style="font-size:11px;color:var(--text-3)">${u.last_seen_at ? formatBeijingDateTime(u.last_seen_at) : '从未访问'}</td>
-      <td>
-        ${canModify ? `<select class="admin-role-select" data-uid="${u.id}" onchange="changeUserRole(${u.id}, this.value)">
+    // Role badge and the "modify role" dropdown used to be two separate columns
+    // showing the same information twice — merged into one: a colored select for
+    // rows that can be modified, a plain read-only badge for the admin's own row.
+    const roleCell = canModify
+      ? `<select class="admin-role-select admin-role-select-${roleClass}" data-uid="${u.id}" onchange="changeUserRole(${u.id}, this.value)">
           <option value="user" ${u.role === 'user' ? 'selected' : ''}>user</option>
           <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>admin</option>
-        </select>` : '-'}
-      </td>
+        </select>`
+      : `<span class="admin-role-badge ${roleClass}">${u.role}</span>`;
+    return `<tr>
+      <td><strong>${esc(u.nickname || u.email.split('@')[0])}</strong><br><span style="font-size:11px;color:var(--text-3)">${esc(u.email)}</span></td>
+      <td>${roleCell}</td>
+      <td style="font-size:11px;color:var(--text-3)">注册 ${formatBeijingDateTime(u.created_at, false)}<br>${u.last_seen_at ? '最近 ' + formatBeijingDateTime(u.last_seen_at) : '从未访问'}</td>
+      <td style="font-size:11px;color:var(--text-3);text-align:center">${u.visit_count || 0}</td>
       <td>${canModify ? `<button class="admin-del-btn" onclick="deleteUser(${u.id}, '${esc(u.email)}')">删除</button>` : '-'}</td>
     </tr>`;
   }).join('');
@@ -4255,7 +4259,7 @@ function renderAdminUsers(data, invitationData) {
       <div class="admin-stat-box"><div class="admin-stat-num">${invitations.length}</div><div class="admin-stat-label">待审核</div></div>
     </div>
     <div class="admin-table-wrap"><table class="admin-table">
-      <thead><tr><th>用户</th><th>角色</th><th>注册时间</th><th>访问次数</th><th>最近访问</th><th>修改角色</th><th></th></tr></thead>
+      <thead><tr><th>用户</th><th>角色</th><th>时间</th><th>访问</th><th></th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>
     <div style="margin-top:20px;font-size:13px;font-weight:700;color:var(--text-2)">🕓 待审核邀请申请（已申请邀请码但尚未完成注册）</div>

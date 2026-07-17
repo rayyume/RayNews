@@ -872,11 +872,35 @@ def test_admin_user_tables_scroll_horizontally_instead_of_clipping_on_narrow_pwa
     # escape valve and gets clipped/squeezed illegibly instead of scrolling.
     assert ".admin-body{overflow-x:hidden;" in html
     assert ".admin-table-wrap{overflow-x:auto;" in html
-    assert ".admin-table{width:100%;min-width:520px;" in html
+    assert ".admin-table{width:100%;min-width:440px;" in html
     render_start = html.index("function renderAdminUsers(data, invitationData)")
     render_end = html.index("async function revokePendingInvitation", render_start)
     render_block = html[render_start:render_end]
     assert render_block.count('<div class="admin-table-wrap"><table class="admin-table">') == 2
+
+
+def test_admin_user_table_merges_role_and_time_columns_to_reduce_crowding():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    # Role badge + "modify role" dropdown used to be two separate columns showing the
+    # same information twice, and registration-time + last-seen-time were two more —
+    # together with the header text no longer fitting, the table forced a horizontal
+    # scrollbar and its own header row wrapped inside a 580px-wide modal. Merged down
+    # to 5 columns: 用户 / 角色 / 时间 / 访问 / (delete action).
+    assert '<thead><tr><th>用户</th><th>角色</th><th>时间</th><th>访问</th><th></th></tr></thead>' in html
+    th_rule = html[html.index(".admin-table th{"):html.index("}", html.index(".admin-table th{"))]
+    assert "white-space:nowrap" in th_rule
+
+    render_start = html.index("function renderAdminUsers(data, invitationData)")
+    render_end = html.index("async function revokePendingInvitation", render_start)
+    render_block = html[render_start:render_end]
+    # Modifiable rows get the select (which now also carries the role color), rows
+    # that can't be modified (the admin's own row) keep the read-only badge — never
+    # both for the same row.
+    assert "const roleCell = canModify" in render_block
+    assert "admin-role-select admin-role-select-${roleClass}" in render_block
+    assert '<span class="admin-role-badge ${roleClass}">${u.role}</span>' in render_block
+    assert "注册 ${formatBeijingDateTime(u.created_at, false)}" in render_block
+    assert "最近 ' + formatBeijingDateTime(u.last_seen_at)" in render_block
 
 
 def test_refresh_button_progress_text_never_wraps_to_two_lines():
