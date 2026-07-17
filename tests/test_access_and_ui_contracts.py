@@ -879,6 +879,24 @@ def test_admin_user_tables_scroll_horizontally_instead_of_clipping_on_narrow_pwa
     assert render_block.count('<div class="admin-table-wrap"><table class="admin-table">') == 2
 
 
+def test_admin_resource_usage_stats_grid_on_narrow_viewports():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    # 4 equal-weight stat boxes in a single flex row (the desktop .admin-stat
+    # layout) don't fit under 640px — .admin-stat-detail's nowrap text forces each
+    # box wider than min-content, overflowing .ai-body (overflow-x:hidden) instead
+    # of shrinking. A 2x2 grid at that breakpoint keeps every stat visible without
+    # hiding half of them behind horizontal scroll.
+    mobile_start = html.index("@media(max-width:640px){\n  .header-right")
+    mobile_end = html.index("</style>", mobile_start)
+    mobile_block = html[mobile_start:mobile_end]
+    assert ".admin-stat{display:grid;grid-template-columns:1fr 1fr" in mobile_block
+    assert ".admin-stat-box{padding:" in mobile_block
+    assert ".admin-stat-detail{white-space:normal" in mobile_block
+    # Desktop layout (outside the media query) must be untouched.
+    desktop_rule = html[html.index(".admin-stat{"):html.index("}", html.index(".admin-stat{"))]
+    assert "display:flex" in desktop_rule
+
+
 def test_article_back_button_does_not_pass_click_event_as_history_state():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     assert "function closeArticleFromButton()" in html
