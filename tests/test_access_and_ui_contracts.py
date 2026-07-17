@@ -888,6 +888,27 @@ def test_article_back_button_does_not_pass_click_event_as_history_state():
     assert "addEventListener('click', closeArticle);" not in html
 
 
+def test_purge_before_date_has_a_native_date_picker_alongside_the_text_field():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    actions_start = html.index('id="purgeBeforeDate"')
+    actions_end = html.index("</div>", actions_start)
+    actions_block = html[actions_start:actions_end]
+    assert 'onclick="openPurgeDatePicker()"' in actions_block
+    assert 'id="purgeDatePicker"' in actions_block
+    assert 'type="date"' in actions_block
+    assert 'onchange="applyPurgeDatePicker()"' in actions_block
+    assert "function openPurgeDatePicker()" in html
+    assert "function applyPurgeDatePicker()" in html
+    # Picking a date must only fill the text field, not auto-run preview/delete —
+    # the existing "preview then confirm" flow must still apply, and switching to a
+    # different date must force a fresh preview before "确认删除" is usable again.
+    apply_fn = html[html.index("function applyPurgeDatePicker()"):html.index("\n}\n", html.index("function applyPurgeDatePicker()"))]
+    assert "previewPurge()" not in apply_fn
+    assert "confirmPurge()" not in apply_fn
+    assert "purgeConfirmBtn" in apply_fn
+    assert ".disabled = true" in apply_fn
+
+
 def test_legacy_admin_source_promotion_is_guarded_after_success():
     server = (ROOT / "web_server.py").read_text(encoding="utf-8")
     assert "_legacy_admin_source_settings_promoted = False" in server

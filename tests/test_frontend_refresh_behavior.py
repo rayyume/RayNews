@@ -2407,3 +2407,88 @@ assert.equal(context.coldStartInitializationTimedOut, true);
 assert.equal(timers.length, 0);
 """,
     )
+
+
+# ─── Admin purge date picker ────────────────────────────────────────────
+
+def _purge_picker_fns():
+    return source_between("function normalizedPurgeDate(", "async function previewPurge(")
+
+
+def test_open_purge_date_picker_prefills_from_text_field_and_caps_at_today():
+    fns = _purge_picker_fns()
+    run_node(
+        fns,
+        """
+const elements = {
+  purgeBeforeDate: { value: '2026/07/10' },
+  purgeDatePicker: { value: '', max: '', style: {}, showPicker: () => { context.pickerShown = true; } },
+};
+context.document = { getElementById: id => elements[id] };
+context.Date = Date; // use the real Date so toISOString().slice(0, 10) behaves normally
+context.pickerShown = false;
+context.openPurgeDatePicker();
+assert.equal(elements.purgeDatePicker.value, '2026-07-10');
+assert.equal(elements.purgeDatePicker.max, new Date().toISOString().slice(0, 10));
+assert.equal(context.pickerShown, true);
+""",
+    )
+
+
+def test_open_purge_date_picker_falls_back_to_focus_click_without_show_picker():
+    fns = _purge_picker_fns()
+    run_node(
+        fns,
+        """
+const calls = [];
+const elements = {
+  purgeBeforeDate: { value: '' },
+  purgeDatePicker: { value: '', max: '', style: {}, focus: () => calls.push('focus'), click: () => calls.push('click') },
+};
+context.document = { getElementById: id => elements[id] };
+context.Date = Date;
+context.openPurgeDatePicker();
+assert.deepEqual(calls, ['focus', 'click']);
+assert.equal(elements.purgeDatePicker.style.pointerEvents, 'auto');
+""",
+    )
+
+
+def test_apply_purge_date_picker_fills_text_field_and_resets_confirm_state():
+    fns = _purge_picker_fns()
+    run_node(
+        fns,
+        """
+const elements = {
+  purgeBeforeDate: { value: '' },
+  purgeDatePicker: { value: '2026-07-15', style: {} },
+  purgeConfirmBtn: { disabled: false }, // simulate a stale "ready to delete" state
+  purgeStatus: { textContent: '将删除 12 篇文章...' },
+};
+context.document = { getElementById: id => elements[id] };
+context.applyPurgeDatePicker();
+assert.equal(elements.purgeBeforeDate.value, '2026/07/15');
+assert.equal(elements.purgeConfirmBtn.disabled, true);
+assert.equal(elements.purgeStatus.textContent, '');
+""",
+    )
+
+
+def test_apply_purge_date_picker_does_nothing_when_picker_has_no_value():
+    fns = _purge_picker_fns()
+    run_node(
+        fns,
+        """
+const elements = {
+  purgeBeforeDate: { value: '2026/01/01' },
+  purgeDatePicker: { value: '', style: {} },
+  purgeConfirmBtn: { disabled: false },
+  purgeStatus: { textContent: 'old status' },
+};
+context.document = { getElementById: id => elements[id] };
+context.applyPurgeDatePicker();
+assert.equal(elements.purgeBeforeDate.value, '2026/01/01');
+assert.equal(elements.purgeConfirmBtn.disabled, false);
+assert.equal(elements.purgeStatus.textContent, 'old status');
+""",
+    )

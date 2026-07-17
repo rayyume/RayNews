@@ -750,6 +750,8 @@ body.body-scroll-lock{overflow:hidden!important}
           <p class="ai-hint">删除所选日期<strong>及之前</strong>的所有历史文章，连同其图片缓存一并删除。<strong>已被任何用户收藏的文章会被自动排除</strong>，不会删除。此操作不可撤销。</p>
           <div class="source-step-actions source-admin-only" style="align-items:center">
             <input class="ai-input" type="text" id="purgeBeforeDate" placeholder="YYYY/MM/DD" inputmode="numeric" pattern="\d{4}/\d{2}/\d{2}" style="width:auto;margin:0">
+            <button class="ai-save-btn" type="button" id="purgeDatePickerBtn" onclick="openPurgeDatePicker()" title="选择日期" style="margin:0;width:auto;padding:8px 10px;background:var(--bg-card);color:var(--text);border:1px solid var(--border)">📅</button>
+            <input type="date" id="purgeDatePicker" aria-hidden="true" tabindex="-1" onchange="applyPurgeDatePicker()" style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none">
             <button class="ai-save-btn" id="purgePreviewBtn" onclick="previewPurge()" style="margin:0;width:auto;padding:8px 12px">预览</button>
             <button class="ai-save-btn" id="purgeConfirmBtn" onclick="confirmPurge()" disabled style="margin:0;width:auto;padding:8px 12px;background:rgba(239,68,68,0.12);color:#ef4444;border:1px solid rgba(239,68,68,0.3)">确认删除</button>
           </div>
@@ -3006,6 +3008,39 @@ function normalizedPurgeDate() {
   const value = input.value.trim();
   if (!/^\d{4}\/\d{2}\/\d{2}$/.test(value)) return '';
   return value.replaceAll('/', '-');
+}
+
+// Opens the native date picker for the hidden <input type="date"> next to the
+// YYYY/MM/DD text field. showPicker() needs a user gesture, which this onclick
+// handler provides; browsers without it (older Safari) fall back to focus+click,
+// which still surfaces the native picker UI on both desktop and mobile.
+function openPurgeDatePicker() {
+  const picker = document.getElementById('purgeDatePicker');
+  if (!picker) return;
+  picker.max = new Date().toISOString().slice(0, 10); // matches the server's "not after today" rule
+  const current = normalizedPurgeDate();
+  if (current) picker.value = current;
+  if (typeof picker.showPicker === 'function') {
+    try { picker.showPicker(); return; } catch (e) {}
+  }
+  picker.style.pointerEvents = 'auto';
+  picker.focus();
+  picker.click();
+}
+
+// Only fills the text field — never auto-runs preview/delete, so the existing
+// "preview then confirm" flow still applies. Changing the date must force a fresh
+// preview before "确认删除" can be used again, so a stale preview for a different
+// date can never be acted on.
+function applyPurgeDatePicker() {
+  const picker = document.getElementById('purgeDatePicker');
+  if (!picker || !picker.value) return;
+  document.getElementById('purgeBeforeDate').value = picker.value.replaceAll('-', '/');
+  const confirmBtn = document.getElementById('purgeConfirmBtn');
+  if (confirmBtn) confirmBtn.disabled = true;
+  const status = document.getElementById('purgeStatus');
+  if (status) status.textContent = '';
+  picker.style.pointerEvents = 'none';
 }
 
 async function previewPurge() {
