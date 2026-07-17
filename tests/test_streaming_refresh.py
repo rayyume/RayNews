@@ -36,7 +36,7 @@ def test_run_streams_articles_into_sqlite_in_batches_before_cycle_completes(tmp_
     monkeypatch.setattr(fetcher, "STREAM_BATCH_SECONDS", 100.0)  # size-triggered only
 
     messages = [{"id": i} for i in range(1, 7)]
-    monkeypatch.setattr(fetcher, "fetch_all_new_messages", lambda state: messages)
+    monkeypatch.setattr(fetcher, "fetch_all_new_messages", lambda state: (messages, max((m["id"] for m in messages), default=0)))
     monkeypatch.setattr(
         fetcher, "process_message",
         lambda msg, orig_id: {
@@ -113,7 +113,7 @@ def test_streaming_ingest_still_respects_deleted_articles(tmp_path, monkeypatch)
     conn.close()
 
     messages = [{"id": i} for i in range(1, 5)]
-    monkeypatch.setattr(fetcher, "fetch_all_new_messages", lambda state: messages)
+    monkeypatch.setattr(fetcher, "fetch_all_new_messages", lambda state: (messages, max((m["id"] for m in messages), default=0)))
     monkeypatch.setattr(
         fetcher, "process_message",
         lambda msg, orig_id: {
@@ -137,7 +137,7 @@ def test_run_keeps_last_seen_id_unchanged_when_a_message_fails(tmp_path, monkeyp
     fetcher.save_state({"last_seen_id": 0})
 
     messages = [{"id": i} for i in range(1, 4)]
-    monkeypatch.setattr(fetcher, "fetch_all_new_messages", lambda state: messages)
+    monkeypatch.setattr(fetcher, "fetch_all_new_messages", lambda state: (messages, max((m["id"] for m in messages), default=0)))
 
     def flaky_process_message(msg, orig_id):
         if orig_id == 2:

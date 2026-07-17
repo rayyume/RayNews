@@ -55,9 +55,10 @@ def test_incremental_run_discards_pre_today_messages_on_a_mixed_page(monkeypatch
     page2 = [_msg(102, _yesterday_at(10)), _msg(103, _yesterday_at(11)), _msg(104, _yesterday_at(12))]
     calls = _mock_pages(monkeypatch, {"": page1, "105": page2})
 
-    result = fetcher.fetch_all_new_messages({"last_seen_id": 100})
+    result, highest_observed_id = fetcher.fetch_all_new_messages({"last_seen_id": 100})
 
     assert [m["id"] for m in result] == [106, 107]
+    assert highest_observed_id == 107
     # Stops after page 2 (newest message on it is from before today) — never pages
     # further back to look for yet more historical backlog.
     assert calls == ["", "105"]
@@ -67,9 +68,10 @@ def test_incremental_run_stops_immediately_once_caught_up(monkeypatch):
     page1 = [_msg(198, _today_at(6)), _msg(199, _today_at(7)), _msg(200, _today_at(8))]
     calls = _mock_pages(monkeypatch, {"": page1, "198": [_msg(1, _yesterday_at(1))] * 3})
 
-    result = fetcher.fetch_all_new_messages({"last_seen_id": 200})
+    result, highest_observed_id = fetcher.fetch_all_new_messages({"last_seen_id": 200})
 
     assert result == []
+    assert highest_observed_id == 200  # nothing new beyond the cursor — unchanged
     assert calls == [""]  # never requests a second page once caught up
 
 
@@ -81,9 +83,10 @@ def test_first_ever_run_still_scopes_to_today_only(monkeypatch):
     # exits via the "no html" branch.
     calls = _mock_pages(monkeypatch, {"": page1})
 
-    result = fetcher.fetch_all_new_messages({"last_seen_id": 0})
+    result, highest_observed_id = fetcher.fetch_all_new_messages({"last_seen_id": 0})
 
     assert [m["id"] for m in result] == [10, 11]
+    assert highest_observed_id == 11
     assert calls == ["", "9"]
 
 
@@ -94,11 +97,50 @@ def test_same_page_new_and_duplicate_ids_are_not_double_counted(monkeypatch):
     page2 = [_msg(21, _today_at(9)), _msg(22, _today_at(10)), _msg(23, _today_at(11))]
     calls = _mock_pages(monkeypatch, {"": page1, "20": page2, "21": []})
 
-    result = fetcher.fetch_all_new_messages({"last_seen_id": 0})
+    result, highest_observed_id = fetcher.fetch_all_new_messages({"last_seen_id": 0})
 
     ids = [m["id"] for m in result]
     assert ids == sorted(set(ids))  # no duplicates
     assert 20 in ids and 23 in ids
+    assert highest_observed_id == 23
+
+
+# ─── P2 fix: cursor still advances past backlog that's entirely discarded ──
+
+def test_only_pre_today_backlog_reports_highest_observed_id_despite_empty_result(monkeypatch):
+    # Every new message (id > last_seen_id) is from yesterday, so nothing is kept —
+    # but the caller still needs to know how far the scan actually got, so it can
+    # advance the cursor and never re-fetch this exact backlog again.
+    page1 = [_msg(101, _yesterday_at(20)), _msg(102, _yesterday_at(21)), _msg(103, _yesterday_at(22))]
+    _mock_pages(monkeypatch, {"": page1})
+
+    result, highest_observed_id = fetcher.fetch_all_new_messages({"last_seen_id": 100})
+
+    assert result == []
+    assert highest_observed_id == 103
+
+
+def test_run_advances_cursor_past_backlog_that_is_entirely_discarded(tmp_path, monkeypatch):
+    monkeypatch.setattr(fetcher, "OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(fetcher, "OUTPUT_FILE", tmp_path / "news.json")
+    monkeypatch.setattr(fetcher, "STATE_FILE", tmp_path / "fetcher_state.json")
+    monkeypatch.setattr(fetcher, "DB_FILE", tmp_path / "news.db")
+    monkeypatch.setattr(fetcher, "PROGRESS_FILE", tmp_path / "fetch_progress.json")
+    fetcher.save_state({"last_seen_id": 100})
+
+    page1 = [_msg(101, _yesterday_at(20)), _msg(102, _yesterday_at(21)), _msg(103, _yesterday_at(22))]
+    calls = _mock_pages(monkeypatch, {"": page1})
+
+    fetcher.run()
+
+    state = fetcher.load_state()
+    assert state["last_seen_id"] == 103
+
+    # A second run must not re-fetch the same discarded backlog: the cursor already
+    # covers ids up to 103, so the page's messages are all <= last_id and the
+    # "caught up" stop condition fires after a single page request.
+    fetcher.run()
+    assert calls == ["", ""]
 
 
 def test_run_advances_last_seen_id_to_the_highest_kept_today_message(tmp_path, monkeypatch):

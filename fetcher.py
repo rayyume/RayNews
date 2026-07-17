@@ -928,18 +928,24 @@ def is_from_today(datetime_str: str) -> bool:
         return True  # If we can't parse, be inclusive
 
 
-def fetch_all_new_messages(state: dict) -> list[dict]:
+def fetch_all_new_messages(state: dict) -> tuple[list[dict], int]:
     """Fetch new messages since last seen ID, scoped to today (Beijing time) only.
 
     Scope is fixed regardless of whether this is the very first successful fetch or a
     routine incremental one: only id > last_seen_id (incremental) AND is_from_today()
     (today-only) messages are kept. Anything from before today is discarded — including
     backlog accumulated while periodic refresh was failing — rather than being pulled
-    in wholesale on the next successful run. last_seen_id still advances to the highest
-    id actually kept, so once discarded, a pre-today message is never revisited.
+    in wholesale on the next successful run.
+
+    Returns (messages, highest_observed_id). highest_observed_id is the highest id seen
+    among *any* message with id > last_seen_id, whether it was kept (today) or discarded
+    (pre-today) — not just the ones in `messages`. This lets run() advance the cursor
+    even when every new message turned out to be pre-today and got discarded, so that
+    backlog isn't re-fetched, re-parsed, and re-discarded again on every subsequent run.
     """
     last_id = state.get("last_seen_id", 0)
     all_msgs: list[dict] = []
+    highest_observed_id = last_id
     before = ""
     pages_fetched = 0
 
@@ -956,6 +962,10 @@ def fetch_all_new_messages(state: dict) -> list[dict]:
             break
 
         pages_fetched += 1
+
+        new_ids = [m["id"] for m in msgs if m["id"] > last_id]
+        if new_ids:
+            highest_observed_id = max(highest_observed_id, max(new_ids))
 
         # Filter to new (id > last_id), not-yet-collected, today-only messages.
         seen_ids = {m["id"] for m in all_msgs}
@@ -996,7 +1006,7 @@ def fetch_all_new_messages(state: dict) -> list[dict]:
             break
 
     log.info(f"Fetched {pages_fetched} pages, {len(all_msgs)} messages total")
-    return all_msgs
+    return all_msgs, highest_observed_id
 
 
 def run():
@@ -1018,10 +1028,21 @@ def run():
     except Exception as e:
         log.error(f"SQLite bootstrap check failed: {e}")
 
-    messages = fetch_all_new_messages(state)
+    messages, highest_observed_id = fetch_all_new_messages(state)
 
     if not messages:
-        log.info("No new messages — keeping existing news.json")
+        if highest_observed_id > state.get("last_seen_id", 0):
+            # Everything new turned out to be pre-today backlog and got discarded —
+            # still advance the cursor past it, otherwise the exact same backlog gets
+            # re-fetched, re-parsed, and re-discarded again on every subsequent run.
+            state["last_seen_id"] = highest_observed_id
+            save_state(state)
+            log.info(
+                f"Only out-of-scope (pre-today) backlog found — advancing "
+                f"last_seen_id to {highest_observed_id} without processing any articles"
+            )
+        else:
+            log.info("No new messages — keeping existing news.json")
         # Still ensure SQLite is initialized from existing data
         try:
             conn = init_db()
@@ -1125,7 +1146,10 @@ def run():
             "so they can be retried on next fetch"
         )
     else:
-        max_id = max(m["id"] for m in messages)
+        # highest_observed_id already covers every id seen this cycle (kept or
+        # discarded as pre-today); max() with the kept messages is defensive in case
+        # a future change ever decouples the two.
+        max_id = max(highest_observed_id, max(m["id"] for m in messages))
         state["last_seen_id"] = max(state.get("last_seen_id", 0), max_id)
         save_state(state)
         log.info(f"Updated state: last_seen_id = {state['last_seen_id']}")
