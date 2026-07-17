@@ -10,12 +10,13 @@ import json
 import os
 import re
 import sqlite3
+import sys
 import logging
 import time
 import html as html_mod
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.utils import parsedate_to_datetime
 from datetime import timezone as dt_timezone, timedelta
@@ -32,26 +33,9 @@ from source_categories import (
 )
 
 # ─── Config (overridable via environment variables) ──────
-def _resolve_telegram_urls() -> tuple[str, str, str]:
-    """Derive (channel, list_url, post_url) from TELEGRAM_CHANNEL_URL if set,
-    otherwise fall back to the legacy TELEGRAM_CHANNEL + hardcoded t.me domain.
+from telegram_source import resolve_telegram_urls
 
-    Using a full URL avoids hardcoding the t.me domain in code, so a domain
-    change or mirror can be handled purely via env var.
-    """
-    channel_url = os.environ.get("TELEGRAM_CHANNEL_URL", "").strip()
-    if channel_url:
-        parsed = urlsplit(channel_url)
-        base = f"{parsed.scheme}://{parsed.netloc}"
-        path_parts = [p for p in parsed.path.split("/") if p]
-        channel = path_parts[-1] if path_parts else "your_channel"
-        return channel, channel_url, f"{base}/{channel}/{{id}}?embed=1&mode=tme"
-
-    channel = os.environ.get("TELEGRAM_CHANNEL", "your_channel")
-    return channel, f"https://t.me/s/{channel}", f"https://t.me/{channel}/{{id}}?embed=1&mode=tme"
-
-
-TELEGRAM_CHANNEL, TELEGRAM_LIST_URL, TELEGRAM_POST_URL = _resolve_telegram_urls()
+TELEGRAM_CHANNEL, TELEGRAM_LIST_URL, TELEGRAM_POST_URL = resolve_telegram_urls()
 OUTPUT_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
 OUTPUT_FILE = OUTPUT_DIR / "news.json"
 STATE_FILE = OUTPUT_DIR / "fetcher_state.json"
@@ -1166,5 +1150,66 @@ def run():
     log.info("Fetch cycle complete")
 
 
-if __name__ == "__main__":
+def refetch_single_post(msg_id: int) -> bool:
+    """Re-fetch and re-upsert a single already-known message by ID (used when Telegram
+    reports an edit). Only touches articles already present in SQLite — this keeps the
+    "today only" scope of the normal incremental fetch intact instead of letting an
+    edit on an old/out-of-scope post pull it back in. Returns True on success.
+    """
+    conn = init_db()
+    try:
+        row = conn.execute(
+            "SELECT id FROM articles WHERE id = ?", (msg_id,)
+        ).fetchone()
+        if not row:
+            log.info(f"refetch_single_post: {msg_id} not in articles table, skipping")
+            return False
+    finally:
+        conn.close()
+
+    url = TELEGRAM_POST_URL.format(id=msg_id)
+    try:
+        log.info(f"Refetching single post: {url}")
+        resp = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        html = resp.text
+    except Exception as e:
+        log.error(f"refetch_single_post: fetch failed for {msg_id}: {e}")
+        return False
+
+    messages = parse_messages(html)
+    msg = next((m for m in messages if m["id"] == msg_id), None)
+    if not msg:
+        log.warning(f"refetch_single_post: {msg_id} not found in embed page response")
+        return False
+
+    entry = process_message(msg, msg_id)
+
+    conn = init_db()
+    try:
+        upsert_articles(conn, [entry])
+    finally:
+        conn.close()
+    log.info(f"refetch_single_post: updated article {msg_id}")
+    return True
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="RayNews Fetcher")
+    parser.add_argument(
+        "--refetch-post", type=int, default=None, metavar="MESSAGE_ID",
+        help="Re-fetch and update a single already-known message by Telegram ID, "
+             "instead of running the normal incremental fetch cycle.",
+    )
+    args = parser.parse_args(argv)
+
+    if args.refetch_post is not None:
+        return 0 if refetch_single_post(args.refetch_post) else 1
     run()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -18,6 +18,12 @@ services:
       - TELEGRAM_CHANNEL=${TELEGRAM_CHANNEL:-your_channel}
       - RAYNEWS_PUBLIC_URL=${RAYNEWS_PUBLIC_URL:?请填写 RayNews 对外访问地址，例如 https://news.example.com}
 
+      # Telegram Serverless Webhook（可选）：配置后 /webhook/telegram 生效，用于接收
+      # serverless 转发 bot 推送的频道更新，触发实时刷新。留空则该路由返回 404，
+      # 系统行为与未启用此功能时完全一致。启用后建议调大 REFRESH_INTERVAL_SECONDS。
+      - TELEGRAM_WEBHOOK_SECRET=${TELEGRAM_WEBHOOK_SECRET:-}
+      - REFRESH_INTERVAL_SECONDS=${REFRESH_INTERVAL_SECONDS:-900}
+
       # 核心运行配置
       - PYTHONUNBUFFERED=1
       - TZ=Asia/Shanghai

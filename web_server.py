@@ -10,6 +10,7 @@ import threading
 import time
 import calendar
 import uuid
+import hmac
 import requests
 from datetime import date, datetime
 from urllib.parse import urlsplit
@@ -43,6 +44,7 @@ from image_cache import (
     cache_stats, evict_article_images, evict_unreferenced_images, collect_image_urls, open_cache_connection, _url_hash,
 )
 from news_schema import ensure_deleted_articles_table
+from telegram_source import resolve_telegram_urls
 from source_categories import (
     CATEGORY_NAMES, CATEGORY_ORDER, cleanup_stale_source_categories,
     clamp_weighted, ensure_article_source_columns, ensure_article_sources,
@@ -4247,6 +4249,90 @@ def test_notification():
         return jsonify({"ok": True, "id": result.get("id", "")})
     except Exception as e:
         return jsonify({"error": f"send failed: {str(e)}"}), 502
+
+
+# ─── Telegram Serverless Webhook ────────────────────────────
+# Relay endpoint for the Telegram serverless forwarding bot (see
+# docs/plans/telegram-serverless-webhook-plan.md). Disabled entirely (404) unless
+# TELEGRAM_WEBHOOK_SECRET is configured, so the system is byte-for-byte identical to
+# pre-webhook behavior when the feature isn't set up.
+TELEGRAM_WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "").strip()
+_WEBHOOK_CHANNEL = resolve_telegram_urls()[0].strip().lower()
+_WEBHOOK_RATE_LIMIT = 30  # max accepted requests per window
+_WEBHOOK_RATE_WINDOW_SECONDS = 60
+_webhook_rate_lock = threading.Lock()
+_webhook_rate_hits: list[float] = []
+
+
+def _webhook_rate_limited() -> bool:
+    """True if the per-window accepted-request budget is exhausted. Only counts calls
+    for updates that pass the channel check, so probing with the wrong channel can't
+    burn the legitimate bot's budget."""
+    now = time.time()
+    with _webhook_rate_lock:
+        cutoff = now - _WEBHOOK_RATE_WINDOW_SECONDS
+        while _webhook_rate_hits and _webhook_rate_hits[0] < cutoff:
+            _webhook_rate_hits.pop(0)
+        if len(_webhook_rate_hits) >= _WEBHOOK_RATE_LIMIT:
+            return True
+        _webhook_rate_hits.append(now)
+        return False
+
+
+@app.route("/webhook/telegram", methods=["POST"])
+def telegram_webhook():
+    """Receive Telegram update forwards from the serverless relay bot and trigger a
+    refresh-server job. Payload content is never trusted for ingestion — only used to
+    identify the update type and route it; all parsing/storage stays in fetcher.py."""
+    if not TELEGRAM_WEBHOOK_SECRET:
+        return jsonify({"error": "not found"}), 404
+
+    token = request.headers.get("X-RayNews-Webhook-Token", "")
+    if not hmac.compare_digest(token, TELEGRAM_WEBHOOK_SECRET):
+        return jsonify({"error": "forbidden"}), 403
+
+    try:
+        update = request.get_json(force=True, silent=False)
+    except Exception:
+        return jsonify({"error": "invalid json"}), 400
+    if not isinstance(update, dict):
+        return jsonify({"error": "invalid json"}), 400
+
+    msg = update.get("channel_post") or update.get("edited_channel_post")
+    is_edit = "edited_channel_post" in update
+    if not isinstance(msg, dict):
+        return jsonify({"status": "ignored"}), 200
+
+    chat_username = ((msg.get("chat") or {}).get("username") or "").strip().lower()
+    if not chat_username or chat_username != _WEBHOOK_CHANNEL:
+        return jsonify({"status": "ignored"}), 200
+
+    if _webhook_rate_limited():
+        return jsonify({"error": "rate limited"}), 429
+
+    message_id = msg.get("message_id")
+
+    import requests as http_req
+    try:
+        if is_edit and isinstance(message_id, int):
+            # Targeted re-fetch: the normal incremental cursor never looks back at
+            # already-seen messages, so an edit needs its own path.
+            resp = http_req.post(
+                "http://127.0.0.1:8081/internal/refetch-post",
+                params={"id": message_id},
+                timeout=30,
+            )
+            # 409 (fetcher busy) is a harmless miss, not a delivery failure — the next
+            # edit or periodic refresh window will reconcile it.
+            if resp.status_code not in (200, 409):
+                resp.raise_for_status()
+        else:
+            resp = http_req.post("http://127.0.0.1:8081/refresh?trigger=webhook", timeout=5)
+            resp.raise_for_status()
+    except http_req.RequestException:
+        return jsonify({"error": "refresh service unavailable"}), 502
+
+    return jsonify({"status": "accepted", "message_id": message_id}), 202
 
 
 # ─── Health (unused section divider) ────────────────────────

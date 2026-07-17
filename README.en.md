@@ -193,6 +193,20 @@ volumes:
 | `RAYNEWS_SECRET` | generated | JWT signing secret; saved to `/app/data/raynews_secret` when omitted |
 | `RAYNEWS_TOKEN_EXPIRY_SECONDS` | `2592000` | Login token lifetime in seconds |
 
+### Telegram Serverless Webhook (optional)
+
+Pairs with a Telegram Serverless (<https://core.telegram.org/bots/serverless>)
+forwarding bot to trigger near-instant refresh on new channel posts and live updates
+on edits. See `docs/plans/telegram-serverless-webhook-plan.md` and
+`serverless/relay/README.md`. When `TELEGRAM_WEBHOOK_SECRET` is unset, the feature is
+fully disabled (`/webhook/telegram` returns 404) and behavior is identical to not
+having this feature at all.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TELEGRAM_WEBHOOK_SECRET` | none | Shared secret required to enable webhook receiving; must match the forwarding bot's `WEBHOOK_TOKEN`. Leave unset to disable |
+| `REFRESH_INTERVAL_SECONDS` | `900` | Fallback polling interval in seconds (floor 300); recommend raising it (e.g. `7200`) once webhook is enabled |
+
 ### Email
 
 | Variable | Default | Description |

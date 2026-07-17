@@ -30,7 +30,21 @@ from source_categories import (
     ensure_article_source_columns, source_rows,
 )
 
-REFRESH_INTERVAL = 900  # 15 minutes
+def _resolve_refresh_interval() -> int:
+    """REFRESH_INTERVAL_SECONDS overrides the default periodic-refresh cadence.
+    Clamped to a 300s floor so a misconfiguration can't hammer the upstream
+    Telegram mirror with a runaway polling loop.
+    """
+    raw = os.environ.get("REFRESH_INTERVAL_SECONDS", "").strip()
+    if not raw:
+        return 900
+    try:
+        return max(300, int(raw))
+    except ValueError:
+        return 900
+
+
+REFRESH_INTERVAL = _resolve_refresh_interval()  # default 15 minutes
 LOCK_FILE = "/tmp/raynews-fetcher.lock"
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
 DB_FILE = DATA_DIR / "news.db"
@@ -56,6 +70,11 @@ REFRESH_JOB = {
 }
 REFRESH_JOB_HISTORY_LIMIT = 16
 REFRESH_JOB_HISTORY = OrderedDict()
+# Set when a webhook-triggered refresh arrives while a job is already running, so the
+# in-flight job's cursor may not have covered the message that triggered it yet. Guarded
+# by REFRESH_JOB_LOCK; consumed (and cleared) once by _run_refresh_job right after its
+# job reaches a terminal state, which starts one more webhook-triggered job.
+REFRESH_RERUN_PENDING = False
 # Set by _run_refresh_job() right before calling run_fetcher(), so run_fetcher() can
 # pass it to the fetcher.py subprocess as FETCH_JOB_ID — letting the progress file it
 # writes be matched to a job by exact ID instead of a second-granularity timestamp
@@ -205,6 +224,45 @@ def run_fetcher():
         release_lock()
 
 
+def run_refetch_post(msg_id: int) -> tuple[bytes, int]:
+    """Run `fetcher.py --refetch-post <id>` for a single edited message. Shares the
+    same lock as run_fetcher() — refetch and the normal incremental fetch both write
+    SQLite/state, so they must not run concurrently. Busy is reported as 409 rather
+    than queued: a missed edit is harmless (next edit, or a manual/periodic refresh
+    of the same today-scoped window, will pick it up), so it's not worth the
+    complexity of a retry queue.
+    """
+    if not acquire_lock():
+        log.warning(f"Refetch-post {msg_id}: fetcher busy — skipping")
+        body = json.dumps({"status": "skipped", "error": "fetcher already running"}).encode()
+        return body, 409
+    try:
+        log.info(f"Triggering refetch-post for message {msg_id}...")
+        result = subprocess.run(
+            ["python3", "/app/fetcher.py", "--refetch-post", str(msg_id)],
+            capture_output=True, text=True, timeout=60,
+        )
+        is_ok = result.returncode == 0
+        if is_ok:
+            clear_article_cache()
+        body = json.dumps({
+            "status": "ok" if is_ok else "error",
+            "returncode": result.returncode,
+            "stdout": result.stdout[-300:],
+            "stderr": result.stderr[-300:],
+        }).encode()
+        log.info(f"Refetch-post {msg_id} done (exit={result.returncode})")
+        return body, 200 if is_ok else 500
+    except subprocess.TimeoutExpired:
+        body = json.dumps({"status": "error", "error": "timeout"}).encode()
+        return body, 500
+    except Exception as e:
+        body = json.dumps({"status": "error", "error": str(e)}).encode()
+        return body, 500
+    finally:
+        release_lock()
+
+
 def article_id_snapshot() -> set[int]:
     """Return current article IDs so refresh can queue only newly inserted images."""
     conn = None
@@ -300,6 +358,7 @@ def _run_refresh_job(job_id: str) -> None:
         completed = False
         error = "refresh failed"
 
+    rerun = False
     with REFRESH_JOB_LOCK:
         if REFRESH_JOB["job_id"] != job_id:
             return
@@ -310,11 +369,24 @@ def _run_refresh_job(job_id: str) -> None:
             "error": error,
         })
         _remember_terminal_job_locked()
+        global REFRESH_RERUN_PENDING
+        if REFRESH_RERUN_PENDING:
+            REFRESH_RERUN_PENDING = False
+            rerun = True
+
+    # Fired outside the lock: a webhook arrived while this job was already running, so
+    # its message may predate this job's cursor. One extra run picks it up without
+    # waiting for the next periodic/webhook trigger.
+    if rerun:
+        start_refresh_job("webhook")
 
 
 def start_refresh_job(trigger: str = "manual") -> tuple[bytes, int]:
     with REFRESH_JOB_LOCK:
         if REFRESH_JOB["status"] == "running":
+            global REFRESH_RERUN_PENDING
+            if trigger == "webhook":
+                REFRESH_RERUN_PENDING = True
             return _refresh_job_json_locked(), 200
         job_id = uuid.uuid4().hex
         REFRESH_JOB.update({
@@ -838,13 +910,35 @@ def send_text(handler, text: str, status=200):
         pass
 
 
+_REFRESH_TRIGGERS = {"manual", "webhook"}
+
+
+def _parse_refresh_trigger(params: dict) -> str:
+    trigger = (params.get("trigger", [""])[0] or "").strip()
+    return trigger if trigger in _REFRESH_TRIGGERS else "manual"
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
-        path = urllib.parse.urlparse(self.path).path.rstrip("/")
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path.rstrip("/")
         if path == "/refresh":
-            body, status = start_refresh_job("manual")
+            params = urllib.parse.parse_qs(parsed.query)
+            body, status = start_refresh_job(_parse_refresh_trigger(params))
             send_json(self, body, status)
             return
+
+        # ── Internal (loopback-only via nginx routing; not exposed under /api/) ──
+        if path == "/internal/refetch-post":
+            params = urllib.parse.parse_qs(parsed.query)
+            raw_id = (params.get("id", [""])[0] or "").strip()
+            if not raw_id.isdigit():
+                send_text(self, "Missing or invalid id parameter", 400)
+                return
+            body, status = run_refetch_post(int(raw_id))
+            send_json(self, body, status)
+            return
+
         send_text(self, "not found", 404)
 
     def do_GET(self):
@@ -877,7 +971,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         # ── Legacy routes ──
         if path == "/refresh":
-            body, status = start_refresh_job("manual")
+            body, status = start_refresh_job(_parse_refresh_trigger(params))
             send_json(self, body, status)
             return
 

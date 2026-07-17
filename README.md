@@ -193,6 +193,19 @@ volumes:
 | `RAYNEWS_SECRET` | 自动生成 | JWT 签名密钥；未设置时保存到 `/app/data/raynews_secret` |
 | `RAYNEWS_TOKEN_EXPIRY_SECONDS` | `2592000` | 登录 Token 有效期，单位秒 |
 
+### Telegram Serverless Webhook（可选）
+
+配合 Telegram Serverless（<https://core.telegram.org/bots/serverless>）转发 bot 使用，
+实现频道新消息秒级触发刷新、编辑消息实时更新，详见
+`docs/plans/telegram-serverless-webhook-plan.md` 和 `serverless/relay/README.md`。
+未配置 `TELEGRAM_WEBHOOK_SECRET` 时该功能整体关闭（`/webhook/telegram` 返回 404），
+系统行为与不启用此功能时完全一致。
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `TELEGRAM_WEBHOOK_SECRET` | 空 | 启用 webhook 接收所需的共享密钥；需与转发 bot 的 `WEBHOOK_TOKEN` 一致。留空则功能禁用 |
+| `REFRESH_INTERVAL_SECONDS` | `900` | 兜底轮询间隔，单位秒（下限 300）；启用 webhook 后建议调大，例如 `7200` |
+
 ### 邮件配置
 
 | 变量 | 默认值 | 说明 |
