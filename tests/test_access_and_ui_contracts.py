@@ -436,7 +436,7 @@ def test_manual_refresh_feeds_new_articles_into_pending_prompt_when_not_on_page_
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     trigger = html[html.index("async function triggerRefresh("):html.index("function setRefreshRunning")]
     new_count_check = trigger.index("Number(status.new_count || 0) > 0")
-    load_since_call = trigger.index("await loadSince(sinceCursor);")
+    load_since_call = trigger.index("await loadSince(latestKnownTimestamp || sinceCursor);")
     assert load_since_call > new_count_check
     assert "let page1BranchRan = false;" in trigger
     assert "page1BranchRan = true;" in trigger
@@ -453,15 +453,32 @@ def test_refresh_running_state_only_disables_refresh_button():
     assert "manual-refreshing" not in block
 
 
-def test_manual_refresh_suppresses_competing_new_article_prompt():
+def test_manual_refresh_new_article_prompt_is_not_suppressed_while_running():
+    # showNewArticlesPrompt() deliberately does NOT bail out on refreshInProgress —
+    # triggerRefresh()'s immediate loadSince(..., { manual: true }) check (see
+    # test_manual_refresh_checks_for_already_fetched_articles_immediately) can
+    # surface a bubble well before the job itself finishes, and the button's
+    # running state (potentially 10-30s) shouldn't suppress that for the whole
+    # duration.
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     prompt = html[html.index("function showNewArticlesPrompt()"):html.index("function hideNewArticlesPrompt()")]
-    assert "if (refreshInProgress) return;" in prompt
+    assert "if (refreshInProgress) return;" not in prompt
     trigger = html[html.index("async function triggerRefresh("):html.index("function setRefreshRunning")]
     consume = "consumePendingNewArticles(refreshView.activeFilter);"
     assert consume in trigger
     assert trigger.index(consume) < trigger.index("setRefreshRunning(false);")
     assert trigger.index("setRefreshRunning(false);") < trigger.index("showNewArticlesPrompt();")
+
+
+def test_manual_refresh_checks_for_already_fetched_articles_immediately():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    trigger = html[html.index("async function triggerRefresh("):html.index("function setRefreshRunning")]
+    immediate_check = "const immediateCheck = loadSince(sinceCursor, { manual: true });"
+    assert immediate_check in trigger
+    assert trigger.index(immediate_check) < trigger.index("await requestRefreshOnce(")
+    assert "async function loadSince(timestamp, { forceApply = false, manual = false } = {})" in html
+    since_block = html[html.index("async function loadSince("):html.index("function rebuildSourceFilterGroups")]
+    assert "if (!manual && (deferForRefresh || refreshInProgress)) return added;" in since_block
 
 
 def test_manual_refresh_uses_structured_error_messages():

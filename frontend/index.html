@@ -4669,6 +4669,17 @@ async function triggerRefresh() {
   // fallback loadSince() call.
   const sinceCursor = latestKnownTimestamp || latestNewsTimestamp();
 
+  // The server auto-refreshes every 15 minutes (see refresh_server.py's
+  // REFRESH_INTERVAL) — SQLite usually already holds articles this session hasn't
+  // seen yet by the time the user clicks "刷新". Check for those immediately,
+  // in parallel with kicking off the scrape job, instead of making the user wait
+  // out the whole job just to see content that was already sitting in the DB.
+  // `manual: true` lets loadSince() apply this to the DOM right away (page 1) or
+  // surface the usual bubble (elsewhere) despite refreshInProgress being true —
+  // it stays true for the job's full duration (see setRefreshRunning() below),
+  // deliberately not shortened just because this check landed.
+  const immediateCheck = loadSince(sinceCursor, { manual: true });
+
   try {
     const data = await requestRefreshOnce(flowController.signal);
     if (!flowIsCurrent()) return;
@@ -4709,8 +4720,13 @@ async function triggerRefresh() {
     // here, so loadSince() takes its defer path — it only queues, it doesn't touch
     // the DOM) so the finally block's showNewArticlesPrompt() below can surface
     // the usual "有 N 篇新文章，点击查看" bubble.
+    //
+    // Uses the live latestKnownTimestamp (falling back to the pre-job sinceCursor)
+    // rather than sinceCursor itself: the immediateCheck kicked off above may have
+    // already advanced it, and re-querying from an older cursor would just mean
+    // more (harmlessly deduped via seenArticleIds) redundant results.
     if (!page1BranchRan && flowIsCurrent() && status.status === 'completed' && Number(status.new_count || 0) > 0) {
-      await loadSince(sinceCursor);
+      await loadSince(latestKnownTimestamp || sinceCursor);
     }
     if (!flowIsCurrent()) return;
     const count = Number(status.new_count || 0);
@@ -5232,7 +5248,12 @@ function consumePendingNewArticles(activeFilter) {
 }
 
 function showNewArticlesPrompt() {
-  if (refreshInProgress) return;
+  // Deliberately does NOT bail out while refreshInProgress: triggerRefresh()'s
+  // immediate loadSince(..., { manual: true }) check can surface new articles
+  // well before the job itself finishes (see triggerRefresh()), and the button's
+  // running state (potentially 10-30s) shouldn't suppress that bubble for the
+  // whole duration. triggerRefresh() already hides any stale prompt at the start
+  // of a manual refresh, so there's nothing here for it to race against.
   const prompt = document.getElementById('newArticlesPrompt');
   if (!prompt) return;
   // Only surface the toast when the newly-arrived articles are actually relevant
@@ -5579,7 +5600,12 @@ async function loadData() {
 }
 
 // Routine refresh path: detect only changed/new rows and prepare the latest first page.
-async function loadSince(timestamp, { forceApply = false } = {}) {
+// `manual`: bypasses the defer-while-a-refresh-is-running early return below — used by
+// triggerRefresh()'s immediate "what's already in SQLite" check (see there), which
+// deliberately runs while refreshInProgress is still true for the job's whole
+// duration. Every other caller (periodic timer, foreground resume, etc.) leaves this
+// false and keeps deferring while a refresh job is in flight, same as before.
+async function loadSince(timestamp, { forceApply = false, manual = false } = {}) {
   const deferForRefresh = refreshInProgress;
   try {
     const controller = new AbortController();
@@ -5612,7 +5638,7 @@ async function loadSince(timestamp, { forceApply = false } = {}) {
     bumpContentEpoch();
     const epochAtStart = contentEpoch;
     refreshTodayArticleCount();
-    if (deferForRefresh || refreshInProgress) return added;
+    if (!manual && (deferForRefresh || refreshInProgress)) return added;
     await loadSourceCategories();
     // Keep an "all"-scoped snapshot warm — the lightweight Logo/home flow
     // intentionally jumps to "all" and can reuse it without starting a scrape.

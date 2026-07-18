@@ -483,7 +483,10 @@ context.loadCalls = 0;
 context.latestKnownTimestamp = 0;
 context.latestNewsTimestamp = () => 0;
 context.loadSinceCalls = [];
-context.loadSince = async timestamp => {{ context.loadSinceCalls.push(timestamp); return 0; }};
+context.loadSince = async (timestamp, options) => {{
+  context.loadSinceCalls.push({{ timestamp, manual: !!(options && options.manual) }});
+  return 0;
+}};
 """
 
 
@@ -499,13 +502,18 @@ def test_manual_refresh_feeds_new_articles_into_pending_queue_when_not_on_page_o
 context.currentPage = 2;
 context.latestKnownTimestamp = 555;
 await context.triggerRefresh();
-assert.deepEqual(context.loadSinceCalls, [555]);
+// One immediate check (fired alongside the scrape job, regardless of outcome) and
+// one completion-time check (since new_count > 0 and page 1's branch never ran).
+assert.deepEqual(context.loadSinceCalls, [
+  { timestamp: 555, manual: true },
+  { timestamp: 555, manual: false },
+]);
 assert.ok(context.toasts.includes('✅ 更新完成，新增 3 篇文章'));
 """,
     )
 
 
-def test_manual_refresh_does_not_feed_pending_queue_when_already_latest():
+def test_manual_refresh_immediate_check_fires_even_when_job_finds_nothing_new():
     trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
     setup = trigger_context_setup(
         "return { job_id: 'job-1', status: 'completed', new_count: 0 };"
@@ -516,13 +524,16 @@ def test_manual_refresh_does_not_feed_pending_queue_when_already_latest():
         + """
 context.currentPage = 2;
 await context.triggerRefresh();
-assert.deepEqual(context.loadSinceCalls, []);
+// The immediate "what's already in SQLite" check always fires — it's independent
+// of the job's own outcome — but the completion-time re-check is skipped since
+// new_count is 0.
+assert.deepEqual(context.loadSinceCalls, [{ timestamp: 0, manual: true }]);
 assert.ok(context.toasts.includes('✅ 已是最新'));
 """,
     )
 
 
-def test_manual_refresh_does_not_feed_pending_queue_when_page_one_branch_already_applied():
+def test_manual_refresh_skips_completion_time_check_when_page_one_branch_already_applied():
     trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
     setup = trigger_context_setup(
         "return { job_id: 'job-1', status: 'completed', new_count: 4 };"
@@ -538,7 +549,9 @@ context.loadNewsPage = async (page, options) => {
   return true;
 };
 await context.triggerRefresh();
-assert.deepEqual(context.loadSinceCalls, []);
+// Immediate check still fires; completion-time check is redundant once page 1's
+// own branch has already applied the new articles to the DOM.
+assert.deepEqual(context.loadSinceCalls, [{ timestamp: 0, manual: true }]);
 assert.equal(context.consumed, 1);
 """,
     )
@@ -557,7 +570,10 @@ context.currentPage = 3;
 context.latestKnownTimestamp = 0; // nothing observed yet this session -> falls back
 context.latestNewsTimestamp = () => 42;
 await context.triggerRefresh();
-assert.deepEqual(context.loadSinceCalls, [42]);
+assert.deepEqual(context.loadSinceCalls, [
+  { timestamp: 42, manual: true },
+  { timestamp: 42, manual: false },
+]);
 """,
     )
 
@@ -914,6 +930,56 @@ assert.equal(context.sourceLoads, 0);
 assert.equal(context.pageFetches, 0);
 assert.equal(context.applies, 0);
 assert.equal(context.consumes, 0);
+""",
+    )
+
+
+def test_manual_incremental_check_applies_immediately_despite_refresh_in_progress():
+    incremental = source_between("async function loadSince(", "function rebuildSourceFilterGroups")
+    run_node(
+        incremental,
+        """
+context.refreshInProgress = true; // a manual-refresh job is running for its full duration
+context.INCREMENTAL_FETCH_LIMIT = 200;
+context.seenArticleIds = new Set();
+context.latestKnownTimestamp = 100;
+context.pendingNewArticleCount = 0;
+context.pendingNewItems = [];
+context.contentEpoch = 0;
+context.bumpContentEpoch = () => { context.epochBumps = (context.epochBumps || 0) + 1; };
+context.fetch = async () => ({
+  json: async () => ({ items: [{ id: 2, timestamp: 101, source: 's' }] }),
+});
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
+context.refreshTodayArticleCount = () => { context.countRefreshes++; };
+context.countRefreshes = 0;
+context.loadSourceCategories = async () => { context.sourceLoads++; };
+context.sourceLoads = 0;
+context.fetchNewsPage = async () => { context.pageFetches++; return { items: [] }; };
+context.pageFetches = 0;
+context.writeCachedNewsPage = async () => {};
+context.pendingRelevantCount = () => 1;
+context.showLatestAfterIdle = () => { context.applies++; };
+context.showNewArticlesPrompt = () => { context.applies++; };
+context.applyNewsPage = () => { context.applies++; };
+context.consumePendingNewArticles = () => { context.consumes++; };
+context.applies = 0;
+context.consumes = 0;
+context.filter = 'all';
+context.currentPage = 1;
+context.window = { scrollY: 0 };
+context.hasBlockingOverlayOpen = () => false;
+context.lastUserActivityAt = 0;
+context.IDLE_LATEST_DELAY_MS = 1;
+// { manual: true } bypasses the defer-while-refreshing early return that the
+// sibling test above (without `manual`) relies on.
+const added = await context.loadSince(100, { manual: true });
+assert.equal(added, 1);
+assert.equal(context.sourceLoads, 1);
+assert.equal(context.pageFetches, 1);
+assert.equal(context.applies, 1); // atLatestTop on page 1 -> applyNewsPage()
+assert.equal(context.consumes, 1);
 """,
     )
 
@@ -2641,7 +2707,11 @@ context.consumePendingNewArticles = () => {};
 context.loadNewsPage = async () => { throw new Error('page 2 must not calibrate'); };
 context.latestKnownTimestamp = 0;
 context.latestNewsTimestamp = () => 0;
-context.loadSince = async () => { throw new Error('new_count is 0, must not check for new articles'); };
+context.loadSinceCalls = [];
+context.loadSince = async (timestamp, options) => {
+  context.loadSinceCalls.push({ timestamp, manual: !!(options && options.manual) });
+  return 0;
+};
 context.runningStates = [];
 context.setRefreshRunning = running => {
   context.refreshInProgress = running;
@@ -2682,6 +2752,7 @@ await manual;
 assert.deepEqual(context.runningStates, [true, false]);
 assert.equal(context.refreshInProgress, false);
 assert.ok(context.toasts.includes('✅ 已是最新'));
+assert.deepEqual(context.loadSinceCalls, [{ timestamp: 0, manual: true }]);
 """,
     )
 
