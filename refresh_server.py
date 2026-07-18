@@ -168,7 +168,14 @@ def run_fetcher():
                 conn = sqlite3.connect(str(DB_FILE))
                 conn.row_factory = sqlite3.Row
                 ensure_article_source_columns(conn)
-                result = maintain_source_categories(conn, force=True)
+                # force=False: let maintain_source_categories()'s own
+                # MAINTENANCE_THROTTLE_SECONDS throttle skip the two full-table
+                # scans (source discovery, stale cleanup) when the last run was
+                # recent — e.g. back-to-back manual refreshes. New/stale sources
+                # are still caught within that window by whichever refresh (this
+                # one, the next manual click, or the 15-minute periodic cycle)
+                # lands after the throttle expires.
+                result = maintain_source_categories(conn, force=False)
                 conn.commit()
                 conn.close()
                 if result.get("discovered") or result.get("deleted"):

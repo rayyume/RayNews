@@ -64,6 +64,14 @@ PROGRESS_FILE = OUTPUT_DIR / "fetch_progress.json"
 FETCH_JOB_ID = os.environ.get("FETCH_JOB_ID", "")
 MAX_WORKERS = 15
 REQUEST_TIMEOUT = 20
+# Full-text (Telegraph/WeChat) fetches get their own, shorter timeout — a slow
+# outbound article page shouldn't stretch a manual refresh out as long as the
+# Telegram list-page fetch's REQUEST_TIMEOUT allows. Both fetch_telegraph() and
+# fetch_wechat_article() already catch their own exceptions and return None on
+# failure, so a timeout here just falls back to the plain Telegram excerpt for
+# this cycle (see process_message()) — it doesn't fail the message or block
+# last_seen_id from advancing, so there's no automatic retry of the full text.
+FULLTEXT_TIMEOUT = 10
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 HEADERS = {"User-Agent": USER_AGENT}
 # Max historical pages to fetch on initial full sync
@@ -653,7 +661,7 @@ def _legacy_news_item_key(item: dict) -> str:
 def fetch_telegraph(url: str) -> dict | None:
     try:
         log.info(f"  Fetching Telegraph: {unquote(url)[:80]}...")
-        resp = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        resp = requests.get(url, headers=HEADERS, timeout=FULLTEXT_TIMEOUT)
         resp.raise_for_status()
 
         soup = BeautifulSoup(resp.text, "html.parser")
@@ -756,7 +764,7 @@ def fetch_wechat_article(url: str) -> dict | None:
     }
     try:
         log.info(f"  Fetching WeChat: {url[:80]}...")
-        resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+        resp = requests.get(url, headers=headers, timeout=FULLTEXT_TIMEOUT)
         resp.raise_for_status()
 
         soup = BeautifulSoup(resp.text, "html.parser")
@@ -1012,6 +1020,7 @@ def fetch_all_new_messages(state: dict) -> tuple[list[dict], int]:
 def run():
     log.info("=" * 50)
     log.info("Starting fetch cycle")
+    cycle_started_at = time.monotonic()
 
     state = load_state()
     try:
@@ -1028,7 +1037,9 @@ def run():
     except Exception as e:
         log.error(f"SQLite bootstrap check failed: {e}")
 
+    telegram_fetch_started_at = time.monotonic()
     messages, highest_observed_id = fetch_all_new_messages(state)
+    log.info(f"[timing] Telegram fetch: {time.monotonic() - telegram_fetch_started_at:.2f}s")
 
     if not messages:
         if highest_observed_id > state.get("last_seen_id", 0):
@@ -1050,6 +1061,7 @@ def run():
             conn.close()
         except Exception as e:
             log.error(f"SQLite init failed: {e}")
+        log.info(f"[timing] Fetch cycle total: {time.monotonic() - cycle_started_at:.2f}s (no new messages)")
         return
 
     # Reset progress for this cycle before streaming starts, so a stale value from a
@@ -1067,6 +1079,7 @@ def run():
     stream_batch = []
     inserted_total = 0
     last_commit_at = time.monotonic()
+    fulltext_started_at = time.monotonic()
     try:
         stream_conn = init_db()
         stream_conn.execute("PRAGMA busy_timeout=30000")
@@ -1099,8 +1112,86 @@ def run():
     finally:
         if stream_conn:
             stream_conn.close()
+    log.info(
+        f"[timing] Full-text fetch + streaming ingest: "
+        f"{time.monotonic() - fulltext_started_at:.2f}s ({len(messages)} messages, "
+        f"{inserted_total} inserted, {failed_count} failed)"
+    )
 
-    # Merge with existing data (accumulate)
+    # Update state with latest message ID
+    # Only advance last_seen_id if ALL messages processed successfully,
+    # otherwise failed messages would be permanently skipped on next run.
+    if failed_count:
+        log.warning(
+            f"{failed_count} message(s) failed — keeping last_seen_id={state.get('last_seen_id')} "
+            "so they can be retried on next fetch"
+        )
+    else:
+        # highest_observed_id already covers every id seen this cycle (kept or
+        # discarded as pre-today); max() with the kept messages is defensive in case
+        # a future change ever decouples the two.
+        max_id = max(highest_observed_id, max(m["id"] for m in messages))
+        state["last_seen_id"] = max(state.get("last_seen_id", 0), max_id)
+        save_state(state)
+        log.info(f"Updated state: last_seen_id = {state['last_seen_id']}")
+
+    # ── SQLite sync ── the load-bearing step: source-category bookkeeping that
+    # GET /sources and the drawer rely on. Runs before the news.json mirror below
+    # so a slow/failed news.json write can never delay or block it.
+    sqlite_sync_started_at = time.monotonic()
+    try:
+        conn = init_db()
+        migrate_news_json(conn)
+        if inserted_total < len(new_entries):
+            # The streaming loop above didn't manage to write every entry (a batch
+            # upsert failed mid-cycle, or the whole streaming block raised) —
+            # fall back to a full upsert so nothing collected in new_entries is
+            # lost, at the cost of the full-table source sync it also runs.
+            upsert_articles(conn, new_entries)
+        else:
+            # Common case: streaming already wrote every entry with
+            # sync_sources=False (see the comment above the streaming loop) — just
+            # run the one full-table source sync that upsert_articles(...,
+            # sync_sources=True) would otherwise needlessly repeat.
+            ensure_article_sources(conn)
+            conn.commit()
+        conn.close()
+    except Exception as e:
+        log.error(f"SQLite write failed: {e}")
+    log.info(f"[timing] SQLite sync: {time.monotonic() - sqlite_sync_started_at:.2f}s")
+
+    # ── news.json mirror ── best-effort only: legacy bootstrap source for
+    # migrate_news_json() when SQLite is empty, not read by anything else. A
+    # failure here is logged, not raised, so it can never fail the fetch cycle —
+    # articles are already durably in SQLite by this point regardless.
+    news_json_started_at = time.monotonic()
+    try:
+        write_news_json_mirror(new_entries)
+    except Exception as e:
+        log.error(f"news.json write failed: {e}")
+    log.info(f"[timing] news.json mirror write: {time.monotonic() - news_json_started_at:.2f}s")
+
+    log.info(f"[timing] Fetch cycle total: {time.monotonic() - cycle_started_at:.2f}s")
+    log.info("Fetch cycle complete")
+
+
+# Most recent items kept in news.json — it's only ever read back by
+# migrate_news_json() to bootstrap SQLite when the DB is empty, so it doesn't need
+# the full unbounded history it used to accumulate.
+NEWS_JSON_MIRROR_LIMIT = 2000
+
+
+def write_news_json_mirror(new_entries: list[dict]) -> None:
+    """Best-effort mirror of the most recent articles to news.json.
+
+    Not on the critical path: only read back by migrate_news_json() to bootstrap
+    SQLite when the DB is empty. Raises on failure (caller logs and moves on) —
+    articles are already durably in SQLite by the time this runs regardless.
+    """
+    # Merge with existing data (accumulate), then keep only the most recent
+    # NEWS_JSON_MIRROR_LIMIT — this file is a bootstrap fallback, not a growing
+    # archive, and serializing years of accumulated body_html on every cycle was
+    # pure wasted latency.
     existing_data = {"items": []}
     try:
         if OUTPUT_FILE.exists():
@@ -1121,9 +1212,10 @@ def run():
             existing_data["items"].append(entry)
             existing_ids.add(key)
 
-    # Sort by timestamp descending
+    # Sort by timestamp descending, then truncate to the most recent slice
     all_items = existing_data["items"]
     all_items.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+    all_items = all_items[:NEWS_JSON_MIRROR_LIMIT]
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     output = {
@@ -1131,39 +1223,12 @@ def run():
         "count": len(all_items),
         "items": all_items,
     }
-    # Atomic write: write to temp file, then rename
+    # Atomic write: write to temp file, then rename. No indent — this file is
+    # machine-read (migrate_news_json), never hand-inspected.
     tmp = OUTPUT_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.write_text(json.dumps(output, ensure_ascii=False), encoding="utf-8")
     tmp.replace(OUTPUT_FILE)
     log.info(f"Wrote {len(all_items)} entries to {OUTPUT_FILE} (added {len(new_entries)} new)")
-
-    # Update state with latest message ID
-    # Only advance last_seen_id if ALL messages processed successfully,
-    # otherwise failed messages would be permanently skipped on next run.
-    if failed_count:
-        log.warning(
-            f"{failed_count} message(s) failed — keeping last_seen_id={state.get('last_seen_id')} "
-            "so they can be retried on next fetch"
-        )
-    else:
-        # highest_observed_id already covers every id seen this cycle (kept or
-        # discarded as pre-today); max() with the kept messages is defensive in case
-        # a future change ever decouples the two.
-        max_id = max(highest_observed_id, max(m["id"] for m in messages))
-        state["last_seen_id"] = max(state.get("last_seen_id", 0), max_id)
-        save_state(state)
-        log.info(f"Updated state: last_seen_id = {state['last_seen_id']}")
-
-    # ── SQLite sync ──
-    try:
-        conn = init_db()
-        migrate_news_json(conn)
-        upsert_articles(conn, new_entries)
-        conn.close()
-    except Exception as e:
-        log.error(f"SQLite write failed: {e}")
-
-    log.info("Fetch cycle complete")
 
 
 if __name__ == "__main__":
