@@ -400,13 +400,24 @@ def test_refresh_status_polling_uses_authenticated_get_and_bounded_wait():
     assert "fetch('/auth/refresh/status?job_id=' + encodeURIComponent(jobId)" in request
     assert "'Authorization': 'Bearer ' + authToken" in request
     assert "cache: 'no-store'" in request
-    assert "await abortableDelay(Math.min(1200, beforeDelayMs), flowSignal);" in poll
-    assert "const status = await requestRefreshStatus(jobId, remainingMs, flowSignal);" in poll
+    assert "await abortableDelay(Math.min(delayMs, beforeDelayMs), flowSignal);" in poll
+    assert "status = await requestRefreshStatus(jobId, remainingMs, flowSignal);" in poll
     assert "if (status.job_id !== jobId)" in poll
     assert "status.status === 'completed' || status.status === 'failed'" in poll
     assert "throw new Error('刷新状态查询超时，请稍后查看最新文章');" in poll
     assert "signal: controller.signal" in request
     assert "clearTimeout(timeout);" in request
+
+
+def test_refresh_status_polling_tolerates_a_run_of_transient_failures():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    poll = html[html.index("async function pollRefreshJob("):html.index("function rebuildCategoryMap")]
+    assert "MAX_CONSECUTIVE_TRANSIENT_FAILURES" in poll
+    assert "isTransientRefreshError(error)" in poll
+    assert "consecutiveTransientFailures = 0;" in poll
+    assert "continue;" in poll
+    assert "FIRST_POLL_DELAY_MS" in poll
+    assert "POLL_INTERVAL_MS" in poll
 
 
 def test_refresh_running_state_only_disables_refresh_button():

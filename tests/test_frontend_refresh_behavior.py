@@ -26,6 +26,67 @@ def test_logo_refresh_state_is_declared_before_click_handler_uses_it():
     assert "let logoRefreshInProgress = false;" in HTML
 
 
+def test_is_transient_refresh_error_recognizes_browser_and_tagged_timeouts():
+    source = source_between("function isTransientRefreshError(", "async function retryTransientRefreshRequest(")
+    run_node(
+        source,
+        """
+assert.equal(context.isTransientRefreshError(null), false);
+assert.equal(context.isTransientRefreshError(Object.assign(new Error('cancelled'), { name: 'AbortError' })), false);
+assert.equal(context.isTransientRefreshError(new TypeError('Load failed')), true);
+assert.equal(context.isTransientRefreshError(new TypeError('Failed to fetch')), true);
+assert.equal(context.isTransientRefreshError(new Error('NetworkError when attempting to fetch resource')), true);
+assert.equal(context.isTransientRefreshError(Object.assign(new Error('slow'), { name: 'RefreshStatusTimeoutError' })), true);
+assert.equal(context.isTransientRefreshError(new Error('刷新失败，请稍后重试')), false);
+""",
+    )
+
+
+def test_refresh_error_message_normalizes_raw_browser_network_errors():
+    source = source_between("function refreshErrorMessage(", "async function parseRefreshResponse(")
+    run_node(
+        source,
+        """
+context.compactRefreshDetail = value => String(value || '').trim();
+// Must construct with the vm realm's own Error/TypeError — refreshErrorMessage's
+// `instanceof Error` check fails across realms, so an outer-realm Error would be
+// silently misclassified as a data object instead.
+const loadFailed = vm.runInContext("new TypeError('Load failed')", context);
+const failedToFetch = vm.runInContext("new TypeError('Failed to fetch')", context);
+const networkError = vm.runInContext("new Error('NetworkError when attempting to fetch resource')", context);
+const other = vm.runInContext("new Error('something unexpected')", context);
+assert.equal(context.refreshErrorMessage(loadFailed), '网络连接失败，请检查网络后重试');
+assert.equal(context.refreshErrorMessage(failedToFetch), '网络连接失败，请检查网络后重试');
+assert.equal(context.refreshErrorMessage(networkError), '网络连接失败，请检查网络后重试');
+assert.equal(context.refreshErrorMessage(other), 'something unexpected');
+""",
+    )
+
+
+def test_status_request_tags_per_request_timeout_as_transient():
+    source = source_between("async function requestRefreshStatusOnce(", "async function pollRefreshJob(")
+    run_node(
+        source,
+        """
+context.authToken = 'token';
+context.parseRefreshResponse = async () => ({ status: 'running' });
+context.setTimeout = (callback) => { callback(); return 1; };
+context.clearTimeout = () => {};
+context.AbortController = class {
+  constructor() { this.signal = { aborted: false }; }
+  abort() { this.signal.aborted = true; }
+};
+context.fetch = () => new Promise((resolve, reject) => {
+  reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+});
+await assert.rejects(
+  context.requestRefreshStatusOnce('job-1', 10),
+  error => error.name === 'RefreshStatusTimeoutError',
+);
+""",
+    )
+
+
 def test_refresh_running_state_has_no_dot_overlay_but_keeps_sweep():
     assert ".refresh-btn.refresh-running::after" not in HTML
     assert ".refresh-btn.refresh-running::before" in HTML
@@ -138,7 +199,9 @@ let now = 0;
 let requestedTimeout = null;
 context.Date = { now: () => now };
 context.abortableDelay = async timeout => {
-  assert.equal(timeout, 1000);
+  // First poll uses the short FIRST_POLL_DELAY_MS (300), capped by the
+  // remaining deadline (1000) — so the shorter of the two wins here.
+  assert.equal(timeout, 300);
   now = 600;
 };
 context.requestRefreshStatus = async (jobId, timeout) => {
@@ -149,6 +212,98 @@ context.requestRefreshStatus = async (jobId, timeout) => {
 const status = await context.pollRefreshJob('job-1', 1000);
 assert.equal(status.new_count, 2);
 assert.equal(requestedTimeout, 400);
+""",
+    )
+
+
+def test_poll_refresh_job_uses_steady_interval_after_first_poll():
+    poll = source_between("async function pollRefreshJob(", "function rebuildCategoryMap")
+    run_node(
+        poll,
+        """
+let now = 0;
+const delays = [];
+context.Date = { now: () => now };
+context.abortableDelay = async timeout => {
+  delays.push(timeout);
+  now += 100;
+};
+let call = 0;
+context.requestRefreshStatus = async () => {
+  call++;
+  if (call < 3) return { job_id: 'job-1', status: 'running' };
+  return { job_id: 'job-1', status: 'completed', new_count: 0 };
+};
+await context.pollRefreshJob('job-1', 100000);
+assert.deepEqual(delays, [300, 800, 800]);
+""",
+    )
+
+
+def test_poll_refresh_job_tolerates_transient_failures_below_the_threshold():
+    poll = source_between("async function pollRefreshJob(", "function rebuildCategoryMap")
+    run_node(
+        poll,
+        """
+let now = 0;
+context.Date = { now: () => now };
+context.abortableDelay = async () => { now += 100; };
+context.isTransientRefreshError = error => error && error.transient === true;
+let call = 0;
+context.requestRefreshStatus = async () => {
+  call++;
+  if (call <= 2) throw Object.assign(new Error('Load failed'), { transient: true });
+  return { job_id: 'job-1', status: 'completed', new_count: 5 };
+};
+const status = await context.pollRefreshJob('job-1', 100000);
+assert.equal(status.new_count, 5);
+assert.equal(call, 3);
+""",
+    )
+
+
+def test_poll_refresh_job_gives_up_after_too_many_consecutive_transient_failures():
+    poll = source_between("async function pollRefreshJob(", "function rebuildCategoryMap")
+    run_node(
+        poll,
+        """
+let now = 0;
+context.Date = { now: () => now };
+context.abortableDelay = async () => { now += 100; };
+context.isTransientRefreshError = error => error && error.transient === true;
+let call = 0;
+context.requestRefreshStatus = async () => {
+  call++;
+  throw Object.assign(new Error('Load failed'), { transient: true });
+};
+await assert.rejects(
+  context.pollRefreshJob('job-1', 100000),
+  error => error.message === 'Load failed',
+);
+assert.equal(call, 3);
+""",
+    )
+
+
+def test_poll_refresh_job_does_not_tolerate_non_transient_errors():
+    poll = source_between("async function pollRefreshJob(", "function rebuildCategoryMap")
+    run_node(
+        poll,
+        """
+let now = 0;
+context.Date = { now: () => now };
+context.abortableDelay = async () => { now += 100; };
+context.isTransientRefreshError = () => false;
+let call = 0;
+context.requestRefreshStatus = async () => {
+  call++;
+  throw new Error('刷新失败，请稍后重试');
+};
+await assert.rejects(
+  context.pollRefreshJob('job-1', 100000),
+  error => error.message === '刷新失败，请稍后重试',
+);
+assert.equal(call, 1);
 """,
     )
 
