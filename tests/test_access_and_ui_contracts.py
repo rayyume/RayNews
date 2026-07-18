@@ -345,11 +345,16 @@ def test_view_bound_refresh_work_is_cancelled_by_navigation_and_backgrounding():
     for start, end in (
         ("async function restoreListStateFromUrl(", "function setPageLoading"),
         ("async function selectFilter(", "function filteredNews"),
-        ("async function goToPage(", "function waitForScrollTop"),
         ("function openArticle(", "function fetchArticleDetail"),
     ):
         block = html[html.index(start):html.index(end, html.index(start))]
         assert "cancelViewBoundRefreshWork();" in block
+    # goToPage() deliberately does NOT cancel an in-flight manual refresh — its DOM
+    # application is already gated by viewIsCurrent()/flowIsCurrent() (see
+    # triggerRefresh()), so navigating away should let the job keep running rather
+    # than silently aborting it. See test_go_to_page_does_not_cancel_refresh_flow.
+    go_to_page = html[html.index("async function goToPage("):html.index("function waitForScrollTop")]
+    assert "cancelViewBoundRefreshWork();" not in go_to_page
     visibility = html[
         html.index("document.addEventListener('visibilitychange', () =>"):
         html.index("window.addEventListener('focus', onReturnToForeground)")
@@ -361,6 +366,13 @@ def test_view_bound_refresh_work_is_cancelled_by_navigation_and_backgrounding():
     ]
     assert "cancelRefreshFlow();" in helper
     assert "cancelStartupEmptyRevalidation();" in helper
+
+
+def test_go_to_page_does_not_cancel_refresh_flow():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    go_to_page = html[html.index("async function goToPage("):html.index("function waitForScrollTop")]
+    assert "cancelViewBoundRefreshWork();" not in go_to_page
+    assert "cancelRefreshFlow();" not in go_to_page
 
 
 def test_manual_refresh_posts_once_then_polls_status():
@@ -418,6 +430,18 @@ def test_refresh_status_polling_tolerates_a_run_of_transient_failures():
     assert "continue;" in poll
     assert "FIRST_POLL_DELAY_MS" in poll
     assert "POLL_INTERVAL_MS" in poll
+
+
+def test_manual_refresh_feeds_new_articles_into_pending_prompt_when_not_on_page_one():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    trigger = html[html.index("async function triggerRefresh("):html.index("function setRefreshRunning")]
+    new_count_check = trigger.index("Number(status.new_count || 0) > 0")
+    load_since_call = trigger.index("await loadSince(sinceCursor);")
+    assert load_since_call > new_count_check
+    assert "let page1BranchRan = false;" in trigger
+    assert "page1BranchRan = true;" in trigger
+    assert "!page1BranchRan" in trigger
+    assert trigger.index("const sinceCursor =") < trigger.index("await requestRefreshOnce(")
 
 
 def test_refresh_running_state_only_disables_refresh_button():
@@ -525,6 +549,18 @@ def test_adjacent_pages_are_buffered_immediately_and_cover_images_are_warmed():
     prepare_block = html[prepare_start:prepare_end]
     assert "const pendingPrefetch = pagePrefetchPromises.get(key);" in prepare_block
     assert "const prefetched = await pendingPrefetch;" in prepare_block
+
+
+def test_must_be_fresh_navigation_has_a_downgrade_budget():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    prepare_start = html.index("async function preparePageNavigation(")
+    prepare_end = html.index("// Full snapshot compatibility wrapper", prepare_start)
+    prepare_block = html[prepare_start:prepare_end]
+    assert "const NAVIGATION_FRESH_BUDGET_MS = 2500;" in prepare_block
+    assert "await withPromiseTimeout(networkPromise, null, NAVIGATION_FRESH_BUDGET_MS);" in prepare_block
+    assert "peekStaleBufferedPage(page, activeFilter)" in prepare_block
+    assert "applyPageCalibrationWhenActive(result.data, page, activeFilter, requestSeq)" in prepare_block
+    assert "function peekStaleBufferedPage(page, activeFilter)" in html
     start = html.index("function scheduleAdjacentPagePrefetch(")
     end = html.index("async function loadNewsPage(", start)
     block = html[start:end]

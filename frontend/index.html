@@ -4664,6 +4664,11 @@ async function triggerRefresh() {
     )).finally(() => { streamApplyInFlight = false; });
   };
 
+  // Captured before the job starts so a page-1 refresh that gets navigated away
+  // from mid-flight (see the branch below) still has a correct baseline for the
+  // fallback loadSince() call.
+  const sinceCursor = latestKnownTimestamp || latestNewsTimestamp();
+
   try {
     const data = await requestRefreshOnce(flowController.signal);
     if (!flowIsCurrent()) return;
@@ -4673,11 +4678,13 @@ async function triggerRefresh() {
     if (status.status === 'failed') {
       throw new Error(refreshErrorMessage(status));
     }
+    let page1BranchRan = false;
     if (
       refreshView.page === 1
       && refreshView.pendingRequestSequence === 0
       && viewIsCurrent(refreshView.requestSequence, 0)
     ) {
+      page1BranchRan = true;
       const completionRequestSequence = refreshView.requestSequence + 1;
       const applicationGuard = () => viewIsCurrent(
         completionRequestSequence,
@@ -4694,6 +4701,16 @@ async function triggerRefresh() {
       if (loaded && viewIsCurrent(completionRequestSequence, 0)) {
         consumePendingNewArticles(refreshView.activeFilter);
       }
+    }
+    // Not on page 1 (or navigated away before the branch above could run): the new
+    // articles a completed job found are otherwise invisible until the user
+    // manually pages back to the top. Feed them into the same pendingNewItems
+    // queue the periodic background check uses (refreshInProgress is still true
+    // here, so loadSince() takes its defer path — it only queues, it doesn't touch
+    // the DOM) so the finally block's showNewArticlesPrompt() below can surface
+    // the usual "有 N 篇新文章，点击查看" bubble.
+    if (!page1BranchRan && flowIsCurrent() && status.status === 'completed' && Number(status.new_count || 0) > 0) {
+      await loadSince(sinceCursor);
     }
     if (!flowIsCurrent()) return;
     const count = Number(status.new_count || 0);
@@ -5107,6 +5124,16 @@ function readBufferedPage(page, activeFilter) {
   return entry.data;
 }
 
+// Unlike readBufferedPage(), does not reject an entry whose stamped epoch no
+// longer matches the live contentEpoch — used only by preparePageNavigation()'s
+// mustBeFresh downgrade budget, where a possibly-stale snapshot beats leaving the
+// pager frozen while the network is slow, and the caller schedules a
+// network-backed correction (applyPageCalibrationWhenActive()) right after.
+function peekStaleBufferedPage(page, activeFilter) {
+  const entry = pageMemoryBuffer.get(newsPageCacheKey(page, activeFilter));
+  return entry ? entry.data : null;
+}
+
 async function prefetchNewsPage(page, activeFilter) {
   if (page < 1) return;
   const key = newsPageCacheKey(page, activeFilter);
@@ -5469,13 +5496,37 @@ async function preparePageNavigation(page, activeFilter) {
 
   // A pending/known-relevant new article means any snapshot fetched before this
   // navigation started is stale — e.g. articles bumped off page 1 by a background
-  // refresh may already be sitting at the top of what page 2 used to look like. Skip
-  // buffered/cached snapshots entirely and wait for the real network response, so the
-  // scroll-to-top animation that follows renders the final content on its first paint
-  // instead of correcting itself after the animation completes.
+  // refresh may already be sitting at the top of what page 2 used to look like. The
+  // fresh network response is strongly preferred so the scroll-to-top animation
+  // renders final content on its first paint instead of correcting itself after.
+  //
+  // But a manual refresh job can keep the server busy enough that this response
+  // takes several seconds — rather than leaving the pager disabled for up to the
+  // full 12s fetch timeout (see startNetworkFetch()'s AbortController), give the
+  // network a shorter budget. If it hasn't answered by then and *any* snapshot is
+  // available — even one invalidated by a concurrent bumpContentEpoch() — show
+  // that now and silently correct it via applyPageCalibrationWhenActive() once the
+  // network catches up. Only genuinely wait it out if no snapshot exists at all.
+  const NAVIGATION_FRESH_BUDGET_MS = 2500;
   const mustBeFresh = pendingRelevantCount(activeFilter) > 0;
   if (mustBeFresh) {
-    const result = await startNetworkFetch();
+    const networkPromise = startNetworkFetch();
+    const settledWithinBudget = await withPromiseTimeout(networkPromise, null, NAVIGATION_FRESH_BUDGET_MS);
+    if (requestSeq !== pageRequestSequence) return null;
+    if (settledWithinBudget) {
+      if (settledWithinBudget.data) return settledWithinBudget.data;
+      const error = settledWithinBudget.error || new Error('load failed');
+      showToast(error.name === 'AbortError' ? '连接超时，请稍后重试' : '加载失败，请检查网络');
+      return null;
+    }
+    const staleSnapshot = peekStaleBufferedPage(page, activeFilter);
+    if (staleSnapshot) {
+      networkPromise.then(result => {
+        if (result.data) applyPageCalibrationWhenActive(result.data, page, activeFilter, requestSeq);
+      });
+      return staleSnapshot;
+    }
+    const result = await networkPromise;
     if (requestSeq !== pageRequestSequence) return null;
     if (result.data) return result.data;
     const error = result.error || new Error('load failed');
@@ -6126,7 +6177,11 @@ async function goToPage(page) {
   }
   const totalPages = Math.max(1, Math.ceil(currentTotal / PAGE_SIZE));
   if (page < 1 || page > totalPages) return;
-  cancelViewBoundRefreshWork();
+  // Deliberately does NOT cancelViewBoundRefreshWork() here: a manual refresh job
+  // keeps running server-side regardless of what the user does with the page, and
+  // its DOM-application paths are already gated by viewIsCurrent()/flowIsCurrent()
+  // (see triggerRefresh()) — navigating away just makes those guards fail closed
+  // instead of the refresh being silently aborted underneath the user.
   rememberCurrentListHistory();
   const activeFilter = filter;
   const navigationSeq = ++pageNavigationSequence;

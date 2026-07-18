@@ -87,6 +87,90 @@ await assert.rejects(
     )
 
 
+def test_prepare_page_navigation_must_be_fresh_uses_network_within_budget():
+    block = source_between("function peekStaleBufferedPage(", "// Full snapshot compatibility wrapper")
+    run_node(
+        block,
+        """
+context.pageRequestSequence = 0;
+context.pageRequestController = null;
+context.contentEpoch = 1;
+context.AbortController = class { constructor() { this.signal = {}; } abort() {} };
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
+context.fetchNewsPage = async () => ({ items: [{ id: 1 }], total: 1 });
+context.writeCachedNewsPage = async () => {};
+context.rememberBufferedPage = () => {};
+context.pendingRelevantCount = () => 1; // mustBeFresh
+context.withPromiseTimeout = async promise => promise; // network answers "immediately"
+context.showToast = () => { throw new Error('should not toast'); };
+context.applyPageCalibrationWhenActive = () => { throw new Error('should not calibrate'); };
+context.pageMemoryBuffer = new Map();
+const data = await context.preparePageNavigation(2, 'all');
+assert.deepEqual(data, { items: [{ id: 1 }], total: 1 });
+""",
+    )
+
+
+def test_prepare_page_navigation_falls_back_to_stale_snapshot_past_budget():
+    block = source_between("function peekStaleBufferedPage(", "// Full snapshot compatibility wrapper")
+    run_node(
+        block,
+        """
+context.pageRequestSequence = 0;
+context.pageRequestController = null;
+context.contentEpoch = 5;
+context.AbortController = class { constructor() { this.signal = {}; } abort() {} };
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
+let resolveNetwork;
+context.fetchNewsPage = () => new Promise(resolve => { resolveNetwork = resolve; });
+context.writeCachedNewsPage = async () => {};
+context.rememberBufferedPage = () => {};
+context.pendingRelevantCount = () => 1;
+// Simulates withPromiseTimeout's real race semantics losing to the timeout,
+// without needing a real timer in the test.
+context.withPromiseTimeout = async () => null;
+context.showToast = () => { throw new Error('should not toast'); };
+context.newsPageCacheKey = (page, filter) => page + ':' + filter;
+// A snapshot buffered under a now-stale epoch — still usable as a downgrade.
+context.pageMemoryBuffer = new Map([['2:all', { data: { items: [{ id: 'stale' }] }, epoch: 1 }]]);
+let calibrated = null;
+context.applyPageCalibrationWhenActive = data => { calibrated = data; };
+const data = await context.preparePageNavigation(2, 'all');
+assert.deepEqual(data, { items: [{ id: 'stale' }] });
+resolveNetwork({ items: [{ id: 'fresh' }] });
+await new Promise(resolve => setTimeout(resolve, 20));
+assert.deepEqual(calibrated, { items: [{ id: 'fresh' }] });
+""",
+    )
+
+
+def test_prepare_page_navigation_waits_out_network_when_no_stale_snapshot_exists():
+    block = source_between("function peekStaleBufferedPage(", "// Full snapshot compatibility wrapper")
+    run_node(
+        block,
+        """
+context.pageRequestSequence = 0;
+context.pageRequestController = null;
+context.contentEpoch = 5;
+context.AbortController = class { constructor() { this.signal = {}; } abort() {} };
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
+context.fetchNewsPage = async () => ({ items: [{ id: 'fresh' }] });
+context.writeCachedNewsPage = async () => {};
+context.rememberBufferedPage = () => {};
+context.pendingRelevantCount = () => 1;
+context.withPromiseTimeout = async () => null; // budget always "expires" in this test
+context.showToast = () => {};
+context.newsPageCacheKey = (page, filter) => page + ':' + filter;
+context.pageMemoryBuffer = new Map(); // nothing buffered — must fall through to network
+const data = await context.preparePageNavigation(2, 'all');
+assert.deepEqual(data, { items: [{ id: 'fresh' }] });
+""",
+    )
+
+
 def test_refresh_running_state_has_no_dot_overlay_but_keeps_sweep():
     assert ".refresh-btn.refresh-running::after" not in HTML
     assert ".refresh-btn.refresh-running::before" in HTML
@@ -396,7 +480,86 @@ context.promptStates = [];
 context.consumePendingNewArticles = () => context.consumed++;
 context.consumed = 0;
 context.loadCalls = 0;
+context.latestKnownTimestamp = 0;
+context.latestNewsTimestamp = () => 0;
+context.loadSinceCalls = [];
+context.loadSince = async timestamp => {{ context.loadSinceCalls.push(timestamp); return 0; }};
 """
+
+
+def test_manual_refresh_feeds_new_articles_into_pending_queue_when_not_on_page_one():
+    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    setup = trigger_context_setup(
+        "return { job_id: 'job-1', status: 'completed', new_count: 3 };"
+    )
+    run_node(
+        trigger,
+        setup
+        + """
+context.currentPage = 2;
+context.latestKnownTimestamp = 555;
+await context.triggerRefresh();
+assert.deepEqual(context.loadSinceCalls, [555]);
+assert.ok(context.toasts.includes('✅ 更新完成，新增 3 篇文章'));
+""",
+    )
+
+
+def test_manual_refresh_does_not_feed_pending_queue_when_already_latest():
+    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    setup = trigger_context_setup(
+        "return { job_id: 'job-1', status: 'completed', new_count: 0 };"
+    )
+    run_node(
+        trigger,
+        setup
+        + """
+context.currentPage = 2;
+await context.triggerRefresh();
+assert.deepEqual(context.loadSinceCalls, []);
+assert.ok(context.toasts.includes('✅ 已是最新'));
+""",
+    )
+
+
+def test_manual_refresh_does_not_feed_pending_queue_when_page_one_branch_already_applied():
+    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    setup = trigger_context_setup(
+        "return { job_id: 'job-1', status: 'completed', new_count: 4 };"
+    )
+    run_node(
+        trigger,
+        setup
+        + """
+context.loadNewsPage = async (page, options) => {
+  context.pageRequestSequence++;
+  context.pageRequestPendingSequence = context.pageRequestSequence;
+  context.pageRequestPendingSequence = 0;
+  return true;
+};
+await context.triggerRefresh();
+assert.deepEqual(context.loadSinceCalls, []);
+assert.equal(context.consumed, 1);
+""",
+    )
+
+
+def test_manual_refresh_pending_queue_feed_prefers_latest_known_timestamp_over_page_snapshot():
+    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    setup = trigger_context_setup(
+        "return { job_id: 'job-1', status: 'completed', new_count: 1 };"
+    )
+    run_node(
+        trigger,
+        setup
+        + """
+context.currentPage = 3;
+context.latestKnownTimestamp = 0; // nothing observed yet this session -> falls back
+context.latestNewsTimestamp = () => 42;
+await context.triggerRefresh();
+assert.deepEqual(context.loadSinceCalls, [42]);
+""",
+    )
 
 
 def test_manual_refresh_skips_apply_after_navigation_changed_then_returned():
@@ -668,6 +831,9 @@ context.refreshErrorMessage = error => error.message || 'failed';
 context.hasBlockingOverlayOpen = () => false;
 context.consumePendingNewArticles = () => {};
 context.loadNewsPage = async () => true;
+context.latestKnownTimestamp = 0;
+context.latestNewsTimestamp = () => 0;
+context.loadSince = async () => 0;
 context.runningStates = [];
 context.setRefreshRunning = running => {
   context.refreshInProgress = running;
@@ -2473,6 +2639,9 @@ context.refreshErrorMessage = error => error.message || error.error || 'failed';
 context.hasBlockingOverlayOpen = () => false;
 context.consumePendingNewArticles = () => {};
 context.loadNewsPage = async () => { throw new Error('page 2 must not calibrate'); };
+context.latestKnownTimestamp = 0;
+context.latestNewsTimestamp = () => 0;
+context.loadSince = async () => { throw new Error('new_count is 0, must not check for new articles'); };
 context.runningStates = [];
 context.setRefreshRunning = running => {
   context.refreshInProgress = running;
