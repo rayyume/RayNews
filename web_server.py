@@ -4344,4 +4344,13 @@ if __name__ == "__main__":
     print("[image-cache] Existing favorite image pinning thread started")
     port = int(os.environ.get("WEB_PORT", 8082))
     print(f"[web] RayNews Web Server listening on {port}")
-    app.run(host="127.0.0.1", port=port, debug=False)
+    # threaded=True: this Flask process serves /auth/, /ai/, /sources, /settings,
+    # /articles, /admin/ and /favorites behind the same nginx upstream. Without it,
+    # Werkzeug's dev server handles one HTTP request at a time — a single slow /ai/
+    # call (nginx allows up to 600s) or admin action blocks every other route,
+    # including the manual-refresh /auth/refresh/status poll, until nginx's 30s
+    # proxy_read_timeout on /auth/ gives up and returns an HTML error page (surfaced
+    # to users as "反代错误"). All shared mutable state here is already guarded for
+    # concurrent access (see the *_lock globals and check_same_thread=False above),
+    # so this was a real gap rather than an intentional serialization point.
+    app.run(host="127.0.0.1", port=port, debug=False, threaded=True)

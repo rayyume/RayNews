@@ -514,6 +514,19 @@ def test_auth_proxy_has_explicit_short_timeouts():
     assert "proxy_read_timeout 30s;" in block
 
 
+def test_web_server_runs_threaded_so_slow_requests_cannot_starve_refresh_polling():
+    # Without threaded=True, Werkzeug's dev server handles one HTTP request at a
+    # time for the whole process — a single slow /ai/ call (nginx allows up to
+    # 600s) or admin action then blocks every other route sharing this process,
+    # including /auth/refresh/status polling, until nginx's 30s proxy_read_timeout
+    # on /auth/ gives up and returns an HTML error page (surfaced to users as a
+    # reverse-proxy error on manual refresh). All shared mutable state in
+    # web_server.py is already lock-guarded for concurrent access, so this isn't
+    # an intentional serialization point.
+    source = (ROOT / "web_server.py").read_text(encoding="utf-8")
+    assert "app.run(host=\"127.0.0.1\", port=port, debug=False, threaded=True)" in source
+
+
 def test_article_images_retry_with_cache_busting_when_mobile_runtime_loses_them():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
 
