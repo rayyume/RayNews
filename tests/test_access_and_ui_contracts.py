@@ -698,6 +698,21 @@ def test_source_metadata_recovers_on_foreground_and_redrives_deep_link():
     assert "retrySourceDeepLink();" in retry
 
 
+def test_foreground_resume_uses_retrying_incremental_check():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    fg = html[html.index("function onReturnToForeground()"):
+              html.index("document.addEventListener('visibilitychange', () =>")]
+    assert "checkForNewArticlesAfterForegroundResume(cursor)" in fg
+    assert "loadSince(cursor);" not in fg
+    helper = html[
+        html.index("async function checkForNewArticlesAfterForegroundResume("):
+        html.index("let lastForegroundSyncAt = 0;")
+    ]
+    assert "result !== -1" in helper
+    assert "document.hidden" in helper
+    assert "latestKnownTimestamp || cursor" in helper
+
+
 def test_cold_start_retry_uses_a_fresh_abort_controller_and_preserves_cache():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     load = html[html.index("async function loadNewsPage("):html.index("function applyPageCalibrationWhenActive")]

@@ -26,6 +26,21 @@ function normalizedApiRequest(request) {
   });
 }
 
+// Marks a cached response served in place of a failed network request. Without
+// this, a network failure at the wrong moment (e.g. iOS PWA foreground resume,
+// before the network stack is back) is indistinguishable from a real 200 —
+// callers like loadSince() would read it as "no new articles" and stay quiet
+// instead of retrying. See index.html's isSwFallbackResponse() callers.
+function withSwFallbackMarker(cached) {
+  const headers = new Headers(cached.headers);
+  headers.set('X-SW-Fallback', '1');
+  return new Response(cached.body, {
+    status: cached.status,
+    statusText: cached.statusText,
+    headers,
+  });
+}
+
 self.addEventListener('install', event => {
   event.waitUntil(
     caches.open(CACHE).then(cache => {
@@ -102,7 +117,7 @@ self.addEventListener('fetch', event => {
         return network;
       }).catch(error => {
         return caches.open(API_CACHE).then(cache => cache.match(cacheRequest)).then(cached => {
-          if (cached) return cached;
+          if (cached) return withSwFallbackMarker(cached);
           throw error;
         });
       })

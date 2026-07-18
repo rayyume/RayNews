@@ -171,6 +171,149 @@ assert.deepEqual(data, { items: [{ id: 'fresh' }] });
     )
 
 
+def test_is_sw_fallback_response_reads_the_marker_header():
+    source = source_between("function isSwFallbackResponse(", "function swFallbackError(")
+    run_node(
+        source,
+        """
+const headers = new Map([['X-SW-Fallback', '1']]);
+assert.equal(context.isSwFallbackResponse({ headers: { get: k => headers.get(k) } }), true);
+assert.equal(context.isSwFallbackResponse({ headers: { get: () => null } }), false);
+assert.equal(context.isSwFallbackResponse({}), false);
+assert.equal(context.isSwFallbackResponse(null), false);
+""",
+    )
+
+
+def test_fetch_news_page_rejects_sw_fallback_responses():
+    source = source_between("function isSwFallbackResponse(", "function warmPageCoverImages")
+    run_node(
+        source,
+        """
+context.buildNewsPageParams = () => new URLSearchParams();
+context.fetch = async () => ({
+  ok: true,
+  headers: { get: name => (name === 'X-SW-Fallback' ? '1' : null) },
+  json: async () => ({ items: [{ id: 1 }] }),
+});
+await assert.rejects(
+  context.fetchNewsPage(1, 'all'),
+  error => error.name === 'SwFallbackError',
+);
+""",
+    )
+
+
+def test_load_since_treats_sw_fallback_as_a_failed_check_not_zero_new_articles():
+    incremental = source_between("async function loadSince(", "function rebuildSourceFilterGroups")
+    run_node(
+        incremental,
+        """
+context.refreshInProgress = false;
+context.INCREMENTAL_FETCH_LIMIT = 200;
+context.seenArticleIds = new Set();
+context.latestKnownTimestamp = 100;
+context.pendingNewArticleCount = 0;
+context.pendingNewItems = [];
+context.fetch = async () => ({
+  headers: { get: name => (name === 'X-SW-Fallback' ? '1' : null) },
+  json: async () => { throw new Error('must not parse a fallback response as data'); },
+});
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
+const added = await context.loadSince(100);
+// -1 (not 0): a stale SW-cache fallback must read as "couldn't check", not as
+// "checked, confirmed zero new articles" — see checkForNewArticlesAfterForegroundResume().
+assert.equal(added, -1);
+assert.equal(context.pendingNewItems.length, 0);
+""",
+    )
+
+
+def test_foreground_resume_check_retries_only_on_failed_checks():
+    helper = source_between(
+        "async function checkForNewArticlesAfterForegroundResume(",
+        "let lastForegroundSyncAt = 0;",
+    )
+    run_node(
+        helper,
+        """
+context.document = { hidden: false };
+context.delay = async () => {};
+context.latestKnownTimestamp = 0;
+const calls = [];
+context.loadSince = async cursor => { calls.push(cursor); return 0; };
+await context.checkForNewArticlesAfterForegroundResume(100);
+assert.deepEqual(calls, [100]); // confirmed zero -> no retry
+""",
+    )
+
+
+def test_foreground_resume_check_retries_up_to_twice_on_failure_then_gives_up():
+    helper = source_between(
+        "async function checkForNewArticlesAfterForegroundResume(",
+        "let lastForegroundSyncAt = 0;",
+    )
+    run_node(
+        helper,
+        """
+context.document = { hidden: false };
+const delays = [];
+context.delay = async ms => { delays.push(ms); };
+context.latestKnownTimestamp = 0;
+const calls = [];
+context.loadSince = async cursor => { calls.push(cursor); return -1; };
+await context.checkForNewArticlesAfterForegroundResume(100);
+assert.deepEqual(calls, [100, 100, 100]);
+assert.deepEqual(delays, [1500, 4000]);
+""",
+    )
+
+
+def test_foreground_resume_check_stops_retrying_once_backgrounded_again():
+    helper = source_between(
+        "async function checkForNewArticlesAfterForegroundResume(",
+        "let lastForegroundSyncAt = 0;",
+    )
+    run_node(
+        helper,
+        """
+context.document = { hidden: false };
+context.delay = async () => { context.document.hidden = true; };
+context.latestKnownTimestamp = 0;
+const calls = [];
+context.loadSince = async cursor => { calls.push(cursor); return -1; };
+await context.checkForNewArticlesAfterForegroundResume(100);
+// One initial attempt, one retry attempt scheduled — but backgrounded during the
+// delay before that retry's loadSince() call, so it's never made.
+assert.deepEqual(calls, [100]);
+""",
+    )
+
+
+def test_foreground_resume_check_uses_the_latest_known_timestamp_on_retry():
+    helper = source_between(
+        "async function checkForNewArticlesAfterForegroundResume(",
+        "let lastForegroundSyncAt = 0;",
+    )
+    run_node(
+        helper,
+        """
+context.document = { hidden: false };
+context.delay = async () => {};
+context.latestKnownTimestamp = 0;
+const calls = [];
+context.loadSince = async cursor => {
+  calls.push(cursor);
+  context.latestKnownTimestamp = 999; // simulates a concurrent successful check
+  return -1;
+};
+await context.checkForNewArticlesAfterForegroundResume(100);
+assert.deepEqual(calls, [100, 999, 999]);
+""",
+    )
+
+
 def test_refresh_running_state_has_no_dot_overlay_but_keeps_sweep():
     assert ".refresh-btn.refresh-running::after" not in HTML
     assert ".refresh-btn.refresh-running::before" in HTML
@@ -199,6 +342,25 @@ def test_mobile_article_header_has_a_dedicated_double_tap_top_scroll_zone():
 def test_service_worker_rethrows_network_errors_without_a_cached_response():
     source = (ROOT / "frontend" / "sw.js").read_text(encoding="utf-8")
     assert ".catch(error => { if (cached) return cached; throw error; })" in source
+
+
+def test_service_worker_tags_list_api_fallback_responses():
+    source = (ROOT / "frontend" / "sw.js").read_text(encoding="utf-8")
+    assert "function withSwFallbackMarker(cached)" in source
+    assert "headers.set('X-SW-Fallback', '1');" in source
+    list_api_block = source[
+        source.index("// List / other API: network-first"):
+        source.index("// ── Static assets: cache-first ──")
+    ]
+    assert "if (cached) return withSwFallbackMarker(cached);" in list_api_block
+    # The article-detail stale-while-revalidate path is a separate cache
+    # strategy — a genuinely fresh cache hit there, not a failure fallback — and
+    # must not be tagged.
+    article_detail_block = source[
+        source.index("Article detail: stale-while-revalidate"):
+        source.index("// List / other API: network-first")
+    ]
+    assert "withSwFallbackMarker" not in article_detail_block
 
 
 def source_between(start, end):
@@ -898,6 +1060,7 @@ context.bumpContentEpoch = () => { context.epochBumps = (context.epochBumps || 0
 context.fetch = async () => ({
   json: async () => ({ items: [{ id: 2, timestamp: 101, source: 's' }] }),
 });
+context.isSwFallbackResponse = () => false;
 context.setTimeout = () => 1;
 context.clearTimeout = () => {};
 context.refreshTodayArticleCount = () => { context.countRefreshes++; };
@@ -950,6 +1113,7 @@ context.bumpContentEpoch = () => { context.epochBumps = (context.epochBumps || 0
 context.fetch = async () => ({
   json: async () => ({ items: [{ id: 2, timestamp: 101, source: 's' }] }),
 });
+context.isSwFallbackResponse = () => false;
 context.setTimeout = () => 1;
 context.clearTimeout = () => {};
 context.refreshTodayArticleCount = () => { context.countRefreshes++; };
@@ -2070,6 +2234,99 @@ assert.equal(context.location.search, originalSearch);
     )
 
 
+def test_load_news_page_surfaces_a_toast_for_sw_fallback_failures_even_when_quiet_otherwise():
+    # loadNewsPageRequest() normally stays silent on failure when there's no cache
+    # to fall back on but the page already has news rendered and this wasn't a
+    # user-initiated load (routine background prefetch shouldn't nag the user).
+    # A SW-fallback failure is the one exception — see isSwFallbackResponse().
+    params = source_between("function buildNewsPageParams(", "function listUrlForState")
+    fetch_page = source_between("function isSwFallbackResponse(", "function warmPageCoverImages")
+    load_page = source_between("async function loadNewsPage(", "function applyPageCalibrationWhenActive")
+    run_node(
+        params + fetch_page + load_page,
+        """
+context.PAGE_SIZE = 30;
+context.sourceFilterGroups = {};
+context.contentEpoch = 0;
+context.pageRequestSequence = 0;
+context.pageRequestPendingSequence = 0;
+context.pageRequestController = null;
+context.news = [{ id: 1 }]; // page already has content -> not the empty cold-start case
+context.readCachedNewsPage = async () => null; // cache miss
+context.rememberBufferedPage = () => {};
+context.applyNewsPage = () => {};
+context.renderColdStartSkeleton = () => {};
+context.writeCachedNewsPage = async () => {};
+context.scheduleAdjacentPagePrefetch = () => {};
+context.setPageLoading = () => {};
+context.renderColdStartError = () => { throw new Error('must not hit the empty-list error path'); };
+context.toasts = [];
+context.showToast = message => context.toasts.push(message);
+context.currentTotal = 0;
+context.document = {
+  getElementById: () => ({ classList: { contains: () => false } }),
+};
+context.articleReturnInProgress = false;
+context.pendingLatestPage = null;
+context.buildNewsPageParams = () => new URLSearchParams();
+context.fetch = async () => ({
+  ok: true,
+  headers: { get: name => (name === 'X-SW-Fallback' ? '1' : null) },
+  json: async () => ({ items: [{ id: 2 }] }),
+});
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
+const loaded = await context.loadNewsPage(1, { activeFilter: 'all', useCache: false, forceNetwork: true });
+assert.equal(loaded, false);
+assert.deepEqual(context.toasts, ['内容可能不是最新，下拉或点击刷新重试']);
+""",
+    )
+
+
+def test_load_news_page_stays_quiet_for_ordinary_background_prefetch_failures():
+    # Regression guard for the branch above: a plain (non-SW-fallback) network
+    # error in the same "cache miss, news already showing, not user-initiated"
+    # shape must remain silent, same as before this change.
+    params = source_between("function buildNewsPageParams(", "function listUrlForState")
+    fetch_page = source_between("function isSwFallbackResponse(", "function warmPageCoverImages")
+    load_page = source_between("async function loadNewsPage(", "function applyPageCalibrationWhenActive")
+    run_node(
+        params + fetch_page + load_page,
+        """
+context.PAGE_SIZE = 30;
+context.sourceFilterGroups = {};
+context.contentEpoch = 0;
+context.pageRequestSequence = 0;
+context.pageRequestPendingSequence = 0;
+context.pageRequestController = null;
+context.news = [{ id: 1 }];
+context.readCachedNewsPage = async () => null;
+context.rememberBufferedPage = () => {};
+context.applyNewsPage = () => {};
+context.renderColdStartSkeleton = () => {};
+context.writeCachedNewsPage = async () => {};
+context.scheduleAdjacentPagePrefetch = () => {};
+context.setPageLoading = () => {};
+context.renderColdStartError = () => { throw new Error('must not hit the empty-list error path'); };
+context.toasts = [];
+context.showToast = message => context.toasts.push(message);
+context.currentTotal = 0;
+context.document = {
+  getElementById: () => ({ classList: { contains: () => false } }),
+};
+context.articleReturnInProgress = false;
+context.pendingLatestPage = null;
+context.buildNewsPageParams = () => new URLSearchParams();
+context.fetch = async () => { throw new TypeError('Failed to fetch'); };
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
+const loaded = await context.loadNewsPage(1, { activeFilter: 'all', useCache: false, forceNetwork: true });
+assert.equal(loaded, false);
+assert.deepEqual(context.toasts, []);
+""",
+    )
+
+
 def test_real_load_news_page_forwards_source_snapshot_to_fetch_query():
     params = source_between("function buildNewsPageParams(", "function listUrlForState")
     fetch_page = source_between("async function fetchNewsPage(", "function warmPageCoverImages")
@@ -2102,6 +2359,7 @@ context.document = {
 context.articleReturnInProgress = false;
 context.pendingLatestPage = null;
 context.requestUrl = '';
+context.isSwFallbackResponse = () => false;
 context.fetch = async (url, options) => {
   context.requestUrl = url;
   assert.ok(options.signal);

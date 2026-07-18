@@ -5073,10 +5073,27 @@ function applyNewsPage(data, page, activeFilter, { animate = false, preserveDom 
   }
 }
 
+// A Service Worker network-first fallback served a stale cached response in
+// place of a failed network request (see sw.js's withSwFallbackMarker()) — most
+// commonly right after an iOS PWA resumes from the background, before the
+// network stack is back up. Left unchecked, that looks exactly like a fresh 200
+// to callers — e.g. loadSince() would read it as "no new articles" and stay
+// quiet instead of retrying. Treat it the same as a network failure instead.
+function isSwFallbackResponse(resp) {
+  return !!(resp && resp.headers && resp.headers.get('X-SW-Fallback'));
+}
+
+function swFallbackError() {
+  const error = new Error('stale response served from Service Worker cache fallback');
+  error.name = 'SwFallbackError';
+  return error;
+}
+
 async function fetchNewsPage(page, activeFilter, signal, sourceSnapshot = null) {
   const params = buildNewsPageParams(page, activeFilter, sourceSnapshot);
   const resp = await fetch('/api/news?' + params.toString(), { signal });
   if (!resp.ok) throw new Error('HTTP ' + resp.status);
+  if (isSwFallbackResponse(resp)) throw swFallbackError();
   const data = await resp.json();
   if (data.error) throw new Error(data.error);
   return data;
@@ -5462,14 +5479,25 @@ async function loadNewsPageRequest(requestSeq, page = 1, {
         if (externalSignal) externalSignal.removeEventListener('abort', abortFromExternal);
       }
     }
+    // A SW-fallback failure means every retry was silently answered with a stale
+    // cached response — surfacing it gets a more specific message than a plain
+    // network error.
+    const isSwFallbackFailure = lastError && lastError.name === 'SwFallbackError';
     const message = lastError && lastError.name === 'AbortError'
       ? '连接超时，请稍后重试'
+      : isSwFallbackFailure
+      ? '内容可能不是最新，下拉或点击刷新重试'
       : '加载失败，请检查网络';
     if (cacheApplied) showToast(message);
     else if (!cacheApplied && !news.length) {
       (coldStartErrorHandler || renderColdStartError)(message);
     }
-    else if (userInitiated) showToast(message);
+    // Otherwise (cache missed, but the page already has news rendered from an
+    // earlier load, and this wasn't a user-initiated fetch): ordinarily silent —
+    // background prefetch failures shouldn't nag the user — except a SW-fallback
+    // failure specifically, which per isSwFallbackResponse()'s doc must never be
+    // silently mistaken for "up to date".
+    else if (userInitiated || isSwFallbackFailure) showToast(message);
     return cacheApplied;
   } finally {
     if (requestSeq === pageRequestSequence && showPageProgress) setPageLoading(false);
@@ -5616,6 +5644,7 @@ async function loadSince(timestamp, { forceApply = false, manual = false } = {})
     });
     const resp = await fetch('/api/news?' + params.toString(), { signal: controller.signal });
     clearTimeout(timeout);
+    if (isSwFallbackResponse(resp)) throw swFallbackError();
     const data = await resp.json();
     if (data.error) throw new Error(data.error);
     const newItems = (data.items || []).filter(item => {
@@ -5664,8 +5693,11 @@ async function loadSince(timestamp, { forceApply = false, manual = false } = {})
     }
     return added;
   } catch (e) {
-    // Incremental checks never replace or hide the currently visible page.
-    return 0;
+    // Incremental checks never replace or hide the currently visible page. -1
+    // (rather than 0) distinguishes "couldn't check" from "checked, found
+    // nothing new" — see checkForNewArticlesAfterForegroundResume(), which
+    // retries only on the former.
+    return -1;
   }
 }
 
@@ -7251,6 +7283,22 @@ window.addEventListener('scroll', markUserActivity, { passive: true });
 // articles and title updates whenever the page becomes visible/focused again.
 // iOS sometimes fires only 'focus' (not 'visibilitychange') on PWA resume, so
 // listen for both and dedupe the work behind a short guard.
+// Retries a foreground-resume incremental check that failed to even reach the
+// server — a dropped request or a stale Service Worker cache fallback (see
+// isSwFallbackResponse()) right as iOS PWA's network stack comes back online.
+// A genuine "checked, nothing new" (loadSince() returning 0) is NOT retried —
+// only -1 (loadSince()'s "couldn't check" sentinel) triggers a retry.
+async function checkForNewArticlesAfterForegroundResume(cursor) {
+  const RETRY_DELAYS_MS = [1500, 4000];
+  let result = await loadSince(cursor);
+  for (const delayMs of RETRY_DELAYS_MS) {
+    if (result !== -1 || document.hidden) return;
+    await delay(delayMs);
+    if (document.hidden) return;
+    result = await loadSince(latestKnownTimestamp || cursor);
+  }
+}
+
 let lastForegroundSyncAt = 0;
 function usesIpadPwaTrackpadNavigation() {
   return navigator.platform === 'MacIntel'
@@ -7265,7 +7313,7 @@ function onReturnToForeground() {
   pageVisibleSince = now;
   lastUserActivityAt = now;
   const cursor = latestKnownTimestamp || latestNewsTimestamp();
-  if (cursor > 0) loadSince(cursor);
+  if (cursor > 0) checkForNewArticlesAfterForegroundResume(cursor);
   // If source metadata never loaded (e.g. backgrounded through the whole retry
   // window), recover now so the drawer/labels — and any stuck source deep link —
   // don't stay broken until a manual refresh.
