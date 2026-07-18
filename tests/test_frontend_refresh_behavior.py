@@ -26,6 +26,12 @@ def test_logo_refresh_state_is_declared_before_click_handler_uses_it():
     assert "let logoRefreshInProgress = false;" in HTML
 
 
+def test_refresh_running_state_has_no_dot_overlay_but_keeps_sweep():
+    assert ".refresh-btn.refresh-running::after" not in HTML
+    assert ".refresh-btn.refresh-running::before" in HTML
+    assert "refreshSweep" in HTML
+
+
 def test_ipad_pwa_trackpad_back_gesture_is_isolated_from_other_platforms():
     assert "function usesIpadPwaTrackpadNavigation()" in HTML
     gesture = source_between("function usesIpadPwaTrackpadNavigation()", "document.addEventListener('visibilitychange'")
