@@ -19,12 +19,17 @@ def test_auto_translation_publishes_marker_after_translated_body_commit(monkeypa
         "_save_article_translation",
         lambda article_id, title=None, body_html=None: calls.append(
             ("article", article_id, title, body_html)
-        ),
+        ) or True,
     )
     monkeypatch.setattr(
         web_server,
         "_save_ai_result",
-        lambda article_id, **kwargs: calls.append(("marker", article_id, kwargs["translation"])),
+        lambda article_id, **kwargs: calls.append(("cache", article_id, kwargs["translation"])),
+    )
+    monkeypatch.setattr(
+        web_server,
+        "_publish_translation_update",
+        lambda article_id: calls.append(("marker", article_id)),
     )
 
     assert web_server._translate_article_background(
@@ -38,5 +43,5 @@ def test_auto_translation_publishes_marker_after_translated_body_commit(monkeypa
         {"api_key": "key", "endpoint": "https://example.test", "model": "model"},
     )
 
-    assert [call[0] for call in calls] == ["article", "marker"]
+    assert [call[0] for call in calls] == ["article", "cache", "marker"]
     assert calls[0][3] == "<p>中文正文</p>"

@@ -2111,9 +2111,9 @@ def _fetch_untranslated_articles(config: dict, limit: int = AUTO_TRANSLATION_BAT
 
 
 def _save_article_translation(article_id: int, title: str | None = None,
-                              body_html: str | None = None):
+                              body_html: str | None = None) -> bool:
     if not os.path.exists(NEWS_DB):
-        return
+        return False
     sets = []
     vals = []
     if title:
@@ -2122,16 +2122,17 @@ def _save_article_translation(article_id: int, title: str | None = None,
         sets.append("body_html = ?")
         vals.append(body_html)
     if not sets:
-        return
+        return False
     vals.append(article_id)
     conn = sqlite3.connect(NEWS_DB, timeout=30)
     try:
         conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute(f"UPDATE articles SET {', '.join(sets)} WHERE id = ?", vals)
+        result = conn.execute(f"UPDATE articles SET {', '.join(sets)} WHERE id = ?", vals)
         conn.commit()
         # _save_article_title_update() above already invalidates on a title
         # change; body_html has no such path, so cover it here too.
         _invalidate_refresh_server_cache(article_id)
+        return result.rowcount > 0
     finally:
         conn.close()
 
@@ -2191,12 +2192,16 @@ def _translate_article_background(article: dict, config: dict) -> bool:
     elif article.get("translate_title_needed"):
         translated_title = svc.translate_title(article.get("title", ""), "zh-CN")
 
-    _save_article_translation(article_id, title=translated_title, body_html=translated_html)
+    body_writeback_committed = _save_article_translation(
+        article_id, title=translated_title, body_html=translated_html
+    )
     # The browser's translation-update marker is visible independently of the
     # article detail row.  Publish it only after the translated body commit so
     # a poll can never evict a detail cache and then re-fetch English text.
     if translation_cache_data is not None:
         _save_ai_result(article_id, translation=translation_cache_data)
+        if body_writeback_committed:
+            _publish_translation_update(article_id)
     return bool(translated_title or translated_html)
 
 
@@ -3102,18 +3107,13 @@ def _save_ai_result(article_id: int, summary: str | None = None,
              title_summary, title_summary_error, title_summary_error_at,
              title_translation_error, title_translation_error_at,
              title_summary_provider, title_summary_model, title_summary_by_user_id)
-            VALUES (?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE strftime('%Y-%m-%d %H:%M:%f', 'now') END,
-                    ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END,
+            VALUES (?, ?, ?, NULL, ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END,
                     ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END,
                     ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END,
                     ?, ?, ?)
             ON CONFLICT(article_id) DO UPDATE SET
                 summary = COALESCE(excluded.summary, summary),
                 translation = COALESCE(excluded.translation, translation),
-                translation_updated_at = CASE
-                    WHEN excluded.translation IS NOT NULL THEN strftime('%Y-%m-%d %H:%M:%f', 'now')
-                    ELSE translation_updated_at
-                END,
                 summary_error = CASE
                     WHEN excluded.summary IS NOT NULL THEN NULL
                     WHEN excluded.summary_error IS NOT NULL THEN excluded.summary_error
@@ -3154,7 +3154,6 @@ def _save_ai_result(article_id: int, summary: str | None = None,
                 article_id,
                 summary,
                 translation,
-                translation,
                 summary_error[:500] if summary_error else None,
                 summary_error,
                 title_summary,
@@ -3178,6 +3177,35 @@ def _save_ai_result(article_id: int, summary: str | None = None,
 
 
 # ─── AI Result Cache (read-only) ──────────────────────────
+
+
+def _publish_translation_update(article_id: int):
+    """Publish a completed automatic full-body translation writeback.
+
+    This is intentionally separate from ``_save_ai_result`` because manual
+    browser translations are cache-only and must not invalidate article detail
+    caches before their underlying ``articles.body_html`` has changed.
+    """
+    if not os.path.exists(NEWS_DB):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(NEWS_DB)
+        _init_ai_results_table()
+        conn.execute(
+            """
+            INSERT INTO ai_results (article_id, translation_updated_at)
+            VALUES (?, strftime('%Y-%m-%d %H:%M:%f', 'now'))
+            ON CONFLICT(article_id) DO UPDATE SET
+                translation_updated_at = excluded.translation_updated_at,
+                updated_at = datetime('now')
+            """,
+            (article_id,),
+        )
+        conn.commit()
+    finally:
+        if conn:
+            conn.close()
 
 
 @app.route("/ai/translation-updates", methods=["GET"])
