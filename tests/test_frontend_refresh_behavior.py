@@ -400,7 +400,14 @@ def test_mobile_article_header_has_a_dedicated_double_tap_top_scroll_zone():
 
 def test_service_worker_rethrows_network_errors_without_a_cached_response():
     source = (ROOT / "frontend" / "sw.js").read_text(encoding="utf-8")
-    assert ".catch(error => { if (cached) return cached; throw error; })" in source
+    # Article detail is network-first: on a network failure it serves a cached
+    # copy only if one exists, otherwise it rethrows (never silently swallows).
+    article_detail_block = source[
+        source.index("// Article detail: network-first"):
+        source.index("// List / other API: network-first")
+    ]
+    assert "if (cached) return withSwFallbackMarker(cached);" in article_detail_block
+    assert "throw error;" in article_detail_block
 
 
 def test_service_worker_tags_list_api_fallback_responses():
@@ -412,14 +419,14 @@ def test_service_worker_tags_list_api_fallback_responses():
         source.index("// ── Static assets: cache-first ──")
     ]
     assert "if (cached) return withSwFallbackMarker(cached);" in list_api_block
-    # The article-detail stale-while-revalidate path is a separate cache
-    # strategy — a genuinely fresh cache hit there, not a failure fallback — and
-    # must not be tagged.
+    # Article detail is network-first too: its cached copy is only ever served
+    # as an offline failure fallback (never as a fresh hit), so — like the list —
+    # it must be tagged so callers can tell it apart from a live response.
     article_detail_block = source[
-        source.index("Article detail: stale-while-revalidate"):
+        source.index("// Article detail: network-first"):
         source.index("// List / other API: network-first")
     ]
-    assert "withSwFallbackMarker" not in article_detail_block
+    assert "if (cached) return withSwFallbackMarker(cached);" in article_detail_block
 
 
 def source_between(start, end):

@@ -92,21 +92,29 @@ self.addEventListener('fetch', event => {
   // ── API list: network-first + background cache (no cold-start delay) ──
   if (url.pathname.startsWith('/api/')) {
     const cacheRequest = normalizedApiRequest(event.request);
-    // Article detail: stale-while-revalidate (fast re-opens via SW cache)
+    // Article detail: network-first, cache fallback only when offline.
+    // Stale-while-revalidate here served the pre-translation body on the first
+    // read after an automatic translation (and again on every fresh session
+    // whose SW cache predates the translation), so a completed translation only
+    // appeared one open later. Fast in-session re-opens are already covered by
+    // the in-page articleBodyCache, so the SW cache only needs to be an offline
+    // fallback — mirroring the list handler below.
     if (/^\/api\/news\/\d+$/.test(url.pathname)) {
       event.respondWith(
-        caches.open(API_CACHE).then(cache => {
-          return cache.match(cacheRequest).then(cached => {
-            const fetchPromise = fetch(event.request).then(network => {
-              if (network.ok) {
-                const cloned = network.clone();
-                cache.put(cacheRequest, cloned).catch(err => {
-                  console.warn('SW: article cache.put failed', err);
-                });
-              }
-              return network;
-            }).catch(error => { if (cached) return cached; throw error; });
-            return cached || fetchPromise;
+        fetch(event.request).then(network => {
+          if (network.ok) {
+            const cloned = network.clone();
+            caches.open(API_CACHE).then(cache => {
+              cache.put(cacheRequest, cloned).catch(err => {
+                console.warn('SW: article cache.put failed', err);
+              });
+            });
+          }
+          return network;
+        }).catch(error => {
+          return caches.open(API_CACHE).then(cache => cache.match(cacheRequest)).then(cached => {
+            if (cached) return withSwFallbackMarker(cached);
+            throw error;
           });
         })
       );
