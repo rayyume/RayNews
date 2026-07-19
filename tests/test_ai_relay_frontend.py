@@ -22,8 +22,14 @@ def _auto_display_summary_block():
 
 
 def _translation_update_block():
-    start = HTML.index("function applyTranslationUpdate(")
+    start = HTML.index("function invalidateArticleBody(")
     end = HTML.index("function articleItemHtml(", start)
+    return HTML[start:end]
+
+
+def _article_detail_block():
+    start = HTML.index("function fetchArticleDetail(")
+    end = HTML.index("function renderArticleBody(", start)
     return HTML[start:end]
 
 
@@ -43,6 +49,11 @@ const context = {{
   authToken: 'tok',
   articleBodyCache: {{}},
   articleBodyPromises: {{}},
+  articleBodyControllers: {{}},
+  articleBodyRequestGenerations: {{}},
+  translationUpdateCursor: '',
+  translationUpdatePolling: false,
+  translationUpdatePollPromise: null,
   document: {{
     getElementById: id => id === 'overlay' ? overlay : (id === 'articleWrap' ? articleWrap : null),
   }},
@@ -258,7 +269,7 @@ assert.equal(body.innerHTML, '<p>English original</p>');
 
 
 def test_translation_update_invalidates_closed_cache_and_refreshes_open_article():
-    _run_translation_update("""
+    _run_translation_update(r"""
 context.articleBodyCache[41] = { body_html: '<p>stale</p>' };
 context.articleBodyPromises[41] = Promise.resolve({ body_html: '<p>stale</p>' });
 let detailCalls = 0;
@@ -288,3 +299,105 @@ assert.equal(context.articleBodyCache[42], undefined);
 assert.deepEqual(rendered, { wrap: context._articleWrap, data: { body_html: '<p>译文</p>' }, id: 42 });
 assert.equal(summaryCalls, 1);
 """)
+
+
+def test_translation_update_poll_initializes_cursor_with_authenticated_request():
+    _run_translation_update(r"""
+const requests = [];
+context.fetch = async (url, options) => {
+  requests.push({ url, options });
+  return { ok: true, json: async () => ({ items: [], cursor: '2026-07-19 10:00:00.000|9' }) };
+};
+await context.pollTranslationUpdates();
+assert.equal(requests.length, 1);
+assert.match(requests[0].url, /\/ai\/translation-updates\?since=&t=/);
+assert.equal(requests[0].options.headers.Authorization, 'Bearer tok');
+assert.equal(context.translationUpdateCursor, '2026-07-19 10:00:00.000|9');
+""")
+
+
+def test_first_detail_waits_for_translation_cursor_baseline():
+    script = rf"""
+const assert = require('assert');
+const vm = require('vm');
+const calls = [];
+const context = {{
+  console,
+  authToken: 'tok',
+  translationUpdateCursor: '',
+  translationUpdatePolling: false,
+  articleBodyCache: {{}},
+  articleBodyPromises: {{}},
+  articleBodyControllers: {{}},
+  articleBodyRequestGenerations: {{}},
+  translationUpdatePollPromise: null,
+  document: {{ getElementById: () => null }},
+  setTimeout,
+  clearTimeout,
+  AbortController,
+}};
+context.fetch = async (url, options) => {{
+  calls.push({{ url, options }});
+  if (url.startsWith('/ai/translation-updates')) {{
+    return {{ ok: true, json: async () => ({{ items: [], cursor: '2026-07-19 10:00:00.000|9' }}) }};
+  }}
+  return {{ ok: true, json: async () => ({{ body_html: '<p>current</p>' }}) }};
+}};
+vm.createContext(context);
+vm.runInContext({json.dumps(_article_detail_block() + _translation_update_block())}, context);
+(async () => {{
+  assert.deepEqual(await context.fetchArticleDetail(42), {{ body_html: '<p>current</p>' }});
+  assert.match(calls[0].url, /^\/ai\/translation-updates\?since=/);
+  assert.match(calls[1].url, /^\/api\/news\/42\?/);
+}})().catch(error => {{ console.error(error && error.stack ? error.stack : error); process.exitCode = 1; }});
+"""
+    result = subprocess.run(["node", "-e", script], cwd=ROOT,
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_translation_update_aborts_and_supersedes_inflight_stale_detail_request():
+    script = f"""
+const assert = require('assert');
+const vm = require('vm');
+const overlay = {{ dataset: {{ articleId: '42' }}, classList: {{ contains: name => name === 'open' }} }};
+const requests = [];
+let rendered = null;
+const context = {{
+  console,
+  authToken: 'tok',
+  translationUpdateCursor: 'cursor',
+  articleBodyCache: {{}},
+  articleBodyPromises: {{}},
+  articleBodyControllers: {{}},
+  articleBodyRequestGenerations: {{}},
+  translationUpdatePolling: false,
+  translationUpdatePollPromise: null,
+  document: {{ getElementById: id => id === 'overlay' ? overlay : (id === 'articleWrap' ? {{ id }} : null) }},
+  setTimeout,
+  clearTimeout,
+  AbortController,
+  renderArticleBody: (wrap, data, id) => {{ rendered = {{ data, id }}; }},
+  autoDisplaySummary: () => {{}},
+}};
+context.fetch = (url, options) => new Promise(resolve => requests.push({{ url, options, resolve }}));
+vm.createContext(context);
+vm.runInContext({json.dumps(_article_detail_block() + _translation_update_block())}, context);
+(async () => {{
+  const stale = context.fetchArticleDetail(42);
+  assert.equal(requests.length, 1);
+  context.applyTranslationUpdate({{ id: 42 }});
+  assert.equal(requests[0].options.signal.aborted, true);
+  assert.equal(requests.length, 2);
+  requests[1].resolve({{ ok: true, json: async () => ({{ body_html: '<p>译文</p>' }}) }});
+  await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+  requests[0].resolve({{ ok: true, json: async () => ({{ body_html: '<p>English stale</p>' }}) }});
+  await assert.rejects(stale);
+  await Promise.resolve(); await Promise.resolve();
+  assert.deepEqual(context.articleBodyCache[42], {{ body_html: '<p>译文</p>' }});
+  assert.deepEqual(rendered, {{ data: {{ body_html: '<p>译文</p>' }}, id: 42 }});
+}})().catch(error => {{ console.error(error && error.stack ? error.stack : error); process.exitCode = 1; }});
+"""
+    result = subprocess.run(["node", "-e", script], cwd=ROOT,
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr or result.stdout
