@@ -1020,6 +1020,8 @@ let activeArticleRequestId = 0;
 let searchDebounceTimer = null;
 let titleUpdateCursor = '';
 let titleUpdatePolling = false;
+let translationUpdateCursor = '';
+let translationUpdatePolling = false;
 let searchRequestController = null;
 let searchRequestSeq = 0;
 let searchPage = 1;
@@ -6010,6 +6012,48 @@ async function pollTitleUpdates() {
   }
 }
 
+function applyTranslationUpdate(item) {
+  const id = Number(item && item.id);
+  if (!Number.isFinite(id) || id <= 0) return;
+  delete articleBodyCache[id];
+  delete articleBodyPromises[id];
+
+  const overlay = document.getElementById('overlay');
+  if (!overlay || !overlay.classList.contains('open') || overlay.dataset.articleId !== String(id)) return;
+  fetchArticleDetail(id)
+    .then(data => {
+      const currentOverlay = document.getElementById('overlay');
+      if (!currentOverlay || !currentOverlay.classList.contains('open') || currentOverlay.dataset.articleId !== String(id)) return;
+      renderArticleBody(document.getElementById('articleWrap'), data, id);
+      autoDisplaySummary(id);
+    })
+    .catch(() => {
+      // Translation updates are opportunistic; never disturb reading.
+    });
+}
+
+async function pollTranslationUpdates() {
+  if (translationUpdatePolling || !authToken) return;
+  translationUpdatePolling = true;
+  try {
+    const resp = await fetch('/ai/translation-updates?since=' + encodeURIComponent(translationUpdateCursor) + '&t=' + Date.now(), {
+      headers: { 'Authorization': 'Bearer ' + authToken },
+    });
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (data.error) return;
+    translationUpdateCursor = data.cursor || translationUpdateCursor;
+    (data.items || []).forEach(item => {
+      const id = Number(item && item.id);
+      if (Number.isFinite(id) && id > 0) applyTranslationUpdate(item);
+    });
+  } catch (e) {
+    // Translation updates are opportunistic; never disturb reading.
+  } finally {
+    translationUpdatePolling = false;
+  }
+}
+
 function articleItemHtml(n) {
   return `
     <div class="item" data-id="${n.id}" onclick="openArticle(${n.id})">
@@ -7343,7 +7387,10 @@ setInterval(function() {
 }, 60000);
 setInterval(showLatestAfterIdle, 15000);
 setInterval(function() {
-  if (news.length > 0) pollTitleUpdates();
+  if (news.length > 0) {
+    pollTitleUpdates();
+    pollTranslationUpdates();
+  }
 }, 12000);
 
 ['pointerdown', 'touchstart', 'keydown', 'wheel'].forEach(eventName => {
@@ -7405,7 +7452,10 @@ function onReturnToForeground() {
       forceNetwork: true,
     });
   }
-  if (news.length > 0) pollTitleUpdates();
+  if (news.length > 0) {
+    pollTitleUpdates();
+    pollTranslationUpdates();
+  }
   if (typeof document !== 'undefined') {
     const overlay = document.getElementById('overlay');
     const articleId = Number(overlay && overlay.dataset.articleId);

@@ -21,6 +21,48 @@ def _auto_display_summary_block():
     return HTML[start:end]
 
 
+def _translation_update_block():
+    start = HTML.index("function applyTranslationUpdate(")
+    end = HTML.index("function articleItemHtml(", start)
+    return HTML[start:end]
+
+
+def _run_translation_update(body):
+    # Evaluate only translation-update handling with the article cache and overlay
+    # dependencies supplied explicitly, keeping this a browser contract test.
+    script = f"""
+const assert = require('assert');
+const vm = require('vm');
+const overlay = {{
+  dataset: {{}},
+  classList: {{ contains: () => false }},
+}};
+const articleWrap = {{ id: 'articleWrap' }};
+const context = {{
+  console,
+  authToken: 'tok',
+  articleBodyCache: {{}},
+  articleBodyPromises: {{}},
+  document: {{
+    getElementById: id => id === 'overlay' ? overlay : (id === 'articleWrap' ? articleWrap : null),
+  }},
+  fetchArticleDetail: async () => {{ throw new Error('fetchArticleDetail not stubbed'); }},
+  renderArticleBody: () => {{ throw new Error('renderArticleBody not stubbed'); }},
+  autoDisplaySummary: () => {{ throw new Error('autoDisplaySummary not stubbed'); }},
+  _overlay: overlay,
+  _articleWrap: articleWrap,
+}};
+vm.createContext(context);
+vm.runInContext({json.dumps(_translation_update_block())}, context);
+(async () => {{
+{body}
+}})().catch(error => {{ console.error(error && error.stack ? error.stack : error); process.exitCode = 1; }});
+"""
+    result = subprocess.run(["node", "-e", script], cwd=ROOT,
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def _run(body):
     # Minimal browser shims: an in-memory localStorage and a controllable fetch.
     script = f"""
@@ -212,4 +254,37 @@ context.aiTranslate = async () => { manualCalls++; };
 await context.autoDisplaySummary(42);
 assert.equal(manualCalls, 0);
 assert.equal(body.innerHTML, '<p>English original</p>');
+""")
+
+
+def test_translation_update_invalidates_closed_cache_and_refreshes_open_article():
+    _run_translation_update("""
+context.articleBodyCache[41] = { body_html: '<p>stale</p>' };
+context.articleBodyPromises[41] = Promise.resolve({ body_html: '<p>stale</p>' });
+let detailCalls = 0;
+context.fetchArticleDetail = async () => { detailCalls++; return { body_html: '<p>译文</p>' }; };
+context.applyTranslationUpdate({ id: 41 });
+assert.equal(context.articleBodyCache[41], undefined);
+assert.equal(context.articleBodyPromises[41], undefined);
+assert.equal(detailCalls, 0);
+
+context._overlay.dataset.articleId = '42';
+context._overlay.classList.contains = name => name === 'open';
+context.articleBodyCache[42] = { body_html: '<p>stale</p>' };
+let rendered = null;
+let summaryCalls = 0;
+context.fetchArticleDetail = async id => {
+  detailCalls++;
+  assert.equal(id, 42);
+  return { body_html: '<p>译文</p>' };
+};
+context.renderArticleBody = (wrap, data, id) => { rendered = { wrap, data, id }; };
+context.autoDisplaySummary = id => { summaryCalls++; assert.equal(id, 42); };
+context.applyTranslationUpdate({ id: 42 });
+await Promise.resolve();
+await Promise.resolve();
+assert.equal(detailCalls, 1);
+assert.equal(context.articleBodyCache[42], undefined);
+assert.deepEqual(rendered, { wrap: context._articleWrap, data: { body_html: '<p>译文</p>' }, id: 42 });
+assert.equal(summaryCalls, 1);
 """)
