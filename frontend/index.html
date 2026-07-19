@@ -3906,9 +3906,76 @@ async function callClaudeChat(config, messages, maxTokens, temperature) {
   return data.content[0].text;
 }
 
+// Origins whose AI endpoint we've learned can't be called directly from the browser
+// (no CORS headers — e.g. opencode.ai/zen) get routed through the same-origin server
+// relay. The decision is remembered per-origin in localStorage so we only pay one
+// failed direct attempt per endpoint, not one on every summarize/translate.
+function aiEndpointOrigin(endpoint) {
+  try { return new URL(endpoint).origin; } catch (e) { return ''; }
+}
+
+function aiRelayOrigins() {
+  try { return JSON.parse(localStorage.getItem('aiRelayOrigins') || '[]'); } catch (e) { return []; }
+}
+
+function aiRelayNeeded(endpoint) {
+  const origin = aiEndpointOrigin(endpoint);
+  return !!origin && aiRelayOrigins().includes(origin);
+}
+
+function markAiRelayNeeded(endpoint) {
+  const origin = aiEndpointOrigin(endpoint);
+  if (!origin) return;
+  const set = new Set(aiRelayOrigins());
+  if (set.has(origin)) return;
+  set.add(origin);
+  try { localStorage.setItem('aiRelayOrigins', JSON.stringify([...set])); } catch (e) {}
+}
+
+// A blocked CORS request (or a genuine network drop) rejects with a TypeError that has
+// no HTTP status — "Load failed" / "Failed to fetch" / "NetworkError". A real API error
+// (4xx/5xx) is thrown by callOpenAiChat/callClaudeChat as "AI API HTTP ..." and must NOT
+// be silently rerouted, so only the former triggers the relay fallback.
+function isCorsOrNetworkError(e) {
+  return (e instanceof TypeError)
+    || /load failed|failed to fetch|networkerror/i.test((e && e.message) || '');
+}
+
+// Same-origin relay: the server forwards the chat to the user's endpoint (no CORS) using
+// their stored config, so the api_key isn't sent from here.
+async function callAiRelay(messages, maxTokens, temperature) {
+  const resp = await fetch('/ai/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
+    body: JSON.stringify({ messages, max_tokens: maxTokens, temperature }),
+  });
+  if (!resp.ok) {
+    const data = await resp.json().catch(() => null);
+    throw new Error((data && data.error) || ('AI relay HTTP ' + resp.status));
+  }
+  const data = await resp.json();
+  return data.content;
+}
+
 async function aiChat(config, messages, maxTokens, temperature) {
-  if (config.provider_type === 'claude') return callClaudeChat(config, messages, maxTokens, temperature);
-  return callOpenAiChat(config, messages, maxTokens, temperature);
+  const direct = () => (config.provider_type === 'claude'
+    ? callClaudeChat(config, messages, maxTokens, temperature)
+    : callOpenAiChat(config, messages, maxTokens, temperature));
+
+  // CORS-friendly endpoints keep the zero-server-cost direct path.
+  if (aiRelayNeeded(config.endpoint)) {
+    return callAiRelay(messages, maxTokens, temperature);
+  }
+  try {
+    return await direct();
+  } catch (e) {
+    if (!isCorsOrNetworkError(e)) throw e;
+    // First time we've seen this endpoint refuse a browser-direct call — remember it
+    // and retry via the relay. The failed direct attempt burned no tokens (a CORS
+    // preflight fails before the POST is sent), so this doesn't double-charge.
+    markAiRelayNeeded(config.endpoint);
+    return callAiRelay(messages, maxTokens, temperature);
+  }
 }
 
 async function aiSummarize(articleId) {
