@@ -38,6 +38,65 @@ assert.equal(context.isTransientRefreshError(new TypeError('Failed to fetch')), 
 assert.equal(context.isTransientRefreshError(new Error('NetworkError when attempting to fetch resource')), true);
 assert.equal(context.isTransientRefreshError(Object.assign(new Error('slow'), { name: 'RefreshStatusTimeoutError' })), true);
 assert.equal(context.isTransientRefreshError(new Error('刷新失败，请稍后重试')), false);
+// A real 502/504 collapses its body into a code-less message ("refresh service
+// unavailable", nginx HTML) — classification must fall back to the numeric status.
+assert.equal(context.isTransientRefreshError(Object.assign(new Error('refresh service unavailable'), { status: 502 })), true);
+assert.equal(context.isTransientRefreshError(Object.assign(new Error('刷新接口返回了 HTML 页面'), { status: 504 })), true);
+assert.equal(context.isTransientRefreshError(Object.assign(new Error('bad request'), { status: 400 })), false);
+""",
+    )
+
+
+def test_parse_refresh_response_preserves_numeric_status_on_error():
+    source = source_between("async function parseRefreshResponse(", "function isTransientRefreshError(")
+    run_node(
+        source,
+        """
+context.refreshErrorMessage = (data) => (data && data.error) || 'refresh failed';
+// A real 502 JSON body from web_server.py's status endpoint.
+const jsonResp = {
+  ok: false,
+  status: 502,
+  text: async () => JSON.stringify({ error: 'refresh service unavailable' }),
+};
+await assert.rejects(
+  context.parseRefreshResponse(jsonResp),
+  error => error.status === 502 && error.message === 'refresh service unavailable',
+);
+// An nginx HTML 504 page must also carry the status through.
+const htmlResp = {
+  ok: false,
+  status: 504,
+  text: async () => '<html><body>504 Gateway Time-out</body></html>',
+};
+await assert.rejects(
+  context.parseRefreshResponse(htmlResp),
+  error => error.status === 504,
+);
+""",
+    )
+
+
+def test_bump_content_epoch_retains_memory_buffer_for_stale_downgrade():
+    source = source_between("function bumpContentEpoch(", "function rememberBufferedPage(")
+    run_node(
+        source,
+        """
+context.contentEpoch = 3;
+context.pagePrefetchPromises = new Map([['2:all', Promise.resolve()]]);
+let cleared = false;
+context.clearCachedNewsPages = () => { cleared = true; };
+// A snapshot buffered under the current epoch.
+context.pageMemoryBuffer = new Map([['2:all', { data: { items: [] }, epoch: 3 }]]);
+context.bumpContentEpoch();
+assert.equal(context.contentEpoch, 4);
+// Prefetch dedup slots + IndexedDB are hygiene-cleared...
+assert.equal(context.pagePrefetchPromises.size, 0);
+assert.equal(cleared, true);
+// ...but the in-memory buffer is deliberately retained so peekStaleBufferedPage()
+// still has a snapshot to downgrade to after a bump (correctness is upheld by the
+// per-record epoch check in readBufferedPage(), not by clearing).
+assert.equal(context.pageMemoryBuffer.size, 1);
 """,
     )
 
@@ -397,7 +456,7 @@ def test_poll_refresh_job_rejects_terminal_status_for_another_job():
         poll,
         """
 context.abortableDelay = async () => {};
-context.requestRefreshStatus = async () => ({
+context.requestRefreshStatusOnce = async () => ({
   job_id: 'other-job', status: 'completed', new_count: 99,
 });
 context.Date = { now: () => 0 };
@@ -410,7 +469,7 @@ await assert.rejects(
 
 
 def test_status_request_uses_abort_signal_with_caller_bounded_timeout():
-    request = source_between("async function requestRefreshStatus(", "async function pollRefreshJob(")
+    request = source_between("async function requestRefreshStatusOnce(", "async function pollRefreshJob(")
     run_node(
         request,
         """
@@ -429,7 +488,7 @@ context.fetch = async (url, options) => {
   fetchOptions = options;
   return {};
 };
-await context.requestRefreshStatus('job-1', 37);
+await context.requestRefreshStatusOnce('job-1', 37);
 assert.deepEqual(timers, [37]);
 assert.equal(fetchOptions.signal.marker, 'status-signal');
 """,
@@ -450,14 +509,37 @@ context.abortableDelay = async timeout => {
   assert.equal(timeout, 300);
   now = 600;
 };
-context.requestRefreshStatus = async (jobId, timeout) => {
+context.requestRefreshStatusOnce = async (jobId, timeout) => {
   assert.equal(jobId, 'job-1');
   requestedTimeout = timeout;
   return { job_id: 'job-1', status: 'completed', new_count: 2 };
 };
 const status = await context.pollRefreshJob('job-1', 1000);
 assert.equal(status.new_count, 2);
+// remaining (400) < 5s cap, so the shorter remaining wins.
 assert.equal(requestedTimeout, 400);
+""",
+    )
+
+
+def test_poll_refresh_job_caps_each_status_request_to_five_seconds():
+    poll = source_between("async function pollRefreshJob(", "function rebuildCategoryMap")
+    run_node(
+        poll,
+        """
+let now = 0;
+let requestedTimeout = null;
+context.Date = { now: () => now };
+context.abortableDelay = async () => { now += 300; };
+context.requestRefreshStatusOnce = async (jobId, timeout) => {
+  requestedTimeout = timeout;
+  return { job_id: 'job-1', status: 'completed', new_count: 1 };
+};
+// A huge remaining deadline must NOT become a single per-request timeout —
+// each status request is capped at 5s so one stuck request can't burn the
+// whole budget (and, before, get doubled by an inner retry).
+await context.pollRefreshJob('job-1', 200000);
+assert.equal(requestedTimeout, 5000);
 """,
     )
 
@@ -475,7 +557,7 @@ context.abortableDelay = async timeout => {
   now += 100;
 };
 let call = 0;
-context.requestRefreshStatus = async () => {
+context.requestRefreshStatusOnce = async () => {
   call++;
   if (call < 3) return { job_id: 'job-1', status: 'running' };
   return { job_id: 'job-1', status: 'completed', new_count: 0 };
@@ -496,7 +578,7 @@ context.Date = { now: () => now };
 context.abortableDelay = async () => { now += 100; };
 context.isTransientRefreshError = error => error && error.transient === true;
 let call = 0;
-context.requestRefreshStatus = async () => {
+context.requestRefreshStatusOnce = async () => {
   call++;
   if (call <= 2) throw Object.assign(new Error('Load failed'), { transient: true });
   return { job_id: 'job-1', status: 'completed', new_count: 5 };
@@ -518,7 +600,7 @@ context.Date = { now: () => now };
 context.abortableDelay = async () => { now += 100; };
 context.isTransientRefreshError = error => error && error.transient === true;
 let call = 0;
-context.requestRefreshStatus = async () => {
+context.requestRefreshStatusOnce = async () => {
   call++;
   throw Object.assign(new Error('Load failed'), { transient: true });
 };
@@ -541,7 +623,7 @@ context.Date = { now: () => now };
 context.abortableDelay = async () => { now += 100; };
 context.isTransientRefreshError = () => false;
 let call = 0;
-context.requestRefreshStatus = async () => {
+context.requestRefreshStatusOnce = async () => {
   call++;
   throw new Error('刷新失败，请稍后重试');
 };
@@ -555,7 +637,7 @@ assert.equal(call, 1);
 
 
 def test_status_poll_targets_exact_job_and_links_fetch_to_flow_abort():
-    request = source_between("async function requestRefreshStatus(", "async function pollRefreshJob(")
+    request = source_between("async function requestRefreshStatusOnce(", "async function pollRefreshJob(")
     run_node(
         request,
         """
@@ -575,7 +657,7 @@ context.fetch = (url, options) => {
 };
 context.setTimeout = () => 9;
 context.clearTimeout = () => {};
-const pending = context.requestRefreshStatus('job/a', 5000, flow.signal);
+const pending = context.requestRefreshStatusOnce('job/a', 5000, flow.signal);
 await Promise.resolve();
 assert.equal(fetchUrl, '/auth/refresh/status?job_id=job%2Fa');
 assert.notEqual(fetchSignal, flow.signal);
@@ -598,7 +680,7 @@ context.abortableDelay = async (timeout, signal) => {
   assert.equal(signal, flow.signal);
   now += timeout;
 };
-context.requestRefreshStatus = async (jobId, timeout, signal) => {
+context.requestRefreshStatusOnce = async (jobId, timeout, signal) => {
   calls.push([jobId, timeout, signal]);
   return { job_id: jobId, status: 'completed', new_count: 0 };
 };

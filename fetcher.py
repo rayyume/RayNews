@@ -69,8 +69,11 @@ REQUEST_TIMEOUT = 20
 # Telegram list-page fetch's REQUEST_TIMEOUT allows. Both fetch_telegraph() and
 # fetch_wechat_article() already catch their own exceptions and return None on
 # failure, so a timeout here just falls back to the plain Telegram excerpt for
-# this cycle (see process_message()) — it doesn't fail the message or block
-# last_seen_id from advancing, so there's no automatic retry of the full text.
+# this cycle (see process_message()) without failing the message or blocking
+# last_seen_id. That fallback is no longer permanent: backfill_missing_fulltext()
+# re-fetches recent Telegraph articles still stuck on the excerpt on subsequent
+# cycles, so keeping this timeout short trades a little first-paint latency for
+# speed without costing article quality.
 FULLTEXT_TIMEOUT = 10
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 HEADERS = {"User-Agent": USER_AGENT}
@@ -168,6 +171,73 @@ def upsert_articles(conn: sqlite3.Connection, entries: list[dict], sync_sources:
     conn.commit()
     log.info(f"SQLite: upserted {len(rows)} articles"
              f" (total: {conn.execute('SELECT COUNT(*) FROM articles').fetchone()[0]})")
+
+
+# A Telegraph full-text fetch that fails on the cycle an article first arrives (e.g.
+# FULLTEXT_TIMEOUT tripped on a briefly-slow article page, or a transient 5xx) leaves the
+# article stored with has_full_content=0 and only the Telegram excerpt. The main loop
+# never revisits it — last_seen_id advances past it — so without this pass that downgrade
+# is permanent. Re-fetch a bounded batch of recent such articles at the end of each cycle
+# so a transient blip costs full text for at most a cycle or two, not forever. The window
+# is bounded by recency rather than a per-article retry counter: a genuinely dead
+# Telegraph URL simply ages out of BACKFILL_MAX_AGE_DAYS instead of being retried forever
+# (and no schema migration is needed to track attempts).
+BACKFILL_MAX_AGE_DAYS = 3
+BACKFILL_LIMIT = 40
+
+
+def backfill_missing_fulltext(conn: sqlite3.Connection) -> int:
+    """Retry Telegraph full-text for recent articles still stuck on the excerpt fallback.
+
+    Returns the number of articles upgraded to full content this cycle.
+    """
+    cutoff = int(time.time()) - BACKFILL_MAX_AGE_DAYS * 86400
+    rows = conn.execute(
+        """SELECT id, telegraph_url, thumb, origin_source
+             FROM articles
+            WHERE has_full_content = 0
+              AND telegraph_url != ''
+              AND timestamp >= ?
+            ORDER BY timestamp DESC
+            LIMIT ?""",
+        (cutoff, BACKFILL_LIMIT),
+    ).fetchall()
+    if not rows:
+        return 0
+    updated = 0
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {
+            executor.submit(fetch_telegraph, row["telegraph_url"]): row for row in rows
+        }
+        for future in as_completed(futures):
+            row = futures[future]
+            try:
+                result = future.result()
+            except Exception as e:
+                log.warning(f"  Backfill fetch failed (id={row['id']}): {e}")
+                continue
+            if not result:
+                continue
+            # Mirror process_message()'s full-text application: keep an existing thumb,
+            # otherwise adopt the article's first image; prefer a Telegraph-detected
+            # source when one was found, else keep what we already had.
+            new_thumb = row["thumb"] or (result["images"][0] if result["images"] else "")
+            origin = result.get("detected_source", "") or row["origin_source"]
+            conn.execute(
+                """UPDATE articles
+                      SET has_full_content = 1,
+                          body_html = ?,
+                          thumb = ?,
+                          origin_source = ?,
+                          summary = ''
+                    WHERE id = ?""",
+                (result["body_html"], new_thumb, origin, row["id"]),
+            )
+            updated += 1
+    if updated:
+        conn.commit()
+        log.info(f"Backfilled full text for {updated}/{len(rows)} article(s)")
+    return updated
 
 
 def write_fetch_progress(inserted: int, total: int) -> None:
@@ -1155,6 +1225,14 @@ def run():
             # sync_sources=True) would otherwise needlessly repeat.
             ensure_article_sources(conn)
             conn.commit()
+        # Retry any recent articles whose Telegraph full text failed on arrival, so a
+        # transient timeout/5xx doesn't leave them permanently downgraded to the excerpt
+        # (see backfill_missing_fulltext()). Isolated in its own try so a backfill hiccup
+        # can never undo the sync above.
+        try:
+            backfill_missing_fulltext(conn)
+        except Exception as e:
+            log.error(f"Full-text backfill failed: {e}")
         conn.close()
     except Exception as e:
         log.error(f"SQLite write failed: {e}")

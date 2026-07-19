@@ -173,14 +173,19 @@ def test_refresh_article_detail_cache_computes_once_per_article():
     assert "_article_cache_inflight[article_id]" in source
 
 
-def test_news_db_connection_initialization_uses_lock():
+def test_news_db_connection_is_thread_local_not_process_wide():
+    # The news.db connection must be per-thread: a single process-wide connection
+    # shared across Werkzeug's request threads let concurrent cursors/transactions
+    # (a slow /ai/ or admin write vs. a /auth/refresh/status read) corrupt each other.
     source = (ROOT / "web_server.py").read_text(encoding="utf-8")
-    news_conn_pos = source.index("_news_conn = None")
+    local_pos = source.index("_news_conn_local = threading.local()")
     get_news_pos = source.index("def _get_news_db()")
-    block = source[news_conn_pos:get_news_pos + 500]
+    block = source[local_pos:get_news_pos + 500]
 
-    assert "_news_conn_lock = threading.Lock()" in block
-    assert "with _news_conn_lock:" in block
+    assert "getattr(_news_conn_local, \"conn\", None)" in block
+    assert "_news_conn_local.conn = conn" in block
+    # No resurrected process-wide shared connection.
+    assert "_news_conn = None" not in source
 
 
 def test_ai_result_save_uses_single_upsert_statement():

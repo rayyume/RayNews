@@ -1353,13 +1353,19 @@ async function parseRefreshResponse(resp) {
   } catch (e) {
     const trimmed = text.trim();
     if (trimmed.startsWith('<')) {
-      throw new Error('刷新接口返回了 HTML 页面，请检查服务是否超时或反向代理是否生效');
+      // e.g. an nginx 502/504 HTML error page — carry the status so a transient
+      // upstream blip is retried rather than aborting the refresh on first hit.
+      throw Object.assign(new Error('刷新接口返回了 HTML 页面，请检查服务是否超时或反向代理是否生效'), { status: resp.status });
     }
-    throw new Error('刷新接口返回格式错误');
+    throw Object.assign(new Error('刷新接口返回格式错误'), { status: resp.status });
   }
   if (data && data.status === 'skipped') return data;
   if (!resp.ok || data.status === 'error') {
-    throw new Error(refreshErrorMessage(data, resp.status));
+    // Keep the numeric HTTP status on the error object — parseRefreshResponse
+    // collapses a 502/504 body ("refresh service unavailable", nginx HTML, …)
+    // into a human-readable message that no longer contains the status code, so
+    // isTransientRefreshError() must classify by status rather than by regex.
+    throw Object.assign(new Error(refreshErrorMessage(data, resp.status)), { status: resp.status });
   }
   return data;
 }
@@ -1367,6 +1373,8 @@ async function parseRefreshResponse(resp) {
 function isTransientRefreshError(error) {
   if (!error || error.name === 'AbortError') return false;
   if (error.name === 'RefreshStatusTimeoutError') return true;
+  const status = Number(error.status);
+  if (status >= 500 && status < 600) return true;
   return /network|failed to fetch|load failed|timeout|temporar|HTTP 5\d\d/i.test(error.message || '');
 }
 
@@ -1390,17 +1398,6 @@ async function requestRefreshOnce(signal) {
     });
     return parseRefreshResponse(resp);
   }, signal);
-}
-
-async function requestRefreshStatus(jobId, timeoutMs = 5000, flowSignal = null) {
-  try {
-    return await requestRefreshStatusOnce(jobId, timeoutMs, flowSignal);
-  } catch (error) {
-    if (error && error.name === 'AbortError') throw error;
-    if (!isTransientRefreshError(error)) throw error;
-    await abortableDelay(800, flowSignal);
-    return requestRefreshStatusOnce(jobId, timeoutMs, flowSignal);
-  }
 }
 
 async function requestRefreshStatusOnce(jobId, timeoutMs = 5000, flowSignal = null) {
@@ -1452,7 +1449,11 @@ async function pollRefreshJob(jobId, timeoutMs = 135000, flowSignal = null, onPr
     if (remainingMs <= 0) break;
     let status;
     try {
-      status = await requestRefreshStatus(jobId, remainingMs, flowSignal);
+      // Cap each individual status request at 5s (never the whole remaining
+      // deadline) — a stuck request otherwise burns the full budget, and the
+      // outer loop below already handles transient failures/retries against the
+      // deadline, so the request no longer retries internally.
+      status = await requestRefreshStatusOnce(jobId, Math.min(5000, remainingMs), flowSignal);
     } catch (error) {
       // The job keeps running server-side regardless of whether this particular
       // status request landed — a single blip (dropped request, per-request
@@ -5118,12 +5119,15 @@ function warmPageCoverImages(data) {
 // no longer matches the live one — that per-record check, not this function, is what
 // actually guarantees pagination never hands out a stale page; it holds regardless of
 // when a bump lands relative to an in-flight read/write, so there's no TOCTOU window.
-// Clearing the buffer/prefetch map/IndexedDB store here is just hygiene on top of that
-// (reclaim memory, stop reusing now-pointless in-flight dedup slots) — not required
-// for correctness.
+// Clearing the prefetch map/IndexedDB store here is just hygiene on top of that
+// (stop reusing now-pointless in-flight dedup slots, reclaim storage) — not required
+// for correctness. The in-memory pageMemoryBuffer is deliberately *not* cleared: it's
+// bounded (PAGE_MEMORY_BUFFER_LIMIT LRU) and its now-stale entries are exactly what
+// preparePageNavigation()'s 2.5s downgrade budget reads via peekStaleBufferedPage() to
+// avoid freezing the pager for up to 12s while a slow manual refresh runs. Correctness
+// still holds because readBufferedPage() rejects any entry whose epoch != contentEpoch.
 function bumpContentEpoch() {
   contentEpoch++;
-  pageMemoryBuffer.clear();
   pagePrefetchPromises.clear();
   clearCachedNewsPages();
 }

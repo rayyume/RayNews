@@ -405,15 +405,16 @@ def test_list_request_pending_marker_is_owned_by_matching_request():
 
 def test_refresh_status_polling_uses_authenticated_get_and_bounded_wait():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
-    assert "async function requestRefreshStatus(" in html
+    assert "async function requestRefreshStatusOnce(" in html
     assert "async function pollRefreshJob(" in html
-    request = html[html.index("async function requestRefreshStatus("):html.index("async function pollRefreshJob(")]
+    request = html[html.index("async function requestRefreshStatusOnce("):html.index("async function pollRefreshJob(")]
     poll = html[html.index("async function pollRefreshJob("):html.index("function rebuildCategoryMap")]
     assert "fetch('/auth/refresh/status?job_id=' + encodeURIComponent(jobId)" in request
     assert "'Authorization': 'Bearer ' + authToken" in request
     assert "cache: 'no-store'" in request
     assert "await abortableDelay(Math.min(delayMs, beforeDelayMs), flowSignal);" in poll
-    assert "status = await requestRefreshStatus(jobId, remainingMs, flowSignal);" in poll
+    # Each status request is capped at 5s (never the full remaining deadline).
+    assert "status = await requestRefreshStatusOnce(jobId, Math.min(5000, remainingMs), flowSignal);" in poll
     assert "if (status.job_id !== jobId)" in poll
     assert "status.status === 'completed' || status.status === 'failed'" in poll
     assert "throw new Error('刷新状态查询超时，请稍后查看最新文章');" in poll
@@ -490,7 +491,7 @@ def test_manual_refresh_uses_structured_error_messages():
     assert "function refreshErrorMessage" in html
     assert "async function parseRefreshResponse" in html
     assert "async function requestRefreshOnce(signal)" in html
-    assert "async function requestRefreshStatus(" in html
+    assert "async function requestRefreshStatusOnce(" in html
     assert "async function pollRefreshJob(jobId" in html
     assert "await requestRefreshOnce(flowController.signal);" in trigger_block
     assert "await pollRefreshJob(data.job_id, 135000, flowController.signal, handleRefreshProgress);" in trigger_block
@@ -514,17 +515,19 @@ def test_auth_proxy_has_explicit_short_timeouts():
     assert "proxy_read_timeout 30s;" in block
 
 
-def test_web_server_runs_threaded_so_slow_requests_cannot_starve_refresh_polling():
-    # Without threaded=True, Werkzeug's dev server handles one HTTP request at a
-    # time for the whole process — a single slow /ai/ call (nginx allows up to
-    # 600s) or admin action then blocks every other route sharing this process,
-    # including /auth/refresh/status polling, until nginx's 30s proxy_read_timeout
-    # on /auth/ gives up and returns an HTML error page (surfaced to users as a
-    # reverse-proxy error on manual refresh). All shared mutable state in
-    # web_server.py is already lock-guarded for concurrent access, so this isn't
-    # an intentional serialization point.
+def test_web_server_uses_per_thread_news_db_connection():
+    # The real cross-request stall behind "反代错误" wasn't single-threaded serving
+    # (threaded=True is already Flask's default, so it was never single-threaded) — it
+    # was the process-wide shared news.db connection several request threads drove at
+    # once, letting a slow /ai/ or admin write interleave with a /auth/refresh/status
+    # read on the same connection/transaction. Each thread must get its own connection.
     source = (ROOT / "web_server.py").read_text(encoding="utf-8")
     assert "app.run(host=\"127.0.0.1\", port=port, debug=False, threaded=True)" in source
+    # No process-wide shared connection object; connections are thread-local.
+    assert "_news_conn_local = threading.local()" in source
+    assert "_news_conn = None" not in source
+    assert "conn = getattr(_news_conn_local, \"conn\", None)" in source
+    assert "_news_conn_local.conn = conn" in source
 
 
 def test_article_images_retry_with_cache_busting_when_mobile_runtime_loses_them():

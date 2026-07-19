@@ -513,20 +513,28 @@ def _get_article_meta(article_id: int) -> dict | None:
         return None
 
 
-_news_conn = None
-_news_conn_lock = threading.Lock()
+# One SQLite connection per request-handling thread. Werkzeug's threaded server hands
+# each request its own thread; a single process-wide connection shared across them meant
+# several threads driving one connection's cursors — and, worse, one connection-wide
+# transaction — concurrently. An admin write on /admin/* could then interleave with
+# another thread's read or commit and corrupt transaction state ("cannot commit - no
+# transaction"), surface a half-written row (dirty read), or hit "database is locked".
+# A thread-local connection is the sqlite3-recommended pattern: each thread owns its own
+# and it's finalized when the thread ends. WAL mode (set by the fetcher) lets these
+# coexist cleanly — concurrent readers never block and writers serialize at the SQLite
+# level rather than clobbering a shared Python-level transaction.
+_news_conn_local = threading.local()
 
 
 def _get_news_db():
-    """Persistent connection to news.db for batch queries."""
-    global _news_conn
-    if _news_conn is None and os.path.exists(NEWS_DB):
-        with _news_conn_lock:
-            if _news_conn is None and os.path.exists(NEWS_DB):
-                _news_conn = sqlite3.connect(NEWS_DB, check_same_thread=False)
-                _news_conn.row_factory = sqlite3.Row
-                _ensure_news_schema(_news_conn)
-    return _news_conn
+    """Per-thread persistent connection to news.db for batch queries."""
+    conn = getattr(_news_conn_local, "conn", None)
+    if conn is None and os.path.exists(NEWS_DB):
+        conn = sqlite3.connect(NEWS_DB, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        _ensure_news_schema(conn)
+        _news_conn_local.conn = conn
+    return conn
 
 
 def _get_article_meta_batch(article_ids: list[int]) -> dict[int, dict]:
@@ -4344,13 +4352,12 @@ if __name__ == "__main__":
     print("[image-cache] Existing favorite image pinning thread started")
     port = int(os.environ.get("WEB_PORT", 8082))
     print(f"[web] RayNews Web Server listening on {port}")
-    # threaded=True: this Flask process serves /auth/, /ai/, /sources, /settings,
-    # /articles, /admin/ and /favorites behind the same nginx upstream. Without it,
-    # Werkzeug's dev server handles one HTTP request at a time — a single slow /ai/
-    # call (nginx allows up to 600s) or admin action blocks every other route,
-    # including the manual-refresh /auth/refresh/status poll, until nginx's 30s
-    # proxy_read_timeout on /auth/ gives up and returns an HTML error page (surfaced
-    # to users as "反代错误"). All shared mutable state here is already guarded for
-    # concurrent access (see the *_lock globals and check_same_thread=False above),
-    # so this was a real gap rather than an intentional serialization point.
+    # threaded=True is passed explicitly for clarity, but it's already Flask's default
+    # (Flask.run() does options.setdefault("threaded", True)), so it does NOT by itself
+    # change concurrency — this process has always served /auth/, /ai/, /admin/ etc. on a
+    # thread per request. The real cross-request stall wasn't single-threaded serving; it
+    # was the process-wide shared news.db connection several of those threads drove at
+    # once (a slow /ai/ or admin write interleaving with a /auth/refresh/status read on
+    # the same connection/transaction). That is fixed by the per-thread connection in
+    # _get_news_db() above; this flag just documents the intended serving model.
     app.run(host="127.0.0.1", port=port, debug=False, threaded=True)

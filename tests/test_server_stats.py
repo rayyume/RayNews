@@ -152,7 +152,9 @@ def test_purge_dry_run_excludes_favorites(tmp_path, monkeypatch):
     conn.close()
 
     monkeypatch.setattr(web_server, "NEWS_DB", str(db_path))
-    monkeypatch.setattr(web_server, "_news_conn", None)
+    # Fresh per-thread connection store so _get_news_db() opens the patched NEWS_DB
+    # rather than reusing a connection this thread opened for an earlier test.
+    monkeypatch.setattr(web_server, "_news_conn_local", web_server.threading.local())
     # Article 2 is favorited by some user -> must be excluded.
     monkeypatch.setattr(web_server, "get_all_favorite_article_ids", lambda: [2])
 
