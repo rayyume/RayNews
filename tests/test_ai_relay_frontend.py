@@ -10,7 +10,7 @@ HTML = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
 
 
 def _ai_chat_block():
-    start = HTML.index("function aiEndpointOrigin(")
+    start = HTML.index("function isDeepSeekModel(")
     end = HTML.index("async function aiSummarize(")
     return HTML[start:end]
 
@@ -57,6 +57,24 @@ const out = await context.aiChat(
 assert.equal(out, 'direct-answer');
 assert.equal(relayed, false);
 assert.equal(context._store.aiRelayOrigins, undefined);  // origin not marked
+""")
+
+
+def test_browser_direct_deepseek_request_disables_thinking():
+    _run("""
+const calls = [];
+context.fetch = async (url, opts) => {
+  calls.push({ url, body: JSON.parse(opts.body) });
+  return { ok: true, json: async () => ({ choices: [{ message: { content: 'ok' } }] }) };
+};
+const deepseekCfg = { endpoint: 'https://opencode.ai/zen/go/v1', api_key: 'key', model: 'DeepSeek-V4-Flash' };
+assert.equal(await context.callOpenAiChat(deepseekCfg, [{ role: 'user', content: 'hi' }], 1024, 0.3), 'ok');
+assert.deepEqual(calls[0].body.thinking, { type: 'disabled' });
+
+calls.length = 0;
+const openAiCfg = { endpoint: 'https://api.openai.com/v1', api_key: 'key', model: 'gpt-4o-mini' };
+await context.callOpenAiChat(openAiCfg, [{ role: 'user', content: 'hi' }], 1024, 0.3);
+assert.equal('thinking' in calls[0].body, false);
 """)
 
 

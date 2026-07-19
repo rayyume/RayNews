@@ -56,6 +56,22 @@ def test_openai_normal_content_is_returned(monkeypatch):
     assert _svc().chat([{"role": "user", "content": "hi"}]) == "  hello  "
 
 
+def test_deepseek_openai_request_forces_non_thinking(monkeypatch):
+    captured = _patch_post(monkeypatch, {"choices": [{"message": {"content": "ok"}}]})
+    AIService("key", "https://opencode.ai/zen/go/v1", "deepseek-v4-flash").chat(
+        [{"role": "user", "content": "hi"}]
+    )
+    assert captured["body"]["thinking"] == {"type": "disabled"}
+
+
+def test_non_deepseek_openai_request_does_not_send_thinking(monkeypatch):
+    captured = _patch_post(monkeypatch, {"choices": [{"message": {"content": "ok"}}]})
+    AIService("key", "https://api.openai.com/v1", "gpt-4o-mini").chat(
+        [{"role": "user", "content": "hi"}]
+    )
+    assert "thinking" not in captured["body"]
+
+
 def test_openai_null_content_does_not_crash_and_raises(monkeypatch):
     # content=None must not blow up later .strip() calls — it maps to the same error.
     _patch_post(monkeypatch, {"choices": [{"message": {"content": None}}]})

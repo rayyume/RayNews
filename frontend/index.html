@@ -3858,16 +3858,22 @@ function buildTranslateFullMessages(html, title) {
   ];
 }
 
+function isDeepSeekModel(model) {
+  return (model || '').toLowerCase().includes('deepseek');
+}
+
 async function callOpenAiChat(config, messages, maxTokens, temperature) {
   const base = (config.endpoint || '').replace(/\/$/, '');
   const url = base.includes('/v1') ? base + '/chat/completions' : base + '/v1/chat/completions';
+  const body = { model: config.model, messages, max_tokens: maxTokens, temperature };
+  if (isDeepSeekModel(config.model)) body.thinking = { type: 'disabled' };
   const resp = await fetch(url, {
     method: 'POST',
     headers: {
       'Authorization': 'Bearer ' + config.api_key,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ model: config.model, messages, max_tokens: maxTokens, temperature }),
+    body: JSON.stringify(body),
   });
   if (!resp.ok) {
     const text = await resp.text().catch(() => '');
