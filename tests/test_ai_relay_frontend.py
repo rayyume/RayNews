@@ -15,6 +15,12 @@ def _ai_chat_block():
     return HTML[start:end]
 
 
+def _auto_display_summary_block():
+    start = HTML.index("async function autoDisplaySummary(")
+    end = HTML.index("function showAIActions(", start)
+    return HTML[start:end]
+
+
 def _run(body):
     # Minimal browser shims: an in-memory localStorage and a controllable fetch.
     script = f"""
@@ -34,6 +40,39 @@ const context = {{
 context.fetch = async () => {{ throw new Error('fetch not stubbed'); }};
 vm.createContext(context);
 vm.runInContext({json.dumps(_ai_chat_block())}, context);
+(async () => {{
+{body}
+}})().catch(error => {{ console.error(error && error.stack ? error.stack : error); process.exitCode = 1; }});
+"""
+    result = subprocess.run(["node", "-e", script], cwd=ROOT,
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def _run_auto_display(body):
+    # Evaluate only the cache-display function with the smallest browser surface it
+    # needs, so this stays a contract test rather than loading the frontend bundle.
+    script = f"""
+const assert = require('assert');
+const vm = require('vm');
+const context = {{
+  console,
+  authToken: 'tok',
+  isRestrictedUser: () => false,
+  news: [],
+  proxyImages: html => html,
+  sanitizeTranslatedHtml: html => html,
+  syncArticleTitle: () => {{}},
+  esc: value => String(value),
+  document: {{
+    getElementById: () => null,
+    querySelector: () => null,
+    createElement: () => ({{ style: {{}}, remove: () => {{}} }}),
+  }},
+}};
+context.fetch = async () => {{ throw new Error('fetch not stubbed'); }};
+vm.createContext(context);
+vm.runInContext({json.dumps(_auto_display_summary_block())}, context);
 (async () => {{
 {body}
 }})().catch(error => {{ console.error(error && error.stack ? error.stack : error); process.exitCode = 1; }});
@@ -159,4 +198,18 @@ const cfg = { provider_type: 'openai', endpoint: 'https://api.deepseek.com/v1' }
 
 await assert.rejects(context.aiChat(cfg, [{ role: 'user', content: 'x' }], 100, 0.3));
 assert.equal(context._store.aiRelayOrigins, undefined);  // not persisted on relay failure
+""")
+
+
+def test_pending_auto_translation_keeps_original_body_and_does_not_call_manual_translate():
+    _run_auto_display("""
+const body = { dataset: {}, innerHTML: '<p>English original</p>', querySelectorAll: () => [] };
+context.document.getElementById = id => id === 'articleBody' ? body : (id === 'articleWrap' ? { querySelector: () => null, prepend: () => {} } : null);
+context.fetch = async () => ({ json: async () => ({}) });
+context.userAutoSettings = { auto_translate_content: true };
+let manualCalls = 0;
+context.aiTranslate = async () => { manualCalls++; };
+await context.autoDisplaySummary(42);
+assert.equal(manualCalls, 0);
+assert.equal(body.innerHTML, '<p>English original</p>');
 """)
