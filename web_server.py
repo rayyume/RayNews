@@ -56,6 +56,7 @@ AUTO_SUMMARY_BATCH_LIMIT = int(os.environ.get("AUTO_SUMMARY_BATCH_LIMIT", "20"))
 AUTO_SUMMARY_INTERVAL_SECONDS = int(os.environ.get("AUTO_SUMMARY_INTERVAL_SECONDS", "30"))
 AUTO_TRANSLATION_BATCH_LIMIT = int(os.environ.get("AUTO_TRANSLATION_BATCH_LIMIT", "5"))
 AUTO_TRANSLATION_INTERVAL_SECONDS = int(os.environ.get("AUTO_TRANSLATION_INTERVAL_SECONDS", "30"))
+AUTO_TRANSLATION_SCAN_LIMIT = int(os.environ.get("AUTO_TRANSLATION_SCAN_LIMIT", "1000"))
 AUTO_TITLE_PROCESS_BATCH_LIMIT = int(os.environ.get("AUTO_TITLE_PROCESS_BATCH_LIMIT", "20"))
 AUTO_TITLE_PROCESS_INTERVAL_SECONDS = int(os.environ.get("AUTO_TITLE_PROCESS_INTERVAL_SECONDS", "10"))
 AUTO_TITLE_PROCESS_SCAN_LIMIT = int(os.environ.get("AUTO_TITLE_PROCESS_SCAN_LIMIT", "1000"))
@@ -2084,8 +2085,14 @@ def _fetch_untranslated_articles(config: dict, limit: int = AUTO_TRANSLATION_BAT
             "FROM articles a "
             "LEFT JOIN ai_results r ON r.article_id = a.id "
             "WHERE a.date = ? "
-            "ORDER BY a.timestamp ASC LIMIT ?",
-            (today_str, max(limit * 8, 40)),
+            # Newest-first, and scan far more than one batch: the untranslated
+            # rows are filtered in Python (the latin/CJK heuristic can't run in
+            # SQL), so a tight oldest-first LIMIT would only ever see the oldest
+            # articles of the day. Once the day exceeds that window, freshly
+            # fetched English articles would never enter the candidate set and
+            # stay untranslated forever. Mirrors the title-process scan.
+            "ORDER BY a.timestamp DESC LIMIT ?",
+            (today_str, max(limit * 8, AUTO_TRANSLATION_SCAN_LIMIT)),
         ).fetchall()
         conn.close()
     except Exception as e:
