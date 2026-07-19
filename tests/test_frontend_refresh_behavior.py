@@ -26,6 +26,359 @@ def test_logo_refresh_state_is_declared_before_click_handler_uses_it():
     assert "let logoRefreshInProgress = false;" in HTML
 
 
+def test_is_transient_refresh_error_recognizes_browser_and_tagged_timeouts():
+    source = source_between("function isTransientRefreshError(", "async function retryTransientRefreshRequest(")
+    run_node(
+        source,
+        """
+assert.equal(context.isTransientRefreshError(null), false);
+assert.equal(context.isTransientRefreshError(Object.assign(new Error('cancelled'), { name: 'AbortError' })), false);
+assert.equal(context.isTransientRefreshError(new TypeError('Load failed')), true);
+assert.equal(context.isTransientRefreshError(new TypeError('Failed to fetch')), true);
+assert.equal(context.isTransientRefreshError(new Error('NetworkError when attempting to fetch resource')), true);
+assert.equal(context.isTransientRefreshError(Object.assign(new Error('slow'), { name: 'RefreshStatusTimeoutError' })), true);
+assert.equal(context.isTransientRefreshError(new Error('刷新失败，请稍后重试')), false);
+// A real 502/504 collapses its body into a code-less message ("refresh service
+// unavailable", nginx HTML) — classification must fall back to the numeric status.
+assert.equal(context.isTransientRefreshError(Object.assign(new Error('refresh service unavailable'), { status: 502 })), true);
+assert.equal(context.isTransientRefreshError(Object.assign(new Error('刷新接口返回了 HTML 页面'), { status: 504 })), true);
+assert.equal(context.isTransientRefreshError(Object.assign(new Error('bad request'), { status: 400 })), false);
+""",
+    )
+
+
+def test_parse_refresh_response_preserves_numeric_status_on_error():
+    source = source_between("async function parseRefreshResponse(", "function isTransientRefreshError(")
+    run_node(
+        source,
+        """
+context.refreshErrorMessage = (data) => (data && data.error) || 'refresh failed';
+// A real 502 JSON body from web_server.py's status endpoint.
+const jsonResp = {
+  ok: false,
+  status: 502,
+  text: async () => JSON.stringify({ error: 'refresh service unavailable' }),
+};
+await assert.rejects(
+  context.parseRefreshResponse(jsonResp),
+  error => error.status === 502 && error.message === 'refresh service unavailable',
+);
+// An nginx HTML 504 page must also carry the status through.
+const htmlResp = {
+  ok: false,
+  status: 504,
+  text: async () => '<html><body>504 Gateway Time-out</body></html>',
+};
+await assert.rejects(
+  context.parseRefreshResponse(htmlResp),
+  error => error.status === 504,
+);
+""",
+    )
+
+
+def test_bump_content_epoch_retains_memory_buffer_for_stale_downgrade():
+    source = source_between("function bumpContentEpoch(", "function rememberBufferedPage(")
+    run_node(
+        source,
+        """
+context.contentEpoch = 3;
+context.pagePrefetchPromises = new Map([['2:all', Promise.resolve()]]);
+let cleared = false;
+context.clearCachedNewsPages = () => { cleared = true; };
+// A snapshot buffered under the current epoch.
+context.pageMemoryBuffer = new Map([['2:all', { data: { items: [] }, epoch: 3 }]]);
+context.bumpContentEpoch();
+assert.equal(context.contentEpoch, 4);
+// Prefetch dedup slots + IndexedDB are hygiene-cleared...
+assert.equal(context.pagePrefetchPromises.size, 0);
+assert.equal(cleared, true);
+// ...but the in-memory buffer is deliberately retained so peekStaleBufferedPage()
+// still has a snapshot to downgrade to after a bump (correctness is upheld by the
+// per-record epoch check in readBufferedPage(), not by clearing).
+assert.equal(context.pageMemoryBuffer.size, 1);
+""",
+    )
+
+
+def test_refresh_error_message_normalizes_raw_browser_network_errors():
+    source = source_between("function refreshErrorMessage(", "async function parseRefreshResponse(")
+    run_node(
+        source,
+        """
+context.compactRefreshDetail = value => String(value || '').trim();
+// Must construct with the vm realm's own Error/TypeError — refreshErrorMessage's
+// `instanceof Error` check fails across realms, so an outer-realm Error would be
+// silently misclassified as a data object instead.
+const loadFailed = vm.runInContext("new TypeError('Load failed')", context);
+const failedToFetch = vm.runInContext("new TypeError('Failed to fetch')", context);
+const networkError = vm.runInContext("new Error('NetworkError when attempting to fetch resource')", context);
+const other = vm.runInContext("new Error('something unexpected')", context);
+assert.equal(context.refreshErrorMessage(loadFailed), '网络连接失败，请检查网络后重试');
+assert.equal(context.refreshErrorMessage(failedToFetch), '网络连接失败，请检查网络后重试');
+assert.equal(context.refreshErrorMessage(networkError), '网络连接失败，请检查网络后重试');
+assert.equal(context.refreshErrorMessage(other), 'something unexpected');
+""",
+    )
+
+
+def test_status_request_tags_per_request_timeout_as_transient():
+    source = source_between("async function requestRefreshStatusOnce(", "async function pollRefreshJob(")
+    run_node(
+        source,
+        """
+context.authToken = 'token';
+context.parseRefreshResponse = async () => ({ status: 'running' });
+context.setTimeout = (callback) => { callback(); return 1; };
+context.clearTimeout = () => {};
+context.AbortController = class {
+  constructor() { this.signal = { aborted: false }; }
+  abort() { this.signal.aborted = true; }
+};
+context.fetch = () => new Promise((resolve, reject) => {
+  reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+});
+await assert.rejects(
+  context.requestRefreshStatusOnce('job-1', 10),
+  error => error.name === 'RefreshStatusTimeoutError',
+);
+""",
+    )
+
+
+def test_prepare_page_navigation_must_be_fresh_uses_network_within_budget():
+    block = source_between("function peekStaleBufferedPage(", "// Full snapshot compatibility wrapper")
+    run_node(
+        block,
+        """
+context.pageRequestSequence = 0;
+context.pageRequestController = null;
+context.contentEpoch = 1;
+context.AbortController = class { constructor() { this.signal = {}; } abort() {} };
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
+context.fetchNewsPage = async () => ({ items: [{ id: 1 }], total: 1 });
+context.writeCachedNewsPage = async () => {};
+context.rememberBufferedPage = () => {};
+context.pendingRelevantCount = () => 1; // mustBeFresh
+context.withPromiseTimeout = async promise => promise; // network answers "immediately"
+context.showToast = () => { throw new Error('should not toast'); };
+context.applyPageCalibrationWhenActive = () => { throw new Error('should not calibrate'); };
+context.pageMemoryBuffer = new Map();
+const data = await context.preparePageNavigation(2, 'all');
+assert.deepEqual(data, { items: [{ id: 1 }], total: 1 });
+""",
+    )
+
+
+def test_prepare_page_navigation_falls_back_to_stale_snapshot_past_budget():
+    block = source_between("function peekStaleBufferedPage(", "// Full snapshot compatibility wrapper")
+    run_node(
+        block,
+        """
+context.pageRequestSequence = 0;
+context.pageRequestController = null;
+context.contentEpoch = 5;
+context.AbortController = class { constructor() { this.signal = {}; } abort() {} };
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
+let resolveNetwork;
+context.fetchNewsPage = () => new Promise(resolve => { resolveNetwork = resolve; });
+context.writeCachedNewsPage = async () => {};
+context.rememberBufferedPage = () => {};
+context.pendingRelevantCount = () => 1;
+// Simulates withPromiseTimeout's real race semantics losing to the timeout,
+// without needing a real timer in the test.
+context.withPromiseTimeout = async () => null;
+context.showToast = () => { throw new Error('should not toast'); };
+context.newsPageCacheKey = (page, filter) => page + ':' + filter;
+// A snapshot buffered under a now-stale epoch — still usable as a downgrade.
+context.pageMemoryBuffer = new Map([['2:all', { data: { items: [{ id: 'stale' }] }, epoch: 1 }]]);
+let calibrated = null;
+context.applyPageCalibrationWhenActive = data => { calibrated = data; };
+const data = await context.preparePageNavigation(2, 'all');
+assert.deepEqual(data, { items: [{ id: 'stale' }] });
+resolveNetwork({ items: [{ id: 'fresh' }] });
+await new Promise(resolve => setTimeout(resolve, 20));
+assert.deepEqual(calibrated, { items: [{ id: 'fresh' }] });
+""",
+    )
+
+
+def test_prepare_page_navigation_waits_out_network_when_no_stale_snapshot_exists():
+    block = source_between("function peekStaleBufferedPage(", "// Full snapshot compatibility wrapper")
+    run_node(
+        block,
+        """
+context.pageRequestSequence = 0;
+context.pageRequestController = null;
+context.contentEpoch = 5;
+context.AbortController = class { constructor() { this.signal = {}; } abort() {} };
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
+context.fetchNewsPage = async () => ({ items: [{ id: 'fresh' }] });
+context.writeCachedNewsPage = async () => {};
+context.rememberBufferedPage = () => {};
+context.pendingRelevantCount = () => 1;
+context.withPromiseTimeout = async () => null; // budget always "expires" in this test
+context.showToast = () => {};
+context.newsPageCacheKey = (page, filter) => page + ':' + filter;
+context.pageMemoryBuffer = new Map(); // nothing buffered — must fall through to network
+const data = await context.preparePageNavigation(2, 'all');
+assert.deepEqual(data, { items: [{ id: 'fresh' }] });
+""",
+    )
+
+
+def test_is_sw_fallback_response_reads_the_marker_header():
+    source = source_between("function isSwFallbackResponse(", "function swFallbackError(")
+    run_node(
+        source,
+        """
+const headers = new Map([['X-SW-Fallback', '1']]);
+assert.equal(context.isSwFallbackResponse({ headers: { get: k => headers.get(k) } }), true);
+assert.equal(context.isSwFallbackResponse({ headers: { get: () => null } }), false);
+assert.equal(context.isSwFallbackResponse({}), false);
+assert.equal(context.isSwFallbackResponse(null), false);
+""",
+    )
+
+
+def test_fetch_news_page_rejects_sw_fallback_responses():
+    source = source_between("function isSwFallbackResponse(", "function warmPageCoverImages")
+    run_node(
+        source,
+        """
+context.buildNewsPageParams = () => new URLSearchParams();
+context.fetch = async () => ({
+  ok: true,
+  headers: { get: name => (name === 'X-SW-Fallback' ? '1' : null) },
+  json: async () => ({ items: [{ id: 1 }] }),
+});
+await assert.rejects(
+  context.fetchNewsPage(1, 'all'),
+  error => error.name === 'SwFallbackError',
+);
+""",
+    )
+
+
+def test_load_since_treats_sw_fallback_as_a_failed_check_not_zero_new_articles():
+    incremental = source_between("async function loadSince(", "function rebuildSourceFilterGroups")
+    run_node(
+        incremental,
+        """
+context.refreshInProgress = false;
+context.INCREMENTAL_FETCH_LIMIT = 200;
+context.seenArticleIds = new Set();
+context.latestKnownTimestamp = 100;
+context.pendingNewArticleCount = 0;
+context.pendingNewItems = [];
+context.fetch = async () => ({
+  headers: { get: name => (name === 'X-SW-Fallback' ? '1' : null) },
+  json: async () => { throw new Error('must not parse a fallback response as data'); },
+});
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
+const added = await context.loadSince(100);
+// -1 (not 0): a stale SW-cache fallback must read as "couldn't check", not as
+// "checked, confirmed zero new articles" — see checkForNewArticlesAfterForegroundResume().
+assert.equal(added, -1);
+assert.equal(context.pendingNewItems.length, 0);
+""",
+    )
+
+
+def test_foreground_resume_check_retries_only_on_failed_checks():
+    helper = source_between(
+        "async function checkForNewArticlesAfterForegroundResume(",
+        "let lastForegroundSyncAt = 0;",
+    )
+    run_node(
+        helper,
+        """
+context.document = { hidden: false };
+context.delay = async () => {};
+context.latestKnownTimestamp = 0;
+const calls = [];
+context.loadSince = async cursor => { calls.push(cursor); return 0; };
+await context.checkForNewArticlesAfterForegroundResume(100);
+assert.deepEqual(calls, [100]); // confirmed zero -> no retry
+""",
+    )
+
+
+def test_foreground_resume_check_retries_up_to_twice_on_failure_then_gives_up():
+    helper = source_between(
+        "async function checkForNewArticlesAfterForegroundResume(",
+        "let lastForegroundSyncAt = 0;",
+    )
+    run_node(
+        helper,
+        """
+context.document = { hidden: false };
+const delays = [];
+context.delay = async ms => { delays.push(ms); };
+context.latestKnownTimestamp = 0;
+const calls = [];
+context.loadSince = async cursor => { calls.push(cursor); return -1; };
+await context.checkForNewArticlesAfterForegroundResume(100);
+assert.deepEqual(calls, [100, 100, 100]);
+assert.deepEqual(delays, [1500, 4000]);
+""",
+    )
+
+
+def test_foreground_resume_check_stops_retrying_once_backgrounded_again():
+    helper = source_between(
+        "async function checkForNewArticlesAfterForegroundResume(",
+        "let lastForegroundSyncAt = 0;",
+    )
+    run_node(
+        helper,
+        """
+context.document = { hidden: false };
+context.delay = async () => { context.document.hidden = true; };
+context.latestKnownTimestamp = 0;
+const calls = [];
+context.loadSince = async cursor => { calls.push(cursor); return -1; };
+await context.checkForNewArticlesAfterForegroundResume(100);
+// One initial attempt, one retry attempt scheduled — but backgrounded during the
+// delay before that retry's loadSince() call, so it's never made.
+assert.deepEqual(calls, [100]);
+""",
+    )
+
+
+def test_foreground_resume_check_uses_the_latest_known_timestamp_on_retry():
+    helper = source_between(
+        "async function checkForNewArticlesAfterForegroundResume(",
+        "let lastForegroundSyncAt = 0;",
+    )
+    run_node(
+        helper,
+        """
+context.document = { hidden: false };
+context.delay = async () => {};
+context.latestKnownTimestamp = 0;
+const calls = [];
+context.loadSince = async cursor => {
+  calls.push(cursor);
+  context.latestKnownTimestamp = 999; // simulates a concurrent successful check
+  return -1;
+};
+await context.checkForNewArticlesAfterForegroundResume(100);
+assert.deepEqual(calls, [100, 999, 999]);
+""",
+    )
+
+
+def test_refresh_running_state_has_no_dot_overlay_but_keeps_sweep():
+    assert ".refresh-btn.refresh-running::after" not in HTML
+    assert ".refresh-btn.refresh-running::before" in HTML
+    assert "refreshSweep" in HTML
+
+
 def test_ipad_pwa_trackpad_back_gesture_is_isolated_from_other_platforms():
     assert "function usesIpadPwaTrackpadNavigation()" in HTML
     gesture = source_between("function usesIpadPwaTrackpadNavigation()", "document.addEventListener('visibilitychange'")
@@ -48,6 +401,25 @@ def test_mobile_article_header_has_a_dedicated_double_tap_top_scroll_zone():
 def test_service_worker_rethrows_network_errors_without_a_cached_response():
     source = (ROOT / "frontend" / "sw.js").read_text(encoding="utf-8")
     assert ".catch(error => { if (cached) return cached; throw error; })" in source
+
+
+def test_service_worker_tags_list_api_fallback_responses():
+    source = (ROOT / "frontend" / "sw.js").read_text(encoding="utf-8")
+    assert "function withSwFallbackMarker(cached)" in source
+    assert "headers.set('X-SW-Fallback', '1');" in source
+    list_api_block = source[
+        source.index("// List / other API: network-first"):
+        source.index("// ── Static assets: cache-first ──")
+    ]
+    assert "if (cached) return withSwFallbackMarker(cached);" in list_api_block
+    # The article-detail stale-while-revalidate path is a separate cache
+    # strategy — a genuinely fresh cache hit there, not a failure fallback — and
+    # must not be tagged.
+    article_detail_block = source[
+        source.index("Article detail: stale-while-revalidate"):
+        source.index("// List / other API: network-first")
+    ]
+    assert "withSwFallbackMarker" not in article_detail_block
 
 
 def source_between(start, end):
@@ -84,7 +456,7 @@ def test_poll_refresh_job_rejects_terminal_status_for_another_job():
         poll,
         """
 context.abortableDelay = async () => {};
-context.requestRefreshStatus = async () => ({
+context.requestRefreshStatusOnce = async () => ({
   job_id: 'other-job', status: 'completed', new_count: 99,
 });
 context.Date = { now: () => 0 };
@@ -97,7 +469,7 @@ await assert.rejects(
 
 
 def test_status_request_uses_abort_signal_with_caller_bounded_timeout():
-    request = source_between("async function requestRefreshStatus(", "async function pollRefreshJob(")
+    request = source_between("async function requestRefreshStatusOnce(", "async function pollRefreshJob(")
     run_node(
         request,
         """
@@ -116,7 +488,7 @@ context.fetch = async (url, options) => {
   fetchOptions = options;
   return {};
 };
-await context.requestRefreshStatus('job-1', 37);
+await context.requestRefreshStatusOnce('job-1', 37);
 assert.deepEqual(timers, [37]);
 assert.equal(fetchOptions.signal.marker, 'status-signal');
 """,
@@ -132,23 +504,140 @@ let now = 0;
 let requestedTimeout = null;
 context.Date = { now: () => now };
 context.abortableDelay = async timeout => {
-  assert.equal(timeout, 1000);
+  // First poll uses the short FIRST_POLL_DELAY_MS (300), capped by the
+  // remaining deadline (1000) — so the shorter of the two wins here.
+  assert.equal(timeout, 300);
   now = 600;
 };
-context.requestRefreshStatus = async (jobId, timeout) => {
+context.requestRefreshStatusOnce = async (jobId, timeout) => {
   assert.equal(jobId, 'job-1');
   requestedTimeout = timeout;
   return { job_id: 'job-1', status: 'completed', new_count: 2 };
 };
 const status = await context.pollRefreshJob('job-1', 1000);
 assert.equal(status.new_count, 2);
+// remaining (400) < 5s cap, so the shorter remaining wins.
 assert.equal(requestedTimeout, 400);
 """,
     )
 
 
+def test_poll_refresh_job_caps_each_status_request_to_five_seconds():
+    poll = source_between("async function pollRefreshJob(", "function rebuildCategoryMap")
+    run_node(
+        poll,
+        """
+let now = 0;
+let requestedTimeout = null;
+context.Date = { now: () => now };
+context.abortableDelay = async () => { now += 300; };
+context.requestRefreshStatusOnce = async (jobId, timeout) => {
+  requestedTimeout = timeout;
+  return { job_id: 'job-1', status: 'completed', new_count: 1 };
+};
+// A huge remaining deadline must NOT become a single per-request timeout —
+// each status request is capped at 5s so one stuck request can't burn the
+// whole budget (and, before, get doubled by an inner retry).
+await context.pollRefreshJob('job-1', 200000);
+assert.equal(requestedTimeout, 5000);
+""",
+    )
+
+
+def test_poll_refresh_job_uses_steady_interval_after_first_poll():
+    poll = source_between("async function pollRefreshJob(", "function rebuildCategoryMap")
+    run_node(
+        poll,
+        """
+let now = 0;
+const delays = [];
+context.Date = { now: () => now };
+context.abortableDelay = async timeout => {
+  delays.push(timeout);
+  now += 100;
+};
+let call = 0;
+context.requestRefreshStatusOnce = async () => {
+  call++;
+  if (call < 3) return { job_id: 'job-1', status: 'running' };
+  return { job_id: 'job-1', status: 'completed', new_count: 0 };
+};
+await context.pollRefreshJob('job-1', 100000);
+assert.deepEqual(delays, [300, 800, 800]);
+""",
+    )
+
+
+def test_poll_refresh_job_tolerates_transient_failures_below_the_threshold():
+    poll = source_between("async function pollRefreshJob(", "function rebuildCategoryMap")
+    run_node(
+        poll,
+        """
+let now = 0;
+context.Date = { now: () => now };
+context.abortableDelay = async () => { now += 100; };
+context.isTransientRefreshError = error => error && error.transient === true;
+let call = 0;
+context.requestRefreshStatusOnce = async () => {
+  call++;
+  if (call <= 2) throw Object.assign(new Error('Load failed'), { transient: true });
+  return { job_id: 'job-1', status: 'completed', new_count: 5 };
+};
+const status = await context.pollRefreshJob('job-1', 100000);
+assert.equal(status.new_count, 5);
+assert.equal(call, 3);
+""",
+    )
+
+
+def test_poll_refresh_job_gives_up_after_too_many_consecutive_transient_failures():
+    poll = source_between("async function pollRefreshJob(", "function rebuildCategoryMap")
+    run_node(
+        poll,
+        """
+let now = 0;
+context.Date = { now: () => now };
+context.abortableDelay = async () => { now += 100; };
+context.isTransientRefreshError = error => error && error.transient === true;
+let call = 0;
+context.requestRefreshStatusOnce = async () => {
+  call++;
+  throw Object.assign(new Error('Load failed'), { transient: true });
+};
+await assert.rejects(
+  context.pollRefreshJob('job-1', 100000),
+  error => error.message === 'Load failed',
+);
+assert.equal(call, 3);
+""",
+    )
+
+
+def test_poll_refresh_job_does_not_tolerate_non_transient_errors():
+    poll = source_between("async function pollRefreshJob(", "function rebuildCategoryMap")
+    run_node(
+        poll,
+        """
+let now = 0;
+context.Date = { now: () => now };
+context.abortableDelay = async () => { now += 100; };
+context.isTransientRefreshError = () => false;
+let call = 0;
+context.requestRefreshStatusOnce = async () => {
+  call++;
+  throw new Error('刷新失败，请稍后重试');
+};
+await assert.rejects(
+  context.pollRefreshJob('job-1', 100000),
+  error => error.message === '刷新失败，请稍后重试',
+);
+assert.equal(call, 1);
+""",
+    )
+
+
 def test_status_poll_targets_exact_job_and_links_fetch_to_flow_abort():
-    request = source_between("async function requestRefreshStatus(", "async function pollRefreshJob(")
+    request = source_between("async function requestRefreshStatusOnce(", "async function pollRefreshJob(")
     run_node(
         request,
         """
@@ -168,7 +657,7 @@ context.fetch = (url, options) => {
 };
 context.setTimeout = () => 9;
 context.clearTimeout = () => {};
-const pending = context.requestRefreshStatus('job/a', 5000, flow.signal);
+const pending = context.requestRefreshStatusOnce('job/a', 5000, flow.signal);
 await Promise.resolve();
 assert.equal(fetchUrl, '/auth/refresh/status?job_id=job%2Fa');
 assert.notEqual(fetchSignal, flow.signal);
@@ -191,7 +680,7 @@ context.abortableDelay = async (timeout, signal) => {
   assert.equal(signal, flow.signal);
   now += timeout;
 };
-context.requestRefreshStatus = async (jobId, timeout, signal) => {
+context.requestRefreshStatusOnce = async (jobId, timeout, signal) => {
   calls.push([jobId, timeout, signal]);
   return { job_id: jobId, status: 'completed', new_count: 0 };
 };
@@ -235,7 +724,102 @@ context.promptStates = [];
 context.consumePendingNewArticles = () => context.consumed++;
 context.consumed = 0;
 context.loadCalls = 0;
+context.latestKnownTimestamp = 0;
+context.latestNewsTimestamp = () => 0;
+context.loadSinceCalls = [];
+context.loadSince = async (timestamp, options) => {{
+  context.loadSinceCalls.push({{ timestamp, manual: !!(options && options.manual) }});
+  return 0;
+}};
 """
+
+
+def test_manual_refresh_feeds_new_articles_into_pending_queue_when_not_on_page_one():
+    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    setup = trigger_context_setup(
+        "return { job_id: 'job-1', status: 'completed', new_count: 3 };"
+    )
+    run_node(
+        trigger,
+        setup
+        + """
+context.currentPage = 2;
+context.latestKnownTimestamp = 555;
+await context.triggerRefresh();
+// One immediate check (fired alongside the scrape job, regardless of outcome) and
+// one completion-time check (since new_count > 0 and page 1's branch never ran).
+assert.deepEqual(context.loadSinceCalls, [
+  { timestamp: 555, manual: true },
+  { timestamp: 555, manual: false },
+]);
+assert.ok(context.toasts.includes('✅ 更新完成，新增 3 篇文章'));
+""",
+    )
+
+
+def test_manual_refresh_immediate_check_fires_even_when_job_finds_nothing_new():
+    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    setup = trigger_context_setup(
+        "return { job_id: 'job-1', status: 'completed', new_count: 0 };"
+    )
+    run_node(
+        trigger,
+        setup
+        + """
+context.currentPage = 2;
+await context.triggerRefresh();
+// The immediate "what's already in SQLite" check always fires — it's independent
+// of the job's own outcome — but the completion-time re-check is skipped since
+// new_count is 0.
+assert.deepEqual(context.loadSinceCalls, [{ timestamp: 0, manual: true }]);
+assert.ok(context.toasts.includes('✅ 已是最新'));
+""",
+    )
+
+
+def test_manual_refresh_skips_completion_time_check_when_page_one_branch_already_applied():
+    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    setup = trigger_context_setup(
+        "return { job_id: 'job-1', status: 'completed', new_count: 4 };"
+    )
+    run_node(
+        trigger,
+        setup
+        + """
+context.loadNewsPage = async (page, options) => {
+  context.pageRequestSequence++;
+  context.pageRequestPendingSequence = context.pageRequestSequence;
+  context.pageRequestPendingSequence = 0;
+  return true;
+};
+await context.triggerRefresh();
+// Immediate check still fires; completion-time check is redundant once page 1's
+// own branch has already applied the new articles to the DOM.
+assert.deepEqual(context.loadSinceCalls, [{ timestamp: 0, manual: true }]);
+assert.equal(context.consumed, 1);
+""",
+    )
+
+
+def test_manual_refresh_pending_queue_feed_prefers_latest_known_timestamp_over_page_snapshot():
+    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    setup = trigger_context_setup(
+        "return { job_id: 'job-1', status: 'completed', new_count: 1 };"
+    )
+    run_node(
+        trigger,
+        setup
+        + """
+context.currentPage = 3;
+context.latestKnownTimestamp = 0; // nothing observed yet this session -> falls back
+context.latestNewsTimestamp = () => 42;
+await context.triggerRefresh();
+assert.deepEqual(context.loadSinceCalls, [
+  { timestamp: 42, manual: true },
+  { timestamp: 42, manual: false },
+]);
+""",
+    )
 
 
 def test_manual_refresh_skips_apply_after_navigation_changed_then_returned():
@@ -507,6 +1091,9 @@ context.refreshErrorMessage = error => error.message || 'failed';
 context.hasBlockingOverlayOpen = () => false;
 context.consumePendingNewArticles = () => {};
 context.loadNewsPage = async () => true;
+context.latestKnownTimestamp = 0;
+context.latestNewsTimestamp = () => 0;
+context.loadSince = async () => 0;
 context.runningStates = [];
 context.setRefreshRunning = running => {
   context.refreshInProgress = running;
@@ -555,6 +1142,7 @@ context.bumpContentEpoch = () => { context.epochBumps = (context.epochBumps || 0
 context.fetch = async () => ({
   json: async () => ({ items: [{ id: 2, timestamp: 101, source: 's' }] }),
 });
+context.isSwFallbackResponse = () => false;
 context.setTimeout = () => 1;
 context.clearTimeout = () => {};
 context.refreshTodayArticleCount = () => { context.countRefreshes++; };
@@ -587,6 +1175,57 @@ assert.equal(context.sourceLoads, 0);
 assert.equal(context.pageFetches, 0);
 assert.equal(context.applies, 0);
 assert.equal(context.consumes, 0);
+""",
+    )
+
+
+def test_manual_incremental_check_applies_immediately_despite_refresh_in_progress():
+    incremental = source_between("async function loadSince(", "function rebuildSourceFilterGroups")
+    run_node(
+        incremental,
+        """
+context.refreshInProgress = true; // a manual-refresh job is running for its full duration
+context.INCREMENTAL_FETCH_LIMIT = 200;
+context.seenArticleIds = new Set();
+context.latestKnownTimestamp = 100;
+context.pendingNewArticleCount = 0;
+context.pendingNewItems = [];
+context.contentEpoch = 0;
+context.bumpContentEpoch = () => { context.epochBumps = (context.epochBumps || 0) + 1; };
+context.fetch = async () => ({
+  json: async () => ({ items: [{ id: 2, timestamp: 101, source: 's' }] }),
+});
+context.isSwFallbackResponse = () => false;
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
+context.refreshTodayArticleCount = () => { context.countRefreshes++; };
+context.countRefreshes = 0;
+context.loadSourceCategories = async () => { context.sourceLoads++; };
+context.sourceLoads = 0;
+context.fetchNewsPage = async () => { context.pageFetches++; return { items: [] }; };
+context.pageFetches = 0;
+context.writeCachedNewsPage = async () => {};
+context.pendingRelevantCount = () => 1;
+context.showLatestAfterIdle = () => { context.applies++; };
+context.showNewArticlesPrompt = () => { context.applies++; };
+context.applyNewsPage = () => { context.applies++; };
+context.consumePendingNewArticles = () => { context.consumes++; };
+context.applies = 0;
+context.consumes = 0;
+context.filter = 'all';
+context.currentPage = 1;
+context.window = { scrollY: 0 };
+context.hasBlockingOverlayOpen = () => false;
+context.lastUserActivityAt = 0;
+context.IDLE_LATEST_DELAY_MS = 1;
+// { manual: true } bypasses the defer-while-refreshing early return that the
+// sibling test above (without `manual`) relies on.
+const added = await context.loadSince(100, { manual: true });
+assert.equal(added, 1);
+assert.equal(context.sourceLoads, 1);
+assert.equal(context.pageFetches, 1);
+assert.equal(context.applies, 1); // atLatestTop on page 1 -> applyNewsPage()
+assert.equal(context.consumes, 1);
 """,
     )
 
@@ -1677,6 +2316,99 @@ assert.equal(context.location.search, originalSearch);
     )
 
 
+def test_load_news_page_surfaces_a_toast_for_sw_fallback_failures_even_when_quiet_otherwise():
+    # loadNewsPageRequest() normally stays silent on failure when there's no cache
+    # to fall back on but the page already has news rendered and this wasn't a
+    # user-initiated load (routine background prefetch shouldn't nag the user).
+    # A SW-fallback failure is the one exception — see isSwFallbackResponse().
+    params = source_between("function buildNewsPageParams(", "function listUrlForState")
+    fetch_page = source_between("function isSwFallbackResponse(", "function warmPageCoverImages")
+    load_page = source_between("async function loadNewsPage(", "function applyPageCalibrationWhenActive")
+    run_node(
+        params + fetch_page + load_page,
+        """
+context.PAGE_SIZE = 30;
+context.sourceFilterGroups = {};
+context.contentEpoch = 0;
+context.pageRequestSequence = 0;
+context.pageRequestPendingSequence = 0;
+context.pageRequestController = null;
+context.news = [{ id: 1 }]; // page already has content -> not the empty cold-start case
+context.readCachedNewsPage = async () => null; // cache miss
+context.rememberBufferedPage = () => {};
+context.applyNewsPage = () => {};
+context.renderColdStartSkeleton = () => {};
+context.writeCachedNewsPage = async () => {};
+context.scheduleAdjacentPagePrefetch = () => {};
+context.setPageLoading = () => {};
+context.renderColdStartError = () => { throw new Error('must not hit the empty-list error path'); };
+context.toasts = [];
+context.showToast = message => context.toasts.push(message);
+context.currentTotal = 0;
+context.document = {
+  getElementById: () => ({ classList: { contains: () => false } }),
+};
+context.articleReturnInProgress = false;
+context.pendingLatestPage = null;
+context.buildNewsPageParams = () => new URLSearchParams();
+context.fetch = async () => ({
+  ok: true,
+  headers: { get: name => (name === 'X-SW-Fallback' ? '1' : null) },
+  json: async () => ({ items: [{ id: 2 }] }),
+});
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
+const loaded = await context.loadNewsPage(1, { activeFilter: 'all', useCache: false, forceNetwork: true });
+assert.equal(loaded, false);
+assert.deepEqual(context.toasts, ['内容可能不是最新，下拉或点击刷新重试']);
+""",
+    )
+
+
+def test_load_news_page_stays_quiet_for_ordinary_background_prefetch_failures():
+    # Regression guard for the branch above: a plain (non-SW-fallback) network
+    # error in the same "cache miss, news already showing, not user-initiated"
+    # shape must remain silent, same as before this change.
+    params = source_between("function buildNewsPageParams(", "function listUrlForState")
+    fetch_page = source_between("function isSwFallbackResponse(", "function warmPageCoverImages")
+    load_page = source_between("async function loadNewsPage(", "function applyPageCalibrationWhenActive")
+    run_node(
+        params + fetch_page + load_page,
+        """
+context.PAGE_SIZE = 30;
+context.sourceFilterGroups = {};
+context.contentEpoch = 0;
+context.pageRequestSequence = 0;
+context.pageRequestPendingSequence = 0;
+context.pageRequestController = null;
+context.news = [{ id: 1 }];
+context.readCachedNewsPage = async () => null;
+context.rememberBufferedPage = () => {};
+context.applyNewsPage = () => {};
+context.renderColdStartSkeleton = () => {};
+context.writeCachedNewsPage = async () => {};
+context.scheduleAdjacentPagePrefetch = () => {};
+context.setPageLoading = () => {};
+context.renderColdStartError = () => { throw new Error('must not hit the empty-list error path'); };
+context.toasts = [];
+context.showToast = message => context.toasts.push(message);
+context.currentTotal = 0;
+context.document = {
+  getElementById: () => ({ classList: { contains: () => false } }),
+};
+context.articleReturnInProgress = false;
+context.pendingLatestPage = null;
+context.buildNewsPageParams = () => new URLSearchParams();
+context.fetch = async () => { throw new TypeError('Failed to fetch'); };
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
+const loaded = await context.loadNewsPage(1, { activeFilter: 'all', useCache: false, forceNetwork: true });
+assert.equal(loaded, false);
+assert.deepEqual(context.toasts, []);
+""",
+    )
+
+
 def test_real_load_news_page_forwards_source_snapshot_to_fetch_query():
     params = source_between("function buildNewsPageParams(", "function listUrlForState")
     fetch_page = source_between("async function fetchNewsPage(", "function warmPageCoverImages")
@@ -1709,6 +2441,7 @@ context.document = {
 context.articleReturnInProgress = false;
 context.pendingLatestPage = null;
 context.requestUrl = '';
+context.isSwFallbackResponse = () => false;
 context.fetch = async (url, options) => {
   context.requestUrl = url;
   assert.ok(options.signal);
@@ -2312,6 +3045,13 @@ context.refreshErrorMessage = error => error.message || error.error || 'failed';
 context.hasBlockingOverlayOpen = () => false;
 context.consumePendingNewArticles = () => {};
 context.loadNewsPage = async () => { throw new Error('page 2 must not calibrate'); };
+context.latestKnownTimestamp = 0;
+context.latestNewsTimestamp = () => 0;
+context.loadSinceCalls = [];
+context.loadSince = async (timestamp, options) => {
+  context.loadSinceCalls.push({ timestamp, manual: !!(options && options.manual) });
+  return 0;
+};
 context.runningStates = [];
 context.setRefreshRunning = running => {
   context.refreshInProgress = running;
@@ -2352,6 +3092,7 @@ await manual;
 assert.deepEqual(context.runningStates, [true, false]);
 assert.equal(context.refreshInProgress, false);
 assert.ok(context.toasts.includes('✅ 已是最新'));
+assert.deepEqual(context.loadSinceCalls, [{ timestamp: 0, manual: true }]);
 """,
     )
 

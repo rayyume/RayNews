@@ -345,11 +345,16 @@ def test_view_bound_refresh_work_is_cancelled_by_navigation_and_backgrounding():
     for start, end in (
         ("async function restoreListStateFromUrl(", "function setPageLoading"),
         ("async function selectFilter(", "function filteredNews"),
-        ("async function goToPage(", "function waitForScrollTop"),
         ("function openArticle(", "function fetchArticleDetail"),
     ):
         block = html[html.index(start):html.index(end, html.index(start))]
         assert "cancelViewBoundRefreshWork();" in block
+    # goToPage() deliberately does NOT cancel an in-flight manual refresh — its DOM
+    # application is already gated by viewIsCurrent()/flowIsCurrent() (see
+    # triggerRefresh()), so navigating away should let the job keep running rather
+    # than silently aborting it. See test_go_to_page_does_not_cancel_refresh_flow.
+    go_to_page = html[html.index("async function goToPage("):html.index("function waitForScrollTop")]
+    assert "cancelViewBoundRefreshWork();" not in go_to_page
     visibility = html[
         html.index("document.addEventListener('visibilitychange', () =>"):
         html.index("window.addEventListener('focus', onReturnToForeground)")
@@ -361,6 +366,13 @@ def test_view_bound_refresh_work_is_cancelled_by_navigation_and_backgrounding():
     ]
     assert "cancelRefreshFlow();" in helper
     assert "cancelStartupEmptyRevalidation();" in helper
+
+
+def test_go_to_page_does_not_cancel_refresh_flow():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    go_to_page = html[html.index("async function goToPage("):html.index("function waitForScrollTop")]
+    assert "cancelViewBoundRefreshWork();" not in go_to_page
+    assert "cancelRefreshFlow();" not in go_to_page
 
 
 def test_manual_refresh_posts_once_then_polls_status():
@@ -393,20 +405,44 @@ def test_list_request_pending_marker_is_owned_by_matching_request():
 
 def test_refresh_status_polling_uses_authenticated_get_and_bounded_wait():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
-    assert "async function requestRefreshStatus(" in html
+    assert "async function requestRefreshStatusOnce(" in html
     assert "async function pollRefreshJob(" in html
-    request = html[html.index("async function requestRefreshStatus("):html.index("async function pollRefreshJob(")]
+    request = html[html.index("async function requestRefreshStatusOnce("):html.index("async function pollRefreshJob(")]
     poll = html[html.index("async function pollRefreshJob("):html.index("function rebuildCategoryMap")]
     assert "fetch('/auth/refresh/status?job_id=' + encodeURIComponent(jobId)" in request
     assert "'Authorization': 'Bearer ' + authToken" in request
     assert "cache: 'no-store'" in request
-    assert "await abortableDelay(Math.min(1200, beforeDelayMs), flowSignal);" in poll
-    assert "const status = await requestRefreshStatus(jobId, remainingMs, flowSignal);" in poll
+    assert "await abortableDelay(Math.min(delayMs, beforeDelayMs), flowSignal);" in poll
+    # Each status request is capped at 5s (never the full remaining deadline).
+    assert "status = await requestRefreshStatusOnce(jobId, Math.min(5000, remainingMs), flowSignal);" in poll
     assert "if (status.job_id !== jobId)" in poll
     assert "status.status === 'completed' || status.status === 'failed'" in poll
     assert "throw new Error('刷新状态查询超时，请稍后查看最新文章');" in poll
     assert "signal: controller.signal" in request
     assert "clearTimeout(timeout);" in request
+
+
+def test_refresh_status_polling_tolerates_a_run_of_transient_failures():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    poll = html[html.index("async function pollRefreshJob("):html.index("function rebuildCategoryMap")]
+    assert "MAX_CONSECUTIVE_TRANSIENT_FAILURES" in poll
+    assert "isTransientRefreshError(error)" in poll
+    assert "consecutiveTransientFailures = 0;" in poll
+    assert "continue;" in poll
+    assert "FIRST_POLL_DELAY_MS" in poll
+    assert "POLL_INTERVAL_MS" in poll
+
+
+def test_manual_refresh_feeds_new_articles_into_pending_prompt_when_not_on_page_one():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    trigger = html[html.index("async function triggerRefresh("):html.index("function setRefreshRunning")]
+    new_count_check = trigger.index("Number(status.new_count || 0) > 0")
+    load_since_call = trigger.index("await loadSince(latestKnownTimestamp || sinceCursor);")
+    assert load_since_call > new_count_check
+    assert "let page1BranchRan = false;" in trigger
+    assert "page1BranchRan = true;" in trigger
+    assert "!page1BranchRan" in trigger
+    assert trigger.index("const sinceCursor =") < trigger.index("await requestRefreshOnce(")
 
 
 def test_refresh_running_state_only_disables_refresh_button():
@@ -418,15 +454,32 @@ def test_refresh_running_state_only_disables_refresh_button():
     assert "manual-refreshing" not in block
 
 
-def test_manual_refresh_suppresses_competing_new_article_prompt():
+def test_manual_refresh_new_article_prompt_is_not_suppressed_while_running():
+    # showNewArticlesPrompt() deliberately does NOT bail out on refreshInProgress —
+    # triggerRefresh()'s immediate loadSince(..., { manual: true }) check (see
+    # test_manual_refresh_checks_for_already_fetched_articles_immediately) can
+    # surface a bubble well before the job itself finishes, and the button's
+    # running state (potentially 10-30s) shouldn't suppress that for the whole
+    # duration.
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     prompt = html[html.index("function showNewArticlesPrompt()"):html.index("function hideNewArticlesPrompt()")]
-    assert "if (refreshInProgress) return;" in prompt
+    assert "if (refreshInProgress) return;" not in prompt
     trigger = html[html.index("async function triggerRefresh("):html.index("function setRefreshRunning")]
     consume = "consumePendingNewArticles(refreshView.activeFilter);"
     assert consume in trigger
     assert trigger.index(consume) < trigger.index("setRefreshRunning(false);")
     assert trigger.index("setRefreshRunning(false);") < trigger.index("showNewArticlesPrompt();")
+
+
+def test_manual_refresh_checks_for_already_fetched_articles_immediately():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    trigger = html[html.index("async function triggerRefresh("):html.index("function setRefreshRunning")]
+    immediate_check = "const immediateCheck = loadSince(sinceCursor, { manual: true });"
+    assert immediate_check in trigger
+    assert trigger.index(immediate_check) < trigger.index("await requestRefreshOnce(")
+    assert "async function loadSince(timestamp, { forceApply = false, manual = false } = {})" in html
+    since_block = html[html.index("async function loadSince("):html.index("function rebuildSourceFilterGroups")]
+    assert "if (!manual && (deferForRefresh || refreshInProgress)) return added;" in since_block
 
 
 def test_manual_refresh_uses_structured_error_messages():
@@ -438,7 +491,7 @@ def test_manual_refresh_uses_structured_error_messages():
     assert "function refreshErrorMessage" in html
     assert "async function parseRefreshResponse" in html
     assert "async function requestRefreshOnce(signal)" in html
-    assert "async function requestRefreshStatus(" in html
+    assert "async function requestRefreshStatusOnce(" in html
     assert "async function pollRefreshJob(jobId" in html
     assert "await requestRefreshOnce(flowController.signal);" in trigger_block
     assert "await pollRefreshJob(data.job_id, 135000, flowController.signal, handleRefreshProgress);" in trigger_block
@@ -460,6 +513,21 @@ def test_auth_proxy_has_explicit_short_timeouts():
     assert "proxy_connect_timeout 5s;" in block
     assert "proxy_send_timeout 30s;" in block
     assert "proxy_read_timeout 30s;" in block
+
+
+def test_web_server_uses_per_thread_news_db_connection():
+    # The real cross-request stall behind "反代错误" wasn't single-threaded serving
+    # (threaded=True is already Flask's default, so it was never single-threaded) — it
+    # was the process-wide shared news.db connection several request threads drove at
+    # once, letting a slow /ai/ or admin write interleave with a /auth/refresh/status
+    # read on the same connection/transaction. Each thread must get its own connection.
+    source = (ROOT / "web_server.py").read_text(encoding="utf-8")
+    assert "app.run(host=\"127.0.0.1\", port=port, debug=False, threaded=True)" in source
+    # No process-wide shared connection object; connections are thread-local.
+    assert "_news_conn_local = threading.local()" in source
+    assert "_news_conn = None" not in source
+    assert "conn = getattr(_news_conn_local, \"conn\", None)" in source
+    assert "_news_conn_local.conn = conn" in source
 
 
 def test_article_images_retry_with_cache_busting_when_mobile_runtime_loses_them():
@@ -514,6 +582,18 @@ def test_adjacent_pages_are_buffered_immediately_and_cover_images_are_warmed():
     prepare_block = html[prepare_start:prepare_end]
     assert "const pendingPrefetch = pagePrefetchPromises.get(key);" in prepare_block
     assert "const prefetched = await pendingPrefetch;" in prepare_block
+
+
+def test_must_be_fresh_navigation_has_a_downgrade_budget():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    prepare_start = html.index("async function preparePageNavigation(")
+    prepare_end = html.index("// Full snapshot compatibility wrapper", prepare_start)
+    prepare_block = html[prepare_start:prepare_end]
+    assert "const NAVIGATION_FRESH_BUDGET_MS = 2500;" in prepare_block
+    assert "await withPromiseTimeout(networkPromise, null, NAVIGATION_FRESH_BUDGET_MS);" in prepare_block
+    assert "peekStaleBufferedPage(page, activeFilter)" in prepare_block
+    assert "applyPageCalibrationWhenActive(result.data, page, activeFilter, requestSeq)" in prepare_block
+    assert "function peekStaleBufferedPage(page, activeFilter)" in html
     start = html.index("function scheduleAdjacentPagePrefetch(")
     end = html.index("async function loadNewsPage(", start)
     block = html[start:end]
@@ -632,6 +712,21 @@ def test_source_metadata_recovers_on_foreground_and_redrives_deep_link():
                  html.index("function sourceLabel")]
     assert "if (document.hidden) return;" in retry
     assert "retrySourceDeepLink();" in retry
+
+
+def test_foreground_resume_uses_retrying_incremental_check():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    fg = html[html.index("function onReturnToForeground()"):
+              html.index("document.addEventListener('visibilitychange', () =>")]
+    assert "checkForNewArticlesAfterForegroundResume(cursor)" in fg
+    assert "loadSince(cursor);" not in fg
+    helper = html[
+        html.index("async function checkForNewArticlesAfterForegroundResume("):
+        html.index("let lastForegroundSyncAt = 0;")
+    ]
+    assert "result !== -1" in helper
+    assert "document.hidden" in helper
+    assert "latestKnownTimestamp || cursor" in helper
 
 
 def test_cold_start_retry_uses_a_fresh_abort_controller_and_preserves_cache():

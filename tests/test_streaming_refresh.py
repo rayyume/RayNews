@@ -56,18 +56,27 @@ def test_run_streams_articles_into_sqlite_in_batches_before_cycle_completes(tmp_
 
     monkeypatch.setattr(fetcher, "upsert_articles", tracking_upsert)
 
+    ensure_sources_calls = []
+    original_ensure_sources = fetcher.ensure_article_sources
+
+    def tracking_ensure_sources(conn):
+        ensure_sources_calls.append(True)
+        return original_ensure_sources(conn)
+
+    monkeypatch.setattr(fetcher, "ensure_article_sources", tracking_ensure_sources)
+
     fetcher.run()
 
     # More than one upsert call proves articles were committed incrementally during
-    # processing, not just once at the very end (the trailing entry is the final
-    # self-healing full-pass upsert that already existed before this change).
+    # processing, not just once at the very end.
     assert len(batch_sizes) >= 2
-    assert sum(batch_sizes[:-1]) == 6
-    assert batch_sizes[-1] == 6
-    # Every streamed batch skips the expensive full-table source sync; only the
-    # trailing end-of-cycle self-heal pass should run it.
-    assert sync_sources_flags[:-1] == [False] * (len(sync_sources_flags) - 1)
-    assert sync_sources_flags[-1] is True
+    assert sum(batch_sizes) == 6
+    # Every streamed batch skips the expensive full-table source sync — since every
+    # entry made it in via streaming, run() doesn't fall back to a trailing
+    # full-pass upsert_articles(..., sync_sources=True); it runs the one
+    # full-table source sync directly (ensure_article_sources) instead.
+    assert sync_sources_flags == [False] * len(sync_sources_flags)
+    assert ensure_sources_calls == [True]
 
     conn = sqlite3.connect(fetcher.DB_FILE)
     count = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
@@ -77,6 +86,56 @@ def test_run_streams_articles_into_sqlite_in_batches_before_cycle_completes(tmp_
     progress = json.loads(fetcher.PROGRESS_FILE.read_text(encoding="utf-8"))
     assert progress["inserted"] == 6
     assert progress["total_messages"] == 6
+
+
+def test_news_json_mirror_is_truncated_and_unindented(tmp_path, monkeypatch):
+    _patch_fetcher_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(fetcher, "NEWS_JSON_MIRROR_LIMIT", 3)
+
+    messages = [{"id": i} for i in range(1, 6)]
+    monkeypatch.setattr(fetcher, "fetch_all_new_messages", lambda state: (messages, max(m["id"] for m in messages)))
+    monkeypatch.setattr(
+        fetcher, "process_message",
+        lambda msg, orig_id: {
+            "id": orig_id, "title": f"t{orig_id}", "source": "s",
+            "feed_source": "s", "timestamp": orig_id,
+        },
+    )
+
+    fetcher.run()
+
+    raw = fetcher.OUTPUT_FILE.read_text(encoding="utf-8")
+    assert "\n" not in raw  # no pretty-printing indent — this file is machine-read only
+    data = json.loads(raw)
+    assert len(data["items"]) == 3
+    # Keeps the most recent (highest timestamp) entries, not an arbitrary slice.
+    assert sorted(item["id"] for item in data["items"]) == [3, 4, 5]
+
+
+def test_news_json_mirror_failure_does_not_fail_the_cycle(tmp_path, monkeypatch):
+    _patch_fetcher_paths(monkeypatch, tmp_path)
+
+    messages = [{"id": 1}]
+    monkeypatch.setattr(fetcher, "fetch_all_new_messages", lambda state: (messages, 1))
+    monkeypatch.setattr(
+        fetcher, "process_message",
+        lambda msg, orig_id: {
+            "id": orig_id, "title": "t1", "source": "s",
+            "feed_source": "s", "timestamp": orig_id,
+        },
+    )
+
+    def boom(entries):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(fetcher, "write_news_json_mirror", boom)
+
+    fetcher.run()  # must not raise despite the news.json mirror blowing up
+
+    conn = sqlite3.connect(fetcher.DB_FILE)
+    count = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
+    conn.close()
+    assert count == 1  # SQLite already has the article regardless of the mirror
 
 
 def test_upsert_articles_skips_source_sync_when_disabled(tmp_path, monkeypatch):

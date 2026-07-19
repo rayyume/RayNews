@@ -97,7 +97,6 @@ a:hover{text-decoration:underline}
 .refresh-btn:hover{border-color:var(--accent);color:var(--accent)}
 .refresh-btn.refresh-running{position:relative;overflow:hidden;border-color:var(--accent);color:var(--accent);pointer-events:none}
 .refresh-btn.refresh-running::before{content:'';position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(110,142,251,0.28),transparent);animation:refreshSweep 1.2s infinite}
-.refresh-btn.refresh-running::after{content:'';position:absolute;right:7px;top:5px;width:6px;height:6px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 3px rgba(110,142,251,0.18)}
 .refresh-btn.refresh-running span{position:relative;z-index:1}
 .daily-summary-btn{position:relative;width:32px;height:32px;font-size:16px}
 .daily-summary-btn.running{color:var(--accent)!important;animation:summaryPulse 1.6s infinite}
@@ -1333,6 +1332,14 @@ function refreshErrorMessage(errorOrData, status = 0) {
   if (data && data.returncode !== undefined && data.returncode !== null) {
     return '抓取任务退出码 ' + data.returncode + (detail ? '：' + detail : '');
   }
+  // Raw browser fetch-layer failures (Safari: "Load failed", Chrome: "Failed to
+  // fetch", Firefox: "NetworkError when attempting to fetch resource") aren't
+  // actionable to a user as-is — normalize them to the same message regardless
+  // of browser instead of leaking the raw exception text via the `if (detail)`
+  // fallback below.
+  if (/^(load failed|failed to fetch|networkerror)/i.test(detail)) {
+    return '网络连接失败，请检查网络后重试';
+  }
   if (detail) return detail;
   if (status) return '刷新接口返回 HTTP ' + status;
   return '刷新失败，请稍后重试';
@@ -1346,20 +1353,29 @@ async function parseRefreshResponse(resp) {
   } catch (e) {
     const trimmed = text.trim();
     if (trimmed.startsWith('<')) {
-      throw new Error('刷新接口返回了 HTML 页面，请检查服务是否超时或反向代理是否生效');
+      // e.g. an nginx 502/504 HTML error page — carry the status so a transient
+      // upstream blip is retried rather than aborting the refresh on first hit.
+      throw Object.assign(new Error('刷新接口返回了 HTML 页面，请检查服务是否超时或反向代理是否生效'), { status: resp.status });
     }
-    throw new Error('刷新接口返回格式错误');
+    throw Object.assign(new Error('刷新接口返回格式错误'), { status: resp.status });
   }
   if (data && data.status === 'skipped') return data;
   if (!resp.ok || data.status === 'error') {
-    throw new Error(refreshErrorMessage(data, resp.status));
+    // Keep the numeric HTTP status on the error object — parseRefreshResponse
+    // collapses a 502/504 body ("refresh service unavailable", nginx HTML, …)
+    // into a human-readable message that no longer contains the status code, so
+    // isTransientRefreshError() must classify by status rather than by regex.
+    throw Object.assign(new Error(refreshErrorMessage(data, resp.status)), { status: resp.status });
   }
   return data;
 }
 
 function isTransientRefreshError(error) {
   if (!error || error.name === 'AbortError') return false;
-  return /network|failed to fetch|timeout|temporar|HTTP 5\d\d/i.test(error.message || '');
+  if (error.name === 'RefreshStatusTimeoutError') return true;
+  const status = Number(error.status);
+  if (status >= 500 && status < 600) return true;
+  return /network|failed to fetch|load failed|timeout|temporar|HTTP 5\d\d/i.test(error.message || '');
 }
 
 async function retryTransientRefreshRequest(request, signal) {
@@ -1384,17 +1400,6 @@ async function requestRefreshOnce(signal) {
   }, signal);
 }
 
-async function requestRefreshStatus(jobId, timeoutMs = 5000, flowSignal = null) {
-  try {
-    return await requestRefreshStatusOnce(jobId, timeoutMs, flowSignal);
-  } catch (error) {
-    if (error && error.name === 'AbortError') throw error;
-    if (!isTransientRefreshError(error)) throw error;
-    await abortableDelay(800, flowSignal);
-    return requestRefreshStatusOnce(jobId, timeoutMs, flowSignal);
-  }
-}
-
 async function requestRefreshStatusOnce(jobId, timeoutMs = 5000, flowSignal = null) {
   if (flowSignal && flowSignal.aborted) throw refreshAbortError();
   const controller = new AbortController();
@@ -1412,7 +1417,10 @@ async function requestRefreshStatusOnce(jobId, timeoutMs = 5000, flowSignal = nu
   } catch (e) {
     if (e && e.name === 'AbortError') {
       if (flowSignal && flowSignal.aborted) throw e;
-      throw new Error('刷新状态查询超时，请稍后查看最新文章');
+      // Tagged (not just a Chinese message) so isTransientRefreshError() can
+      // recognize a single slow status request as transient without relying on
+      // regex-matching translated text.
+      throw Object.assign(new Error('刷新状态查询超时，请稍后查看最新文章'), { name: 'RefreshStatusTimeoutError' });
     }
     throw e;
   } finally {
@@ -1422,14 +1430,45 @@ async function requestRefreshStatusOnce(jobId, timeoutMs = 5000, flowSignal = nu
 }
 
 async function pollRefreshJob(jobId, timeoutMs = 135000, flowSignal = null, onProgress = null) {
+  // First poll fires quickly (short delay) since the job may already be done by
+  // the time the caller starts polling; later polls settle into the steadier
+  // interval so a still-running job isn't hammered with requests.
+  const FIRST_POLL_DELAY_MS = 300;
+  const POLL_INTERVAL_MS = 800;
+  const MAX_CONSECUTIVE_TRANSIENT_FAILURES = 3;
   const deadline = Date.now() + timeoutMs;
+  let isFirstPoll = true;
+  let consecutiveTransientFailures = 0;
   while (true) {
     const beforeDelayMs = deadline - Date.now();
     if (beforeDelayMs <= 0) break;
-    await abortableDelay(Math.min(1200, beforeDelayMs), flowSignal);
+    const delayMs = isFirstPoll ? FIRST_POLL_DELAY_MS : POLL_INTERVAL_MS;
+    isFirstPoll = false;
+    await abortableDelay(Math.min(delayMs, beforeDelayMs), flowSignal);
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) break;
-    const status = await requestRefreshStatus(jobId, remainingMs, flowSignal);
+    let status;
+    try {
+      // Cap each individual status request at 5s (never the whole remaining
+      // deadline) — a stuck request otherwise burns the full budget, and the
+      // outer loop below already handles transient failures/retries against the
+      // deadline, so the request no longer retries internally.
+      status = await requestRefreshStatusOnce(jobId, Math.min(5000, remainingMs), flowSignal);
+    } catch (error) {
+      // The job keeps running server-side regardless of whether this particular
+      // status request landed — a single blip (dropped request, per-request
+      // timeout) shouldn't surface as "refresh failed". Only give up after
+      // several transient failures in a row; a non-transient error (or the flow
+      // being aborted) still propagates immediately.
+      if (
+        !isTransientRefreshError(error)
+        || ++consecutiveTransientFailures >= MAX_CONSECUTIVE_TRANSIENT_FAILURES
+      ) {
+        throw error;
+      }
+      continue;
+    }
+    consecutiveTransientFailures = 0;
     if (Date.now() >= deadline) break;
     if (status.job_id !== jobId) {
       throw new Error('刷新任务状态已被取代，请稍后查看最新文章');
@@ -4626,6 +4665,22 @@ async function triggerRefresh() {
     )).finally(() => { streamApplyInFlight = false; });
   };
 
+  // Captured before the job starts so a page-1 refresh that gets navigated away
+  // from mid-flight (see the branch below) still has a correct baseline for the
+  // fallback loadSince() call.
+  const sinceCursor = latestKnownTimestamp || latestNewsTimestamp();
+
+  // The server auto-refreshes every 15 minutes (see refresh_server.py's
+  // REFRESH_INTERVAL) — SQLite usually already holds articles this session hasn't
+  // seen yet by the time the user clicks "刷新". Check for those immediately,
+  // in parallel with kicking off the scrape job, instead of making the user wait
+  // out the whole job just to see content that was already sitting in the DB.
+  // `manual: true` lets loadSince() apply this to the DOM right away (page 1) or
+  // surface the usual bubble (elsewhere) despite refreshInProgress being true —
+  // it stays true for the job's full duration (see setRefreshRunning() below),
+  // deliberately not shortened just because this check landed.
+  const immediateCheck = loadSince(sinceCursor, { manual: true });
+
   try {
     const data = await requestRefreshOnce(flowController.signal);
     if (!flowIsCurrent()) return;
@@ -4635,11 +4690,13 @@ async function triggerRefresh() {
     if (status.status === 'failed') {
       throw new Error(refreshErrorMessage(status));
     }
+    let page1BranchRan = false;
     if (
       refreshView.page === 1
       && refreshView.pendingRequestSequence === 0
       && viewIsCurrent(refreshView.requestSequence, 0)
     ) {
+      page1BranchRan = true;
       const completionRequestSequence = refreshView.requestSequence + 1;
       const applicationGuard = () => viewIsCurrent(
         completionRequestSequence,
@@ -4656,6 +4713,21 @@ async function triggerRefresh() {
       if (loaded && viewIsCurrent(completionRequestSequence, 0)) {
         consumePendingNewArticles(refreshView.activeFilter);
       }
+    }
+    // Not on page 1 (or navigated away before the branch above could run): the new
+    // articles a completed job found are otherwise invisible until the user
+    // manually pages back to the top. Feed them into the same pendingNewItems
+    // queue the periodic background check uses (refreshInProgress is still true
+    // here, so loadSince() takes its defer path — it only queues, it doesn't touch
+    // the DOM) so the finally block's showNewArticlesPrompt() below can surface
+    // the usual "有 N 篇新文章，点击查看" bubble.
+    //
+    // Uses the live latestKnownTimestamp (falling back to the pre-job sinceCursor)
+    // rather than sinceCursor itself: the immediateCheck kicked off above may have
+    // already advanced it, and re-querying from an older cursor would just mean
+    // more (harmlessly deduped via seenArticleIds) redundant results.
+    if (!page1BranchRan && flowIsCurrent() && status.status === 'completed' && Number(status.new_count || 0) > 0) {
+      await loadSince(latestKnownTimestamp || sinceCursor);
     }
     if (!flowIsCurrent()) return;
     const count = Number(status.new_count || 0);
@@ -5002,10 +5074,27 @@ function applyNewsPage(data, page, activeFilter, { animate = false, preserveDom 
   }
 }
 
+// A Service Worker network-first fallback served a stale cached response in
+// place of a failed network request (see sw.js's withSwFallbackMarker()) — most
+// commonly right after an iOS PWA resumes from the background, before the
+// network stack is back up. Left unchecked, that looks exactly like a fresh 200
+// to callers — e.g. loadSince() would read it as "no new articles" and stay
+// quiet instead of retrying. Treat it the same as a network failure instead.
+function isSwFallbackResponse(resp) {
+  return !!(resp && resp.headers && resp.headers.get('X-SW-Fallback'));
+}
+
+function swFallbackError() {
+  const error = new Error('stale response served from Service Worker cache fallback');
+  error.name = 'SwFallbackError';
+  return error;
+}
+
 async function fetchNewsPage(page, activeFilter, signal, sourceSnapshot = null) {
   const params = buildNewsPageParams(page, activeFilter, sourceSnapshot);
   const resp = await fetch('/api/news?' + params.toString(), { signal });
   if (!resp.ok) throw new Error('HTTP ' + resp.status);
+  if (isSwFallbackResponse(resp)) throw swFallbackError();
   const data = await resp.json();
   if (data.error) throw new Error(data.error);
   return data;
@@ -5030,12 +5119,15 @@ function warmPageCoverImages(data) {
 // no longer matches the live one — that per-record check, not this function, is what
 // actually guarantees pagination never hands out a stale page; it holds regardless of
 // when a bump lands relative to an in-flight read/write, so there's no TOCTOU window.
-// Clearing the buffer/prefetch map/IndexedDB store here is just hygiene on top of that
-// (reclaim memory, stop reusing now-pointless in-flight dedup slots) — not required
-// for correctness.
+// Clearing the prefetch map/IndexedDB store here is just hygiene on top of that
+// (stop reusing now-pointless in-flight dedup slots, reclaim storage) — not required
+// for correctness. The in-memory pageMemoryBuffer is deliberately *not* cleared: it's
+// bounded (PAGE_MEMORY_BUFFER_LIMIT LRU) and its now-stale entries are exactly what
+// preparePageNavigation()'s 2.5s downgrade budget reads via peekStaleBufferedPage() to
+// avoid freezing the pager for up to 12s while a slow manual refresh runs. Correctness
+// still holds because readBufferedPage() rejects any entry whose epoch != contentEpoch.
 function bumpContentEpoch() {
   contentEpoch++;
-  pageMemoryBuffer.clear();
   pagePrefetchPromises.clear();
   clearCachedNewsPages();
 }
@@ -5067,6 +5159,16 @@ function readBufferedPage(page, activeFilter) {
   pageMemoryBuffer.delete(key);
   pageMemoryBuffer.set(key, entry);
   return entry.data;
+}
+
+// Unlike readBufferedPage(), does not reject an entry whose stamped epoch no
+// longer matches the live contentEpoch — used only by preparePageNavigation()'s
+// mustBeFresh downgrade budget, where a possibly-stale snapshot beats leaving the
+// pager frozen while the network is slow, and the caller schedules a
+// network-backed correction (applyPageCalibrationWhenActive()) right after.
+function peekStaleBufferedPage(page, activeFilter) {
+  const entry = pageMemoryBuffer.get(newsPageCacheKey(page, activeFilter));
+  return entry ? entry.data : null;
 }
 
 async function prefetchNewsPage(page, activeFilter) {
@@ -5167,7 +5269,12 @@ function consumePendingNewArticles(activeFilter) {
 }
 
 function showNewArticlesPrompt() {
-  if (refreshInProgress) return;
+  // Deliberately does NOT bail out while refreshInProgress: triggerRefresh()'s
+  // immediate loadSince(..., { manual: true }) check can surface new articles
+  // well before the job itself finishes (see triggerRefresh()), and the button's
+  // running state (potentially 10-30s) shouldn't suppress that bubble for the
+  // whole duration. triggerRefresh() already hides any stale prompt at the start
+  // of a manual refresh, so there's nothing here for it to race against.
   const prompt = document.getElementById('newArticlesPrompt');
   if (!prompt) return;
   // Only surface the toast when the newly-arrived articles are actually relevant
@@ -5376,14 +5483,25 @@ async function loadNewsPageRequest(requestSeq, page = 1, {
         if (externalSignal) externalSignal.removeEventListener('abort', abortFromExternal);
       }
     }
+    // A SW-fallback failure means every retry was silently answered with a stale
+    // cached response — surfacing it gets a more specific message than a plain
+    // network error.
+    const isSwFallbackFailure = lastError && lastError.name === 'SwFallbackError';
     const message = lastError && lastError.name === 'AbortError'
       ? '连接超时，请稍后重试'
+      : isSwFallbackFailure
+      ? '内容可能不是最新，下拉或点击刷新重试'
       : '加载失败，请检查网络';
     if (cacheApplied) showToast(message);
     else if (!cacheApplied && !news.length) {
       (coldStartErrorHandler || renderColdStartError)(message);
     }
-    else if (userInitiated) showToast(message);
+    // Otherwise (cache missed, but the page already has news rendered from an
+    // earlier load, and this wasn't a user-initiated fetch): ordinarily silent —
+    // background prefetch failures shouldn't nag the user — except a SW-fallback
+    // failure specifically, which per isSwFallbackResponse()'s doc must never be
+    // silently mistaken for "up to date".
+    else if (userInitiated || isSwFallbackFailure) showToast(message);
     return cacheApplied;
   } finally {
     if (requestSeq === pageRequestSequence && showPageProgress) setPageLoading(false);
@@ -5431,13 +5549,37 @@ async function preparePageNavigation(page, activeFilter) {
 
   // A pending/known-relevant new article means any snapshot fetched before this
   // navigation started is stale — e.g. articles bumped off page 1 by a background
-  // refresh may already be sitting at the top of what page 2 used to look like. Skip
-  // buffered/cached snapshots entirely and wait for the real network response, so the
-  // scroll-to-top animation that follows renders the final content on its first paint
-  // instead of correcting itself after the animation completes.
+  // refresh may already be sitting at the top of what page 2 used to look like. The
+  // fresh network response is strongly preferred so the scroll-to-top animation
+  // renders final content on its first paint instead of correcting itself after.
+  //
+  // But a manual refresh job can keep the server busy enough that this response
+  // takes several seconds — rather than leaving the pager disabled for up to the
+  // full 12s fetch timeout (see startNetworkFetch()'s AbortController), give the
+  // network a shorter budget. If it hasn't answered by then and *any* snapshot is
+  // available — even one invalidated by a concurrent bumpContentEpoch() — show
+  // that now and silently correct it via applyPageCalibrationWhenActive() once the
+  // network catches up. Only genuinely wait it out if no snapshot exists at all.
+  const NAVIGATION_FRESH_BUDGET_MS = 2500;
   const mustBeFresh = pendingRelevantCount(activeFilter) > 0;
   if (mustBeFresh) {
-    const result = await startNetworkFetch();
+    const networkPromise = startNetworkFetch();
+    const settledWithinBudget = await withPromiseTimeout(networkPromise, null, NAVIGATION_FRESH_BUDGET_MS);
+    if (requestSeq !== pageRequestSequence) return null;
+    if (settledWithinBudget) {
+      if (settledWithinBudget.data) return settledWithinBudget.data;
+      const error = settledWithinBudget.error || new Error('load failed');
+      showToast(error.name === 'AbortError' ? '连接超时，请稍后重试' : '加载失败，请检查网络');
+      return null;
+    }
+    const staleSnapshot = peekStaleBufferedPage(page, activeFilter);
+    if (staleSnapshot) {
+      networkPromise.then(result => {
+        if (result.data) applyPageCalibrationWhenActive(result.data, page, activeFilter, requestSeq);
+      });
+      return staleSnapshot;
+    }
+    const result = await networkPromise;
     if (requestSeq !== pageRequestSequence) return null;
     if (result.data) return result.data;
     const error = result.error || new Error('load failed');
@@ -5490,7 +5632,12 @@ async function loadData() {
 }
 
 // Routine refresh path: detect only changed/new rows and prepare the latest first page.
-async function loadSince(timestamp, { forceApply = false } = {}) {
+// `manual`: bypasses the defer-while-a-refresh-is-running early return below — used by
+// triggerRefresh()'s immediate "what's already in SQLite" check (see there), which
+// deliberately runs while refreshInProgress is still true for the job's whole
+// duration. Every other caller (periodic timer, foreground resume, etc.) leaves this
+// false and keeps deferring while a refresh job is in flight, same as before.
+async function loadSince(timestamp, { forceApply = false, manual = false } = {}) {
   const deferForRefresh = refreshInProgress;
   try {
     const controller = new AbortController();
@@ -5501,6 +5648,7 @@ async function loadSince(timestamp, { forceApply = false } = {}) {
     });
     const resp = await fetch('/api/news?' + params.toString(), { signal: controller.signal });
     clearTimeout(timeout);
+    if (isSwFallbackResponse(resp)) throw swFallbackError();
     const data = await resp.json();
     if (data.error) throw new Error(data.error);
     const newItems = (data.items || []).filter(item => {
@@ -5523,7 +5671,7 @@ async function loadSince(timestamp, { forceApply = false } = {}) {
     bumpContentEpoch();
     const epochAtStart = contentEpoch;
     refreshTodayArticleCount();
-    if (deferForRefresh || refreshInProgress) return added;
+    if (!manual && (deferForRefresh || refreshInProgress)) return added;
     await loadSourceCategories();
     // Keep an "all"-scoped snapshot warm — the lightweight Logo/home flow
     // intentionally jumps to "all" and can reuse it without starting a scrape.
@@ -5549,8 +5697,11 @@ async function loadSince(timestamp, { forceApply = false } = {}) {
     }
     return added;
   } catch (e) {
-    // Incremental checks never replace or hide the currently visible page.
-    return 0;
+    // Incremental checks never replace or hide the currently visible page. -1
+    // (rather than 0) distinguishes "couldn't check" from "checked, found
+    // nothing new" — see checkForNewArticlesAfterForegroundResume(), which
+    // retries only on the former.
+    return -1;
   }
 }
 
@@ -6088,7 +6239,11 @@ async function goToPage(page) {
   }
   const totalPages = Math.max(1, Math.ceil(currentTotal / PAGE_SIZE));
   if (page < 1 || page > totalPages) return;
-  cancelViewBoundRefreshWork();
+  // Deliberately does NOT cancelViewBoundRefreshWork() here: a manual refresh job
+  // keeps running server-side regardless of what the user does with the page, and
+  // its DOM-application paths are already gated by viewIsCurrent()/flowIsCurrent()
+  // (see triggerRefresh()) — navigating away just makes those guards fail closed
+  // instead of the refresh being silently aborted underneath the user.
   rememberCurrentListHistory();
   const activeFilter = filter;
   const navigationSeq = ++pageNavigationSequence;
@@ -7132,6 +7287,22 @@ window.addEventListener('scroll', markUserActivity, { passive: true });
 // articles and title updates whenever the page becomes visible/focused again.
 // iOS sometimes fires only 'focus' (not 'visibilitychange') on PWA resume, so
 // listen for both and dedupe the work behind a short guard.
+// Retries a foreground-resume incremental check that failed to even reach the
+// server — a dropped request or a stale Service Worker cache fallback (see
+// isSwFallbackResponse()) right as iOS PWA's network stack comes back online.
+// A genuine "checked, nothing new" (loadSince() returning 0) is NOT retried —
+// only -1 (loadSince()'s "couldn't check" sentinel) triggers a retry.
+async function checkForNewArticlesAfterForegroundResume(cursor) {
+  const RETRY_DELAYS_MS = [1500, 4000];
+  let result = await loadSince(cursor);
+  for (const delayMs of RETRY_DELAYS_MS) {
+    if (result !== -1 || document.hidden) return;
+    await delay(delayMs);
+    if (document.hidden) return;
+    result = await loadSince(latestKnownTimestamp || cursor);
+  }
+}
+
 let lastForegroundSyncAt = 0;
 function usesIpadPwaTrackpadNavigation() {
   return navigator.platform === 'MacIntel'
@@ -7146,7 +7317,7 @@ function onReturnToForeground() {
   pageVisibleSince = now;
   lastUserActivityAt = now;
   const cursor = latestKnownTimestamp || latestNewsTimestamp();
-  if (cursor > 0) loadSince(cursor);
+  if (cursor > 0) checkForNewArticlesAfterForegroundResume(cursor);
   // If source metadata never loaded (e.g. backgrounded through the whole retry
   // window), recover now so the drawer/labels — and any stuck source deep link —
   // don't stay broken until a manual refresh.

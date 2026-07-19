@@ -1,9 +1,12 @@
 """Tests for the read-only source_rows() / write-heavy maintain_source_categories()
 split introduced to keep GET /sources fast during a fetch cycle (cold-start fix)."""
 
+from pathlib import Path
 import sqlite3
 
 import source_categories as sc
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _make_conn():
@@ -98,3 +101,14 @@ def test_maintain_is_throttled(monkeypatch):
     assert first["ran"] is True
     assert second["ran"] is False  # throttled within the window
     assert len(ensure_calls) == 1
+
+
+def test_refresh_server_lets_post_fetch_maintenance_be_throttled():
+    # A manual/periodic refresh's post-fetch maintenance call no longer forces past
+    # the throttle — back-to-back refreshes skip the two full-table scans
+    # (source discovery, stale cleanup) when the last run was recent. New/stale
+    # sources are still caught by whichever refresh lands after the throttle
+    # window (60s) expires.
+    source = (ROOT / "refresh_server.py").read_text(encoding="utf-8")
+    assert "maintain_source_categories(conn, force=False)" in source
+    assert "maintain_source_categories(conn, force=True)" not in source

@@ -54,6 +54,50 @@ def test_legacy_news_json_deduplicates_by_stable_article_id():
     assert "title|timestamp" not in source
 
 
+def test_fulltext_fetches_use_a_shorter_timeout_than_the_telegram_list_page():
+    source = (ROOT / "fetcher.py").read_text(encoding="utf-8")
+
+    assert "FULLTEXT_TIMEOUT = 10" in source
+    telegraph = source[source.index("def fetch_telegraph("):source.index("def fetch_wechat_article(")]
+    wechat = source[source.index("def fetch_wechat_article("):source.index("def process_message(")]
+    assert "timeout=FULLTEXT_TIMEOUT" in telegraph
+    assert "timeout=FULLTEXT_TIMEOUT" in wechat
+    # The Telegram list-page fetch keeps the longer REQUEST_TIMEOUT — only the
+    # outbound full-text fetches (which can hang on a slow third-party site) were
+    # tightened.
+    telegram_page = source[source.index("def fetch_telegram_page("):source.index("def parse_messages(")]
+    assert "timeout=REQUEST_TIMEOUT" in telegram_page
+
+
+def test_run_skips_redundant_full_table_upsert_when_streaming_already_succeeded():
+    source = (ROOT / "fetcher.py").read_text(encoding="utf-8")
+    run_block = source[source.index("def run():"):source.index("def write_news_json_mirror(")]
+
+    assert "if inserted_total < len(new_entries):" in run_block
+    assert "upsert_articles(conn, new_entries)" in run_block
+    assert "ensure_article_sources(conn)" in run_block
+    # The old unconditional end-of-cycle upsert_articles(conn, new_entries) (which
+    # re-scanned every article's sources every cycle) must be gone.
+    assert run_block.count("upsert_articles(conn, new_entries)") == 1
+
+
+def test_news_json_write_is_best_effort_and_does_not_block_sqlite_sync():
+    source = (ROOT / "fetcher.py").read_text(encoding="utf-8")
+    run_block = source[source.index("def run():"):source.index("def write_news_json_mirror(")]
+
+    sqlite_sync_at = run_block.index("sqlite_sync_started_at")
+    news_json_at = run_block.index("write_news_json_mirror(new_entries)")
+    assert sqlite_sync_at < news_json_at
+    news_json_call_block = run_block[news_json_at - 60:news_json_at + 120]
+    assert "try:" in news_json_call_block
+    assert "except Exception as e:" in news_json_call_block
+
+    mirror_source = source[source.index("def write_news_json_mirror("):]
+    assert "NEWS_JSON_MIRROR_LIMIT" in mirror_source
+    assert "json.dumps(output, ensure_ascii=False)" in mirror_source
+    assert "indent=2" not in mirror_source
+
+
 def test_article_detail_sanitizes_dangerous_html_without_losing_images():
     db_path = ROOT / f"tmp-hardening-{uuid.uuid4().hex}.db"
     try:
@@ -129,14 +173,19 @@ def test_refresh_article_detail_cache_computes_once_per_article():
     assert "_article_cache_inflight[article_id]" in source
 
 
-def test_news_db_connection_initialization_uses_lock():
+def test_news_db_connection_is_thread_local_not_process_wide():
+    # The news.db connection must be per-thread: a single process-wide connection
+    # shared across Werkzeug's request threads let concurrent cursors/transactions
+    # (a slow /ai/ or admin write vs. a /auth/refresh/status read) corrupt each other.
     source = (ROOT / "web_server.py").read_text(encoding="utf-8")
-    news_conn_pos = source.index("_news_conn = None")
+    local_pos = source.index("_news_conn_local = threading.local()")
     get_news_pos = source.index("def _get_news_db()")
-    block = source[news_conn_pos:get_news_pos + 500]
+    block = source[local_pos:get_news_pos + 500]
 
-    assert "_news_conn_lock = threading.Lock()" in block
-    assert "with _news_conn_lock:" in block
+    assert "getattr(_news_conn_local, \"conn\", None)" in block
+    assert "_news_conn_local.conn = conn" in block
+    # No resurrected process-wide shared connection.
+    assert "_news_conn = None" not in source
 
 
 def test_ai_result_save_uses_single_upsert_statement():
