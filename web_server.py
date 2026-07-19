@@ -2162,6 +2162,7 @@ def _translate_article_background(article: dict, config: dict) -> bool:
     translated_title = None
     translated_html = None
     cached_title = ""
+    translation_cache_data = None
 
     if article.get("translate_content_needed"):
         cached_title, cached_html = _cached_full_translation(article.get("translation"))
@@ -2180,11 +2181,10 @@ def _translate_article_background(article: dict, config: dict) -> bool:
             if article.get("translate_title_needed"):
                 translated_title = result.get("title") or None
         if translated_html:
-            cache_data = json.dumps({
+            translation_cache_data = json.dumps({
                 "title": translated_title if translated_title is not None else cached_title,
                 "html": translated_html,
             }, ensure_ascii=False)
-            _save_ai_result(article_id, translation=cache_data)
         if article.get("translate_title_needed") and not translated_title:
             translated_title = svc.translate_title(article.get("title", ""), "zh-CN")
 
@@ -2192,6 +2192,11 @@ def _translate_article_background(article: dict, config: dict) -> bool:
         translated_title = svc.translate_title(article.get("title", ""), "zh-CN")
 
     _save_article_translation(article_id, title=translated_title, body_html=translated_html)
+    # The browser's translation-update marker is visible independently of the
+    # article detail row.  Publish it only after the translated body commit so
+    # a poll can never evict a detail cache and then re-fetch English text.
+    if translation_cache_data is not None:
+        _save_ai_result(article_id, translation=translation_cache_data)
     return bool(translated_title or translated_html)
 
 
@@ -3191,7 +3196,17 @@ def ai_translation_updates():
         try:
             since_id = int(since_id_text)
         except ValueError:
-            since_id = 0
+            return jsonify({"error": "invalid cursor"}), 400
+        if since_id < 0:
+            return jsonify({"error": "invalid cursor"}), 400
+    if since:
+        try:
+            datetime.strptime(since_ts, "%Y-%m-%d %H:%M:%S.%f")
+        except ValueError:
+            try:
+                datetime.strptime(since_ts, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return jsonify({"error": "invalid cursor"}), 400
 
     if not os.path.exists(NEWS_DB):
         return jsonify({"items": [], "cursor": since})

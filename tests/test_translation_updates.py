@@ -19,7 +19,10 @@ def client(monkeypatch, tmp_path):
     sqlite3.connect(db_path).close()
     monkeypatch.setattr(web_server, "NEWS_DB", str(db_path))
 
-    users = {101: {"id": 101, "role": "user"}}
+    users = {
+        101: {"id": 101, "role": "user"},
+        303: {"id": 303, "role": "auditor"},
+    }
     monkeypatch.setattr(models, "get_user", lambda user_id: users.get(user_id))
     monkeypatch.setattr(models, "record_access", lambda user_id: None)
     return web_server.app.test_client()
@@ -72,3 +75,23 @@ def test_translation_updates_publish_completed_translations_without_touching_sum
     ).fetchone()[0]
     conn.close()
     assert unchanged == translation_updated_at
+
+
+def test_translation_updates_require_reader_authorization_and_reject_bad_cursors(client):
+    unauthenticated = client.get("/ai/translation-updates")
+    assert unauthenticated.status_code == 401
+
+    forbidden = client.get(
+        "/ai/translation-updates",
+        headers=_auth_headers(303, "auditor"),
+    )
+    assert forbidden.status_code == 403
+
+    for cursor in ("definitely-not-a-cursor|0", "2026-07-19 10:00:00|not-an-id"):
+        malformed = client.get(
+            "/ai/translation-updates",
+            query_string={"since": cursor},
+            headers=_auth_headers(),
+        )
+        assert malformed.status_code == 400
+        assert malformed.get_json()["error"] == "invalid cursor"

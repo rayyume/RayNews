@@ -52,6 +52,7 @@ const context = {{
   articleBodyControllers: {{}},
   articleBodyRequestGenerations: {{}},
   translationUpdateCursor: '',
+  translationUpdateBaselineUncertain: false,
   translationUpdatePolling: false,
   translationUpdatePollPromise: null,
   document: {{
@@ -325,6 +326,7 @@ const context = {{
   console,
   authToken: 'tok',
   translationUpdateCursor: '',
+  translationUpdateBaselineUncertain: false,
   translationUpdatePolling: false,
   articleBodyCache: {{}},
   articleBodyPromises: {{}},
@@ -356,6 +358,52 @@ vm.runInContext({json.dumps(_article_detail_block() + _translation_update_block(
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def test_successful_baseline_after_a_failed_initial_poll_invalidates_english_detail_cache():
+    script = rf"""
+const assert = require('assert');
+const vm = require('vm');
+const overlay = {{ dataset: {{ articleId: '42' }}, classList: {{ contains: name => name === 'open' }} }};
+const calls = [];
+const context = {{
+  console,
+  authToken: 'tok',
+  translationUpdateCursor: '',
+  translationUpdateBaselineUncertain: false,
+  translationUpdatePolling: false,
+  translationUpdatePollPromise: null,
+  articleBodyCache: {{ 42: {{ body_html: '<p>English cached</p>' }} }},
+  articleBodyPromises: {{}},
+  articleBodyControllers: {{}},
+  articleBodyRequestGenerations: {{}},
+  document: {{ getElementById: id => id === 'overlay' ? overlay : (id === 'articleWrap' ? {{ id }} : null) }},
+  fetchArticleDetail: async id => {{ calls.push(['detail', id]); return {{ body_html: '<p>Chinese current</p>' }}; }},
+  renderArticleBody: (wrap, data, id) => calls.push(['render', id, data.body_html]),
+  autoDisplaySummary: id => calls.push(['summary', id]),
+}};
+let attempt = 0;
+context.fetch = async () => {{
+  attempt++;
+  if (attempt === 1) throw new TypeError('network down');
+  return {{ ok: true, json: async () => ({{ items: [], cursor: '2026-07-19 10:00:00.000|9' }}) }};
+}};
+vm.createContext(context);
+vm.runInContext({json.dumps(_translation_update_block())}, context);
+(async () => {{
+  await context.pollTranslationUpdates();
+  assert.deepEqual(context.articleBodyCache[42], {{ body_html: '<p>English cached</p>' }});
+  await context.pollTranslationUpdates();
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(context.articleBodyCache[42], undefined);
+  assert.deepEqual(calls, [
+    ['detail', 42], ['render', 42, '<p>Chinese current</p>'], ['summary', 42],
+  ]);
+}})().catch(error => {{ console.error(error && error.stack ? error.stack : error); process.exitCode = 1; }});
+"""
+    result = subprocess.run(["node", "-e", script], cwd=ROOT,
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def test_translation_update_aborts_and_supersedes_inflight_stale_detail_request():
     script = f"""
 const assert = require('assert');
@@ -367,6 +415,7 @@ const context = {{
   console,
   authToken: 'tok',
   translationUpdateCursor: 'cursor',
+  translationUpdateBaselineUncertain: false,
   articleBodyCache: {{}},
   articleBodyPromises: {{}},
   articleBodyControllers: {{}},
