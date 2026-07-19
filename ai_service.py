@@ -164,6 +164,9 @@ class AIService:
     def _is_deepseek(self) -> bool:
         return "deepseek.com" in (self.endpoint or "").lower()
 
+    def _is_deepseek_model(self) -> bool:
+        return "deepseek" in (self.model or "").lower()
+
     def _provider_output_cap(self, requested: int, purpose: str = "default") -> int:
         if not self._is_deepseek():
             return requested
@@ -206,6 +209,15 @@ class AIService:
         if "/v1" not in url and "/v1" not in self.endpoint:
             url = f"{self.endpoint}/v1/chat/completions"
 
+        body = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        if self._is_deepseek_model():
+            body["thinking"] = {"type": "disabled"}
+
         try:
             resp = requests.post(
                 url,
@@ -213,12 +225,7 @@ class AIService:
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
                 },
-                json={
-                    "model": self.model,
-                    "messages": messages,
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                },
+                json=body,
                 timeout=(30, self.request_timeout),
             )
         except requests.exceptions.ReadTimeout as e:
