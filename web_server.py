@@ -2911,6 +2911,7 @@ def _init_ai_results_table():
                 article_id   INTEGER PRIMARY KEY,
                 summary      TEXT,
                 translation  TEXT,
+                translation_updated_at TEXT,
                 title_summary TEXT,
                 title_summary_error TEXT,
                 title_summary_error_at TEXT,
@@ -2932,6 +2933,8 @@ def _init_ai_results_table():
             conn.execute("ALTER TABLE ai_results ADD COLUMN summary_error TEXT")
         if "summary_error_at" not in cols:
             conn.execute("ALTER TABLE ai_results ADD COLUMN summary_error_at TEXT")
+        if "translation_updated_at" not in cols:
+            conn.execute("ALTER TABLE ai_results ADD COLUMN translation_updated_at TEXT")
         if "title_summary" not in cols:
             conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary TEXT")
         if "title_summary_error" not in cols:
@@ -3090,17 +3093,22 @@ def _save_ai_result(article_id: int, summary: str | None = None,
         conn.execute(
             """
             INSERT INTO ai_results
-            (article_id, summary, translation, summary_error, summary_error_at,
+            (article_id, summary, translation, translation_updated_at, summary_error, summary_error_at,
              title_summary, title_summary_error, title_summary_error_at,
              title_translation_error, title_translation_error_at,
              title_summary_provider, title_summary_model, title_summary_by_user_id)
-            VALUES (?, ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END,
+            VALUES (?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE strftime('%Y-%m-%d %H:%M:%f', 'now') END,
+                    ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END,
                     ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END,
                     ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END,
                     ?, ?, ?)
             ON CONFLICT(article_id) DO UPDATE SET
                 summary = COALESCE(excluded.summary, summary),
                 translation = COALESCE(excluded.translation, translation),
+                translation_updated_at = CASE
+                    WHEN excluded.translation IS NOT NULL THEN strftime('%Y-%m-%d %H:%M:%f', 'now')
+                    ELSE translation_updated_at
+                END,
                 summary_error = CASE
                     WHEN excluded.summary IS NOT NULL THEN NULL
                     WHEN excluded.summary_error IS NOT NULL THEN excluded.summary_error
@@ -3141,6 +3149,7 @@ def _save_ai_result(article_id: int, summary: str | None = None,
                 article_id,
                 summary,
                 translation,
+                translation,
                 summary_error[:500] if summary_error else None,
                 summary_error,
                 title_summary,
@@ -3164,6 +3173,58 @@ def _save_ai_result(article_id: int, summary: str | None = None,
 
 
 # ─── AI Result Cache (read-only) ──────────────────────────
+
+
+@app.route("/ai/translation-updates", methods=["GET"])
+@require_role("user", "admin")
+def ai_translation_updates():
+    """Return IDs whose shared translation cache changed after ``since``.
+
+    This deliberately exposes only article IDs and a cursor: the normal result
+    endpoint remains responsible for applying each viewer's sharing settings.
+    """
+    since = (request.args.get("since") or "").strip()
+    since_ts = since
+    since_id = 0
+    if "|" in since:
+        since_ts, since_id_text = since.rsplit("|", 1)
+        try:
+            since_id = int(since_id_text)
+        except ValueError:
+            since_id = 0
+
+    if not os.path.exists(NEWS_DB):
+        return jsonify({"items": [], "cursor": since})
+
+    conn = None
+    try:
+        conn = sqlite3.connect(NEWS_DB)
+        conn.row_factory = sqlite3.Row
+        _init_ai_results_table()
+        if not since:
+            cursor = conn.execute(
+                "SELECT strftime('%Y-%m-%d %H:%M:%f', 'now')"
+            ).fetchone()[0]
+            return jsonify({"items": [], "cursor": cursor})
+        rows = conn.execute(
+            "SELECT article_id, translation_updated_at FROM ai_results "
+            "WHERE translation_updated_at IS NOT NULL "
+            "AND (translation_updated_at > ? "
+            "OR (translation_updated_at = ? AND article_id > ?)) "
+            "ORDER BY translation_updated_at ASC, article_id ASC LIMIT 500",
+            (since_ts, since_ts, since_id),
+        ).fetchall()
+        items = [{"id": row["article_id"]} for row in rows]
+        cursor = (
+            f"{rows[-1]['translation_updated_at']}|{rows[-1]['article_id']}"
+            if rows else since
+        )
+        return jsonify({"items": items, "cursor": cursor})
+    except Exception:
+        return jsonify({"items": [], "cursor": since}), 500
+    finally:
+        if conn:
+            conn.close()
 
 
 @app.route("/ai/result/<int:article_id>", methods=["GET"])
