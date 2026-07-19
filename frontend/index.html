@@ -1015,11 +1015,16 @@ let articleReturnInProgress = false;
 let articleBodyCache = {};
 let articleBodyPromises = {};
 let articleBodyControllers = {};
+let articleBodyRequestGenerations = {};
 let articleDetailRetryInProgress = new Set();
 let activeArticleRequestId = 0;
 let searchDebounceTimer = null;
 let titleUpdateCursor = '';
 let titleUpdatePolling = false;
+let translationUpdateCursor = '';
+let translationUpdateBaselineUncertain = false;
+let translationUpdatePolling = false;
+let translationUpdatePollPromise = null;
 let searchRequestController = null;
 let searchRequestSeq = 0;
 let searchPage = 1;
@@ -5111,6 +5116,9 @@ function renderSourceDeepLinkError(message) {
 
 function applyNewsPage(data, page, activeFilter, { animate = false, preserveDom = false } = {}) {
   news = Array.isArray(data.items) ? data.items : [];
+  // Start the translation-update baseline before this list can open article
+  // details. fetchArticleDetail waits for it while the cursor is empty.
+  if (news.length) pollTranslationUpdates();
   coldStartInitializationActive = typeof isStartupInitializationResponse === 'function'
     && isStartupInitializationResponse(data);
   if (news.length || !coldStartInitializationActive) coldStartInitializationTimedOut = false;
@@ -6010,6 +6018,83 @@ async function pollTitleUpdates() {
   }
 }
 
+function invalidateArticleBody(id) {
+  const controller = articleBodyControllers[id];
+  if (controller) controller.abort();
+  articleBodyRequestGenerations[id] = (articleBodyRequestGenerations[id] || 0) + 1;
+  delete articleBodyCache[id];
+  delete articleBodyPromises[id];
+}
+
+function applyTranslationUpdate(item) {
+  const id = Number(item && item.id);
+  if (!Number.isFinite(id) || id <= 0) return;
+  invalidateArticleBody(id);
+
+  const overlay = document.getElementById('overlay');
+  if (!overlay || !overlay.classList.contains('open') || overlay.dataset.articleId !== String(id)) return;
+  fetchArticleDetail(id)
+    .then(data => {
+      const currentOverlay = document.getElementById('overlay');
+      if (!currentOverlay || !currentOverlay.classList.contains('open') || currentOverlay.dataset.articleId !== String(id)) return;
+      renderArticleBody(document.getElementById('articleWrap'), data, id);
+      autoDisplaySummary(id);
+    })
+    .catch(() => {
+      // Translation updates are opportunistic; never disturb reading.
+    });
+}
+
+function recoverUncertainTranslationBaseline() {
+  const cachedIds = new Set([
+    ...Object.keys(articleBodyCache),
+    ...Object.keys(articleBodyPromises),
+    ...Object.keys(articleBodyControllers),
+  ]);
+  cachedIds.forEach(id => applyTranslationUpdate({ id }));
+}
+
+async function pollTranslationUpdates() {
+  if (!authToken) return;
+  if (translationUpdatePolling) return translationUpdatePollPromise;
+  translationUpdatePolling = true;
+  const pollPromise = (async () => {
+    const establishingBaseline = !translationUpdateCursor;
+    try {
+      const resp = await fetch('/ai/translation-updates?since=' + encodeURIComponent(translationUpdateCursor) + '&t=' + Date.now(), {
+        headers: { 'Authorization': 'Bearer ' + authToken },
+      });
+      if (!resp.ok) {
+        if (establishingBaseline) translationUpdateBaselineUncertain = true;
+        return;
+      }
+      const data = await resp.json();
+      const nextCursor = data && typeof data.cursor === 'string' ? data.cursor : '';
+      if (!data || data.error || (establishingBaseline && !nextCursor)) {
+        if (establishingBaseline) translationUpdateBaselineUncertain = true;
+        return;
+      }
+      if (establishingBaseline && translationUpdateBaselineUncertain) {
+        translationUpdateBaselineUncertain = false;
+        recoverUncertainTranslationBaseline();
+      }
+      translationUpdateCursor = nextCursor || translationUpdateCursor;
+      (data.items || []).forEach(item => {
+        const id = Number(item && item.id);
+        if (Number.isFinite(id) && id > 0) applyTranslationUpdate(item);
+      });
+    } catch (e) {
+      // Translation updates are opportunistic; never disturb reading.
+      if (establishingBaseline) translationUpdateBaselineUncertain = true;
+    } finally {
+      translationUpdatePolling = false;
+      translationUpdatePollPromise = null;
+    }
+  })();
+  translationUpdatePollPromise = pollPromise;
+  return pollPromise;
+}
+
 function articleItemHtml(n) {
   return `
     <div class="item" data-id="${n.id}" onclick="openArticle(${n.id})">
@@ -6726,23 +6811,34 @@ function openArticle(id) {
 function fetchArticleDetail(id, timeoutMs = 8000) {
   if (articleBodyCache[id]) return Promise.resolve(articleBodyCache[id]);
   if (articleBodyPromises[id]) return articleBodyPromises[id];
-  const controller = new AbortController();
-  articleBodyControllers[id] = controller;
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  const promise = fetch('/api/news/' + id + '?t=' + Date.now(), { signal: controller.signal, cache: 'no-store' })
-    .then(r => {
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      return r.json();
-    })
-    .then(data => {
-      if (!data || data.error) throw new Error((data && data.error) || 'article not found');
-      articleBodyCache[id] = data;
-      return data;
-    })
+  const generation = articleBodyRequestGenerations[id] || 0;
+  let controller = null;
+  let timeout = null;
+  const promise = (async () => {
+    // An empty cursor means the server would establish its baseline at the
+    // current instant. Do that before the first detail request so a completed
+    // translation cannot be skipped between list load and the first poll.
+    if (authToken && !translationUpdateCursor) await pollTranslationUpdates();
+    if ((articleBodyRequestGenerations[id] || 0) !== generation) {
+      throw new Error('article detail request superseded');
+    }
+    controller = new AbortController();
+    articleBodyControllers[id] = controller;
+    timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const r = await fetch('/api/news/' + id + '?t=' + Date.now(), { signal: controller.signal, cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    if (!data || data.error) throw new Error((data && data.error) || 'article not found');
+    if ((articleBodyRequestGenerations[id] || 0) !== generation) {
+      throw new Error('article detail request superseded');
+    }
+    articleBodyCache[id] = data;
+    return data;
+  })()
     .finally(() => {
       clearTimeout(timeout);
       if (articleBodyPromises[id] === promise) delete articleBodyPromises[id];
-      if (articleBodyControllers[id] === controller) delete articleBodyControllers[id];
+      if (controller && articleBodyControllers[id] === controller) delete articleBodyControllers[id];
     });
   articleBodyPromises[id] = promise;
   return promise;
@@ -7343,7 +7439,10 @@ setInterval(function() {
 }, 60000);
 setInterval(showLatestAfterIdle, 15000);
 setInterval(function() {
-  if (news.length > 0) pollTitleUpdates();
+  if (news.length > 0) {
+    pollTitleUpdates();
+    pollTranslationUpdates();
+  }
 }, 12000);
 
 ['pointerdown', 'touchstart', 'keydown', 'wheel'].forEach(eventName => {
@@ -7405,7 +7504,10 @@ function onReturnToForeground() {
       forceNetwork: true,
     });
   }
-  if (news.length > 0) pollTitleUpdates();
+  if (news.length > 0) {
+    pollTitleUpdates();
+    pollTranslationUpdates();
+  }
   if (typeof document !== 'undefined') {
     const overlay = document.getElementById('overlay');
     const articleId = Number(overlay && overlay.dataset.articleId);

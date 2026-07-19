@@ -2111,9 +2111,9 @@ def _fetch_untranslated_articles(config: dict, limit: int = AUTO_TRANSLATION_BAT
 
 
 def _save_article_translation(article_id: int, title: str | None = None,
-                              body_html: str | None = None):
+                              body_html: str | None = None) -> bool:
     if not os.path.exists(NEWS_DB):
-        return
+        return False
     sets = []
     vals = []
     if title:
@@ -2122,16 +2122,17 @@ def _save_article_translation(article_id: int, title: str | None = None,
         sets.append("body_html = ?")
         vals.append(body_html)
     if not sets:
-        return
+        return False
     vals.append(article_id)
     conn = sqlite3.connect(NEWS_DB, timeout=30)
     try:
         conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute(f"UPDATE articles SET {', '.join(sets)} WHERE id = ?", vals)
+        result = conn.execute(f"UPDATE articles SET {', '.join(sets)} WHERE id = ?", vals)
         conn.commit()
         # _save_article_title_update() above already invalidates on a title
         # change; body_html has no such path, so cover it here too.
         _invalidate_refresh_server_cache(article_id)
+        return result.rowcount > 0
     finally:
         conn.close()
 
@@ -2162,6 +2163,7 @@ def _translate_article_background(article: dict, config: dict) -> bool:
     translated_title = None
     translated_html = None
     cached_title = ""
+    translation_cache_data = None
 
     if article.get("translate_content_needed"):
         cached_title, cached_html = _cached_full_translation(article.get("translation"))
@@ -2180,18 +2182,26 @@ def _translate_article_background(article: dict, config: dict) -> bool:
             if article.get("translate_title_needed"):
                 translated_title = result.get("title") or None
         if translated_html:
-            cache_data = json.dumps({
+            translation_cache_data = json.dumps({
                 "title": translated_title if translated_title is not None else cached_title,
                 "html": translated_html,
             }, ensure_ascii=False)
-            _save_ai_result(article_id, translation=cache_data)
         if article.get("translate_title_needed") and not translated_title:
             translated_title = svc.translate_title(article.get("title", ""), "zh-CN")
 
     elif article.get("translate_title_needed"):
         translated_title = svc.translate_title(article.get("title", ""), "zh-CN")
 
-    _save_article_translation(article_id, title=translated_title, body_html=translated_html)
+    body_writeback_committed = _save_article_translation(
+        article_id, title=translated_title, body_html=translated_html
+    )
+    # The browser's translation-update marker is visible independently of the
+    # article detail row.  Publish it only after the translated body commit so
+    # a poll can never evict a detail cache and then re-fetch English text.
+    if translation_cache_data is not None:
+        _save_ai_result(article_id, translation=translation_cache_data)
+        if body_writeback_committed:
+            _publish_translation_update(article_id)
     return bool(translated_title or translated_html)
 
 
@@ -2911,6 +2921,7 @@ def _init_ai_results_table():
                 article_id   INTEGER PRIMARY KEY,
                 summary      TEXT,
                 translation  TEXT,
+                translation_updated_at TEXT,
                 title_summary TEXT,
                 title_summary_error TEXT,
                 title_summary_error_at TEXT,
@@ -2932,6 +2943,8 @@ def _init_ai_results_table():
             conn.execute("ALTER TABLE ai_results ADD COLUMN summary_error TEXT")
         if "summary_error_at" not in cols:
             conn.execute("ALTER TABLE ai_results ADD COLUMN summary_error_at TEXT")
+        if "translation_updated_at" not in cols:
+            conn.execute("ALTER TABLE ai_results ADD COLUMN translation_updated_at TEXT")
         if "title_summary" not in cols:
             conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary TEXT")
         if "title_summary_error" not in cols:
@@ -3090,11 +3103,11 @@ def _save_ai_result(article_id: int, summary: str | None = None,
         conn.execute(
             """
             INSERT INTO ai_results
-            (article_id, summary, translation, summary_error, summary_error_at,
+            (article_id, summary, translation, translation_updated_at, summary_error, summary_error_at,
              title_summary, title_summary_error, title_summary_error_at,
              title_translation_error, title_translation_error_at,
              title_summary_provider, title_summary_model, title_summary_by_user_id)
-            VALUES (?, ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END,
+            VALUES (?, ?, ?, NULL, ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END,
                     ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END,
                     ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END,
                     ?, ?, ?)
@@ -3164,6 +3177,97 @@ def _save_ai_result(article_id: int, summary: str | None = None,
 
 
 # ─── AI Result Cache (read-only) ──────────────────────────
+
+
+def _publish_translation_update(article_id: int):
+    """Publish a completed automatic full-body translation writeback.
+
+    This is intentionally separate from ``_save_ai_result`` because manual
+    browser translations are cache-only and must not invalidate article detail
+    caches before their underlying ``articles.body_html`` has changed.
+    """
+    if not os.path.exists(NEWS_DB):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(NEWS_DB)
+        _init_ai_results_table()
+        conn.execute(
+            """
+            INSERT INTO ai_results (article_id, translation_updated_at)
+            VALUES (?, strftime('%Y-%m-%d %H:%M:%f', 'now'))
+            ON CONFLICT(article_id) DO UPDATE SET
+                translation_updated_at = excluded.translation_updated_at,
+                updated_at = datetime('now')
+            """,
+            (article_id,),
+        )
+        conn.commit()
+    finally:
+        if conn:
+            conn.close()
+
+
+@app.route("/ai/translation-updates", methods=["GET"])
+@require_role("user", "admin")
+def ai_translation_updates():
+    """Return IDs whose shared translation cache changed after ``since``.
+
+    This deliberately exposes only article IDs and a cursor: the normal result
+    endpoint remains responsible for applying each viewer's sharing settings.
+    """
+    since = (request.args.get("since") or "").strip()
+    since_ts = since
+    since_id = 0
+    if "|" in since:
+        since_ts, since_id_text = since.rsplit("|", 1)
+        try:
+            since_id = int(since_id_text)
+        except ValueError:
+            return jsonify({"error": "invalid cursor"}), 400
+        if since_id < 0:
+            return jsonify({"error": "invalid cursor"}), 400
+    if since:
+        try:
+            datetime.strptime(since_ts, "%Y-%m-%d %H:%M:%S.%f")
+        except ValueError:
+            try:
+                datetime.strptime(since_ts, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return jsonify({"error": "invalid cursor"}), 400
+
+    if not os.path.exists(NEWS_DB):
+        return jsonify({"items": [], "cursor": since})
+
+    conn = None
+    try:
+        conn = sqlite3.connect(NEWS_DB)
+        conn.row_factory = sqlite3.Row
+        _init_ai_results_table()
+        if not since:
+            cursor = conn.execute(
+                "SELECT strftime('%Y-%m-%d %H:%M:%f', 'now')"
+            ).fetchone()[0]
+            return jsonify({"items": [], "cursor": cursor})
+        rows = conn.execute(
+            "SELECT article_id, translation_updated_at FROM ai_results "
+            "WHERE translation_updated_at IS NOT NULL "
+            "AND (translation_updated_at > ? "
+            "OR (translation_updated_at = ? AND article_id > ?)) "
+            "ORDER BY translation_updated_at ASC, article_id ASC LIMIT 500",
+            (since_ts, since_ts, since_id),
+        ).fetchall()
+        items = [{"id": row["article_id"]} for row in rows]
+        cursor = (
+            f"{rows[-1]['translation_updated_at']}|{rows[-1]['article_id']}"
+            if rows else since
+        )
+        return jsonify({"items": items, "cursor": cursor})
+    except Exception:
+        return jsonify({"items": [], "cursor": since}), 500
+    finally:
+        if conn:
+            conn.close()
 
 
 @app.route("/ai/result/<int:article_id>", methods=["GET"])
