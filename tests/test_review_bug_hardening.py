@@ -1,7 +1,6 @@
 import json
 import sqlite3
 import sys
-import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,8 +59,12 @@ def test_fulltext_fetches_use_a_shorter_timeout_than_the_telegram_list_page():
     assert "FULLTEXT_TIMEOUT = 10" in source
     telegraph = source[source.index("def fetch_telegraph("):source.index("def fetch_wechat_article(")]
     wechat = source[source.index("def fetch_wechat_article("):source.index("def process_message(")]
+    # Telegraph gets the tightened timeout because a failed fetch is retried by
+    # backfill_missing_fulltext(); WeChat keeps the longer dedicated timeout since it has
+    # no backfill safety net, so a short one would permanently downgrade fetchable posts.
     assert "timeout=FULLTEXT_TIMEOUT" in telegraph
-    assert "timeout=FULLTEXT_TIMEOUT" in wechat
+    assert "timeout=WECHAT_FULLTEXT_TIMEOUT" in wechat
+    assert "WECHAT_FULLTEXT_TIMEOUT = 20" in source
     # The Telegram list-page fetch keeps the longer REQUEST_TIMEOUT — only the
     # outbound full-text fetches (which can hang on a slow third-party site) were
     # tightened.
@@ -98,8 +101,11 @@ def test_news_json_write_is_best_effort_and_does_not_block_sqlite_sync():
     assert "indent=2" not in mirror_source
 
 
-def test_article_detail_sanitizes_dangerous_html_without_losing_images():
-    db_path = ROOT / f"tmp-hardening-{uuid.uuid4().hex}.db"
+def test_article_detail_sanitizes_dangerous_html_without_losing_images(tmp_path, monkeypatch):
+    # tmp_path keeps the scratch DB out of the repo; monkeypatch.setattr restores
+    # refresh_server's module globals on teardown so later tests don't inherit a
+    # deleted DB path (which used to leave stray tmp-hardening-*.db files behind).
+    db_path = tmp_path / "hardening.db"
     try:
         conn = sqlite3.connect(db_path)
         conn.execute(
@@ -147,15 +153,15 @@ def test_article_detail_sanitizes_dangerous_html_without_losing_images():
         conn.commit()
         conn.close()
 
-        refresh_server.DB_FILE = db_path
-        refresh_server._schema_ready = False
+        monkeypatch.setattr(refresh_server, "DB_FILE", db_path)
+        monkeypatch.setattr(refresh_server, "_schema_ready", False)
         refresh_server.clear_article_cache()
 
         data = json.loads(refresh_server.api_news_detail(1).decode("utf-8"))
     finally:
+        # Drop the cached detail so a later test doesn't read this article back; the DB
+        # file itself lives under tmp_path and is cleaned up by pytest automatically.
         refresh_server.clear_article_cache()
-        for suffix in ("", "-journal", "-wal", "-shm"):
-            Path(str(db_path) + suffix).unlink(missing_ok=True)
 
     assert "script" not in data["body_html"].lower()
     assert "iframe" not in data["body_html"].lower()

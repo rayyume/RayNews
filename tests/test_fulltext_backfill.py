@@ -107,3 +107,38 @@ def test_backfill_leaves_row_downgraded_when_fetch_still_fails(tmp_path, monkeyp
     assert row[0] == 0
     assert row[1] == "excerpt"   # untouched, will be retried again next cycle
     conn.close()
+
+
+def test_run_still_backfills_when_there_are_no_new_messages(tmp_path, monkeypatch):
+    # A no-new-messages cycle is exactly when a previously failed Telegraph fetch would
+    # otherwise never get retried — backfill must still run so it doesn't age out of the
+    # window and stay permanently downgraded.
+    monkeypatch.setattr(fetcher, "OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(fetcher, "OUTPUT_FILE", tmp_path / "news.json")
+    monkeypatch.setattr(fetcher, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(fetcher, "DB_FILE", tmp_path / "news.db")
+    monkeypatch.setattr(fetcher, "PROGRESS_FILE", tmp_path / "progress.json")
+    monkeypatch.setattr(fetcher, "fetch_all_new_messages", lambda state: ([], 0))
+
+    calls = []
+    monkeypatch.setattr(fetcher, "backfill_missing_fulltext", lambda conn: calls.append(True))
+
+    fetcher.run()
+
+    assert calls == [True]   # backfill ran on the empty cycle
+
+
+def test_wechat_fetch_uses_the_longer_dedicated_timeout(monkeypatch):
+    # WeChat has no backfill safety net, so its full-text fetch must keep the longer
+    # timeout rather than the short Telegraph one.
+    assert fetcher.WECHAT_FULLTEXT_TIMEOUT > fetcher.FULLTEXT_TIMEOUT
+
+    seen = {}
+    monkeypatch.setattr(fetcher.requests, "get",
+                        lambda url, **kw: seen.update(timeout=kw.get("timeout")) or _raise())
+    fetcher.fetch_wechat_article("https://mp.weixin.qq.com/s/abc")
+    assert seen["timeout"] == fetcher.WECHAT_FULLTEXT_TIMEOUT
+
+
+def _raise():
+    raise RuntimeError("stop after capturing timeout")

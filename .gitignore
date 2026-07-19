@@ -3,3 +3,6 @@ data/
 __pycache__/
 *.pyc
 .env
+
+# stray test scratch DBs
+tmp-hardening-*.db

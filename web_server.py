@@ -840,6 +840,61 @@ def ai_test_connection():
     return jsonify(body), status
 
 
+@app.route("/ai/chat", methods=["POST"])
+@require_role("user", "admin")
+def ai_chat_relay():
+    """Same-origin relay for the browser's per-article summarize/translate chats.
+
+    The browser normally calls the user's AI endpoint directly (see aiChat() in
+    index.html) so each user spends their own quota with zero server load. But some
+    providers (e.g. opencode.ai/zen) don't send CORS headers, so a browser-direct
+    fetch is blocked by the same-origin policy. For those the client falls back to
+    this endpoint, which forwards the chat from the server — server-to-server, no
+    CORS — using the caller's own stored AI config. The api_key never leaves the
+    server on this path. Only ever invoked for CORS-blocked endpoints, so
+    CORS-friendly providers keep the original direct, server-free path.
+    """
+    config = get_ai_config(g.user_id)
+    if not config or not config.get("api_key"):
+        return jsonify({"error": "AI not configured. Save API config first."}), 400
+    if not config.get("enabled"):
+        return jsonify({"error": "AI is disabled in your settings."}), 400
+
+    data = request.get_json(silent=True) or {}
+    messages = data.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return jsonify({"error": "messages required"}), 400
+    for m in messages:
+        if not isinstance(m, dict) or not isinstance(m.get("role"), str) \
+                or not isinstance(m.get("content"), str):
+            return jsonify({"error": "each message needs a string role and content"}), 400
+    try:
+        # Clamp to the same envelope the client uses (translate asks for 8000) so a
+        # crafted payload can't request an absurd generation on the user's key.
+        max_tokens = max(1, min(int(data.get("max_tokens", 2000)), 8000))
+        temperature = max(0.0, min(float(data.get("temperature", 0.3)), 2.0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid max_tokens/temperature"}), 400
+
+    try:
+        svc = AIService(
+            api_key=config["api_key"],
+            endpoint=config["endpoint"],
+            model=config["model"],
+            provider_type=config.get("provider_type", "openai"),
+        )
+        content = svc.chat(messages, max_tokens=max_tokens, temperature=temperature)
+    except TimeoutError as e:
+        return jsonify({"error": str(e)}), 504
+    except requests.exceptions.RequestException as e:
+        return jsonify({"error": f"无法连接 AI 服务（{type(e).__name__}）"}), 502
+    except Exception as e:
+        return jsonify({"error": f"AI relay failed: {str(e)}"}), 502
+    if not (content or "").strip():
+        return jsonify({"error": "AI returned an empty response"}), 502
+    return jsonify({"content": content})
+
+
 @app.route("/admin/system-ai-config/test", methods=["POST"])
 @require_role("admin")
 def admin_system_ai_test_connection():

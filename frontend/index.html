@@ -3906,9 +3906,87 @@ async function callClaudeChat(config, messages, maxTokens, temperature) {
   return data.content[0].text;
 }
 
+// Per-origin verdicts for the user's AI endpoint, remembered in localStorage:
+//   aiRelayOrigins   — known CORS-blocked (e.g. opencode.ai/zen); go straight to relay.
+//   aiDirectOkOrigins — known CORS-friendly (a direct call has succeeded); never relay.
+// A never-seen origin is "unknown" and gets one direct attempt.
+function aiEndpointOrigin(endpoint) {
+  try { return new URL(endpoint).origin; } catch (e) { return ''; }
+}
+
+function aiOriginSet(key) {
+  try { return new Set(JSON.parse(localStorage.getItem(key) || '[]')); } catch (e) { return new Set(); }
+}
+
+function aiOriginAdd(key, endpoint) {
+  const origin = aiEndpointOrigin(endpoint);
+  if (!origin) return;
+  const set = aiOriginSet(key);
+  if (set.has(origin)) return;
+  set.add(origin);
+  try { localStorage.setItem(key, JSON.stringify([...set])); } catch (e) {}
+}
+
+function aiOriginHas(key, endpoint) {
+  const origin = aiEndpointOrigin(endpoint);
+  return !!origin && aiOriginSet(key).has(origin);
+}
+
+const aiRelayNeeded = endpoint => aiOriginHas('aiRelayOrigins', endpoint);
+const aiDirectOk = endpoint => aiOriginHas('aiDirectOkOrigins', endpoint);
+
+// A blocked CORS request (or a genuine network drop) rejects with a TypeError that has
+// no HTTP status — "Load failed" / "Failed to fetch" / "NetworkError". A real API error
+// (4xx/5xx) is thrown by callOpenAiChat/callClaudeChat as "AI API HTTP ..." and must NOT
+// be silently rerouted, so only the former is even considered for the relay fallback.
+function isCorsOrNetworkError(e) {
+  return (e instanceof TypeError)
+    || /load failed|failed to fetch|networkerror/i.test((e && e.message) || '');
+}
+
+// Same-origin relay: the server forwards the chat to the user's endpoint (no CORS) using
+// their stored config, so the api_key isn't sent from here.
+async function callAiRelay(messages, maxTokens, temperature) {
+  const resp = await fetch('/ai/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
+    body: JSON.stringify({ messages, max_tokens: maxTokens, temperature }),
+  });
+  if (!resp.ok) {
+    const data = await resp.json().catch(() => null);
+    throw new Error((data && data.error) || ('AI relay HTTP ' + resp.status));
+  }
+  const data = await resp.json();
+  return data.content;
+}
+
 async function aiChat(config, messages, maxTokens, temperature) {
-  if (config.provider_type === 'claude') return callClaudeChat(config, messages, maxTokens, temperature);
-  return callOpenAiChat(config, messages, maxTokens, temperature);
+  const direct = () => (config.provider_type === 'claude'
+    ? callClaudeChat(config, messages, maxTokens, temperature)
+    : callOpenAiChat(config, messages, maxTokens, temperature));
+
+  // Known CORS-blocked endpoint — don't waste a doomed direct attempt.
+  if (aiRelayNeeded(config.endpoint)) return callAiRelay(messages, maxTokens, temperature);
+
+  try {
+    const out = await direct();
+    aiOriginAdd('aiDirectOkOrigins', config.endpoint);  // proven CORS-friendly
+    return out;
+  } catch (e) {
+    if (!isCorsOrNetworkError(e)) throw e;  // real API error → propagate untouched
+    // A TypeError is ambiguous: a CORS preflight block (fails *before* the POST is sent,
+    // so nothing was generated or billed) vs. a network drop *after* the request reached
+    // the provider (which may already have generated and billed). If this origin has
+    // succeeded directly before, CORS is supported, so this is the latter — rerouting
+    // would risk a second, duplicate charge. Propagate instead of relaying.
+    if (aiDirectOk(config.endpoint)) throw e;
+    // Never succeeded directly → almost certainly a CORS preflight block. Relay, and only
+    // persist the "needs relay" verdict once the relay actually succeeds, so a one-off
+    // network blip doesn't permanently pin a CORS-friendly endpoint to the server path.
+    const out = await callAiRelay(messages, maxTokens, temperature);
+    aiOriginAdd('aiRelayOrigins', config.endpoint);
+    return out;
+  }
 }
 
 async function aiSummarize(articleId) {
