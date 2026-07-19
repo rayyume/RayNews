@@ -64,17 +64,22 @@ PROGRESS_FILE = OUTPUT_DIR / "fetch_progress.json"
 FETCH_JOB_ID = os.environ.get("FETCH_JOB_ID", "")
 MAX_WORKERS = 15
 REQUEST_TIMEOUT = 20
-# Full-text (Telegraph/WeChat) fetches get their own, shorter timeout — a slow
-# outbound article page shouldn't stretch a manual refresh out as long as the
-# Telegram list-page fetch's REQUEST_TIMEOUT allows. Both fetch_telegraph() and
-# fetch_wechat_article() already catch their own exceptions and return None on
-# failure, so a timeout here just falls back to the plain Telegram excerpt for
-# this cycle (see process_message()) without failing the message or blocking
-# last_seen_id. That fallback is no longer permanent: backfill_missing_fulltext()
-# re-fetches recent Telegraph articles still stuck on the excerpt on subsequent
-# cycles, so keeping this timeout short trades a little first-paint latency for
-# speed without costing article quality.
+# Telegraph full-text fetches get a shorter timeout than the Telegram list-page fetch
+# (REQUEST_TIMEOUT) — a slow outbound article page shouldn't stretch a manual refresh
+# out that long. fetch_telegraph() catches its own exceptions and returns None on
+# failure, so a timeout just falls back to the plain Telegram excerpt for this cycle
+# (see process_message()) without failing the message or blocking last_seen_id. That
+# fallback is no longer permanent: backfill_missing_fulltext() re-fetches recent
+# Telegraph articles still stuck on the excerpt on later cycles (it has the stored
+# telegraph_url to retry), so keeping this short trades a little first-paint latency
+# for speed without costing article quality.
 FULLTEXT_TIMEOUT = 10
+# WeChat keeps the longer timeout: unlike Telegraph, a failed WeChat full-text has no
+# backfill safety net (we don't persist the source WeChat URL, and
+# backfill_missing_fulltext() only retries telegraph_url), so a short timeout here would
+# permanently downgrade otherwise-fetchable articles to the excerpt. Restore the original
+# 20s until WeChat backfill exists.
+WECHAT_FULLTEXT_TIMEOUT = 20
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 HEADERS = {"User-Agent": USER_AGENT}
 # Max historical pages to fetch on initial full sync
@@ -834,7 +839,7 @@ def fetch_wechat_article(url: str) -> dict | None:
     }
     try:
         log.info(f"  Fetching WeChat: {url[:80]}...")
-        resp = requests.get(url, headers=headers, timeout=FULLTEXT_TIMEOUT)
+        resp = requests.get(url, headers=headers, timeout=WECHAT_FULLTEXT_TIMEOUT)
         resp.raise_for_status()
 
         soup = BeautifulSoup(resp.text, "html.parser")
@@ -1124,10 +1129,17 @@ def run():
             )
         else:
             log.info("No new messages — keeping existing news.json")
-        # Still ensure SQLite is initialized from existing data
+        # Still ensure SQLite is initialized from existing data — and run full-text
+        # backfill here too. A cycle with no new messages is exactly when a previously
+        # failed Telegraph fetch would otherwise never get retried (the main path below
+        # is skipped), letting it age past the backfill window and stay downgraded.
         try:
             conn = init_db()
             migrate_news_json(conn)
+            try:
+                backfill_missing_fulltext(conn)
+            except Exception as e:
+                log.error(f"Full-text backfill failed: {e}")
             conn.close()
         except Exception as e:
             log.error(f"SQLite init failed: {e}")

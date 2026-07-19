@@ -103,3 +103,42 @@ await assert.rejects(
 assert.equal(relayed, false);                 // did not silently reroute a real error
 assert.equal(context._store.aiRelayOrigins, undefined);
 """)
+
+
+def test_network_drop_after_a_prior_direct_success_is_not_relayed():
+    # A CORS-friendly endpoint proven to work must not have a later network drop
+    # (which may already have reached and billed the provider) silently retried through
+    # the relay — that would double-charge.
+    _run("""
+let relayed = false;
+context.fetch = async () => { relayed = true; return { ok: true, json: async () => ({ content: 'x' }) }; };
+let directCalls = 0;
+context.callOpenAiChat = async () => {
+  directCalls++;
+  if (directCalls === 1) return 'ok';           // first call succeeds → origin proven CORS-friendly
+  throw new TypeError('Load failed');           // second: a genuine network drop
+};
+const cfg = { provider_type: 'openai', endpoint: 'https://api.deepseek.com/v1' };
+
+assert.equal(await context.aiChat(cfg, [{ role: 'user', content: 'a' }], 100, 0.3), 'ok');
+assert.deepEqual(JSON.parse(context._store.aiDirectOkOrigins), ['https://api.deepseek.com']);
+
+await assert.rejects(
+  context.aiChat(cfg, [{ role: 'user', content: 'b' }], 100, 0.3),
+  err => err instanceof TypeError);
+assert.equal(relayed, false);                   // did NOT reroute → no duplicate charge
+assert.equal(context._store.aiRelayOrigins, undefined);
+""")
+
+
+def test_relay_verdict_not_persisted_when_the_relay_itself_fails():
+    # A one-off outage where BOTH direct and relay fail must not permanently pin a
+    # (possibly CORS-friendly) endpoint to the relay path.
+    _run("""
+context.fetch = async () => { throw new TypeError('Load failed'); };  // relay also down
+context.callOpenAiChat = async () => { throw new TypeError('Load failed'); };
+const cfg = { provider_type: 'openai', endpoint: 'https://api.deepseek.com/v1' };
+
+await assert.rejects(context.aiChat(cfg, [{ role: 'user', content: 'x' }], 100, 0.3));
+assert.equal(context._store.aiRelayOrigins, undefined);  // not persisted on relay failure
+""")

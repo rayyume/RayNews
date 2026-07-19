@@ -3906,36 +3906,39 @@ async function callClaudeChat(config, messages, maxTokens, temperature) {
   return data.content[0].text;
 }
 
-// Origins whose AI endpoint we've learned can't be called directly from the browser
-// (no CORS headers — e.g. opencode.ai/zen) get routed through the same-origin server
-// relay. The decision is remembered per-origin in localStorage so we only pay one
-// failed direct attempt per endpoint, not one on every summarize/translate.
+// Per-origin verdicts for the user's AI endpoint, remembered in localStorage:
+//   aiRelayOrigins   — known CORS-blocked (e.g. opencode.ai/zen); go straight to relay.
+//   aiDirectOkOrigins — known CORS-friendly (a direct call has succeeded); never relay.
+// A never-seen origin is "unknown" and gets one direct attempt.
 function aiEndpointOrigin(endpoint) {
   try { return new URL(endpoint).origin; } catch (e) { return ''; }
 }
 
-function aiRelayOrigins() {
-  try { return JSON.parse(localStorage.getItem('aiRelayOrigins') || '[]'); } catch (e) { return []; }
+function aiOriginSet(key) {
+  try { return new Set(JSON.parse(localStorage.getItem(key) || '[]')); } catch (e) { return new Set(); }
 }
 
-function aiRelayNeeded(endpoint) {
-  const origin = aiEndpointOrigin(endpoint);
-  return !!origin && aiRelayOrigins().includes(origin);
-}
-
-function markAiRelayNeeded(endpoint) {
+function aiOriginAdd(key, endpoint) {
   const origin = aiEndpointOrigin(endpoint);
   if (!origin) return;
-  const set = new Set(aiRelayOrigins());
+  const set = aiOriginSet(key);
   if (set.has(origin)) return;
   set.add(origin);
-  try { localStorage.setItem('aiRelayOrigins', JSON.stringify([...set])); } catch (e) {}
+  try { localStorage.setItem(key, JSON.stringify([...set])); } catch (e) {}
 }
+
+function aiOriginHas(key, endpoint) {
+  const origin = aiEndpointOrigin(endpoint);
+  return !!origin && aiOriginSet(key).has(origin);
+}
+
+const aiRelayNeeded = endpoint => aiOriginHas('aiRelayOrigins', endpoint);
+const aiDirectOk = endpoint => aiOriginHas('aiDirectOkOrigins', endpoint);
 
 // A blocked CORS request (or a genuine network drop) rejects with a TypeError that has
 // no HTTP status — "Load failed" / "Failed to fetch" / "NetworkError". A real API error
 // (4xx/5xx) is thrown by callOpenAiChat/callClaudeChat as "AI API HTTP ..." and must NOT
-// be silently rerouted, so only the former triggers the relay fallback.
+// be silently rerouted, so only the former is even considered for the relay fallback.
 function isCorsOrNetworkError(e) {
   return (e instanceof TypeError)
     || /load failed|failed to fetch|networkerror/i.test((e && e.message) || '');
@@ -3962,19 +3965,27 @@ async function aiChat(config, messages, maxTokens, temperature) {
     ? callClaudeChat(config, messages, maxTokens, temperature)
     : callOpenAiChat(config, messages, maxTokens, temperature));
 
-  // CORS-friendly endpoints keep the zero-server-cost direct path.
-  if (aiRelayNeeded(config.endpoint)) {
-    return callAiRelay(messages, maxTokens, temperature);
-  }
+  // Known CORS-blocked endpoint — don't waste a doomed direct attempt.
+  if (aiRelayNeeded(config.endpoint)) return callAiRelay(messages, maxTokens, temperature);
+
   try {
-    return await direct();
+    const out = await direct();
+    aiOriginAdd('aiDirectOkOrigins', config.endpoint);  // proven CORS-friendly
+    return out;
   } catch (e) {
-    if (!isCorsOrNetworkError(e)) throw e;
-    // First time we've seen this endpoint refuse a browser-direct call — remember it
-    // and retry via the relay. The failed direct attempt burned no tokens (a CORS
-    // preflight fails before the POST is sent), so this doesn't double-charge.
-    markAiRelayNeeded(config.endpoint);
-    return callAiRelay(messages, maxTokens, temperature);
+    if (!isCorsOrNetworkError(e)) throw e;  // real API error → propagate untouched
+    // A TypeError is ambiguous: a CORS preflight block (fails *before* the POST is sent,
+    // so nothing was generated or billed) vs. a network drop *after* the request reached
+    // the provider (which may already have generated and billed). If this origin has
+    // succeeded directly before, CORS is supported, so this is the latter — rerouting
+    // would risk a second, duplicate charge. Propagate instead of relaying.
+    if (aiDirectOk(config.endpoint)) throw e;
+    // Never succeeded directly → almost certainly a CORS preflight block. Relay, and only
+    // persist the "needs relay" verdict once the relay actually succeeds, so a one-off
+    // network blip doesn't permanently pin a CORS-friendly endpoint to the server path.
+    const out = await callAiRelay(messages, maxTokens, temperature);
+    aiOriginAdd('aiRelayOrigins', config.endpoint);
+    return out;
   }
 }
 
