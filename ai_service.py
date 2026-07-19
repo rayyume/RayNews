@@ -10,6 +10,26 @@ from typing import Optional
 from source_categories import CATEGORY_NAMES, CATEGORY_ORDER, clamp_weighted, local_short_source_name
 
 
+# Title-processing chats produce a short answer but can trigger a lot of *hidden*
+# reasoning on "thinking" models (common on gateways like opencode.ai/zen). With too
+# small a budget the reasoning eats every token and the model returns empty content,
+# surfacing as "empty AI title summary". Give these calls enough room to finish; tune
+# via AI_TITLE_MAX_TOKENS if a heavier reasoning model still comes back empty.
+TITLE_MAX_TOKENS = max(200, int(os.environ.get("AI_TITLE_MAX_TOKENS", "1024")))
+
+
+def _empty_ai_content_error(finish_reason, has_reasoning: bool, max_tokens: int) -> str:
+    """Actionable message for a well-formed API response that carries no usable text —
+    almost always a reasoning model whose hidden thinking exhausted max_tokens."""
+    hint = ""
+    if has_reasoning or finish_reason in ("length", "max_tokens"):
+        hint = (
+            f"；该模型疑似为推理(thinking)模型，隐藏推理耗尽了 max_tokens={max_tokens} 的预算导致正文为空。"
+            "请增大 max_tokens（标题任务可设环境变量 AI_TITLE_MAX_TOKENS）或改用非推理模型。"
+        )
+    return f"AI 返回空内容（finish_reason={finish_reason}{hint}）"
+
+
 def _normalize_cjk_quotes(text: str) -> str:
     """Convert ASCII straight quotes and Unicode curly quotes to Chinese corner brackets 「」 in CJK context.
 
@@ -208,7 +228,19 @@ class AIService:
         if not resp.ok:
             raise RuntimeError(self._format_api_error(resp))
         data = resp.json()
-        return data["choices"][0]["message"]["content"]
+        choice = (data.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        content = message.get("content") or ""
+        if not content.strip():
+            # A 200 with empty content isn't a usable answer — don't hand callers ""
+            # (which they'd log as a bare "empty" and retry forever). Raise with the
+            # finish_reason so the real cause is visible in logs.
+            raise RuntimeError(_empty_ai_content_error(
+                choice.get("finish_reason"),
+                bool(message.get("reasoning_content") or message.get("reasoning")),
+                max_tokens,
+            ))
+        return content
 
     # ─── Claude-compatible API call ──────────────────────────
 
@@ -258,7 +290,18 @@ class AIService:
         if not resp.ok:
             raise RuntimeError(self._format_api_error(resp))
         data = resp.json()
-        return data["content"][0]["text"]
+        blocks = data.get("content") or []
+        text = "".join(
+            b.get("text", "") for b in blocks
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+        if not text.strip():
+            raise RuntimeError(_empty_ai_content_error(
+                data.get("stop_reason"),
+                any(isinstance(b, dict) and b.get("type") == "thinking" for b in blocks),
+                max_tokens,
+            ))
+        return text
 
     # ─── Unified chat ────────────────────────────────────────
 
@@ -403,7 +446,7 @@ class AIService:
                 ),
             },
         ]
-        return _normalize_cjk_quotes(self.chat(messages, max_tokens=500, temperature=temperature).strip())
+        return _normalize_cjk_quotes(self.chat(messages, max_tokens=TITLE_MAX_TOKENS, temperature=temperature).strip())
 
     def _title_summary_system_prompt(self, max_chars: int, min_chars: int) -> str:
         return (
@@ -443,7 +486,7 @@ class AIService:
                 "content": f"原标题：{title}" + self._retry_feedback_line(feedback),
             },
         ]
-        return self.chat(messages, max_tokens=500, temperature=temperature).strip()
+        return self.chat(messages, max_tokens=TITLE_MAX_TOKENS, temperature=temperature).strip()
 
     def translate_and_condense_title(self, title: str, target_lang: str = "zh-CN",
                                      max_chars: int = 30, min_chars: int = 18,
@@ -469,7 +512,7 @@ class AIService:
             },
         ]
         return _normalize_cjk_quotes(
-            self.chat(messages, max_tokens=500, temperature=temperature).strip()
+            self.chat(messages, max_tokens=TITLE_MAX_TOKENS, temperature=temperature).strip()
         )
 
 
