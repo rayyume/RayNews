@@ -1,5 +1,7 @@
 import os
 import sqlite3
+import threading
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -125,6 +127,35 @@ class NotificationsModelTests(unittest.TestCase):
             [row["title"] for row in models.list_notifications(self.user_a)],
             ["公告"],
         )
+
+    def test_atomic_broadcast_uses_connection_isolated_from_other_threads(self):
+        shared = models.get_db()
+        shared.execute("BEGIN")
+        shared.execute(
+            "UPDATE users SET visit_count = visit_count WHERE id = ?",
+            (self.user_a,),
+        )
+        result = []
+        errors = []
+
+        def publish():
+            try:
+                result.append(models.publish_broadcast_atomically(
+                    [self.user_a, self.user_b], "isolated-connection-1",
+                    "公告", "正文", "plain", False,
+                ))
+            except Exception as exc:
+                errors.append(exc)
+
+        worker = threading.Thread(target=publish)
+        worker.start()
+        time.sleep(0.1)
+        shared.rollback()
+        worker.join(timeout=5)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(result, [(True, {"recipients": 2, "email": False})])
 
 
 if __name__ == "__main__":

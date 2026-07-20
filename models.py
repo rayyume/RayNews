@@ -580,10 +580,18 @@ def publish_broadcast_atomically(
     failure rolls back both the claim row and all notification rows, so a retry
     with the same id can safely try again.
     """
-    db = get_db()
+    # This transaction must not use get_db(): that function returns the
+    # process-wide connection shared by every Flask request. A commit/rollback
+    # from another thread on that same connection would split or undo this
+    # transaction. A short-lived connection gives this unit its own transaction
+    # boundary; WAL + busy_timeout let concurrent writers serialize normally.
+    db = sqlite3.connect(str(DB_FILE), timeout=30)
+    db.row_factory = sqlite3.Row
+    db.execute("PRAGMA foreign_keys=ON")
+    db.execute("PRAGMA busy_timeout=30000")
     now = datetime.now().isoformat(timespec="seconds")
     try:
-        db.execute("BEGIN")
+        db.execute("BEGIN IMMEDIATE")
         claimed = db.execute(
             "INSERT OR IGNORE INTO broadcast_publications "
             "(broadcast_id, title, recipients, email, created_at) VALUES (?, '', 0, 0, ?)",
@@ -615,6 +623,8 @@ def publish_broadcast_atomically(
     except Exception:
         db.rollback()
         raise
+    finally:
+        db.close()
 
 
 def list_notifications(user_id: int, limit: int = 100) -> list[dict]:
