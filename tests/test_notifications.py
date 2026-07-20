@@ -1,4 +1,7 @@
 import os
+import sqlite3
+import threading
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -84,6 +87,75 @@ class NotificationsModelTests(unittest.TestCase):
         items = models.list_notifications(self.user_a, limit=3)
         self.assertIn(old_unread_id, [i["id"] for i in items])
         self.assertEqual(models.count_unread_notifications(self.user_a), 1)
+
+    def test_format_defaults_to_plain_and_round_trips(self):
+        models.add_notification(self.user_a, "share_revoked", "系统", "正文")
+        models.add_notification(self.user_a, "admin_broadcast", "公告", "# 标题", fmt="markdown")
+        by_title = {i["title"]: i for i in models.list_notifications(self.user_a)}
+        self.assertEqual(by_title["系统"]["format"], "plain")
+        self.assertEqual(by_title["公告"]["format"], "markdown")
+
+    def test_add_notification_bulk_fans_out_to_every_user(self):
+        n = models.add_notification_bulk(
+            [self.user_a, self.user_b], "admin_broadcast", "全站公告", "正文内容", fmt="markdown"
+        )
+        self.assertEqual(n, 2)
+        for uid in (self.user_a, self.user_b):
+            items = models.list_notifications(uid)
+            self.assertEqual([i["title"] for i in items], ["全站公告"])
+            self.assertEqual(items[0]["format"], "markdown")
+            self.assertEqual(models.count_unread_notifications(uid), 1)
+
+    def test_add_notification_bulk_empty_is_noop(self):
+        self.assertEqual(models.add_notification_bulk([], "admin_broadcast", "x", "y"), 0)
+
+    def test_atomic_broadcast_rolls_back_claim_and_notifications_on_fanout_failure(self):
+        broadcast_id = "rollback-retry-1"
+        with self.assertRaises(sqlite3.IntegrityError):
+            models.publish_broadcast_atomically(
+                [self.user_a, 999999], broadcast_id, "公告", "正文", "plain", False,
+            )
+        self.assertIsNone(models.get_broadcast_publication(broadcast_id))
+        self.assertEqual(models.list_notifications(self.user_a), [])
+
+        is_new, result = models.publish_broadcast_atomically(
+            [self.user_a, self.user_b], broadcast_id, "公告", "正文", "plain", False,
+        )
+        self.assertTrue(is_new)
+        self.assertEqual(result, {"recipients": 2, "email": False})
+        self.assertEqual(
+            [row["title"] for row in models.list_notifications(self.user_a)],
+            ["公告"],
+        )
+
+    def test_atomic_broadcast_uses_connection_isolated_from_other_threads(self):
+        shared = models.get_db()
+        shared.execute("BEGIN")
+        shared.execute(
+            "UPDATE users SET visit_count = visit_count WHERE id = ?",
+            (self.user_a,),
+        )
+        result = []
+        errors = []
+
+        def publish():
+            try:
+                result.append(models.publish_broadcast_atomically(
+                    [self.user_a, self.user_b], "isolated-connection-1",
+                    "公告", "正文", "plain", False,
+                ))
+            except Exception as exc:
+                errors.append(exc)
+
+        worker = threading.Thread(target=publish)
+        worker.start()
+        time.sleep(0.1)
+        shared.rollback()
+        worker.join(timeout=5)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(result, [(True, {"recipients": 2, "email": False})])
 
 
 if __name__ == "__main__":

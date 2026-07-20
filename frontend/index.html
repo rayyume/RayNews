@@ -456,6 +456,9 @@ body.body-scroll-lock{overflow:hidden!important}
 .ai-input{width:100%;padding:9px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:13px;font-family:var(--font);outline:none;transition:border-color 0.15s;box-sizing:border-box}
 .ai-input:focus{border-color:var(--accent)}
 .ai-input::placeholder{color:var(--text-3)}
+.ai-textarea{width:100%;padding:9px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:13px;font-family:var(--font);line-height:1.6;outline:none;transition:border-color 0.15s;box-sizing:border-box;resize:vertical;min-height:120px}
+.ai-textarea:focus{border-color:var(--accent)}
+.ai-textarea::placeholder{color:var(--text-3)}
 .ai-select{width:100%;padding:9px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:13px;font-family:var(--font);outline:none;cursor:pointer;transition:border-color 0.15s;box-sizing:border-box;-webkit-appearance:none;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M3 5l3 3 3-3' stroke='%238b8b9e' stroke-width='1.5' fill='none'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center}
 .ai-select:focus{border-color:var(--accent)}
 .ai-hint{font-size:11px;color:var(--text-3);margin-top:4px}
@@ -664,6 +667,7 @@ body.body-scroll-lock{overflow:hidden!important}
         <button class="admin-settings-tab" data-admin-tab="sources" onclick="switchAdminTab('sources')">订阅源</button>
         <button class="admin-settings-tab" data-admin-tab="translate" onclick="switchAdminTab('translate')">翻译</button>
         <button class="admin-settings-tab" data-admin-tab="systemapi" onclick="switchAdminTab('systemapi')">服务端API</button>
+        <button class="admin-settings-tab" data-admin-tab="notify" onclick="switchAdminTab('notify')">通知</button>
         <button class="admin-settings-tab" data-admin-tab="server" onclick="switchAdminTab('server')">资源占用</button>
       </div>
       <div id="adminSettingsStatus" class="settings-toast" role="status" aria-live="polite"></div>
@@ -764,6 +768,34 @@ body.body-scroll-lock{overflow:hidden!important}
         <p class="ai-hint" style="margin:6px 0 0;text-align:center;font-size:11px;color:var(--text-3)">💡 修改配置后请先保存，再点击下方测试</p>
         <button class="ai-save-btn" onclick="testSystemAiConnection()" style="margin-top:10px;background:var(--bg-card);color:var(--text);border:1px solid var(--border)">🔌 测试 API 连接</button>
         <p class="ai-hint" style="margin-top:8px">此 Key 仅供后台自动摘要/自动翻译使用，与每个用户在"用户设置→AI"中配置的个人 Key 互相独立。</p>
+      </div>
+
+      <!-- Notification Publish Tab -->
+      <div id="adminTabNotify" style="display:none">
+        <label class="ai-label">标题</label>
+        <input class="ai-input" id="notifPubTitle" maxlength="200" placeholder="通知标题" oninput="renderNotifPreview()">
+
+        <label class="ai-label">格式</label>
+        <select class="ai-select" id="notifPubFormat" onchange="renderNotifPreview()">
+          <option value="markdown">Markdown</option>
+          <option value="plain">纯文本</option>
+        </select>
+
+        <label class="ai-label">正文</label>
+        <textarea class="ai-textarea" id="notifPubBody" rows="8" placeholder="支持 Markdown 排版；插入外链图片用 ![说明](https://图片地址)" oninput="renderNotifPreview()"></textarea>
+        <p class="ai-hint">Markdown 模式支持标题/加粗/斜体/列表/链接/行内代码及外链图片 <code>![](url)</code>（图片经服务器缓存代理）；纯文本模式原样显示。</p>
+
+        <div class="ai-toggle" onclick="document.getElementById('notifPubEmail').click()">
+          <input type="checkbox" id="notifPubEmail" onclick="event.stopPropagation()">
+          <span>同时邮件推送给所有用户</span>
+        </div>
+        <p class="ai-hint" style="margin-top:6px">勾选后除站内通知外，会给每个设置了邮箱的用户各发一封邮件（后台发送，未配置发信服务时自动跳过）。<strong>邮件正文始终为纯文本</strong>——Markdown 格式下会原样显示 <code>#</code>/<code>**</code> 等标记且不含图片，完整排版和图片请提醒用户在站内「我的通知」查看。</p>
+
+        <label class="ai-label" style="margin-top:14px">预览</label>
+        <div id="notifPubPreview" class="notif-detail-body" style="border:1px solid var(--border);border-radius:10px;padding:12px;min-height:48px;background:var(--bg-surface)"></div>
+
+        <button class="ai-save-btn" onclick="publishBroadcast()" style="margin-top:16px">📣 发布通知</button>
+        <p class="ai-hint" style="margin-top:8px">发布后立即推送到全部用户（含你自己）的「我的通知」。</p>
       </div>
 
       <!-- Server Tab -->
@@ -2342,7 +2374,7 @@ function switchAdminTab(tab) {
   if (!authUser || authUser.role !== 'admin') return;
   document.querySelectorAll('.admin-settings-tab').forEach(t => t.classList.remove('active'));
   document.querySelector('.admin-settings-tab[data-admin-tab="' + tab + '"]').classList.add('active');
-  ['users','summary','sources','translate','systemapi','server'].forEach(t => {
+  ['users','summary','sources','translate','systemapi','notify','server'].forEach(t => {
     document.getElementById('adminTab' + t.charAt(0).toUpperCase() + t.slice(1)).style.display = t === tab ? '' : 'none';
   });
   if (tab === 'users') loadAdminUsers();
@@ -2350,8 +2382,116 @@ function switchAdminTab(tab) {
   if (tab === 'sources') loadSourcesTab();
   if (tab === 'translate') loadGeneralSettings();
   if (tab === 'systemapi') loadSystemAiConfig();
+  if (tab === 'notify') loadNotifyPublish();
   if (tab === 'server') startServerStatsPolling();
   else stopServerStatsPolling();
+}
+
+// Identifies one publish attempt across a manual retry: minted lazily on the
+// first publish click, and only cleared once that click actually succeeds
+// (see publishBroadcast()). If the network drops the response after the
+// server already committed, retrying with the SAME id lets the server
+// recognize the replay and return the original result instead of emailing
+// and notifying every user a second time.
+let notifPubBroadcastId = null;
+let notifPubPayloadSignature = null;
+
+function loadNotifyPublish() {
+  document.getElementById('notifPubTitle').value = '';
+  document.getElementById('notifPubBody').value = '';
+  document.getElementById('notifPubFormat').value = 'markdown';
+  document.getElementById('notifPubEmail').checked = false;
+  notifPubBroadcastId = null;
+  notifPubPayloadSignature = null;
+  renderNotifPreview();
+}
+
+function newBroadcastId() {
+  if (window.crypto && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+}
+
+function notificationBroadcastPayloadSignature(title, body, format, email) {
+  return JSON.stringify([title, body, format, !!email]);
+}
+
+function prepareNotificationBroadcast(payloadSignature) {
+  if (notifPubBroadcastId && notifPubPayloadSignature !== payloadSignature) {
+    const publishAsNew = confirm(
+      '当前内容与上次网络失败时的发布内容不同。作为新通知发布可能导致上一次通知也已送达，确定继续吗？'
+    );
+    if (!publishAsNew) return null;
+    notifPubBroadcastId = null;
+    notifPubPayloadSignature = null;
+  }
+  if (!notifPubBroadcastId) {
+    notifPubBroadcastId = newBroadcastId();
+    notifPubPayloadSignature = payloadSignature;
+  }
+  return notifPubBroadcastId;
+}
+
+function renderNotifPreview() {
+  const title = document.getElementById('notifPubTitle').value.trim();
+  const body = document.getElementById('notifPubBody').value;
+  const format = document.getElementById('notifPubFormat').value;
+  const preview = document.getElementById('notifPubPreview');
+  if (!title && !body) {
+    preview.innerHTML = '<span style="color:var(--text-3)">预览区（输入标题和正文后显示）</span>';
+    return;
+  }
+  const titleHtml = title ? `<div class="notif-detail-title">${esc(title)}</div>` : '';
+  preview.innerHTML = titleHtml + renderNotifBodyHtml(body, format);
+}
+
+async function publishBroadcast() {
+  const title = document.getElementById('notifPubTitle').value.trim();
+  const body = document.getElementById('notifPubBody').value.trim();
+  const format = document.getElementById('notifPubFormat').value;
+  const email = document.getElementById('notifPubEmail').checked;
+  if (!title) { showSettingsStatus('❌ 请填写标题', 'err'); return; }
+  if (!body) { showSettingsStatus('❌ 请填写正文', 'err'); return; }
+  const confirmMsg = email
+    ? '确定向全部用户发布该通知，并给所有用户发送邮件？'
+    : '确定向全部用户发布该通知？';
+  if (!confirm(confirmMsg)) return;
+  const btn = document.querySelector('#adminTabNotify .ai-save-btn');
+  if (btn) btn.disabled = true;
+  const payloadSignature = notificationBroadcastPayloadSignature(title, body, format, email);
+  const broadcastId = prepareNotificationBroadcast(payloadSignature);
+  if (!broadcastId) {
+    if (btn) btn.disabled = false;
+    return;
+  }
+  try {
+    const resp = await fetch('/admin/notifications/broadcast', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
+      body: JSON.stringify({ title, body, format, email, broadcast_id: broadcastId }),
+    });
+    if (resp.status === 401) { logout(); showSettingsStatus('❌ 登录已过期，请重新登录', 'err'); return; }
+    const data = await resp.json();
+    if (!data || data.error) {
+      // A structured server rejection means this attempt was not committed;
+      // discard its id so editing and resubmitting cannot be mistaken for an
+      // ambiguous network retry.
+      notifPubBroadcastId = null;
+      notifPubPayloadSignature = null;
+      showSettingsStatus('❌ ' + ((data && data.error) || '发布失败'), 'err');
+      return;
+    }
+    showSettingsStatus(`✅ 已发布给 ${data.recipients} 位用户` + (data.email ? '，邮件后台发送中' : ''));
+    loadNotifyPublish();  // also clears notifPubBroadcastId — this attempt is done
+    refreshNotifStatus();  // light up the publisher's own unread dot
+  } catch (e) {
+    // Network error: the server may or may not have actually processed this.
+    // Keep notifPubBroadcastId (do NOT call loadNotifyPublish()) so a retry
+    // of the same click is recognized server-side as a replay, not a
+    // duplicate publish.
+    showSettingsStatus('❌ 发布失败，请重试（如已成功发布，重试会安全去重不会重复通知/邮件）: ' + e.message, 'err');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 function loadAccountTab() {
@@ -4532,13 +4672,23 @@ function showNotifList() {
   renderNotifList();
 }
 
+// Render a notification body by its stored format. 'markdown' goes through the
+// same safe pipeline as translated article bodies (escape → markdown →
+// proxy external images → whitelist-sanitize); anything else is plain text.
+function renderNotifBodyHtml(body, format) {
+  if (format === 'markdown') {
+    return sanitizeTranslatedHtml(proxyImages(renderMarkdown(body || '')));
+  }
+  return esc(body || '').replace(/\n/g, '<br>');
+}
+
 function showNotifDetail(id) {
   const n = notifItems.find(x => x.id === id);
   if (!n) return;
   notifDetailId = id;
   document.getElementById('notifBackBtn').style.display = '';
   document.getElementById('notifPanelTitle').textContent = '通知详情';
-  const bodyHtml = esc(n.body || '').replace(/\n/g, '<br>');
+  const bodyHtml = renderNotifBodyHtml(n.body, n.format);
   document.getElementById('notifBody').innerHTML = `
     <div class="notif-detail">
       <div class="notif-detail-time">${esc(formatNotifTime(n.created_at))}</div>
@@ -7302,6 +7452,12 @@ function renderMarkdown(text) {
   // Bold and italic
   html = html.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
   html = html.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<i>$1</i>');
+  // Images ![alt](url) — must run before the link rule below (which would
+  // otherwise consume the [alt](url) part and leave a stray '!'). Callers that
+  // render untrusted markdown pass the result through proxyImages() +
+  // sanitizeTranslatedHtml(), which route the src through /img-cache and drop
+  // any non-http(s) source.
+  html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" style="max-width:100%;border-radius:8px">');
   // Links [text](url)
   html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
   // Unordered lists: lines starting with - or *
@@ -7345,9 +7501,20 @@ function proxyImgSrc(url) {
 
 function proxyImages(html) {
   // Rewrite external image URLs through the persistent backend cache.
-  return html.replace(/(<img[^>]+src\s*=\s*["'])(https?:\/\/[^"']+)(["'][^>]*>)/gi, (match, prefix, url, suffix) => {
-    return prefix + proxyImgSrc(url) + suffix;
+  // DOMParser-based rather than a regex on the raw string: a source string
+  // whose URLs still carry HTML entities (e.g. renderMarkdown() output, which
+  // runs esc() first — a "?x=1&y=2" query string becomes "?x=1&amp;y=2" in
+  // the string) would have "&amp;" read as literal query-string text by a
+  // regex, producing a broken proxied URL. Parsing decodes entities properly
+  // (getAttribute('src') returns "&" for "&amp;"), and serializing back via
+  // innerHTML re-encodes correctly.
+  if (!html) return html;
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  doc.body.querySelectorAll('img[src]').forEach(img => {
+    const src = img.getAttribute('src');
+    if (/^https?:\/\//i.test(src)) img.setAttribute('src', proxyImgSrc(src));
   });
+  return doc.body.innerHTML;
 }
 
 // Mirrors web_server.py's _sanitize_translated_html() whitelist exactly.

@@ -457,6 +457,36 @@ vm.runInContext({json.dumps(source)}, context);
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def test_changed_notification_retry_requires_explicit_new_broadcast_id():
+    source = source_between("let notifPubBroadcastId", "function renderNotifPreview")
+    run_node(
+        source,
+        """
+const ids = ['broadcast-1', 'broadcast-2'];
+context.window = { crypto: { randomUUID: () => ids.shift() } };
+context.crypto = context.window.crypto;
+let confirmResult = false;
+let confirmCalls = 0;
+context.confirm = () => { confirmCalls++; return confirmResult; };
+
+const first = context.notificationBroadcastPayloadSignature('title', 'body', 'plain', false);
+const changed = context.notificationBroadcastPayloadSignature('title', 'edited', 'plain', false);
+assert.equal(context.prepareNotificationBroadcast(first), 'broadcast-1');
+assert.equal(context.prepareNotificationBroadcast(first), 'broadcast-1');
+assert.equal(confirmCalls, 0);
+
+// A changed payload must never silently reuse the ambiguous request's id.
+assert.equal(context.prepareNotificationBroadcast(changed), null);
+assert.equal(confirmCalls, 1);
+
+// Explicit confirmation creates a genuinely new broadcast id.
+confirmResult = true;
+assert.equal(context.prepareNotificationBroadcast(changed), 'broadcast-2');
+assert.equal(confirmCalls, 2);
+""",
+    )
+
+
 def test_poll_refresh_job_rejects_terminal_status_for_another_job():
     poll = source_between("async function pollRefreshJob(", "function rebuildCategoryMap")
     run_node(
@@ -1606,6 +1636,9 @@ context.lastNewsDiagnostics = {
 context.loadSince = () => { context.incrementalCalls++; };
 context.incrementalCalls = 0;
 context.pollTitleUpdates = () => {};
+context.authToken = 'token';
+context.refreshNotifStatus = () => { context.notifRefreshCalls++; };
+context.notifRefreshCalls = 0;
 context.loadCalls = [];
 context.loadNewsPage = (page, options) => context.loadCalls.push([page, options]);
 context.postCalls = 0;
@@ -1622,6 +1655,9 @@ assert.equal(context.loadCalls[0][1].forceNetwork, true);
 assert.equal(context.postCalls, 0);
 // Metadata never loaded → foreground resume re-attempts immediately.
 assert.deepEqual(context.metadataRetries, [{ immediate: true }]);
+// Foreground resume also re-checks notifications (dot may have gone stale
+// while the tab/PWA was frozen in the background).
+assert.equal(context.notifRefreshCalls, 1);
 """,
     )
 

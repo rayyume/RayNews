@@ -96,11 +96,20 @@ CREATE TABLE IF NOT EXISTS notifications (
     type        TEXT    NOT NULL DEFAULT 'general',
     title       TEXT    NOT NULL,
     body        TEXT    NOT NULL DEFAULT '',
+    format      TEXT    NOT NULL DEFAULT 'plain',
     created_at  TEXT    NOT NULL,
     read_at     TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_notifications_user_time ON notifications(user_id, created_at DESC);"""
+CREATE INDEX IF NOT EXISTS idx_notifications_user_time ON notifications(user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS broadcast_publications (
+    broadcast_id TEXT    PRIMARY KEY,
+    title        TEXT    NOT NULL DEFAULT '',
+    recipients   INTEGER NOT NULL DEFAULT 0,
+    email        INTEGER NOT NULL DEFAULT 0,
+    created_at   TEXT    NOT NULL
+);"""
 
 # ─── Connection ───────────────────────────────────────────────
 
@@ -149,6 +158,9 @@ def get_db() -> sqlite3.Connection:
             "ALTER TABLE user_settings ADD COLUMN share_last_check_at TEXT",
             "ALTER TABLE user_settings ADD COLUMN share_last_check_ok INTEGER",
             "ALTER TABLE user_settings ADD COLUMN share_last_check_error TEXT",
+            # notifications gained a body format ('plain'|'markdown') after the
+            # table already shipped, so existing DBs need the column backfilled.
+            "ALTER TABLE notifications ADD COLUMN format TEXT NOT NULL DEFAULT 'plain'",
         ):
             try:
                 _db.execute(_col_sql)
@@ -519,23 +531,100 @@ def set_user_settings(user_id: int, **kwargs) -> dict:
 # ─── In-App Notifications ──────────────────────────────────
 
 
-def add_notification(user_id: int, ntype: str, title: str, body: str = "") -> int:
+def add_notification(user_id: int, ntype: str, title: str, body: str = "",
+                     fmt: str = "plain") -> int:
     """Insert an in-app notification for a user. Returns the new row id.
 
-    body is plain text (rendered with newline→<br> on the client). If richer
-    formatting is ever needed, add a `format` column rather than putting
-    markup here.
+    fmt is 'plain' (client renders newline→<br>) or 'markdown' (client runs it
+    through renderMarkdown + sanitizer). The raw body text is stored as-is;
+    every client render path escapes/sanitizes, so markup here is inert.
     """
     db = get_db()
     # Local time, same convention as user_settings.share_last_check_at.
     now = datetime.now().isoformat(timespec="seconds")
     cur = db.execute(
-        "INSERT INTO notifications (user_id, type, title, body, created_at) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (user_id, ntype, title, body, now),
+        "INSERT INTO notifications (user_id, type, title, body, format, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (user_id, ntype, title, body, fmt, now),
     )
     db.commit()
     return cur.lastrowid
+
+
+def add_notification_bulk(user_ids: list[int], ntype: str, title: str,
+                          body: str = "", fmt: str = "plain") -> int:
+    """Insert the same notification for many users in one transaction (used by
+    the admin site-wide broadcast). Returns the number of rows inserted."""
+    if not user_ids:
+        return 0
+    db = get_db()
+    now = datetime.now().isoformat(timespec="seconds")
+    rows = [(uid, ntype, title, body, fmt, now) for uid in user_ids]
+    db.executemany(
+        "INSERT INTO notifications (user_id, type, title, body, format, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+    db.commit()
+    return len(rows)
+
+
+def publish_broadcast_atomically(
+    user_ids: list[int], broadcast_id: str, title: str, body: str,
+    fmt: str, email: bool,
+) -> tuple[bool, dict]:
+    """Commit a site-wide in-app broadcast as one transaction.
+
+    Returns ``(True, result)`` when this call publishes a new broadcast, or
+    ``(False, result)`` when ``broadcast_id`` was already committed. A fan-out
+    failure rolls back both the claim row and all notification rows, so a retry
+    with the same id can safely try again.
+    """
+    # This transaction must not use get_db(): that function returns the
+    # process-wide connection shared by every Flask request. A commit/rollback
+    # from another thread on that same connection would split or undo this
+    # transaction. A short-lived connection gives this unit its own transaction
+    # boundary; WAL + busy_timeout let concurrent writers serialize normally.
+    db = sqlite3.connect(str(DB_FILE), timeout=30)
+    db.row_factory = sqlite3.Row
+    db.execute("PRAGMA foreign_keys=ON")
+    db.execute("PRAGMA busy_timeout=30000")
+    now = datetime.now().isoformat(timespec="seconds")
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        claimed = db.execute(
+            "INSERT OR IGNORE INTO broadcast_publications "
+            "(broadcast_id, title, recipients, email, created_at) VALUES (?, '', 0, 0, ?)",
+            (broadcast_id, now),
+        ).rowcount > 0
+        if not claimed:
+            row = db.execute(
+                "SELECT recipients, email FROM broadcast_publications WHERE broadcast_id = ?",
+                (broadcast_id,),
+            ).fetchone()
+            db.rollback()
+            return False, {
+                "recipients": int(row["recipients"]),
+                "email": bool(row["email"]),
+            }
+
+        db.executemany(
+            "INSERT INTO notifications (user_id, type, title, body, format, created_at) "
+            "VALUES (?, 'admin_broadcast', ?, ?, ?, ?)",
+            [(uid, title, body, fmt, now) for uid in user_ids],
+        )
+        db.execute(
+            "UPDATE broadcast_publications SET title = ?, recipients = ?, email = ? "
+            "WHERE broadcast_id = ?",
+            (title, len(user_ids), int(email), broadcast_id),
+        )
+        db.commit()
+        return True, {"recipients": len(user_ids), "email": bool(email)}
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 
 def list_notifications(user_id: int, limit: int = 100) -> list[dict]:
@@ -550,7 +639,7 @@ def list_notifications(user_id: int, limit: int = 100) -> list[dict]:
     """
     db = get_db()
     rows = db.execute(
-        "SELECT id, type, title, body, created_at, read_at "
+        "SELECT id, type, title, body, format, created_at, read_at "
         "FROM notifications WHERE user_id = ? "
         "ORDER BY (read_at IS NULL) DESC, id DESC LIMIT ?",
         (user_id, limit),
@@ -579,6 +668,16 @@ def mark_notification_read(user_id: int, notification_id: int) -> bool:
     )
     db.commit()
     return cur.rowcount > 0
+
+
+def get_broadcast_publication(broadcast_id: str) -> dict | None:
+    db = get_db()
+    row = db.execute(
+        "SELECT broadcast_id, title, recipients, email, created_at "
+        "FROM broadcast_publications WHERE broadcast_id = ?",
+        (broadcast_id,),
+    ).fetchone()
+    return dict(row) if row else None
 
 
 # ─── Invitation Codes ──────────────────────────────────────

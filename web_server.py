@@ -34,8 +34,9 @@ from models import (
     get_system_ai_config, set_system_ai_config,
     create_invitation_code, validate_invitation_code, use_invitation_code,
     list_pending_invitations, delete_invitation_code, delete_invitation_code_by_code,
-    add_notification, list_notifications, count_unread_notifications,
-    mark_notification_read,
+    add_notification, list_notifications,
+    count_unread_notifications, mark_notification_read,
+    publish_broadcast_atomically,
 )
 from auth import init_auth, create_token, require_auth, require_role
 from auth_validation import is_valid_email
@@ -690,6 +691,87 @@ def mark_notification_read_route(nid):
     return jsonify({"ok": True, "unread": count_unread_notifications(g.user_id)})
 
 
+NOTIF_BROADCAST_BODY_MAX = 20000
+
+
+def _broadcast_notification_emails(broadcast_id, user_ids, title, body):
+    """Fan out an email copy of a broadcast to each user (best-effort, in a
+    background thread — mass send must not block the publish request).
+
+    Each send carries a per-(broadcast, user) Resend idempotency key as a
+    second line of defense — the caller (admin_broadcast_notification) never
+    launches this thread twice for the same broadcast_id, but this way even a
+    duplicate call can't actually double-send."""
+    for uid in user_ids:
+        try:
+            _send_notification_email(
+                uid, title, body,
+                idempotency_key=f"broadcast-{broadcast_id}-{uid}",
+            )
+        except Exception as exc:
+            print(f"[broadcast] email to user {uid} failed: {exc}")
+
+
+@app.route("/admin/notifications/broadcast", methods=["POST"])
+@require_role("admin")
+def admin_broadcast_notification():
+    """Publish a site-wide notification: one in-app row per user, optionally
+    with an email copy. Body is stored raw (plain or markdown) — every render
+    path escapes/sanitizes.
+
+    Idempotent on broadcast_id (client-generated, persisted across a manual
+    retry — see publishBroadcast() in frontend/index.html): if the response to
+    the first attempt was lost in transit and the admin retries, replaying the
+    same broadcast_id returns the original result instead of re-inserting a
+    notification for every user and re-sending every email.
+    """
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "JSON object required"}), 400
+    raw_title = data.get("title", "")
+    raw_body = data.get("body", "")
+    raw_format = data.get("format", "plain")
+    raw_email = data.get("email", False)
+    raw_broadcast_id = data.get("broadcast_id", "")
+    if not isinstance(raw_title, str) or not isinstance(raw_body, str):
+        return jsonify({"error": "title/body must be strings"}), 400
+    if not isinstance(raw_format, str):
+        return jsonify({"error": "format must be a string"}), 400
+    if not isinstance(raw_email, bool):
+        return jsonify({"error": "email must be a boolean"}), 400
+    if not isinstance(raw_broadcast_id, str):
+        return jsonify({"error": "broadcast_id must be a string"}), 400
+    # Fall back to a fresh id for a caller that doesn't send one (no
+    # idempotency protection in that case, but still a valid single publish).
+    broadcast_id = raw_broadcast_id.strip()[:100] or uuid.uuid4().hex
+
+    title = _sanitize_plain_text(raw_title, max_len=200)
+    if not title:
+        return jsonify({"error": "title required"}), 400
+    # Keep the raw body (do NOT run _sanitize_plain_text — it would strip
+    # markdown markup); just length-clamp. Client render paths handle safety.
+    body = raw_body.strip()[:NOTIF_BROADCAST_BODY_MAX]
+    if not body:
+        return jsonify({"error": "body required"}), 400
+    fmt = "markdown" if raw_format == "markdown" else "plain"
+    do_email = raw_email
+
+    user_ids = [u["id"] for u in list_users()]
+    is_new, result = publish_broadcast_atomically(
+        user_ids, broadcast_id, title, body, fmt, do_email,
+    )
+    if is_new and do_email and user_ids:
+        threading.Thread(
+            target=_broadcast_notification_emails,
+            args=(broadcast_id, user_ids, title, body),
+            daemon=True,
+        ).start()
+    response = {"ok": True, **result}
+    if not is_new:
+        response["replayed"] = True
+    return jsonify(response)
+
+
 # ─── AI Routes ─────────────────────────────────────────────
 
 @app.route("/ai/config", methods=["GET"])
@@ -951,9 +1033,19 @@ def _notification_recipient(user_id: int) -> str:
     return (user.get("email") or "").strip()
 
 
-def _send_notification_email(user_id: int, title: str, body: str) -> bool:
+def _send_notification_email(user_id: int, title: str, body: str,
+                             idempotency_key: str | None = None) -> bool:
     """Email a user a copy of an in-app notification. Best-effort; never
-    raises. Body is the same plain text stored in the notifications table."""
+    raises. Always renders body as plain text (escaped, newline->br) — for a
+    'markdown'-format notification this means the raw markdown source shows
+    up verbatim (no server-side markdown renderer), by design: see the "邮件
+    正文始终为纯文本" hint in the admin broadcast tab. Do not silently start
+    treating body as HTML here without sanitizing it first.
+
+    idempotency_key, when given, is passed to Resend so a caller that retries
+    after a lost response (see admin_broadcast_notification's broadcast_id
+    dedup) can't cause the same email to actually go out twice, even if our
+    own DB-level dedup were ever bypassed."""
     api_key = os.environ.get("RESEND_API_KEY", "")
     to_email = _notification_recipient(user_id)
     if not api_key or not to_email:
@@ -984,6 +1076,7 @@ h1{{color:#6e8efb;font-size:18px}}
             html,
             from_name="RayNews",
             from_email=from_email,
+            idempotency_key=idempotency_key,
         )
         return True
     except Exception as exc:
