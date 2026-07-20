@@ -350,6 +350,10 @@ body.body-scroll-lock{overflow:hidden!important}
 .user-menu-items{display:flex;flex-direction:column}
 .user-menu-item{width:100%;text-align:left;padding:10px 16px;border:none;background:none;color:var(--text-2);font-size:13px;cursor:pointer;font-family:var(--font);transition:all 0.12s}
 .user-menu-item:hover{background:var(--bg-card-hover);color:var(--text)}
+.header-avatar{position:relative}
+/* Same amber dot as .daily-summary-btn.ready::after — lit while any notification is unread */
+.header-avatar.has-unread::after{content:'';position:absolute;right:0;top:1px;width:7px;height:7px;border-radius:50%;background:#fbbf24;box-shadow:0 0 0 3px rgba(251,191,36,0.18);z-index:1}
+.notif-menu-badge{display:inline-block;margin-left:8px;min-width:16px;padding:1px 5px;border-radius:999px;background:#fbbf24;color:#1a1a1e;font-size:10px;font-weight:800;text-align:center;line-height:1.4;vertical-align:1px}
 
 /* ═══ Admin Panel ═══════════════════════════════════ */
 .admin-body{overflow-x:hidden;overflow-y:auto;padding:16px 24px;flex:1}
@@ -410,6 +414,24 @@ body.body-scroll-lock{overflow:hidden!important}
 .fav-item-meta{font-size:11px;color:var(--text-3);margin-top:4px;display:flex;align-items:center;gap:8px}
 .fav-unfav{background:none;border:1px solid var(--border);color:var(--text-3);padding:2px 8px;border-radius:6px;font-size:11px;cursor:pointer;font-family:var(--font);transition:all 0.15s;flex-shrink:0}
 .fav-unfav:hover{border-color:#ef4444;color:#ef4444}
+
+/* ═══ Notifications ═════════════════════════════════ */
+.notif-item{display:flex;align-items:center;gap:12px;padding:14px 24px;cursor:pointer;transition:background 0.12s;border-left:3px solid transparent}
+.notif-item:hover{background:var(--bg-card-hover)}
+.notif-item.unread{background:var(--accent-dim);border-left-color:#fbbf24}
+.notif-time{font-size:11px;color:var(--text-3);flex-shrink:0}
+.notif-title{flex:1;min-width:0;font-size:13px;color:var(--text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.notif-item.unread .notif-title{font-weight:700;color:var(--text)}
+.notif-btn{background:none;border:1px solid var(--border);color:var(--text-3);padding:2px 8px;border-radius:6px;font-size:11px;cursor:pointer;font-family:var(--font);transition:all 0.15s;flex-shrink:0}
+.notif-btn:hover{border-color:var(--accent);color:var(--accent)}
+.notif-btn.read-btn:hover{border-color:#22c55e;color:#22c55e}
+.notif-detail{padding:20px 24px}
+.notif-detail-time{font-size:11px;color:var(--text-3);margin-bottom:6px}
+.notif-detail-title{font-size:15px;font-weight:700;color:var(--text);margin-bottom:12px;line-height:1.5}
+.notif-detail-body{font-size:13px;line-height:1.8;color:var(--text-2);word-break:break-word}
+.notif-detail-footer{display:flex;justify-content:center;padding:20px 0 4px}
+.notif-read-primary{background:var(--accent);border:1px solid var(--accent);color:#fff;padding:9px 32px;border-radius:10px;font:inherit;font-size:13px;font-weight:700;cursor:pointer;transition:opacity .15s}
+.notif-read-primary:hover{opacity:.85}
 
 /* ═══ AI Settings Panel ═══════════════════════════════════ */
 .ai-overlay{position:fixed;inset:0;z-index:400;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity 0.2s}
@@ -544,6 +566,7 @@ body.body-scroll-lock{overflow:hidden!important}
           </div>
         </div>
         <div class="user-menu-items">
+          <button class="user-menu-item" onclick="openNotifications()" id="notifMenuItem">🔔 我的通知<span class="notif-menu-badge" id="notifMenuBadge" style="display:none"></span></button>
           <button class="user-menu-item" onclick="openFavorites()" id="favMenuItem">⭐ 我的收藏</button>
           <button class="user-menu-item" onclick="openSettings()" id="settingsMenuItem">⚙️ 用户设置</button>
           <button class="user-menu-item" onclick="openAdminSettings()" id="adminSettingsBtn" style="display:none">🛠️ 管理员设置</button>
@@ -794,6 +817,23 @@ body.body-scroll-lock{overflow:hidden!important}
     </div>
     <div id="sourceArticlesStatus" class="source-articles-toast" role="status" aria-live="polite"></div>
     <div class="fav-body" id="sourceArticlesBody">
+      <div class="fav-empty">加载中...</div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ Notifications Panel ═══════════════════════════ -->
+<div class="fav-overlay" id="notifOverlay">
+  <div class="fav-backdrop" onclick="closeNotifications()" style="position:absolute;inset:0"></div>
+  <div class="fav-panel">
+    <div class="fav-header">
+      <div style="display:flex;align-items:center;gap:8px;min-width:0">
+        <button class="fav-close" id="notifBackBtn" onclick="showNotifList()" style="display:none;padding:4px 6px">←</button>
+        <h2 id="notifPanelTitle">🔔 我的通知</h2>
+      </div>
+      <button class="fav-close" onclick="closeNotifications()">✕</button>
+    </div>
+    <div class="fav-body" id="notifBody">
       <div class="fav-empty">加载中...</div>
     </div>
   </div>
@@ -1093,6 +1133,7 @@ async function verifyToken() {
       }
       // Load user settings for auto-translate decisions
       loadUserSettings();
+      refreshNotifStatus();
       syncDailySummaryToday();
     }
   } catch (e) {
@@ -1254,6 +1295,7 @@ function logout() {
   localStorage.removeItem('raynews_user');
   closeUserMenu();
   updateUserUI();
+  resetNotifState();
   renderList();
   showToast('已退出登录');
 }
@@ -2155,6 +2197,7 @@ async function submitAuth() {
       pendingAuthAction = '';
       showToast(authMode === 'login' ? '✅ 登录成功' : '✅ 注册成功');
       loadUserSettings();
+      refreshNotifStatus();
       syncDailySummaryToday();
       renderList();
       if (nextAction === 'search') openSearch();
@@ -2221,7 +2264,9 @@ function updateUserUI() {
 }
 
 function toggleUserMenu() {
-  document.getElementById('userMenu').classList.toggle('open');
+  const menu = document.getElementById('userMenu');
+  menu.classList.toggle('open');
+  if (menu.classList.contains('open')) refreshNotifStatus();
 }
 
 function closeUserMenu() {
@@ -4393,6 +4438,152 @@ async function checkFavoriteStatus(articleId) {
   } catch (e) {}
 }
 
+// ═══ In-App Notifications ═══════════════════════════
+// Timely per-user notices (share revalidation failures now, release notes
+// later). A notification counts as read ONLY when the user clicks a 已读
+// button (list row or detail footer) — merely viewing the detail does not.
+let notifItems = [];
+let notifUnread = 0;
+let notifDetailId = null;
+let notifRequestSeq = 0;
+let notifReadChain = Promise.resolve();  // serializes 已读 writes (see markNotifRead)
+
+function updateNotifDot() {
+  const avatar = document.querySelector('.header-avatar');
+  if (avatar) avatar.classList.toggle('has-unread', notifUnread > 0);
+  const badge = document.getElementById('notifMenuBadge');
+  if (badge) {
+    badge.style.display = notifUnread > 0 ? '' : 'none';
+    badge.textContent = notifUnread;
+  }
+}
+
+function resetNotifState() {
+  notifItems = [];
+  notifUnread = 0;
+  notifDetailId = null;
+  updateNotifDot();
+}
+
+async function refreshNotifStatus() {
+  if (!authToken) return;
+  // Guard against a slow response landing after a newer refresh (or an
+  // account switch) has already superseded it — otherwise a previous user's
+  // (or a stale) response could overwrite the current one's notif state.
+  const requestToken = authToken;
+  const seq = ++notifRequestSeq;
+  try {
+    const data = await apiFetch('/notifications');
+    if (!data || data.error) return;
+    if (authToken !== requestToken || seq !== notifRequestSeq) return;
+    notifItems = data.items || [];
+    notifUnread = data.unread || 0;
+    updateNotifDot();
+  } catch (e) {}
+}
+
+function openNotifications() {
+  closeUserMenu();
+  if (!authToken) { showToast('🔒 登录后才能查看通知'); showAuth(); return; }
+  const overlay = document.getElementById('notifOverlay');
+  overlay.classList.add('open');
+  lockBodyScroll();
+  notifDetailId = null;
+  document.getElementById('notifBackBtn').style.display = 'none';
+  document.getElementById('notifPanelTitle').textContent = '🔔 我的通知';
+  if (notifItems.length) renderNotifList();
+  else document.getElementById('notifBody').innerHTML = '<div class="fav-empty">加载中...</div>';
+  refreshNotifStatus().then(() => {
+    // Don't clobber a detail view the user opened while the refresh was in flight.
+    if (overlay.classList.contains('open') && notifDetailId === null) renderNotifList();
+  });
+}
+
+function closeNotifications() {
+  document.getElementById('notifOverlay').classList.remove('open');
+  unlockBodyScroll();
+  showNotifList();
+}
+
+function formatNotifTime(iso) {
+  return (iso || '').slice(0, 16).replace('T', ' ');
+}
+
+function renderNotifList() {
+  const body = document.getElementById('notifBody');
+  if (!notifItems.length) {
+    body.innerHTML = '<div class="fav-empty">暂无通知</div>';
+    return;
+  }
+  body.innerHTML = notifItems.map(n => `
+    <div class="notif-item ${n.read_at ? '' : 'unread'}" onclick="showNotifDetail(${n.id})">
+      <span class="notif-time">${esc(formatNotifTime(n.created_at))}</span>
+      <span class="notif-title">${esc(n.title)}</span>
+      <button class="notif-btn" onclick="event.stopPropagation();showNotifDetail(${n.id})">查看</button>
+      ${n.read_at ? '' : `<button class="notif-btn read-btn" onclick="event.stopPropagation();markNotifRead(${n.id})">已读</button>`}
+    </div>
+  `).join('');
+}
+
+function showNotifList() {
+  notifDetailId = null;
+  document.getElementById('notifBackBtn').style.display = 'none';
+  document.getElementById('notifPanelTitle').textContent = '🔔 我的通知';
+  renderNotifList();
+}
+
+function showNotifDetail(id) {
+  const n = notifItems.find(x => x.id === id);
+  if (!n) return;
+  notifDetailId = id;
+  document.getElementById('notifBackBtn').style.display = '';
+  document.getElementById('notifPanelTitle').textContent = '通知详情';
+  const bodyHtml = esc(n.body || '').replace(/\n/g, '<br>');
+  document.getElementById('notifBody').innerHTML = `
+    <div class="notif-detail">
+      <div class="notif-detail-time">${esc(formatNotifTime(n.created_at))}</div>
+      <div class="notif-detail-title">${esc(n.title)}</div>
+      <div class="notif-detail-body">${bodyHtml}</div>
+      ${n.read_at ? '' : `<div class="notif-detail-footer"><button class="notif-read-primary" onclick="markNotifRead(${n.id}, true)">已读</button></div>`}
+    </div>
+  `;
+}
+
+function markNotifRead(id, fromDetail = false) {
+  // Serialize the read-writes: two concurrent POSTs can resolve out of order
+  // (and the server may even process them out of click order), so an older
+  // response's data.unread could clobber a newer one's, leaving a wrong badge
+  // count. Chaining guarantees each POST fires only after the previous one has
+  // fully settled, so the last response always reflects the latest server
+  // state. Capture the token at enqueue time so a queued op that runs after an
+  // account switch is skipped rather than acting under the wrong identity.
+  const requestToken = authToken;
+  notifReadChain = notifReadChain.then(() => _applyNotifRead(id, fromDetail, requestToken));
+  return notifReadChain;
+}
+
+async function _applyNotifRead(id, fromDetail, requestToken) {
+  if (!authToken || authToken !== requestToken) return;  // logged out / switched
+  // Invalidate any GET refresh in flight so it can't land after this write and
+  // revert the row back to unread with stale data.
+  notifRequestSeq++;
+  try {
+    const data = await apiFetch('/notifications/' + id + '/read', { method: 'POST' });
+    if (!data || data.error) { showToast('❌ 操作失败'); return; }
+    if (authToken !== requestToken) return;
+    const n = notifItems.find(x => x.id === id);
+    if (n && !n.read_at) n.read_at = new Date().toISOString();
+    notifUnread = typeof data.unread === 'number'
+      ? data.unread
+      : notifItems.filter(x => !x.read_at).length;
+    updateNotifDot();
+    if (fromDetail || notifDetailId === id) showNotifList();
+    else renderNotifList();
+  } catch (e) {
+    showToast('❌ 操作失败');
+  }
+}
+
 // ═══ Admin Panel ════════════════════════════════════
 async function loadAdminUsers() {
   try {
@@ -4551,7 +4742,13 @@ function createArticleElement(item) {
 
 function updateArticleElement(node, item) {
   const title = node.querySelector('.item-title');
-  if (title && title.textContent !== (item.title || '')) title.textContent = item.title || '';
+  // Use displayTitle() (not the raw item.title) so the incremental-update path
+  // honors the viewer's "查看服务端共享的标题翻译" (share_view_title) toggle,
+  // exactly like the initial render in articleItemHtml(). Otherwise this path
+  // would show the translated title regardless of the toggle, disagreeing with
+  // the article detail <h1> which always goes through displayTitle().
+  const wantTitle = displayTitle(item);
+  if (title && title.textContent !== wantTitle) title.textContent = wantTitle;
   const badge = node.querySelector('[data-role="source"]');
   if (badge) {
     const displaySource = displaySourceForArticle(feedSourceOf(item));
@@ -7436,6 +7633,11 @@ setTimeout(handleHash, 200);
 setInterval(function() {
   const cursor = latestKnownTimestamp || latestNewsTimestamp();
   if (cursor > 0) loadSince(cursor);
+  // Low-frequency poll so backend-generated notifications (share revalidation
+  // failures etc.) light up the avatar dot while the page stays open, instead
+  // of only surfacing when the user opens the menu. Self-guards on authToken
+  // and carries the same token/seq protection against out-of-order overwrites.
+  if (authToken && !document.hidden) refreshNotifStatus();
 }, 60000);
 setInterval(showLatestAfterIdle, 15000);
 setInterval(function() {
@@ -7508,6 +7710,9 @@ function onReturnToForeground() {
     pollTitleUpdates();
     pollTranslationUpdates();
   }
+  // Catch notifications that arrived while the tab was backgrounded (the 60s
+  // poll timer is frozen on mobile/PWA until resume).
+  if (authToken) refreshNotifStatus();
   if (typeof document !== 'undefined') {
     const overlay = document.getElementById('overlay');
     const articleId = Number(overlay && overlay.dataset.articleId);

@@ -34,6 +34,8 @@ from models import (
     get_system_ai_config, set_system_ai_config,
     create_invitation_code, validate_invitation_code, use_invitation_code,
     list_pending_invitations, delete_invitation_code, delete_invitation_code_by_code,
+    add_notification, list_notifications, count_unread_notifications,
+    mark_notification_read,
 )
 from auth import init_auth, create_token, require_auth, require_role
 from auth_validation import is_valid_email
@@ -663,6 +665,31 @@ def favorite_status(article_id):
     return jsonify({"favorited": is_favorited(g.user_id, article_id)})
 
 
+# ─── In-App Notifications ─────────────────────────────────────
+
+@app.route("/notifications", methods=["GET"])
+@require_role("user", "admin")
+def list_notifications_route():
+    """User's in-app notifications, newest first, with unread count.
+
+    Bodies are small plain text, so the list payload carries them inline —
+    no separate detail endpoint needed.
+    """
+    return jsonify({
+        "items": list_notifications(g.user_id),
+        "unread": count_unread_notifications(g.user_id),
+    })
+
+
+@app.route("/notifications/<int:nid>/read", methods=["POST"])
+@require_role("user", "admin")
+def mark_notification_read_route(nid):
+    # Idempotent: marking an already-read (or unknown) row is not an error;
+    # the client only cares about the resulting unread count.
+    mark_notification_read(g.user_id, nid)
+    return jsonify({"ok": True, "unread": count_unread_notifications(g.user_id)})
+
+
 # ─── AI Routes ─────────────────────────────────────────────
 
 @app.route("/ai/config", methods=["GET"])
@@ -904,6 +931,77 @@ def admin_system_ai_test_connection():
     return jsonify(body), status
 
 
+def _notification_recipient(user_id: int) -> str:
+    """Best email to reach a user at: prefer the address they set for
+    notifications, fall back to their account email."""
+    try:
+        settings = get_user_settings(user_id) or {}
+        nc = settings.get("notification_config") or "{}"
+        if isinstance(nc, str):
+            try:
+                nc = json.loads(nc)
+            except (json.JSONDecodeError, TypeError):
+                nc = {}
+        to_email = ((nc.get("resend") or {}).get("to_email") or "").strip()
+        if to_email:
+            return to_email
+    except Exception:
+        pass
+    user = get_user(user_id) or {}
+    return (user.get("email") or "").strip()
+
+
+def _send_notification_email(user_id: int, title: str, body: str) -> bool:
+    """Email a user a copy of an in-app notification. Best-effort; never
+    raises. Body is the same plain text stored in the notifications table."""
+    api_key = os.environ.get("RESEND_API_KEY", "")
+    to_email = _notification_recipient(user_id)
+    if not api_key or not to_email:
+        return False
+    from_email = os.environ.get("RAYNEWS_FROM_EMAIL") or "onboarding@resend.dev"
+
+    def _esc(text: str) -> str:
+        return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    safe_title = _esc(title)
+    safe_body = _esc(body).replace("\n", "<br>")
+    try:
+        html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#0a0a0c;color:#e8e8ed;padding:20px;max-width:560px;margin:0 auto}}
+h1{{color:#6e8efb;font-size:18px}}
+.box{{background:#111114;border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:16px;margin:16px 0;color:#c9c9d4;line-height:1.8;word-break:break-word}}
+.footer{{font-size:12px;color:#55556a;margin-top:20px}}
+</style></head><body>
+<h1>🔔 {safe_title}</h1>
+<div class="box">{safe_body}</div>
+<p class="footer">此邮件由 RayNews 自动发送；同样内容可在 头像菜单 → 我的通知 中查看。不包含密码、验证码或令牌。</p>
+</body></html>"""
+        send_email(
+            api_key,
+            to_email,
+            f"RayNews 通知 — {title}",
+            html,
+            from_name="RayNews",
+            from_email=from_email,
+        )
+        return True
+    except Exception as exc:
+        print(f"[notify] Failed to send notification email to user {user_id}: {exc}")
+        return False
+
+
+def _notify_user(user_id: int, ntype: str, title: str, body: str = "") -> None:
+    """Deliver a notification to a user on both channels: insert an in-app
+    row (头像菜单 → 我的通知) and email a copy. Each leg is best-effort and
+    independent, so a DB or mail hiccup never breaks the caller."""
+    try:
+        add_notification(user_id, ntype, title, body)
+    except Exception as exc:
+        print(f"[notify] Failed to add in-app notification for user {user_id}: {exc}")
+    _send_notification_email(user_id, title, body)
+
+
 def _run_ai_share_revalidation_once():
     """Re-verify every opted-in user's own AI connectivity.
 
@@ -925,11 +1023,24 @@ def _run_ai_share_revalidation_once():
                 share_last_check_at=now_str, share_last_check_ok=1, share_last_check_error=None,
             )
         else:
+            err_msg = body.get("error", "connection test failed")
             set_user_settings(
                 user_id,
                 share_ai_results=0, share_view_title=0, share_view_translation=0, share_view_summary=0,
                 share_last_check_at=now_str, share_last_check_ok=0,
-                share_last_check_error=body.get("error", "connection test failed"),
+                share_last_check_error=err_msg,
+            )
+            # The switch is now off, so this user drops out of
+            # get_users_with_share_enabled() and won't be re-checked (or
+            # re-notified) next cycle — the in-app notification and its email
+            # copy fire exactly once, on the transition to failed.
+            _notify_user(
+                user_id, "share_revoked",
+                "共享校验失败，共享状态已失效",
+                "系统对你在「共享」中配置的 AI API 做定期连通性校验时失败，"
+                "「共享 AI 结果」总开关及全部查看子开关已被自动关闭。\n\n"
+                f"失败原因：{err_msg}\n\n"
+                "请到 用户设置 → 共享 检查并更新你的 API 配置，重新保存以恢复共享资格。",
             )
         time.sleep(0.5)  # spread requests out instead of bursting every provider at once
 

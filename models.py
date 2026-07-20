@@ -88,7 +88,19 @@ CREATE TABLE IF NOT EXISTS system_ai_config (
     provider_type TEXT NOT NULL DEFAULT 'openai'
                     CHECK(provider_type IN ('openai', 'claude')),
     enabled     INTEGER NOT NULL DEFAULT 0
-);"""
+);
+
+CREATE TABLE IF NOT EXISTS notifications (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    type        TEXT    NOT NULL DEFAULT 'general',
+    title       TEXT    NOT NULL,
+    body        TEXT    NOT NULL DEFAULT '',
+    created_at  TEXT    NOT NULL,
+    read_at     TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_user_time ON notifications(user_id, created_at DESC);"""
 
 # ─── Connection ───────────────────────────────────────────────
 
@@ -502,6 +514,71 @@ def set_user_settings(user_id: int, **kwargs) -> dict:
         )
     db.commit()
     return get_user_settings(user_id)
+
+
+# ─── In-App Notifications ──────────────────────────────────
+
+
+def add_notification(user_id: int, ntype: str, title: str, body: str = "") -> int:
+    """Insert an in-app notification for a user. Returns the new row id.
+
+    body is plain text (rendered with newline→<br> on the client). If richer
+    formatting is ever needed, add a `format` column rather than putting
+    markup here.
+    """
+    db = get_db()
+    # Local time, same convention as user_settings.share_last_check_at.
+    now = datetime.now().isoformat(timespec="seconds")
+    cur = db.execute(
+        "INSERT INTO notifications (user_id, type, title, body, created_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (user_id, ntype, title, body, now),
+    )
+    db.commit()
+    return cur.lastrowid
+
+
+def list_notifications(user_id: int, limit: int = 100) -> list[dict]:
+    """Newest first, but unread rows always sort ahead of read ones.
+
+    count_unread_notifications() below counts the whole table, not just this
+    page — without the unread-first ordering, a user who accumulates more
+    than `limit` notifications could have an old unread row pushed off the
+    end by newer *read* ones, leaving it permanently uncounted-but-invisible
+    (the badge would never clear). Unread-first guarantees every unread row
+    is visible as long as the unread count itself stays under `limit`.
+    """
+    db = get_db()
+    rows = db.execute(
+        "SELECT id, type, title, body, created_at, read_at "
+        "FROM notifications WHERE user_id = ? "
+        "ORDER BY (read_at IS NULL) DESC, id DESC LIMIT ?",
+        (user_id, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def count_unread_notifications(user_id: int) -> int:
+    db = get_db()
+    row = db.execute(
+        "SELECT COUNT(*) FROM notifications WHERE user_id = ? AND read_at IS NULL",
+        (user_id,),
+    ).fetchone()
+    return int(row[0])
+
+
+def mark_notification_read(user_id: int, notification_id: int) -> bool:
+    """Mark one notification read. User-scoped; idempotent (already-read rows
+    are untouched and return False)."""
+    db = get_db()
+    now = datetime.now().isoformat(timespec="seconds")
+    cur = db.execute(
+        "UPDATE notifications SET read_at = ? "
+        "WHERE id = ? AND user_id = ? AND read_at IS NULL",
+        (now, notification_id, user_id),
+    )
+    db.commit()
+    return cur.rowcount > 0
 
 
 # ─── Invitation Codes ──────────────────────────────────────
