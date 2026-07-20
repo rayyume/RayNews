@@ -16,9 +16,9 @@ import web_server
 @pytest.fixture
 def env(monkeypatch):
     db_path = Path(__file__).resolve().parents[1] / f"tmp-broadcast-{uuid.uuid4().hex}.db"
-    old_db_file, old_conn = models.DB_FILE, models._db
+    old_db_file = models.DB_FILE
+    models.close_db()
     models.DB_FILE = db_path
-    models._db = None
     models.get_db()
     admin = models.create_user("admin@example.com", "pw", "admin", role="admin")
     u1 = models.create_user("u1@example.com", "pw", "u1")
@@ -29,7 +29,8 @@ def env(monkeypatch):
     try:
         yield client, admin["id"], u1["id"], u2["id"]
     finally:
-        models.DB_FILE, models._db = old_db_file, old_conn
+        models.close_db()
+        models.DB_FILE = old_db_file
         for suffix in ("", "-wal", "-shm"):
             try:
                 os.remove(str(db_path) + suffix)
@@ -56,6 +57,16 @@ def test_broadcast_reaches_every_user(env):
         assert [i["title"] for i in items] == ["公告"]
         assert items[0]["format"] == "markdown"
         assert models.count_unread_notifications(uid) == 1
+
+    # The publisher must see their own fan-out through the authenticated route,
+    # not merely through a direct model query. This response carries private
+    # data and must never be reused as a stale empty response by a browser or
+    # intermediary cache.
+    listed = client.get("/notifications", headers=_headers(admin_id, "admin"))
+    assert listed.status_code == 200
+    assert listed.headers["Cache-Control"] == "private, no-store"
+    assert [item["title"] for item in listed.get_json()["items"]] == ["公告"]
+    assert listed.get_json()["unread"] == 1
 
 
 def test_broadcast_requires_admin(env):

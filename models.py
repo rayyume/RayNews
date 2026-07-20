@@ -6,6 +6,7 @@ import bcrypt
 from datetime import datetime
 from pathlib import Path
 import os
+import threading
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
 DB_FILE = DATA_DIR / "raynews.db"
@@ -113,80 +114,122 @@ CREATE TABLE IF NOT EXISTS broadcast_publications (
 
 # ─── Connection ───────────────────────────────────────────────
 
-_db = None
+_db_local = threading.local()
+_db_init_lock = threading.Lock()
+_initialized_db_paths: set[str] = set()
+
+
+def _initialize_db(db: sqlite3.Connection) -> None:
+    """Create and migrate the model database on a newly opened connection."""
+    db.executescript(SCHEMA_SQL)
+    # Migration: add provider_type column if it doesn't exist (pre-v3 schema)
+    try:
+        db.execute("ALTER TABLE ai_configs ADD COLUMN provider_type TEXT NOT NULL DEFAULT 'openai'")
+    except sqlite3.OperationalError:
+        pass  # column already exists
+    try:
+        db.execute("ALTER TABLE user_settings ADD COLUMN auto_summary_enabled INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # column already exists
+    try:
+        db.execute("ALTER TABLE user_settings ADD COLUMN auto_title_summary_enabled INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # column already exists
+    try:
+        db.execute("ALTER TABLE user_settings ADD COLUMN theme_preference TEXT NOT NULL DEFAULT 'system'")
+    except sqlite3.OperationalError:
+        pass  # column already exists
+    try:
+        db.execute("ALTER TABLE users ADD COLUMN visit_count INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # column already exists
+    try:
+        db.execute("ALTER TABLE users ADD COLUMN last_seen_at TEXT NOT NULL DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass  # column already exists
+    for _col_sql in (
+        "ALTER TABLE user_settings ADD COLUMN share_ai_results INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE user_settings ADD COLUMN share_view_title INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE user_settings ADD COLUMN share_view_translation INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE user_settings ADD COLUMN share_view_summary INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE user_settings ADD COLUMN share_last_check_at TEXT",
+        "ALTER TABLE user_settings ADD COLUMN share_last_check_ok INTEGER",
+        "ALTER TABLE user_settings ADD COLUMN share_last_check_error TEXT",
+        # notifications gained a body format ('plain'|'markdown') after the
+        # table already shipped, so existing DBs need the column backfilled.
+        "ALTER TABLE notifications ADD COLUMN format TEXT NOT NULL DEFAULT 'plain'",
+    ):
+        try:
+            db.execute(_col_sql)
+        except sqlite3.OperationalError:
+            pass  # column already exists
+    # Registration now requires a username, stored in the nickname column.
+    # Backfill existing accounts that predate this requirement: keep their
+    # nickname if they set one, otherwise fall back to their email.
+    db.execute("UPDATE users SET nickname = email WHERE nickname = ''")
+    # Auto-summary/auto-translate are now admin-only; zero out any
+    # leftover opt-in flags on non-admin accounts from before this change.
+    db.execute(
+        "UPDATE user_settings SET auto_translate_title = 0, auto_translate_content = 0, "
+        "auto_title_summary_enabled = 0, auto_summary_enabled = 0 "
+        "WHERE user_id NOT IN (SELECT id FROM users WHERE role = 'admin')"
+    )
+    # The "preview" role has been retired: registration now grants "user"
+    # directly, and "who's pending" is tracked via unused invitation_codes
+    # instead. Promote any leftover preview accounts from before this change.
+    # (The role CHECK constraint above only drops 'preview' for brand new
+    # databases — existing databases keep their original, more permissive
+    # constraint rather than paying for a table-rebuild migration just to
+    # tighten it; the application layer already never assigns 'preview'.)
+    db.execute("UPDATE users SET role = 'user' WHERE role = 'preview'")
+    db.commit()
+
+
+def close_db() -> None:
+    """Close the model connection owned by the calling thread, if any."""
+    db = getattr(_db_local, "connection", None)
+    if db is not None:
+        db.close()
+    _db_local.connection = None
+    _db_local.path = None
 
 
 def get_db() -> sqlite3.Connection:
-    global _db
-    if _db is None:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        _db = sqlite3.connect(str(DB_FILE), check_same_thread=False)
-        _db.row_factory = sqlite3.Row
-        _db.execute("PRAGMA journal_mode=WAL")
-        _db.execute("PRAGMA foreign_keys=ON")
-        _db.executescript(SCHEMA_SQL)
-        # Migration: add provider_type column if it doesn't exist (pre-v3 schema)
-        try:
-            _db.execute("ALTER TABLE ai_configs ADD COLUMN provider_type TEXT NOT NULL DEFAULT 'openai'")
-        except sqlite3.OperationalError:
-            pass  # column already exists
-        try:
-            _db.execute("ALTER TABLE user_settings ADD COLUMN auto_summary_enabled INTEGER NOT NULL DEFAULT 0")
-        except sqlite3.OperationalError:
-            pass  # column already exists
-        try:
-            _db.execute("ALTER TABLE user_settings ADD COLUMN auto_title_summary_enabled INTEGER NOT NULL DEFAULT 0")
-        except sqlite3.OperationalError:
-            pass  # column already exists
-        try:
-            _db.execute("ALTER TABLE user_settings ADD COLUMN theme_preference TEXT NOT NULL DEFAULT 'system'")
-        except sqlite3.OperationalError:
-            pass  # column already exists
-        try:
-            _db.execute("ALTER TABLE users ADD COLUMN visit_count INTEGER NOT NULL DEFAULT 0")
-        except sqlite3.OperationalError:
-            pass  # column already exists
-        try:
-            _db.execute("ALTER TABLE users ADD COLUMN last_seen_at TEXT NOT NULL DEFAULT ''")
-        except sqlite3.OperationalError:
-            pass  # column already exists
-        for _col_sql in (
-            "ALTER TABLE user_settings ADD COLUMN share_ai_results INTEGER NOT NULL DEFAULT 0",
-            "ALTER TABLE user_settings ADD COLUMN share_view_title INTEGER NOT NULL DEFAULT 0",
-            "ALTER TABLE user_settings ADD COLUMN share_view_translation INTEGER NOT NULL DEFAULT 0",
-            "ALTER TABLE user_settings ADD COLUMN share_view_summary INTEGER NOT NULL DEFAULT 0",
-            "ALTER TABLE user_settings ADD COLUMN share_last_check_at TEXT",
-            "ALTER TABLE user_settings ADD COLUMN share_last_check_ok INTEGER",
-            "ALTER TABLE user_settings ADD COLUMN share_last_check_error TEXT",
-            # notifications gained a body format ('plain'|'markdown') after the
-            # table already shipped, so existing DBs need the column backfilled.
-            "ALTER TABLE notifications ADD COLUMN format TEXT NOT NULL DEFAULT 'plain'",
-        ):
-            try:
-                _db.execute(_col_sql)
-            except sqlite3.OperationalError:
-                pass  # column already exists
-        # Registration now requires a username, stored in the nickname column.
-        # Backfill existing accounts that predate this requirement: keep their
-        # nickname if they set one, otherwise fall back to their email.
-        _db.execute("UPDATE users SET nickname = email WHERE nickname = ''")
-        # Auto-summary/auto-translate are now admin-only; zero out any
-        # leftover opt-in flags on non-admin accounts from before this change.
-        _db.execute(
-            "UPDATE user_settings SET auto_translate_title = 0, auto_translate_content = 0, "
-            "auto_title_summary_enabled = 0, auto_summary_enabled = 0 "
-            "WHERE user_id NOT IN (SELECT id FROM users WHERE role = 'admin')"
-        )
-        # The "preview" role has been retired: registration now grants "user"
-        # directly, and "who's pending" is tracked via unused invitation_codes
-        # instead. Promote any leftover preview accounts from before this change.
-        # (The role CHECK constraint above only drops 'preview' for brand new
-        # databases — existing databases keep their original, more permissive
-        # constraint rather than paying for a table-rebuild migration just to
-        # tighten it; the application layer already never assigns 'preview'.)
-        _db.execute("UPDATE users SET role = 'user' WHERE role = 'preview'")
-        _db.commit()
-    return _db
+    """Return a SQLite connection owned by the calling thread.
+
+    sqlite3 connections may not safely execute statements or share transaction
+    state across Flask request threads. Keeping one connection per thread lets
+    WAL serialize writers at SQLite's transaction boundary instead of letting
+    one request commit or corrupt another request's work.
+    """
+    DB_FILE.parent.mkdir(parents=True, exist_ok=True)
+    db_path = str(DB_FILE.resolve())
+    db = getattr(_db_local, "connection", None)
+    if db is not None and getattr(_db_local, "path", None) == db_path:
+        return db
+    if db is not None:
+        close_db()
+
+    db = sqlite3.connect(db_path, timeout=30)
+    db.row_factory = sqlite3.Row
+    try:
+        # Foreign-key enforcement and busy_timeout are per connection.
+        db.execute("PRAGMA foreign_keys=ON")
+        db.execute("PRAGMA busy_timeout=30000")
+        # The schema/migrations perform writes. Run them once per database
+        # path in this process so independent request connections cannot race
+        # them or pay migration cost on every request thread.
+        with _db_init_lock:
+            if db_path not in _initialized_db_paths:
+                db.execute("PRAGMA journal_mode=WAL")
+                _initialize_db(db)
+                _initialized_db_paths.add(db_path)
+    except Exception:
+        db.close()
+        raise
+    _db_local.connection = db
+    _db_local.path = db_path
+    return db
 
 
 # ─── User helpers ─────────────────────────────────────────────

@@ -350,10 +350,11 @@ body.body-scroll-lock{overflow:hidden!important}
 .user-menu-items{display:flex;flex-direction:column}
 .user-menu-item{width:100%;text-align:left;padding:10px 16px;border:none;background:none;color:var(--text-2);font-size:13px;cursor:pointer;font-family:var(--font);transition:all 0.12s}
 .user-menu-item:hover{background:var(--bg-card-hover);color:var(--text)}
+.notif-menu-item{display:flex;align-items:center;justify-content:space-between;gap:10px}
 .header-avatar{position:relative}
 /* Same amber dot as .daily-summary-btn.ready::after — lit while any notification is unread */
 .header-avatar.has-unread::after{content:'';position:absolute;right:0;top:1px;width:7px;height:7px;border-radius:50%;background:#fbbf24;box-shadow:0 0 0 3px rgba(251,191,36,0.18);z-index:1}
-.notif-menu-badge{display:inline-block;margin-left:8px;min-width:16px;padding:1px 5px;border-radius:999px;background:#fbbf24;color:#1a1a1e;font-size:10px;font-weight:800;text-align:center;line-height:1.4;vertical-align:1px}
+.notification-new-tag{display:inline-flex;align-items:center;justify-content:center;padding:2px 8px;border-radius:100px;background:rgba(251,191,36,0.12);color:#fbbf24;font-size:10px;font-weight:700;letter-spacing:0.04em;line-height:1.2;flex-shrink:0}
 
 /* ═══ Admin Panel ═══════════════════════════════════ */
 .admin-body{overflow-x:hidden;overflow-y:auto;padding:16px 24px;flex:1}
@@ -429,6 +430,14 @@ body.body-scroll-lock{overflow:hidden!important}
 .notif-detail-time{font-size:11px;color:var(--text-3);margin-bottom:6px}
 .notif-detail-title{font-size:15px;font-weight:700;color:var(--text);margin-bottom:12px;line-height:1.5}
 .notif-detail-body{font-size:13px;line-height:1.8;color:var(--text-2);word-break:break-word}
+.notif-markdown{width:100%;min-width:0;max-width:100%;overflow-x:auto;overflow-wrap:anywhere;word-break:break-word}
+.notif-markdown *{min-width:0;max-width:100%;overflow-wrap:anywhere;word-break:break-word}
+.notif-markdown pre,.notif-markdown code{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
+.notif-markdown img{display:block;max-width:100%!important;height:auto;border-radius:8px}
+.notif-markdown table{width:100%!important;max-width:100%!important;table-layout:fixed;border-collapse:collapse}
+.notif-markdown th,.notif-markdown td{overflow-wrap:anywhere;word-break:break-word}
+.notif-markdown ul,.notif-markdown ol{padding-left:1.5em;margin:0 0 1em}
+.notif-markdown li{margin-bottom:0.4em}
 .notif-detail-footer{display:flex;justify-content:center;padding:20px 0 4px}
 .notif-read-primary{background:var(--accent);border:1px solid var(--accent);color:#fff;padding:9px 32px;border-radius:10px;font:inherit;font-size:13px;font-weight:700;cursor:pointer;transition:opacity .15s}
 .notif-read-primary:hover{opacity:.85}
@@ -569,7 +578,7 @@ body.body-scroll-lock{overflow:hidden!important}
           </div>
         </div>
         <div class="user-menu-items">
-          <button class="user-menu-item" onclick="openNotifications()" id="notifMenuItem">🔔 我的通知<span class="notif-menu-badge" id="notifMenuBadge" style="display:none"></span></button>
+          <button class="user-menu-item notif-menu-item" onclick="openNotifications()" id="notifMenuItem"><span>🔔 我的通知</span><span class="notification-new-tag" id="notifMenuBadge" style="display:none">new</span></button>
           <button class="user-menu-item" onclick="openFavorites()" id="favMenuItem">⭐ 我的收藏</button>
           <button class="user-menu-item" onclick="openSettings()" id="settingsMenuItem">⚙️ 用户设置</button>
           <button class="user-menu-item" onclick="openAdminSettings()" id="adminSettingsBtn" style="display:none">🛠️ 管理员设置</button>
@@ -792,7 +801,7 @@ body.body-scroll-lock{overflow:hidden!important}
         <p class="ai-hint" style="margin-top:6px">勾选后除站内通知外，会给每个设置了邮箱的用户各发一封邮件（后台发送，未配置发信服务时自动跳过）。<strong>邮件正文始终为纯文本</strong>——Markdown 格式下会原样显示 <code>#</code>/<code>**</code> 等标记且不含图片，完整排版和图片请提醒用户在站内「我的通知」查看。</p>
 
         <label class="ai-label" style="margin-top:14px">预览</label>
-        <div id="notifPubPreview" class="notif-detail-body" style="border:1px solid var(--border);border-radius:10px;padding:12px;min-height:48px;background:var(--bg-surface)"></div>
+        <div id="notifPubPreview" class="notif-detail-body notif-markdown" style="border:1px solid var(--border);border-radius:10px;padding:12px;min-height:48px;background:var(--bg-surface)"></div>
 
         <button class="ai-save-btn" onclick="publishBroadcast()" style="margin-top:16px">📣 发布通知</button>
         <p class="ai-hint" style="margin-top:8px">发布后立即推送到全部用户（含你自己）的「我的通知」。</p>
@@ -4587,6 +4596,7 @@ let notifUnread = 0;
 let notifDetailId = null;
 let notifRequestSeq = 0;
 let notifReadChain = Promise.resolve();  // serializes 已读 writes (see markNotifRead)
+let notifLoadState = 'idle';  // 'idle' | 'loading' | 'ready' | 'error'
 
 function updateNotifDot() {
   const avatar = document.querySelector('.header-avatar');
@@ -4594,7 +4604,7 @@ function updateNotifDot() {
   const badge = document.getElementById('notifMenuBadge');
   if (badge) {
     badge.style.display = notifUnread > 0 ? '' : 'none';
-    badge.textContent = notifUnread;
+    badge.textContent = 'new';
   }
 }
 
@@ -4602,24 +4612,37 @@ function resetNotifState() {
   notifItems = [];
   notifUnread = 0;
   notifDetailId = null;
+  notifLoadState = 'idle';
   updateNotifDot();
 }
 
 async function refreshNotifStatus() {
-  if (!authToken) return;
+  if (!authToken) {
+    notifLoadState = 'idle';
+    return false;
+  }
   // Guard against a slow response landing after a newer refresh (or an
   // account switch) has already superseded it — otherwise a previous user's
   // (or a stale) response could overwrite the current one's notif state.
   const requestToken = authToken;
   const seq = ++notifRequestSeq;
+  notifLoadState = 'loading';
   try {
-    const data = await apiFetch('/notifications');
-    if (!data || data.error) return;
-    if (authToken !== requestToken || seq !== notifRequestSeq) return;
+    const data = await apiFetch('/notifications', { cache: 'no-store' });
+    if (!data || data.error) {
+      if (authToken === requestToken && seq === notifRequestSeq) notifLoadState = 'error';
+      return false;
+    }
+    if (authToken !== requestToken || seq !== notifRequestSeq) return false;
     notifItems = data.items || [];
     notifUnread = data.unread || 0;
+    notifLoadState = 'ready';
     updateNotifDot();
-  } catch (e) {}
+    return true;
+  } catch (e) {
+    if (authToken === requestToken && seq === notifRequestSeq) notifLoadState = 'error';
+    return false;
+  }
 }
 
 function openNotifications() {
@@ -4631,7 +4654,7 @@ function openNotifications() {
   notifDetailId = null;
   document.getElementById('notifBackBtn').style.display = 'none';
   document.getElementById('notifPanelTitle').textContent = '🔔 我的通知';
-  if (notifItems.length) renderNotifList();
+  if (notifItems.length || notifLoadState === 'error') renderNotifList();
   else document.getElementById('notifBody').innerHTML = '<div class="fav-empty">加载中...</div>';
   refreshNotifStatus().then(() => {
     // Don't clobber a detail view the user opened while the refresh was in flight.
@@ -4652,6 +4675,14 @@ function formatNotifTime(iso) {
 function renderNotifList() {
   const body = document.getElementById('notifBody');
   if (!notifItems.length) {
+    if (notifLoadState === 'error') {
+      body.innerHTML = '<div class="fav-empty">通知加载失败<br><button class="notif-btn" style="margin-top:12px" onclick="retryNotifications()">重试</button></div>';
+      return;
+    }
+    if (notifLoadState === 'loading') {
+      body.innerHTML = '<div class="fav-empty">加载中...</div>';
+      return;
+    }
     body.innerHTML = '<div class="fav-empty">暂无通知</div>';
     return;
   }
@@ -4659,10 +4690,21 @@ function renderNotifList() {
     <div class="notif-item ${n.read_at ? '' : 'unread'}" onclick="showNotifDetail(${n.id})">
       <span class="notif-time">${esc(formatNotifTime(n.created_at))}</span>
       <span class="notif-title">${esc(n.title)}</span>
+      ${n.read_at ? '' : '<span class="notification-new-tag">new</span>'}
       <button class="notif-btn" onclick="event.stopPropagation();showNotifDetail(${n.id})">查看</button>
       ${n.read_at ? '' : `<button class="notif-btn read-btn" onclick="event.stopPropagation();markNotifRead(${n.id})">已读</button>`}
     </div>
   `).join('');
+}
+
+function retryNotifications() {
+  if (!authToken) return;
+  notifLoadState = 'loading';
+  renderNotifList();
+  refreshNotifStatus().then(() => {
+    const overlay = document.getElementById('notifOverlay');
+    if (overlay.classList.contains('open') && notifDetailId === null) renderNotifList();
+  });
 }
 
 function showNotifList() {
@@ -4693,7 +4735,7 @@ function showNotifDetail(id) {
     <div class="notif-detail">
       <div class="notif-detail-time">${esc(formatNotifTime(n.created_at))}</div>
       <div class="notif-detail-title">${esc(n.title)}</div>
-      <div class="notif-detail-body">${bodyHtml}</div>
+      <div class="notif-detail-body notif-markdown">${bodyHtml}</div>
       ${n.read_at ? '' : `<div class="notif-detail-footer"><button class="notif-read-primary" onclick="markNotifRead(${n.id}, true)">已读</button></div>`}
     </div>
   `;
@@ -7439,6 +7481,43 @@ function displayTitle(item) {
   return item.original_title || item.title || '';
 }
 
+// Convert contiguous list lines before the generic line-break pass. Once a
+// list item has become <li>, a later regex cannot infer whether it started as
+// a bullet or a numbered item, which previously turned bullet blocks into
+// malformed nested <ul><ol> markup.
+function renderMarkdownListBlocks(html) {
+  const lines = html.split('\n');
+  const output = [];
+  const matchListItem = (line) => {
+    const unordered = line.match(/^[\t ]*-(?:[\t ]+|(?=[^\s-]))(.+)$/)
+      || line.match(/^[\t ]*\*[\t ]+(.+)$/);
+    if (unordered) return { tag: 'ul', body: unordered[1].trim() };
+    const ordered = line.match(/^[\t ]*\d+\.[\t ]+(.+)$/);
+    if (ordered) return { tag: 'ol', body: ordered[1].trim() };
+    return null;
+  };
+
+  for (let index = 0; index < lines.length;) {
+    const first = matchListItem(lines[index]);
+    if (!first) {
+      output.push(lines[index]);
+      index++;
+      continue;
+    }
+    const items = [first.body];
+    const tag = first.tag;
+    index++;
+    while (index < lines.length) {
+      const next = matchListItem(lines[index]);
+      if (!next || next.tag !== tag) break;
+      items.push(next.body);
+      index++;
+    }
+    output.push(`<${tag}>${items.map(item => `<li>${item}</li>`).join('')}</${tag}>`);
+  }
+  return output.join('\n');
+}
+
 // Simple markdown to HTML renderer (subset: headers, bold, italic, code, links, lists, line breaks)
 function renderMarkdown(text) {
   if (!text) return '';
@@ -7460,16 +7539,7 @@ function renderMarkdown(text) {
   html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" style="max-width:100%;border-radius:8px">');
   // Links [text](url)
   html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
-  // Unordered lists: lines starting with - or *
-  html = html.replace(/^[\s]*[-*]\s+(.+)$/gm, '<li>$1</li>');
-  html = html.replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>');
-  // Ordered lists: lines starting with 1. etc
-  html = html.replace(/^[\s]*\d+\.\s+(.+)$/gm, '<li>$1</li>');
-  // Wrap consecutive <li> not already in <ul> into <ol>
-  html = html.replace(/(<li>.*<\/li>\n?)+(?!<\/ul>)/g, (m) => {
-    if (m.includes('<ul>')) return m;
-    return '<ol>' + m + '</ol>';
-  });
+  html = renderMarkdownListBlocks(html);
   // Line breaks (double newline = paragraph, single newline = br)
   html = html.replace(/\n\n/g, '</p><p>');
   html = html.replace(/\n/g, '<br>');
