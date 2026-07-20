@@ -187,6 +187,7 @@ a:hover{text-decoration:underline}
 /* ═══ Article Overlay ═════════════════════════════ */
 .overlay{position:fixed;inset:0;z-index:200;background:var(--bg);overflow-x:hidden;overflow-y:auto;transform:translateX(100%);transition:transform 0.35s cubic-bezier(0.4,0,0.2,1);touch-action:pan-y;overscroll-behavior-x:none;overscroll-behavior-y:contain}
 .overlay.from-source-history{z-index:560}
+.overlay.over-daily-summary{z-index:500}
 .overlay.open{transform:translateX(0)}
 .overlay-header{position:sticky;top:0;z-index:10;background:var(--header-bg);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-bottom:1px solid var(--border);padding-top:env(safe-area-inset-top,0px)}
 .overlay-header-inner{max-width:720px;margin:0 auto;display:flex;align-items:center;min-height:48px;padding:0 20px}
@@ -224,7 +225,7 @@ a:hover{text-decoration:underline}
 .source-footer a{color:var(--text-2)}
 
 /* ═══ Lightbox ════════════════════════════════════ */
-.lb{position:fixed;inset:0;z-index:300;background:rgba(0,0,0,0.92);backdrop-filter:blur(10px);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity 0.25s;cursor:zoom-out}
+.lb{position:fixed;inset:0;z-index:600;background:rgba(0,0,0,0.92);backdrop-filter:blur(10px);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity 0.25s;cursor:zoom-out}
 .lb.open{opacity:1;pointer-events:auto}
 .lb img{max-width:92vw;max-height:92vh;border-radius:8px;object-fit:contain}
 
@@ -3946,7 +3947,27 @@ async function triggerDailySummary() {
 
 // ═══ Daily Summary (Sidebar) ════════════════════════════
 
+// Intercept clicks on article links inside the digest so they open the
+// in-app article overlay (on top of the still-open digest) instead of a new
+// tab. Closing the article reveals the digest again, scroll position intact.
+function handleDailySummaryLinkClick(e) {
+  const link = e.target.closest('a');
+  if (!link) return;
+  const m = (link.getAttribute('href') || '').match(/#\/article\/(\d{2}-\d{2}-\d{2})-(\d+)/);
+  if (!m) return;
+  e.preventDefault();
+  const id = parseInt(m[2], 10);
+  document.getElementById('overlay').classList.add('over-daily-summary');
+  syncArticleHistory(id, '20' + m[1]);
+  openArticle(id);
+}
+
 async function showDailySummary() {
+  const body = document.getElementById('dailySummaryBody');
+  if (body && !body.dataset.linkHandlerBound) {
+    body.addEventListener('click', handleDailySummaryLinkClick);
+    body.dataset.linkHandlerBound = '1';
+  }
   document.getElementById('dailySummaryOverlay').classList.add('open');
   lockBodyScroll();
   closeSidebar();
@@ -7347,6 +7368,7 @@ function finishArticleClose(mobileNavigation) {
   const overlay = document.getElementById('overlay');
   overlay.classList.remove('open');
   overlay.classList.remove('from-source-history');
+  overlay.classList.remove('over-daily-summary');
   unlockArticleBackground();
   if (mobileNavigation) {
     const homeUrl = window.location.pathname + window.location.search;
