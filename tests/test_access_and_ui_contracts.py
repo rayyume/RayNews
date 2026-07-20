@@ -49,6 +49,15 @@ def test_nginx_proxies_article_delete_routes():
     assert "proxy_pass http://127.0.0.1:8082" in section
 
 
+def test_nginx_proxies_notification_list_and_read_routes():
+    config = (ROOT / "nginx.conf").read_text(encoding="utf-8")
+    assert "location /notifications" in config
+    section = config.split("location /notifications", 1)[1].split("}", 1)[0]
+    assert "proxy_pass http://127.0.0.1:8082" in section
+    assert '"GET, POST, PUT, DELETE, OPTIONS"' in section
+    assert '"Authorization, Content-Type"' in section
+
+
 def test_container_does_not_block_web_startup_on_initial_fetch():
     entrypoint = (ROOT / "entrypoint.sh").read_text(encoding="utf-8")
     assert "fetcher.py" not in entrypoint
