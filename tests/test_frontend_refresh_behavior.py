@@ -487,6 +487,93 @@ assert.equal(confirmCalls, 2);
     )
 
 
+def test_notification_refresh_exposes_a_failed_load_instead_of_an_empty_list():
+    notification_source = source_between("// ═══ In-App Notifications", "// ═══ Admin Panel")
+    notification_source += "\nglobalThis.__notificationLoadState = () => notifLoadState;"
+    run_node(
+        notification_source,
+        """
+const classes = new Set();
+context.document = {
+  querySelector: () => ({ classList: { toggle: (name, enabled) => enabled ? classes.add(name) : classes.delete(name) } }),
+  getElementById: () => ({ style: {}, textContent: '' }),
+};
+context.authToken = 'token';
+context.apiFetch = async () => { throw new Error('offline'); };
+
+assert.equal(await context.refreshNotifStatus(), false);
+assert.equal(context.__notificationLoadState(), 'error');
+""",
+    )
+
+
+def test_markdown_lists_keep_unordered_bullets_out_of_ordered_lists():
+    markdown_source = """
+function esc(value) {
+  return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+""" + source_between("function renderMarkdownListBlocks", "function resolveImageUrl")
+    run_node(
+        markdown_source,
+        """
+const bullets = context.renderMarkdown('- first\\n- second');
+assert.equal(bullets, '<ul><li>first</li><li>second</li></ul>');
+assert.equal(bullets.includes('<ol>'), false);
+
+const compactBullets = context.renderMarkdown('-first\\n-second');
+assert.equal(compactBullets, '<ul><li>first</li><li>second</li></ul>');
+
+const ordered = context.renderMarkdown('1. first\\n2. second');
+assert.equal(ordered, '<ol><li>first</li><li>second</li></ol>');
+""",
+    )
+
+
+def test_notification_markdown_uses_a_bounded_rendering_container():
+    css = HTML[HTML.index(".notif-detail-body{"):HTML.index("/* ═══ AI Settings Panel")]
+    assert ".notif-markdown{" in css
+    assert ".notif-markdown pre,.notif-markdown code{" in css
+    assert ".notif-markdown img{" in css
+    assert ".notif-markdown table{" in css
+    assert 'id="notifPubPreview" class="notif-detail-body notif-markdown"' in HTML
+    assert '<div class="notif-detail-body notif-markdown">${bodyHtml}</div>' in HTML
+
+
+def test_unread_notifications_use_one_shared_new_tag_in_menu_and_list():
+    notification_source = "function esc(value) { return String(value); }\n" + source_between(
+        "// ═══ In-App Notifications", "// ═══ Admin Panel"
+    )
+    notification_source += """
+globalThis.__setNotifTestState = (items, unread) => {
+  notifItems = items;
+  notifUnread = unread;
+  notifLoadState = 'ready';
+};
+"""
+    run_node(
+        notification_source,
+        """
+const avatarClasses = new Set();
+const avatar = { classList: { toggle: (name, enabled) => enabled ? avatarClasses.add(name) : avatarClasses.delete(name) } };
+const body = { innerHTML: '' };
+const menuBadge = { style: { display: 'none' }, textContent: '' };
+context.document = {
+  querySelector: () => avatar,
+  getElementById: id => id === 'notifBody' ? body : menuBadge,
+};
+context.__setNotifTestState([{ id: 7, title: '公告', created_at: '2026-07-20T10:00:00', read_at: null }], 1);
+context.updateNotifDot();
+assert.equal(avatarClasses.has('has-unread'), true);
+assert.equal(menuBadge.textContent, 'new');
+assert.notEqual(menuBadge.style.display, 'none');
+
+context.renderNotifList();
+assert.match(body.innerHTML, /notification-new-tag/);
+assert.match(body.innerHTML, />new</);
+""",
+    )
+
+
 def test_poll_refresh_job_rejects_terminal_status_for_another_job():
     poll = source_between("async function pollRefreshJob(", "function rebuildCategoryMap")
     run_node(

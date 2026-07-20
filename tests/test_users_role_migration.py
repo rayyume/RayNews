@@ -17,10 +17,9 @@ class UsersRoleMigrationTests(unittest.TestCase):
     def test_fresh_install_gets_tightened_role_check_constraint(self):
         db_path = temp_db_path()
         old_db_file = models.DB_FILE
-        old_conn = models._db
         try:
+            models.close_db()
             models.DB_FILE = db_path
-            models._db = None
             db = models.get_db()
             sql = db.execute(
                 "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'"
@@ -32,9 +31,8 @@ class UsersRoleMigrationTests(unittest.TestCase):
                     "('new-preview@example.com', 'hash', 'newpreviewer', 'preview')"
                 )
         finally:
-            db.close()
+            models.close_db()
             models.DB_FILE = old_db_file
-            models._db = old_conn
             for suffix in ("", "-wal", "-shm"):
                 try:
                     os.remove(str(db_path) + suffix)
@@ -49,10 +47,9 @@ class UsersRoleMigrationTests(unittest.TestCase):
         # its original, more permissive CHECK constraint is left in place.
         db_path = temp_db_path()
         old_db_file = models.DB_FILE
-        old_conn = models._db
         try:
+            models.close_db()
             models.DB_FILE = db_path
-            models._db = None
 
             conn = sqlite3.connect(str(db_path))
             conn.execute(
@@ -95,9 +92,8 @@ class UsersRoleMigrationTests(unittest.TestCase):
             ).fetchone()[0]
             self.assertIn("preview", sql)
         finally:
-            db.close()
+            models.close_db()
             models.DB_FILE = old_db_file
-            models._db = old_conn
             for suffix in ("", "-wal", "-shm"):
                 try:
                     os.remove(str(db_path) + suffix)

@@ -676,10 +676,15 @@ def list_notifications_route():
     Bodies are small plain text, so the list payload carries them inline —
     no separate detail endpoint needed.
     """
-    return jsonify({
+    response = jsonify({
         "items": list_notifications(g.user_id),
         "unread": count_unread_notifications(g.user_id),
     })
+    # Notification data is user-specific and changes immediately after a
+    # broadcast. Never let a browser or intermediary reuse an older empty
+    # response for the same authenticated URL.
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
 
 
 @app.route("/notifications/<int:nid>/read", methods=["POST"])

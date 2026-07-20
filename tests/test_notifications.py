@@ -19,17 +19,15 @@ class NotificationsModelTests(unittest.TestCase):
     def setUp(self):
         self.db_path = temp_db_path()
         self.old_db_file = models.DB_FILE
-        self.old_conn = models._db
+        models.close_db()
         models.DB_FILE = self.db_path
-        models._db = None
         self.db = models.get_db()
         self.user_a = models.create_user("a@example.com", "pw", "A")["id"]
         self.user_b = models.create_user("b@example.com", "pw", "B")["id"]
 
     def tearDown(self):
-        self.db.close()
+        models.close_db()
         models.DB_FILE = self.old_db_file
-        models._db = self.old_conn
         for suffix in ("", "-wal", "-shm"):
             try:
                 os.remove(str(self.db_path) + suffix)
@@ -156,6 +154,21 @@ class NotificationsModelTests(unittest.TestCase):
         self.assertFalse(worker.is_alive())
         self.assertEqual(errors, [])
         self.assertEqual(result, [(True, {"recipients": 2, "email": False})])
+
+    def test_get_db_returns_a_connection_owned_by_the_calling_thread(self):
+        main_connection = models.get_db()
+        worker_connections = []
+
+        def get_worker_connection():
+            worker_connections.append(models.get_db())
+
+        worker = threading.Thread(target=get_worker_connection)
+        worker.start()
+        worker.join(timeout=5)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(len(worker_connections), 1)
+        self.assertIsNot(worker_connections[0], main_connection)
 
 
 if __name__ == "__main__":
