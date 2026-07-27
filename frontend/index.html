@@ -225,9 +225,11 @@ a:hover{text-decoration:underline}
 .source-footer a{color:var(--text-2)}
 
 /* ═══ Lightbox ════════════════════════════════════ */
-.lb{position:fixed;inset:0;z-index:600;background:rgba(0,0,0,0.92);backdrop-filter:blur(10px);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity 0.25s;cursor:zoom-out}
+.lb{position:fixed;inset:0;z-index:600;background:rgba(0,0,0,.92);backdrop-filter:blur(10px);opacity:0;pointer-events:none;transition:opacity .25s;overflow:hidden}
 .lb.open{opacity:1;pointer-events:auto}
-.lb img{max-width:92vw;max-height:92vh;border-radius:8px;object-fit:contain}
+.lb-stage{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;overflow:hidden;touch-action:none;cursor:zoom-out}
+.lb img{max-width:92vw;max-height:92vh;border-radius:8px;object-fit:contain;transform-origin:0 0;will-change:transform;user-select:none;-webkit-user-drag:none}
+.lb-close{position:absolute;z-index:2;top:calc(12px + env(safe-area-inset-top,0px));right:14px;width:44px;height:44px;border:0;border-radius:50%;background:rgba(0,0,0,.55);color:#fff;font:600 20px/1 var(--font);cursor:pointer;touch-action:manipulation}
 
 /* ═══ Toast ═══════════════════════════════════════ */
 .toast{position:fixed;bottom:40px;left:50%;transform:translateX(-50%) translateY(20px);z-index:999;background:var(--toast-bg);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);color:var(--text);padding:10px 24px;border-radius:100px;font-size:13px;font-weight:600;opacity:0;pointer-events:none;transition:all 0.3s cubic-bezier(0.4,0,0.2,1);border:1px solid var(--border);box-shadow:var(--toast-shadow)}
@@ -633,7 +635,13 @@ body.body-scroll-lock{overflow:hidden!important}
   <div class="article-wrap" id="articleWrap"></div>
 </div>
 
-<div class="lb" id="lb"><img src="" id="lbImg"></div>
+<div class="lb" id="lb" role="dialog" aria-modal="true"
+     aria-label="图片全屏查看" aria-hidden="true">
+  <button class="lb-close" id="lbCloseBtn" type="button" aria-label="关闭图片">✕</button>
+  <div class="lb-stage" id="lbStage">
+    <img src="" id="lbImg" alt="" draggable="false">
+  </div>
+</div>
 
 <!-- ═══ Auth Modal ═══════════════════════════════════════ -->
 <div class="auth-modal" id="authModal">
@@ -4288,14 +4296,6 @@ async function aiTranslate(articleId) {
       bodyEl.innerHTML = bodyEl.dataset.originalHtml;
       if (h1 && bodyEl.dataset.originalTitle) h1.textContent = bodyEl.dataset.originalTitle;
       bodyEl.dataset.showingTranslation = 'false';
-      // Re-attach lightbox
-      bodyEl.querySelectorAll('img').forEach(img => {
-        img.addEventListener('click', e => {
-          e.stopPropagation();
-          document.getElementById('lbImg').src = img.src;
-          document.getElementById('lb').classList.add('open'); lockBodyScroll();
-        });
-      });
       if (btn) btn.textContent = '翻译';
     } else {
       // Show translation
@@ -4324,13 +4324,6 @@ async function aiTranslate(articleId) {
     bodyEl.dataset.showingTranslation = 'true';
     bodyEl.innerHTML = translatedHtml;
     if (h1 && translatedTitle) h1.textContent = translatedTitle;
-    bodyEl.querySelectorAll('img').forEach(img => {
-      img.addEventListener('click', e => {
-        e.stopPropagation();
-        document.getElementById('lbImg').src = img.src;
-        document.getElementById('lb').classList.add('open');
-      });
-    });
     if (btn) { btn.textContent = '原文'; btn.disabled = false; }
   };
 
@@ -4444,14 +4437,6 @@ async function autoDisplaySummary(articleId) {
         bodyEl.innerHTML = bodyEl.dataset.translatedHtml;
         if (h1El && cachedData.title) h1El.textContent = cachedData.title;
         syncArticleTitle(articleId, cachedData.title);
-        // Re-attach lightbox
-        bodyEl.querySelectorAll('img').forEach(img => {
-          img.addEventListener('click', e => {
-            e.stopPropagation();
-            document.getElementById('lbImg').src = img.src;
-            document.getElementById('lb').classList.add('open');
-          });
-        });
         const btn = document.querySelector('.ai-translate-btn');
         if (btn) btn.textContent = '原文';
         return;
@@ -4463,14 +4448,6 @@ async function autoDisplaySummary(articleId) {
         bodyEl.dataset.translatedHtml = proxyImages(sanitizeTranslatedHtml(t));
         bodyEl.dataset.showingTranslation = 'true';
         bodyEl.innerHTML = bodyEl.dataset.translatedHtml;
-        // Re-attach lightbox
-        bodyEl.querySelectorAll('img').forEach(img => {
-          img.addEventListener('click', e => {
-            e.stopPropagation();
-            document.getElementById('lbImg').src = img.src;
-            document.getElementById('lb').classList.add('open');
-          });
-        });
         const btn = document.querySelector('.ai-translate-btn');
         if (btn) btn.textContent = '原文';
         return;
@@ -7309,19 +7286,10 @@ function renderArticleBody(wrap, data, id) {
       }
     }
   }
-  // Attach lightbox
-  bodyEl.querySelectorAll('img').forEach(img => {
+  for (const img of bodyEl.querySelectorAll('img')) {
     img.loading = img.loading || 'lazy';
     img.decoding = 'async';
-    img.addEventListener('click', e => {
-      e.stopPropagation();
-      document.getElementById('lbImg').src = img.src;
-      document.getElementById('lb').classList.add('open'); lockBodyScroll();
-      // Allow zoom on lightbox
-      const vp = document.querySelector('meta[name=viewport]');
-      if (vp) vp.content = 'width=device-width, initial-scale=1.0, viewport-fit=cover';
-    });
-  });
+  }
 }
 
 function formatTime(date, time) {
@@ -7345,14 +7313,37 @@ function showToast(msg) {
 }
 
 function closeLightbox() {
-  document.getElementById('lb').classList.remove('open');
+  const lb = document.getElementById('lb');
+  lb.classList.remove('open');
+  lb.setAttribute('aria-hidden', 'true');
   unlockBodyScroll();
-  // Lock zoom back when lightbox closes
-  const vp = document.querySelector('meta[name=viewport]');
-  if (vp) {
-    vp.content = 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no';
-  }
 }
+
+function openImageViewer(image) {
+  if (!(image instanceof HTMLImageElement)) return;
+  if (!image.currentSrc && !image.src) return;
+  if (!image.complete || image.naturalWidth === 0) {
+    recoverImageLoad(image);
+    return;
+  }
+  resetLightboxGesture();
+  const lb = document.getElementById('lb');
+  const lbImg = document.getElementById('lbImg');
+  lbImg.src = image.currentSrc || image.src;
+  lbImg.alt = image.alt || '';
+  lb.classList.add('open');
+  lb.setAttribute('aria-hidden', 'false');
+  lockBodyScroll();
+}
+
+const articleWrap = document.getElementById('articleWrap');
+articleWrap.addEventListener('click', event => {
+  const image = event.target.closest('img');
+  if (!image || !articleWrap.contains(image)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  openImageViewer(image);
+});
 
 function shareArticle() {
   const url = location.href;
