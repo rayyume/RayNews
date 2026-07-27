@@ -262,6 +262,7 @@ def _positive_article_ids(values) -> list[int]:
 
 def _refresh_job_json_locked() -> bytes:
     payload = dict(REFRESH_JOB)
+    baseline_ids = set(payload.pop("_baseline_ids", set()) or set())
     if payload.get("status") == "running":
         progress = _read_fetch_progress()
         # Match by exact job_id (fetcher.py stamps it from FETCH_JOB_ID) rather than a
@@ -269,8 +270,18 @@ def _refresh_job_json_locked() -> bytes:
         # the same wall-clock second could otherwise let a previous cycle's progress
         # file be mistaken for this job's progress.
         if progress and progress.get("job_id") and progress.get("job_id") == payload.get("job_id"):
-            payload["new_count_so_far"] = progress.get("inserted", 0)
-            payload["new_ids_so_far"] = _positive_article_ids(progress.get("inserted_ids"))
+            if "inserted_ids" in progress:
+                new_ids_so_far = [
+                    article_id
+                    for article_id in _positive_article_ids(progress.get("inserted_ids"))
+                    if article_id not in baseline_ids
+                ]
+                payload["new_count_so_far"] = len(new_ids_so_far)
+                payload["new_ids_so_far"] = new_ids_so_far
+            else:
+                # Older fetchers did not publish IDs. Preserve their diagnostic
+                # progress count, but never invent IDs from that arithmetic value.
+                payload["new_count_so_far"] = progress.get("inserted", 0)
     return json.dumps(payload).encode()
 
 
@@ -283,7 +294,9 @@ def _remember_terminal_job_locked() -> None:
     job_id = REFRESH_JOB.get("job_id") or ""
     if not job_id or REFRESH_JOB.get("status") not in ("completed", "failed"):
         return
-    REFRESH_JOB_HISTORY[job_id] = dict(REFRESH_JOB)
+    terminal = dict(REFRESH_JOB)
+    terminal.pop("_baseline_ids", None)
+    REFRESH_JOB_HISTORY[job_id] = terminal
     REFRESH_JOB_HISTORY.move_to_end(job_id)
     while len(REFRESH_JOB_HISTORY) > REFRESH_JOB_HISTORY_LIMIT:
         REFRESH_JOB_HISTORY.popitem(last=False)
@@ -312,6 +325,13 @@ def _run_refresh_job(job_id: str) -> None:
     error = ""
     try:
         before_ids = article_id_snapshot()
+        with REFRESH_JOB_LOCK:
+            if REFRESH_JOB["job_id"] != job_id:
+                return
+            # The pre-job snapshot already exists for the terminal difference.
+            # Reuse it to filter running progress instead of adding a status-time
+            # database scan for every poll.
+            REFRESH_JOB["_baseline_ids"] = before_ids
         CURRENT_FETCH_JOB_ID = job_id
         body, status = run_fetcher()
         payload = json.loads(body)
@@ -357,6 +377,7 @@ def start_refresh_job(trigger: str = "manual") -> tuple[bytes, int]:
             "finished_at": None,
             "new_count": 0,
             "new_ids": [],
+            "_baseline_ids": set(),
             "error": "",
         })
         body = _refresh_job_json_locked()

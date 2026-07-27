@@ -133,8 +133,12 @@ def init_db() -> sqlite3.Connection:
     return conn
 
 
-def upsert_articles(conn: sqlite3.Connection, entries: list[dict], sync_sources: bool = True):
-    """Batch insert or update articles into SQLite.
+def upsert_articles(
+    conn: sqlite3.Connection,
+    entries: list[dict],
+    sync_sources: bool = True,
+) -> list[int]:
+    """Batch insert or update articles into SQLite and return persisted positive IDs.
 
     ensure_article_sources() does a full-table alias UPDATE plus a DISTINCT scan over
     every article, so it's expensive relative to a handful of row upserts. The
@@ -176,6 +180,7 @@ def upsert_articles(conn: sqlite3.Connection, entries: list[dict], sync_sources:
     conn.commit()
     log.info(f"SQLite: upserted {len(rows)} articles"
              f" (total: {conn.execute('SELECT COUNT(*) FROM articles').fetchone()[0]})")
+    return sorted({int(row[0]) for row in rows if int(row[0]) > 0})
 
 
 # A Telegraph full-text fetch that fails on the cycle an article first arrives (e.g.
@@ -1194,19 +1199,25 @@ def run():
                     len(stream_batch) >= STREAM_BATCH_SIZE
                     or time.monotonic() - last_commit_at >= STREAM_BATCH_SECONDS
                 ):
-                    committed_ids = [int(entry["id"]) for entry in stream_batch if int(entry.get("id", 0) or 0) > 0]
-                    upsert_articles(stream_conn, stream_batch, sync_sources=False)
+                    committed_ids = upsert_articles(
+                        stream_conn,
+                        stream_batch,
+                        sync_sources=False,
+                    )
                     inserted_total += len(stream_batch)
                     inserted_ids.extend(committed_ids)
                     stream_batch = []
                     last_commit_at = time.monotonic()
-                    write_fetch_progress(inserted_total, len(messages), inserted_ids)
+                    write_fetch_progress(len(set(inserted_ids)), len(messages), inserted_ids)
         if stream_batch:
-            committed_ids = [int(entry["id"]) for entry in stream_batch if int(entry.get("id", 0) or 0) > 0]
-            upsert_articles(stream_conn, stream_batch, sync_sources=False)
+            committed_ids = upsert_articles(
+                stream_conn,
+                stream_batch,
+                sync_sources=False,
+            )
             inserted_total += len(stream_batch)
             inserted_ids.extend(committed_ids)
-            write_fetch_progress(inserted_total, len(messages), inserted_ids)
+            write_fetch_progress(len(set(inserted_ids)), len(messages), inserted_ids)
     except Exception as e:
         log.error(f"Streaming SQLite ingest failed: {e}")
     finally:

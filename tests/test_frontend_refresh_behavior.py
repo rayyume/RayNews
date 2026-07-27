@@ -953,6 +953,38 @@ assert.ok(!context.toasts.includes('✅ 更新完成，新增 5 篇文章'));
     )
 
 
+def test_retry_and_deleted_attempt_counts_do_not_inflate_final_set_or_toast():
+    trigger = refresh_trigger_source()
+    setup = trigger_context_setup(
+        "return { job_id: 'job-1', status: 'completed', new_count: 1, new_ids: [4] };"
+    )
+    run_node(
+        trigger,
+        setup
+        + """
+context.window = { scrollY: 200 };
+context.labels = [];
+context.setRefreshProgressLabel = count => context.labels.push(count);
+context.loadNewsPage = async () => true;
+context.pollRefreshJob = async (jobId, timeout, signal, onProgress) => {
+  // The diagnostic attempted count can be larger for an old/mixed producer.
+  // Only the filtered actual-new ID stream is authoritative for the Set/Toast.
+  onProgress({ new_count_so_far: 3, new_ids_so_far: [4] });
+  return {
+    job_id: 'job-1',
+    status: 'completed',
+    new_count: 1,
+    new_ids: [4],
+  };
+};
+await context.triggerRefresh();
+assert.deepEqual(context.labels, [1]);
+assert.ok(context.toasts.includes('✅ 更新完成，新增 1 篇文章'));
+assert.ok(!context.toasts.includes('✅ 更新完成，新增 3 篇文章'));
+""",
+    )
+
+
 def test_unified_refresh_count_adds_no_fetch_or_status_poll():
     trigger = refresh_trigger_source()
     setup = trigger_context_setup(
@@ -1377,6 +1409,145 @@ assert.deepEqual(context.toasts, ['🔄 正在后台抓取...']);
 assert.equal(context.promptCalls, 0);
 assert.equal(context.refreshInProgress, false);
 assert.equal(context.refreshFlowController, null);
+""",
+    )
+
+
+def test_cancelled_delayed_immediate_check_cannot_pollute_replacement_refresh_count():
+    cancel_helpers = source_between("function cancelRefreshFlow(", "function rebuildCategoryMap")
+    trigger = refresh_trigger_source()
+    incremental = source_between("async function loadSince(", "function rebuildSourceFilterGroups")
+    run_node(
+        cancel_helpers + trigger + incremental,
+        """
+context.refreshInProgress = false;
+context.refreshFlowGeneration = 0;
+context.refreshFlowController = null;
+context.authToken = 'token';
+context.filter = 'all';
+context.currentPage = 1;
+context.pageNavigationSequence = 0;
+context.pageRequestSequence = 0;
+context.pageRequestPendingSequence = 0;
+context.pageNavigationPending = false;
+context.document = { hidden: false };
+context.window = { scrollY: 0 };
+context.cancelStartupEmptyRevalidation = () => {};
+context.hideNewArticlesPrompt = () => {};
+context.showNewArticlesPrompt = () => {};
+context.refreshErrorMessage = error => error.message || 'failed';
+context.hasBlockingOverlayOpen = () => false;
+context.latestNewsTimestamp = () => 100;
+context.loadNewsPage = async () => true;
+context.consumePendingNewArticles = () => {};
+context.runningStates = [];
+context.setRefreshRunning = running => {
+  context.refreshInProgress = running;
+  context.runningStates.push(running);
+};
+context.labels = [];
+context.setRefreshProgressLabel = count => context.labels.push(count);
+context.toasts = [];
+context.showToast = message => context.toasts.push(message);
+
+context.INCREMENTAL_FETCH_LIMIT = 200;
+context.seenArticleIds = new Set();
+context.latestKnownTimestamp = 100;
+context.pendingNewArticleCount = 0;
+context.pendingNewItems = [];
+context.contentEpoch = 0;
+context.bumpContentEpoch = () => { context.contentEpoch++; };
+context.isSwFallbackResponse = () => false;
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
+context.countRefreshes = 0;
+context.refreshTodayArticleCount = () => { context.countRefreshes++; };
+context.sourceLoads = 0;
+context.loadSourceCategories = async () => { context.sourceLoads++; };
+context.pageFetches = 0;
+context.fetchNewsPage = async () => {
+  context.pageFetches++;
+  return { items: [{ id: 42, timestamp: 101, source: 's' }] };
+};
+context.writeCachedNewsPage = async () => {};
+context.pendingRelevantCount = () => 1;
+context.showLatestAfterIdle = () => {};
+context.showNewArticlesPrompt = () => {};
+context.applyCalls = 0;
+context.applyNewsPage = () => { context.applyCalls++; };
+context.lastUserActivityAt = 0;
+context.IDLE_LATEST_DELAY_MS = 1;
+
+let resolveImmediateA;
+let resolveImmediateB;
+let sinceFetchCalls = 0;
+context.fetch = () => new Promise(resolve => {
+  sinceFetchCalls++;
+  if (sinceFetchCalls === 1) resolveImmediateA = resolve;
+  else if (sinceFetchCalls === 2) resolveImmediateB = resolve;
+  else throw new Error('unexpected incremental request');
+});
+const responseFor42 = () => ({
+  json: async () => ({ items: [{ id: 42, timestamp: 101, source: 's' }] }),
+});
+
+let nextJob = 0;
+context.requestRefreshOnce = async () => ({
+  job_id: ++nextJob === 1 ? 'job-a' : 'job-b',
+  status: 'running',
+});
+let markAPollStarted;
+const aPollStarted = new Promise(resolve => { markAPollStarted = resolve; });
+context.pollRefreshJob = (jobId, timeout, signal) => {
+  if (jobId === 'job-a') {
+    markAPollStarted();
+    return new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(
+      Object.assign(new Error('cancelled'), { name: 'AbortError' })
+    )));
+  }
+  return Promise.resolve({
+    job_id: 'job-b',
+    status: 'completed',
+    new_count: 0,
+    new_ids: [],
+  });
+};
+
+const flowA = context.triggerRefresh();
+await aPollStarted;
+context.cancelRefreshFlow();
+
+// Flow B is active before A's ignored-abort fetch resolves. If A mutates
+// seenArticleIds here, B will wrongly filter out ID 42 and finish with a zero Toast.
+const flowB = context.triggerRefresh();
+await Promise.resolve();
+assert.equal(typeof resolveImmediateB, 'function');
+resolveImmediateA(responseFor42());
+await Promise.resolve();
+await Promise.resolve();
+assert.deepEqual(Array.from(context.seenArticleIds), []);
+assert.equal(context.latestKnownTimestamp, 100);
+assert.equal(context.pendingNewArticleCount, 0);
+assert.equal(context.contentEpoch, 0);
+assert.equal(context.sourceLoads, 0);
+assert.equal(context.pageFetches, 0);
+assert.equal(context.applyCalls, 0);
+
+resolveImmediateB(responseFor42());
+await flowB;
+await flowA;
+
+assert.deepEqual(Array.from(context.seenArticleIds), [42]);
+assert.equal(context.latestKnownTimestamp, 101);
+assert.equal(context.pendingNewArticleCount, 1);
+assert.deepEqual(Array.from(context.pendingNewItems, item => item.id), [42]);
+assert.equal(context.contentEpoch, 1);
+assert.deepEqual(context.labels, [1]);
+assert.deepEqual(context.toasts, [
+  '🔄 正在后台抓取...',
+  '🔄 正在后台抓取...',
+  '✅ 更新完成，新增 1 篇文章',
+]);
 """,
     )
 
@@ -2190,6 +2361,155 @@ assert.deepEqual(context.toasts, []);
 context.apiFetch = async () => { throw Object.assign(new Error('cancelled'), { name: 'AbortError' }); };
 await context.loadSourceCategories();
 assert.deepEqual(context.toasts, []);
+""",
+    )
+
+
+def test_source_metadata_load_exits_after_refresh_flow_is_cancelled_during_cache_await():
+    load_sources = source_between("function persistSourceMetadata(", "function sourceLabel")
+    run_node(
+        load_sources,
+        """
+let resolveCache;
+context.readNewsCacheEntry = () => new Promise(resolve => { resolveCache = resolve; });
+context.withCacheTimeout = async value => value;
+context.events = [];
+context.rebuildCategoryMap = sources => context.events.push(`rebuild:${sources[0]}`);
+context.renderFilters = () => context.events.push('render');
+context.isRestrictedUser = () => false;
+context.apiFetch = async () => {
+  context.events.push('network');
+  return { sources: ['fresh'] };
+};
+context.writeNewsCacheEntry = () => context.events.push('cache-write');
+context.delay = () => new Promise(() => {});
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
+const controller = new AbortController();
+let current = true;
+const loading = context.loadSourceCategories({
+  externalSignal: controller.signal,
+  applicationGuard: () => current,
+});
+current = false;
+controller.abort();
+resolveCache({ data: { sources: ['stale'] } });
+await loading;
+assert.deepEqual(context.events, []);
+""",
+    )
+
+
+def test_today_count_ignores_response_after_refresh_flow_cancellation():
+    today_count = source_between("async function refreshTodayArticleCount(", "let dailySummaryState")
+    run_node(
+        today_count,
+        """
+context.beijingDateString = () => '2026-07-27';
+context.countTodayArticles = () => context.todayArticleCount == null ? 0 : context.todayArticleCount;
+context.todayArticleCount = null;
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
+let resolveJson;
+let requestSignal;
+context.fetch = async (url, options) => {
+  requestSignal = options.signal;
+  return {
+    ok: true,
+    json: () => new Promise(resolve => { resolveJson = resolve; }),
+  };
+};
+const controller = new AbortController();
+let current = true;
+const loading = context.refreshTodayArticleCount(8000, {
+  externalSignal: controller.signal,
+  applicationGuard: () => current,
+});
+while (typeof resolveJson !== 'function') await Promise.resolve();
+current = false;
+controller.abort();
+resolveJson({ total: 9 });
+await loading;
+assert.equal(requestSignal.aborted, true);
+assert.equal(context.todayArticleCount, null);
+""",
+    )
+
+
+def test_source_metadata_retry_exits_when_owning_refresh_flow_is_cancelled():
+    load_sources = source_between("function persistSourceMetadata(", "function sourceLabel")
+    run_node(
+        load_sources,
+        """
+context.sourceMetadataRetryScheduled = false;
+context.SOURCE_METADATA_RETRY_DELAYS = [1];
+context.SOURCE_METADATA_RETRY_TIMEOUT_MS = 25000;
+let resumeDelay;
+context.delay = () => new Promise(resolve => { resumeDelay = resolve; });
+context.document = { hidden: false };
+context.events = [];
+context.fetchSourceMetadata = async () => {
+  context.events.push('network');
+  return { sources: ['late'] };
+};
+context.rebuildCategoryMap = () => context.events.push('rebuild');
+context.renderFilters = () => context.events.push('render');
+context.persistSourceMetadata = () => context.events.push('persist');
+context.retrySourceDeepLink = () => context.events.push('deep-link');
+const controller = new AbortController();
+let current = true;
+const retrying = context.scheduleSourceMetadataRetry({
+  externalSignal: controller.signal,
+  applicationGuard: () => current,
+});
+while (typeof resumeDelay !== 'function') await Promise.resolve();
+current = false;
+controller.abort();
+resumeDelay();
+await retrying;
+assert.deepEqual(context.events, []);
+assert.equal(context.sourceMetadataRetryScheduled, false);
+""",
+    )
+
+
+def test_idle_latest_apply_exits_after_refresh_flow_cancellation_during_cache_write():
+    show_latest = source_between("async function showLatestAfterIdle(", "function scheduleAdjacentPagePrefetch")
+    run_node(
+        show_latest,
+        """
+context.filter = 'all';
+context.currentPage = 2;
+context.contentEpoch = 5;
+context.pendingRelevantCount = () => 1;
+context.document = { hidden: false };
+context.hasBlockingOverlayOpen = () => false;
+context.lastUserActivityAt = 0;
+context.IDLE_LATEST_DELAY_MS = 1;
+context.Date = { now: () => 100 };
+context.fetchNewsPage = async () => ({ items: [{ id: 7 }] });
+let finishCacheWrite;
+context.writeCachedNewsPage = () => new Promise(resolve => { finishCacheWrite = resolve; });
+context.scrollCalls = 0;
+context.scrollPageToTop = async () => { context.scrollCalls++; return true; };
+context.applyCalls = 0;
+context.applyNewsPage = () => { context.applyCalls++; };
+context.consumePendingNewArticles = () => {};
+context.syncListUrl = () => {};
+const controller = new AbortController();
+let current = true;
+const applying = context.showLatestAfterIdle({
+  externalSignal: controller.signal,
+  applicationGuard: () => current,
+});
+while (typeof finishCacheWrite !== 'function') await Promise.resolve();
+current = false;
+controller.abort();
+finishCacheWrite();
+await applying;
+assert.equal(context.currentPage, 2);
+assert.equal(context.scrollCalls, 0);
+assert.equal(context.applyCalls, 0);
 """,
     )
 

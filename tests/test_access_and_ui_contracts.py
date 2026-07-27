@@ -253,8 +253,8 @@ def test_idle_refresh_only_returns_to_latest_after_five_minutes_and_new_articles
     assert "const IDLE_LATEST_DELAY_MS = 5 * 60 * 1000;" in html
     assert "function markUserActivity(event)" in html
     assert "function hasBlockingOverlayOpen()" in html
-    assert "async function showLatestAfterIdle()" in html
-    idle_start = html.index("async function showLatestAfterIdle()")
+    assert "async function showLatestAfterIdle({" in html
+    idle_start = html.index("async function showLatestAfterIdle({")
     idle_end = html.index("function scheduleAdjacentPagePrefetch", idle_start)
     idle_block = html[idle_start:idle_end]
     # Idle auto-apply is scoped to whichever category is currently active, not
@@ -264,7 +264,7 @@ def test_idle_refresh_only_returns_to_latest_after_five_minutes_and_new_articles
     assert "pendingRelevantCount(activeFilter)" in idle_block
     assert "hasBlockingOverlayOpen()" in idle_block
     assert "scrollPageToTop({ onNearTop: applyLatest, auto: true })" in idle_block
-    assert "if (!completed) return;" in idle_block
+    assert "if (!mayApply() || !completed) return;" in idle_block
     assert "currentPage = 1;" in idle_block
     # Only the just-consumed category's pending items are dropped, not every
     # category's — an unseen article in another category must survive.
@@ -446,8 +446,10 @@ def test_manual_refresh_feeds_new_articles_into_pending_prompt_when_not_on_page_
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     trigger = html[html.index("async function triggerRefresh("):html.index("function setRefreshRunning")]
     new_count_check = trigger.index("Number(status.new_count || 0) > 0")
-    load_since_call = trigger.index("await loadSince(latestKnownTimestamp || sinceCursor);")
+    load_since_call = trigger.index("await loadSince(latestKnownTimestamp || sinceCursor, {")
     assert load_since_call > new_count_check
+    assert "externalSignal: flowController.signal" in trigger[load_since_call:]
+    assert "applicationGuard: flowIsCurrent" in trigger[load_since_call:]
     assert "let page1BranchRan = false;" in trigger
     assert "page1BranchRan = true;" in trigger
     assert "!page1BranchRan" in trigger
@@ -685,7 +687,7 @@ def test_cached_source_metadata_is_rendered_before_network_fetch():
     start = html.index("async function loadSourceCategories(")
     block = html[start:html.index("async function scheduleSourceMetadataRetry", start)]
     # The network fetch now lives in a helper; the cache must still be applied first.
-    source_fetch = "await fetchSourceMetadata(networkTimeoutMs)"
+    source_fetch = "await fetchSourceMetadata(networkTimeoutMs, externalSignal)"
     assert block.index("rebuildCategoryMap(cached.data.sources);") < block.index(source_fetch)
     assert block.index("renderFilters();") < block.index(source_fetch)
 
@@ -704,7 +706,8 @@ def test_source_metadata_retry_is_scheduled_on_failure():
     """A failed/aborted bootstrap fetch must queue a backoff retry so the drawer
     repopulates without the user opening the admin Sources tab."""
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
-    assert "if (!succeeded) scheduleSourceMetadataRetry();" in html
+    assert "if (!succeeded && mayApply()) {" in html
+    assert "scheduleSourceMetadataRetry({ externalSignal, applicationGuard });" in html
     assert "async function scheduleSourceMetadataRetry(" in html
     # The admin Sources tab must also warm the cold-start cache.
     tab = html[html.index("async function loadSourcesTab("):
@@ -822,7 +825,7 @@ def test_new_article_prompt_and_idle_motion_are_cancellable():
     assert "hideNewArticlesPrompt();" in prompt_block
     assert "function cancelActiveAutoMotion()" in html
     assert "if (!activeScrollMotion || !activeScrollMotion.auto) return;" in html
-    assert "if (!completed) return;" in html
+    assert "if (!mayApply() || !completed) return;" in html
     assert "const atLatestTop = currentPage === 1" in html
 
 

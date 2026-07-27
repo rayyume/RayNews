@@ -1881,8 +1881,13 @@ function persistSourceMetadata(data) {
 // Fetch /sources with an abortable timeout. Logged-in users hit the authenticated
 // endpoint; if the token has expired mid-session, fall back to the public /api/sources
 // so the drawer still populates instead of silently staying empty.
-async function fetchSourceMetadata(networkTimeoutMs) {
+async function fetchSourceMetadata(networkTimeoutMs, externalSignal = null) {
   const controller = new AbortController();
+  const abortFromExternal = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort();
+    else externalSignal.addEventListener('abort', abortFromExternal, { once: true });
+  }
   const timeout = setTimeout(() => controller.abort(), networkTimeoutMs);
   try {
     if (!isRestrictedUser()) {
@@ -1897,6 +1902,7 @@ async function fetchSourceMetadata(networkTimeoutMs) {
     return await resp.json();
   } finally {
     clearTimeout(timeout);
+    if (externalSignal) externalSignal.removeEventListener('abort', abortFromExternal);
   }
 }
 
@@ -1920,10 +1926,16 @@ async function loadSourceCategories({
   networkTimeoutMs = 8000,
   quietNetworkError = false,
   cacheTimeoutMs = 5000,
+  externalSignal = null,
+  applicationGuard = null,
 } = {}) {
+  const mayApply = () => (
+    !(externalSignal && externalSignal.aborted)
+    && (!applicationGuard || applicationGuard())
+  );
   let metadataNotified = false;
   const notifyMetadataReady = () => {
-    if (metadataNotified) return;
+    if (metadataNotified || !mayApply()) return;
     metadataNotified = true;
     if (onMetadataReady) onMetadataReady();
   };
@@ -1934,23 +1946,29 @@ async function loadSourceCategories({
   const cached = useCache
     ? await withCacheTimeout(readNewsCacheEntry('source-metadata'), null, cacheTimeoutMs)
     : null;
+  if (!mayApply()) return;
   if (cached && cached.data && Array.isArray(cached.data.sources)) {
     rebuildCategoryMap(cached.data.sources);
   }
+  if (!mayApply()) return;
   renderFilters();
   if (cached && cached.data && Array.isArray(cached.data.sources)) notifyMetadataReady();
   let succeeded = false;
   try {
-    const data = await fetchSourceMetadata(networkTimeoutMs);
+    const data = await fetchSourceMetadata(networkTimeoutMs, externalSignal);
+    if (!mayApply()) return;
     if (data && Array.isArray(data.sources)) {
       rebuildCategoryMap(data.sources);
+      if (!mayApply()) return;
       renderFilters();
       notifyMetadataReady();
+      if (!mayApply()) return;
       persistSourceMetadata(data);
       succeeded = true;
       sourceMetadataNetworkOk = true;
     }
   } catch (e) {
+    if (!mayApply()) return;
     // Keep the built-in fallback CATEGORY_MAP.
     if (
       cached
@@ -1966,10 +1984,21 @@ async function loadSourceCategories({
   }
   // On failure, quietly retry with backoff so a deploy-time slow/aborted request
   // eventually repopulates the drawer without the user having to open the admin page.
-  if (!succeeded) scheduleSourceMetadataRetry();
+  if (!succeeded && mayApply()) {
+    scheduleSourceMetadataRetry({ externalSignal, applicationGuard });
+  }
 }
 
-async function scheduleSourceMetadataRetry({ immediate = false } = {}) {
+async function scheduleSourceMetadataRetry({
+  immediate = false,
+  externalSignal = null,
+  applicationGuard = null,
+} = {}) {
+  const mayApply = () => (
+    !(externalSignal && externalSignal.aborted)
+    && (!applicationGuard || applicationGuard())
+  );
+  if (!mayApply()) return;
   if (sourceMetadataRetryScheduled) return;
   sourceMetadataRetryScheduled = true;
   try {
@@ -1978,14 +2007,21 @@ async function scheduleSourceMetadataRetry({ immediate = false } = {}) {
     const delays = immediate ? [0, ...SOURCE_METADATA_RETRY_DELAYS] : SOURCE_METADATA_RETRY_DELAYS;
     for (const delayMs of delays) {
       if (delayMs) await delay(delayMs);
+      if (!mayApply()) return;
       // Don't burn an attempt while backgrounded — bail and let onReturnToForeground
       // re-arm the chain on resume instead of silently consuming the retry budget.
       if (document.hidden) return;
       try {
-        const data = await fetchSourceMetadata(SOURCE_METADATA_RETRY_TIMEOUT_MS);
+        const data = await fetchSourceMetadata(
+          SOURCE_METADATA_RETRY_TIMEOUT_MS,
+          externalSignal,
+        );
+        if (!mayApply()) return;
         if (data && Array.isArray(data.sources)) {
           rebuildCategoryMap(data.sources);
+          if (!mayApply()) return;
           renderFilters();
+          if (!mayApply()) return;
           persistSourceMetadata(data);
           sourceMetadataNetworkOk = true;
           // If a source deep link is still stuck on its error state, re-drive it now
@@ -3705,20 +3741,35 @@ function countTodayArticles() {
   return news.filter(n => n.date === todayStr).length;
 }
 
-async function refreshTodayArticleCount(timeoutMs = 8000) {
+async function refreshTodayArticleCount(
+  timeoutMs = 8000,
+  { externalSignal = null, applicationGuard = null } = {},
+) {
   const date = beijingDateString();
   const controller = new AbortController();
+  const abortFromExternal = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort();
+    else externalSignal.addEventListener('abort', abortFromExternal, { once: true });
+  }
+  const mayApply = () => (
+    !(externalSignal && externalSignal.aborted)
+    && (!applicationGuard || applicationGuard())
+  );
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const params = new URLSearchParams({ page: '1', size: '1', date });
     const resp = await fetch('/api/news?' + params.toString(), { signal: controller.signal });
+    if (!mayApply()) return countTodayArticles();
     if (resp.ok) {
       const data = await resp.json();
-      if (!data.error) todayArticleCount = Number(data.total || 0);
+      if (!mayApply()) return countTodayArticles();
+      if (!data.error && mayApply()) todayArticleCount = Number(data.total || 0);
     }
   } catch (e) {
   } finally {
     clearTimeout(timeout);
+    if (externalSignal) externalSignal.removeEventListener('abort', abortFromExternal);
   }
   return countTodayArticles();
 }
@@ -5167,6 +5218,8 @@ async function triggerRefresh() {
   const immediateCheck = loadSince(sinceCursor, {
     manual: true,
     onDiscovered: mergeDiscovered,
+    externalSignal: flowController.signal,
+    applicationGuard: flowIsCurrent,
   });
 
   try {
@@ -5180,6 +5233,7 @@ async function triggerRefresh() {
     }
     mergeDiscovered(status.new_ids || []);
     await immediateCheck;
+    if (!flowIsCurrent()) return;
     let page1BranchRan = false;
     if (
       refreshView.page === 1
@@ -5217,7 +5271,10 @@ async function triggerRefresh() {
     // already advanced it, and re-querying from an older cursor would just mean
     // more (harmlessly deduped via seenArticleIds) redundant results.
     if (!page1BranchRan && flowIsCurrent() && status.status === 'completed' && Number(status.new_count || 0) > 0) {
-      await loadSince(latestKnownTimestamp || sinceCursor);
+      await loadSince(latestKnownTimestamp || sinceCursor, {
+        externalSignal: flowController.signal,
+        applicationGuard: flowIsCurrent,
+      });
     }
     if (!flowIsCurrent()) return;
     const count = discoveredArticleIds.size;
@@ -5808,7 +5865,15 @@ async function revealPendingLatest() {
   stabilizePageTop();
 }
 
-async function showLatestAfterIdle() {
+async function showLatestAfterIdle({
+  externalSignal = null,
+  applicationGuard = null,
+} = {}) {
+  const mayApply = () => (
+    !(externalSignal && externalSignal.aborted)
+    && (!applicationGuard || applicationGuard())
+  );
+  if (!mayApply()) return;
   const activeFilter = filter;
   if (!pendingRelevantCount(activeFilter)) return;
   if (document.hidden || hasBlockingOverlayOpen()) return;
@@ -5816,25 +5881,34 @@ async function showLatestAfterIdle() {
   const epochAtStart = contentEpoch;
   let latestPage;
   try {
-    latestPage = await fetchNewsPage(1, activeFilter);
+    latestPage = await fetchNewsPage(1, activeFilter, externalSignal);
+    if (!mayApply()) return;
     await writeCachedNewsPage(1, activeFilter, latestPage, epochAtStart);
+    if (!mayApply()) return;
   } catch (e) {
     return;
   }
   let pageApplied = false;
   const applyLatest = () => {
-    if (pageApplied || hasBlockingOverlayOpen() || filter !== activeFilter) return;
+    if (
+      !mayApply()
+      || pageApplied
+      || hasBlockingOverlayOpen()
+      || filter !== activeFilter
+    ) return;
     pageApplied = true;
     currentPage = 1;
     applyNewsPage(latestPage, 1, activeFilter, { animate: true, preserveDom: true });
     syncListUrl({ replace: true });
   };
+  if (!mayApply()) return;
   programmaticScrollUntil = Date.now() + 800;
   const completed = await scrollPageToTop({ onNearTop: applyLatest, auto: true });
-  if (!completed) return;
+  if (!mayApply() || !completed) return;
   applyLatest();
-  if (!pageApplied) return;
+  if (!mayApply() || !pageApplied) return;
   consumePendingNewArticles(activeFilter);
+  if (!mayApply()) return;
   lastUserActivityAt = Date.now();
 }
 
@@ -6132,34 +6206,54 @@ async function loadData() {
 // false and keeps deferring while a refresh job is in flight, same as before.
 async function loadSince(
   timestamp,
-  { forceApply = false, manual = false, onDiscovered = null } = {},
+  {
+    forceApply = false,
+    manual = false,
+    onDiscovered = null,
+    externalSignal = null,
+    applicationGuard = null,
+  } = {},
 ) {
   const deferForRefresh = refreshInProgress;
+  const flowIsActive = () => (
+    !(externalSignal && externalSignal.aborted)
+    && (!applicationGuard || applicationGuard())
+  );
+  const controller = new AbortController();
+  const abortFromExternal = () => controller.abort();
+  let timeout = null;
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
+    if (!flowIsActive()) return -1;
+    if (externalSignal) {
+      if (externalSignal.aborted) controller.abort();
+      else externalSignal.addEventListener('abort', abortFromExternal, { once: true });
+    }
+    timeout = setTimeout(() => controller.abort(), 8000);
     const params = new URLSearchParams({
       since: String(timestamp || 0),
       size: String(INCREMENTAL_FETCH_LIMIT),
     });
     const resp = await fetch('/api/news?' + params.toString(), { signal: controller.signal });
     clearTimeout(timeout);
+    timeout = null;
+    if (!flowIsActive()) return -1;
     if (isSwFallbackResponse(resp)) throw swFallbackError();
     const data = await resp.json();
+    if (!flowIsActive()) return -1;
     if (data.error) throw new Error(data.error);
     const newItems = (data.items || []).filter(item => {
       const id = Number(item.id);
       if (!id || seenArticleIds.has(id)) return false;
       const itemTs = Number(item.timestamp || 0);
-      if (itemTs > Number(timestamp || 0)) {
-        seenArticleIds.add(id);
-        return true;
-      }
-      return false;
+      return itemTs > Number(timestamp || 0);
     });
     const added = newItems.length;
     if (!added) return 0;
+    if (!flowIsActive()) return -1;
+    newItems.forEach(item => seenArticleIds.add(Number(item.id)));
+    if (!flowIsActive()) return -1;
     if (typeof onDiscovered === 'function') onDiscovered(newItems.slice());
+    if (!flowIsActive()) return -1;
     latestKnownTimestamp = Math.max(latestKnownTimestamp, ...newItems.map(item => Number(item.timestamp) || 0));
     pendingNewArticleCount += added;
     pendingNewItems = pendingNewItems.concat(newItems);
@@ -6167,14 +6261,25 @@ async function loadSince(
     // invalidate them so pagination doesn't hand out stale pages (see bumpContentEpoch()).
     bumpContentEpoch();
     const epochAtStart = contentEpoch;
-    refreshTodayArticleCount();
+    refreshTodayArticleCount(8000, {
+      externalSignal,
+      applicationGuard: flowIsActive,
+    });
     if (!manual && (deferForRefresh || refreshInProgress)) return added;
-    await loadSourceCategories();
+    if (!flowIsActive()) return -1;
+    await loadSourceCategories({
+      externalSignal,
+      applicationGuard: flowIsActive,
+    });
+    if (!flowIsActive()) return -1;
     // Keep an "all"-scoped snapshot warm — the lightweight Logo/home flow
     // intentionally jumps to "all" and can reuse it without starting a scrape.
-    const latestAllData = await fetchNewsPage(1, 'all');
+    const latestAllData = await fetchNewsPage(1, 'all', controller.signal);
+    if (!flowIsActive()) return -1;
     pendingLatestPage = latestAllData;
+    if (!flowIsActive()) return -1;
     await writeCachedNewsPage(1, 'all', latestAllData, epochAtStart);
+    if (!flowIsActive()) return -1;
 
     const activeFilter = filter;
     const relevantCount = pendingRelevantCount(activeFilter);
@@ -6182,14 +6287,25 @@ async function loadSince(
       && window.scrollY <= 4
       && !hasBlockingOverlayOpen();
     if ((forceApply || atLatestTop) && currentPage === 1 && !hasBlockingOverlayOpen() && relevantCount > 0) {
-      const latestData = activeFilter === 'all' ? latestAllData : await fetchNewsPage(1, activeFilter);
-      if (filter === activeFilter) {
+      const latestData = activeFilter === 'all'
+        ? latestAllData
+        : await fetchNewsPage(1, activeFilter, controller.signal);
+      if (!flowIsActive()) return -1;
+      if (filter === activeFilter && flowIsActive()) {
         applyNewsPage(latestData, 1, activeFilter, { animate: true, preserveDom: true });
+        if (!flowIsActive()) return -1;
         consumePendingNewArticles(activeFilter);
       }
-    } else if (relevantCount > 0 && Date.now() - lastUserActivityAt >= IDLE_LATEST_DELAY_MS) {
-      showLatestAfterIdle();
-    } else if (!forceApply && relevantCount > 0) {
+    } else if (
+      flowIsActive()
+      && relevantCount > 0
+      && Date.now() - lastUserActivityAt >= IDLE_LATEST_DELAY_MS
+    ) {
+      showLatestAfterIdle({
+        externalSignal,
+        applicationGuard: flowIsActive,
+      });
+    } else if (flowIsActive() && !forceApply && relevantCount > 0) {
       showNewArticlesPrompt();
     }
     return added;
@@ -6199,6 +6315,9 @@ async function loadSince(
     // nothing new" — see checkForNewArticlesAfterForegroundResume(), which
     // retries only on the former.
     return -1;
+  } finally {
+    if (timeout !== null) clearTimeout(timeout);
+    if (externalSignal) externalSignal.removeEventListener('abort', abortFromExternal);
   }
 }
 

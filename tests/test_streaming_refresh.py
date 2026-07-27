@@ -184,7 +184,9 @@ def test_streaming_ingest_still_respects_deleted_articles(tmp_path, monkeypatch)
     conn.commit()
     conn.close()
 
-    messages = [{"id": i} for i in range(1, 5)]
+    # Five rows with batch size two exercises both the size-triggered commits and
+    # the trailing partial-batch branch.
+    messages = [{"id": i} for i in range(1, 6)]
     monkeypatch.setattr(fetcher, "fetch_all_new_messages", lambda state: (messages, max((m["id"] for m in messages), default=0)))
     monkeypatch.setattr(
         fetcher, "process_message",
@@ -199,7 +201,13 @@ def test_streaming_ingest_still_respects_deleted_articles(tmp_path, monkeypatch)
     conn = sqlite3.connect(fetcher.DB_FILE)
     ids = {row[0] for row in conn.execute("SELECT id FROM articles").fetchall()}
     conn.close()
-    assert ids == {1, 2, 4}
+    assert ids == {1, 2, 4, 5}
+
+    # Running progress is a discovery contract, not an attempted-upsert log.
+    # A tombstoned row must therefore never enter the browser's authoritative Set.
+    progress = json.loads(fetcher.PROGRESS_FILE.read_text(encoding="utf-8"))
+    assert progress["inserted"] == 4
+    assert progress["inserted_ids"] == [1, 2, 4, 5]
 
 
 def test_run_keeps_last_seen_id_unchanged_when_a_message_fails(tmp_path, monkeypatch):
@@ -279,6 +287,44 @@ def test_status_sanitizes_progress_ids(tmp_path, monkeypatch):
     payload = json.loads(refresh_server.get_refresh_job_status())
 
     assert payload["new_ids_so_far"] == [3, 4]
+
+
+def test_running_status_excludes_existing_ids_retried_after_failed_cycle(tmp_path, monkeypatch):
+    """A failed cycle keeps its cursor, so its successful rows are retried next job."""
+    started_at = int(time.time())
+    _reset_running_job(monkeypatch, started_at)
+    monkeypatch.setattr(refresh_server, "PROGRESS_FILE", tmp_path / "fetch_progress.json")
+
+    # IDs 1 and 3 were committed by the previous failed cycle; only 4 is new in
+    # this job. Replaying 1 and 3 through INSERT OR REPLACE must not advertise
+    # them as new running discoveries.
+    snapshots = iter(({1, 3}, {1, 3, 4}))
+    monkeypatch.setattr(refresh_server, "article_id_snapshot", lambda: next(snapshots))
+    running_payload = {}
+
+    def fake_run_fetcher():
+        refresh_server.PROGRESS_FILE.write_text(
+            json.dumps({
+                "job_id": "job-1",
+                "inserted": 3,
+                "inserted_ids": [1, 3, 4],
+                "total_messages": 3,
+                "updated_at": started_at + 1,
+            }),
+            encoding="utf-8",
+        )
+        running_payload.update(json.loads(refresh_server.get_refresh_job_status()))
+        return json.dumps({"status": "ok"}).encode(), 200
+
+    monkeypatch.setattr(refresh_server, "run_fetcher", fake_run_fetcher)
+
+    refresh_server._run_refresh_job("job-1")
+
+    assert running_payload["new_count_so_far"] == 1
+    assert running_payload["new_ids_so_far"] == [4]
+    terminal = json.loads(refresh_server.get_refresh_job_status())
+    assert terminal["new_count"] == 1
+    assert terminal["new_ids"] == [4]
 
 
 def test_status_ignores_progress_file_from_a_different_job_id(tmp_path, monkeypatch):
