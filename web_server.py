@@ -797,6 +797,7 @@ def get_ai_config_route():
     has_key = bool(safe.get("api_key"))
     safe["has_api_key"] = has_key
     safe.pop("api_key", None)  # never expose the key to frontend
+    safe.pop("revision", None)
     return jsonify(safe)
 
 
@@ -819,12 +820,13 @@ def set_ai_config_route():
         if _is_enabled_value(settings.get("share_ai_results")):
             test_body, test_status = _run_ai_connection_test(config)
             share_check = _share_check_after_personal_api_test(
-                g.user_id, test_body, test_status
+                g.user_id, test_body, test_status, (config or {}).get("revision", 0)
             )
         safe = dict(config) if config else {}
         has_key = bool(safe.get("api_key"))
         safe["has_api_key"] = has_key
         safe.pop("api_key", None)
+        safe.pop("revision", None)
         if share_check is not None:
             safe["share_check"] = share_check
         return jsonify(safe)
@@ -853,7 +855,9 @@ def get_ai_config_client_route():
             "enabled": False,
             "api_key": "",
         })
-    return jsonify(dict(config))
+    safe = dict(config)
+    safe.pop("revision", None)
+    return jsonify(safe)
 
 
 def _generate_article_summary(article_id: int, config: dict,
@@ -957,13 +961,20 @@ def _run_ai_connection_test(config: dict | None) -> tuple[dict, int]:
         return {"error": f"Connection test failed: {str(e)}"}, 502
 
 
-def _share_check_after_personal_api_test(user_id: int, body: dict, status: int) -> dict | None:
+def _share_check_after_personal_api_test(
+    user_id: int,
+    body: dict,
+    status: int,
+    config_revision: int | None = None,
+) -> dict | None:
     """Apply a personal API probe to opted-in sharing and return safe status."""
     settings = get_user_settings(user_id) or {}
     if not _is_enabled_value(settings.get("share_ai_results")):
         return None
     error = body.get("error", "") if status != 200 else ""
-    transition = _apply_share_connectivity_result(user_id, status == 200, error)
+    transition = _apply_share_connectivity_result(
+        user_id, status == 200, error, config_revision=config_revision
+    )
     result = {
         "status": transition,
         "restored": transition == "restored",
@@ -977,10 +988,15 @@ def _share_check_after_personal_api_test(user_id: int, body: dict, status: int) 
 @require_role("user", "admin")
 def ai_test_connection():
     """Test the user's own AI API configuration with a minimal prompt."""
-    body, status = _run_ai_connection_test(get_ai_config(g.user_id))
-    share_check = _share_check_after_personal_api_test(g.user_id, body, status)
+    config = get_ai_config(g.user_id)
+    body, status = _run_ai_connection_test(config)
+    share_check = _share_check_after_personal_api_test(
+        g.user_id, body, status, (config or {}).get("revision", 0)
+    )
     if share_check is not None:
         body = {**body, "share_check": share_check}
+    if status != 200 and "error" in body:
+        body = {**body, "error": _compact_share_error(body["error"])}
     return jsonify(body), status
 
 
@@ -1171,13 +1187,21 @@ def _apply_share_connectivity_result(
     ok: bool,
     error: str = "",
     checked_at: str | None = None,
+    config_revision: int | None = None,
 ) -> str:
-    """Apply one connectivity probe result without changing sharing intent."""
+    """Apply a probe only while the exact tested AI config is still current."""
     import datetime as _dt
 
     settings = get_user_settings(user_id) or {}
     if not _is_enabled_value(settings.get("share_ai_results")):
         return "not_opted_in"
+
+    if config_revision is None:
+        config_revision = (get_ai_config(user_id) or {}).get("revision", 0)
+    try:
+        config_revision = int(config_revision)
+    except (TypeError, ValueError):
+        return "validation_failed"
 
     checked_at = checked_at or _dt.datetime.now().isoformat(timespec="seconds")
     was_suspended = _is_enabled_value(settings.get("share_suspended"))
@@ -1186,6 +1210,7 @@ def _apply_share_connectivity_result(
     claimed = apply_share_connectivity_transition(
         user_id,
         expected_suspended=int(was_suspended),
+        expected_config_revision=config_revision,
         next_suspended=target_suspended,
         checked_at=checked_at,
         check_ok=int(ok),
@@ -1195,6 +1220,9 @@ def _apply_share_connectivity_result(
         latest_settings = get_user_settings(user_id) or {}
         if not _is_enabled_value(latest_settings.get("share_ai_results")):
             return "not_opted_in"
+        current_revision = (get_ai_config(user_id) or {}).get("revision", 0)
+        if int(current_revision) != config_revision:
+            return "stale"
         return "unchanged"
 
     if ok:
@@ -1239,6 +1267,7 @@ def _run_ai_share_revalidation_once():
             user_id,
             status == 200,
             body.get("error", "") if status != 200 else "",
+            config_revision=(config or {}).get("revision", 0),
         )
         time.sleep(0.5)  # spread requests out instead of bursting every provider at once
 
@@ -4636,17 +4665,28 @@ def update_settings():
     # the master is off.
     share_sub_keys = ("share_view_title", "share_view_translation", "share_view_summary")
     share_check_ok = False
+    share_check_revision = 0
     if "share_ai_results" in data:
         if _is_enabled_value(data.get("share_ai_results")):
-            test_body, test_status = _run_ai_connection_test(get_ai_config(g.user_id))
+            user_ai_config = get_ai_config(g.user_id)
+            share_check_revision = (user_ai_config or {}).get("revision", 0)
+            test_body, test_status = _run_ai_connection_test(user_ai_config)
             if test_status != 200:
                 error = test_body.get("error", "connection test failed")
-                _apply_share_connectivity_result(g.user_id, False, error)
+                transition = _apply_share_connectivity_result(
+                    g.user_id, False, error, config_revision=share_check_revision
+                )
+                latest = get_user_settings(g.user_id) or {}
+                paused = (
+                    _is_enabled_value(latest.get("share_ai_results"))
+                    and _is_enabled_value(latest.get("share_suspended"))
+                    and transition in {"suspended", "unchanged"}
+                )
                 return jsonify({
                     "error": "personal AI API connection test failed",
                     "share_check": {
                         "ok": False,
-                        "status": "paused",
+                        "status": "paused" if paused else transition,
                         "error": _compact_share_error(error),
                     },
                 }), 400
@@ -4694,7 +4734,9 @@ def update_settings():
     if not settings:
         return jsonify({"error": "update failed"}), 400
     if share_check_ok:
-        _apply_share_connectivity_result(g.user_id, True)
+        _apply_share_connectivity_result(
+            g.user_id, True, config_revision=share_check_revision
+        )
         settings = get_user_settings(g.user_id) or {}
     # Parse back
     safe = dict(settings)

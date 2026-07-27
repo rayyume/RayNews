@@ -585,3 +585,143 @@ def test_manual_success_after_explicit_opt_out_does_not_restore_sharing(share_en
     assert all(settings[key] == 0 for key in (
         "share_view_title", "share_view_translation", "share_view_summary",
     ))
+
+
+def test_manual_connection_failure_redacts_provider_error_in_every_response_field(
+    share_env, monkeypatch
+):
+    client, user_id = share_env
+    opted_in(user_id)
+    raw_error = (
+        "AI API HTTP 401: provider response body: Bearer bearer-secret-value; "
+        "api_key=provider-api-key-value&token=form-token-value"
+    )
+    monkeypatch.setattr(
+        web_server,
+        "_run_ai_connection_test",
+        lambda config: ({"error": raw_error}, 502),
+    )
+
+    response = client.post("/ai/test-connection", headers=auth_headers(user_id))
+
+    assert response.status_code == 502
+    data = response.get_json()
+    assert data["error"] == "AI API HTTP 401"
+    assert data["share_check"]["error"] == "AI API HTTP 401"
+    serialized = str(data)
+    for secret in ("bearer-secret-value", "provider-api-key-value", "form-token-value"):
+        assert secret not in serialized
+    assert "provider response body" not in serialized
+
+
+def test_first_share_enable_failure_reports_not_opted_in_not_paused(share_env, monkeypatch):
+    client, user_id = share_env
+    monkeypatch.setattr(
+        web_server,
+        "_run_ai_connection_test",
+        lambda config: ({"error": "AI API HTTP 401"}, 502),
+    )
+
+    response = client.put(
+        "/settings",
+        json={"share_ai_results": 1},
+        headers=auth_headers(user_id),
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["share_check"] == {
+        "ok": False,
+        "status": "not_opted_in",
+        "error": "AI API HTTP 401",
+    }
+    assert models.get_user_settings(user_id) is None
+
+
+def _config_revision(user_id: int) -> int:
+    config = models.get_ai_config(user_id)
+    if not config:
+        config = models.set_ai_config(user_id, api_key="initial-key", enabled=1)
+    return config["revision"]
+
+
+def test_old_slow_failure_cannot_override_new_fast_success(share_env, monkeypatch):
+    _, user_id = share_env
+    opted_in(user_id)
+    old_revision = _config_revision(user_id)
+    notices = []
+    monkeypatch.setattr(web_server, "_notify_user", lambda *args, **kwargs: notices.append(args))
+
+    models.set_ai_config(user_id, api_key="replacement-key")
+    new_revision = _config_revision(user_id)
+    assert new_revision > old_revision
+    assert web_server._apply_share_connectivity_result(
+        user_id, True, config_revision=new_revision
+    ) == "unchanged"
+    before = models.get_user_settings(user_id)
+
+    assert web_server._apply_share_connectivity_result(
+        user_id, False, "AI API HTTP 401", config_revision=old_revision
+    ) == "stale"
+    assert models.get_user_settings(user_id) == before
+    assert notices == []
+
+
+def test_old_slow_success_cannot_override_new_fast_failure(share_env, monkeypatch):
+    _, user_id = share_env
+    opted_in(user_id, suspended=1)
+    old_revision = _config_revision(user_id)
+    notices = []
+    monkeypatch.setattr(web_server, "_notify_user", lambda *args, **kwargs: notices.append(args))
+
+    models.set_ai_config(user_id, api_key="replacement-key")
+    new_revision = _config_revision(user_id)
+    assert web_server._apply_share_connectivity_result(
+        user_id, False, "AI API HTTP 401", config_revision=new_revision
+    ) == "unchanged"
+    before = models.get_user_settings(user_id)
+
+    assert web_server._apply_share_connectivity_result(
+        user_id, True, config_revision=old_revision
+    ) == "stale"
+    assert models.get_user_settings(user_id) == before
+    assert notices == []
+
+
+def test_old_manual_probe_after_new_save_is_stale(share_env, monkeypatch):
+    _, user_id = share_env
+    opted_in(user_id)
+    old_revision = _config_revision(user_id)
+    notices = []
+    monkeypatch.setattr(web_server, "_notify_user", lambda *args, **kwargs: notices.append(args))
+
+    models.set_ai_config(user_id, api_key="replacement-key")
+    before = models.get_user_settings(user_id)
+    share_check = web_server._share_check_after_personal_api_test(
+        user_id, {"error": "AI API HTTP 401"}, 502, old_revision
+    )
+
+    assert share_check == {
+        "status": "stale",
+        "restored": False,
+        "error": "AI API HTTP 401",
+    }
+    assert models.get_user_settings(user_id) == before
+    assert notices == []
+
+
+def test_old_manual_probe_after_opt_out_does_not_change_health_or_notify(share_env, monkeypatch):
+    _, user_id = share_env
+    opted_in(user_id)
+    old_revision = _config_revision(user_id)
+    notices = []
+    monkeypatch.setattr(web_server, "_notify_user", lambda *args, **kwargs: notices.append(args))
+    models.set_user_settings(user_id, share_ai_results=0, share_suspended=0)
+    before = models.get_user_settings(user_id)
+
+    share_check = web_server._share_check_after_personal_api_test(
+        user_id, {"ok": True}, 200, old_revision
+    )
+
+    assert share_check is None
+    assert models.get_user_settings(user_id) == before
+    assert notices == []

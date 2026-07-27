@@ -42,7 +42,8 @@ CREATE TABLE IF NOT EXISTS ai_configs (
     model       TEXT    NOT NULL DEFAULT 'gpt-4o-mini',
     provider_type TEXT NOT NULL DEFAULT 'openai'
                     CHECK(provider_type IN ('openai', 'claude')),
-    enabled     INTEGER NOT NULL DEFAULT 0
+    enabled     INTEGER NOT NULL DEFAULT 0,
+    revision    INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS user_settings (
@@ -126,6 +127,10 @@ def _initialize_db(db: sqlite3.Connection) -> None:
     # Migration: add provider_type column if it doesn't exist (pre-v3 schema)
     try:
         db.execute("ALTER TABLE ai_configs ADD COLUMN provider_type TEXT NOT NULL DEFAULT 'openai'")
+    except sqlite3.OperationalError:
+        pass  # column already exists
+    try:
+        db.execute("ALTER TABLE ai_configs ADD COLUMN revision INTEGER NOT NULL DEFAULT 1")
     except sqlite3.OperationalError:
         pass  # column already exists
     try:
@@ -456,7 +461,7 @@ def count_article_favorites(article_id: int) -> int:
 def get_ai_config(user_id: int) -> dict | None:
     db = get_db()
     row = db.execute(
-        "SELECT id, provider, api_key, endpoint, model, provider_type, enabled "
+        "SELECT id, provider, api_key, endpoint, model, provider_type, enabled, revision "
         "FROM ai_configs WHERE user_id = ?",
         (user_id,),
     ).fetchone()
@@ -472,7 +477,7 @@ def set_ai_config(user_id: int, **kwargs) -> dict:
     db = get_db()
     existing = get_ai_config(user_id)
     if existing:
-        sets = ", ".join(f"{k} = ?" for k in updates)
+        sets = ", ".join([*(f"{k} = ?" for k in updates), "revision = revision + 1"])
         vals = list(updates.values()) + [user_id]
         db.execute(f"UPDATE ai_configs SET {sets} WHERE user_id = ?", vals)
     else:
@@ -578,6 +583,7 @@ def set_user_settings(user_id: int, **kwargs) -> dict:
 def apply_share_connectivity_transition(
     user_id: int,
     expected_suspended: int,
+    expected_config_revision: int,
     next_suspended: int,
     checked_at: str,
     check_ok: int,
@@ -586,16 +592,19 @@ def apply_share_connectivity_transition(
     """Atomically apply a share-health result if the observed state is current.
 
     The conditional update is the notification ownership claim: only the
-    caller whose observed suspension state still matches can report a state
-    transition. ``share_ai_results = 1`` also makes an opt-out that committed
-    after the read win over a delayed background probe.
+    caller whose observed suspension state and tested AI-config revision still
+    match can report a state transition. ``share_ai_results = 1`` also makes
+    an opt-out that committed after the read win over a delayed background
+    probe. A missing config is revision zero, so a probe that started before
+    the first save cannot claim state after that save.
     """
     db = get_db()
     changed = db.execute(
         "UPDATE user_settings "
         "SET share_suspended = ?, share_last_check_at = ?, "
         "share_last_check_ok = ?, share_last_check_error = ? "
-        "WHERE user_id = ? AND share_ai_results = 1 AND share_suspended = ?",
+        "WHERE user_id = ? AND share_ai_results = 1 AND share_suspended = ? "
+        "AND COALESCE((SELECT revision FROM ai_configs WHERE user_id = ?), 0) = ?",
         (
             int(next_suspended),
             checked_at,
@@ -603,6 +612,8 @@ def apply_share_connectivity_transition(
             error,
             user_id,
             int(expected_suspended),
+            user_id,
+            int(expected_config_revision),
         ),
     ).rowcount == 1
     db.commit()
