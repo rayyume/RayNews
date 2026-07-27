@@ -7540,6 +7540,7 @@ function onLightboxPointerMove(event) {
 }
 
 function onLightboxPointerEnd(event) {
+  if (!lightboxGesture.pointers.has(event.pointerId)) return;
   lightboxGesture.pointers.delete(event.pointerId);
   if (lightboxGesture.scale <= 1) {
     lightboxGesture.scale = 1;
