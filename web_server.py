@@ -814,10 +814,19 @@ def set_ai_config_route():
             else:
                 data.pop("api_key", None)
         config = set_ai_config(g.user_id, **data)
+        settings = get_user_settings(g.user_id) or {}
+        share_check = None
+        if _is_enabled_value(settings.get("share_ai_results")):
+            test_body, test_status = _run_ai_connection_test(config)
+            share_check = _share_check_after_personal_api_test(
+                g.user_id, test_body, test_status
+            )
         safe = dict(config) if config else {}
         has_key = bool(safe.get("api_key"))
         safe["has_api_key"] = has_key
         safe.pop("api_key", None)
+        if share_check is not None:
+            safe["share_check"] = share_check
         return jsonify(safe)
     except Exception as e:
         import traceback
@@ -948,11 +957,30 @@ def _run_ai_connection_test(config: dict | None) -> tuple[dict, int]:
         return {"error": f"Connection test failed: {str(e)}"}, 502
 
 
+def _share_check_after_personal_api_test(user_id: int, body: dict, status: int) -> dict | None:
+    """Apply a personal API probe to opted-in sharing and return safe status."""
+    settings = get_user_settings(user_id) or {}
+    if not _is_enabled_value(settings.get("share_ai_results")):
+        return None
+    error = body.get("error", "") if status != 200 else ""
+    transition = _apply_share_connectivity_result(user_id, status == 200, error)
+    result = {
+        "status": transition,
+        "restored": transition == "restored",
+    }
+    if status != 200:
+        result["error"] = _compact_share_error(error)
+    return result
+
+
 @app.route("/ai/test-connection", methods=["POST"])
 @require_role("user", "admin")
 def ai_test_connection():
     """Test the user's own AI API configuration with a minimal prompt."""
     body, status = _run_ai_connection_test(get_ai_config(g.user_id))
+    share_check = _share_check_after_personal_api_test(g.user_id, body, status)
+    if share_check is not None:
+        body = {**body, "share_check": share_check}
     return jsonify(body), status
 
 
@@ -4560,6 +4588,7 @@ def get_settings():
             "share_last_check_at": None,
             "share_last_check_ok": None,
             "share_last_check_error": None,
+            "share_active": False,
         })
     # Parse notification_config JSON
     safe = dict(settings)
@@ -4570,6 +4599,7 @@ def get_settings():
         except (json.JSONDecodeError, TypeError):
             nc = {}
     safe["notification_config"] = nc
+    safe["share_active"] = is_share_active(safe)
     return jsonify(safe)
 
 
@@ -4605,27 +4635,37 @@ def update_settings():
     # body says, so we never persist a state where a sub-toggle is on while
     # the master is off.
     share_sub_keys = ("share_view_title", "share_view_translation", "share_view_summary")
+    share_check_ok = False
     if "share_ai_results" in data:
-        import datetime as _dt
         if _is_enabled_value(data.get("share_ai_results")):
-            user_ai_config = get_ai_config(g.user_id)
-            if not user_ai_config or not user_ai_config.get("enabled") or not user_ai_config.get("api_key"):
-                return jsonify({"error": "请先在AI设置中配置并启用有效的API"}), 400
-            test_body, test_status = _run_ai_connection_test(user_ai_config)
-            now_str = _dt.datetime.now().isoformat(timespec="seconds")
+            test_body, test_status = _run_ai_connection_test(get_ai_config(g.user_id))
             if test_status != 200:
-                set_user_settings(
-                    g.user_id,
-                    share_last_check_at=now_str, share_last_check_ok=0,
-                    share_last_check_error=test_body.get("error", "connection test failed"),
-                )
-                return jsonify({"error": test_body.get("error", "AI 连通性测试失败")}), 400
+                error = test_body.get("error", "connection test failed")
+                _apply_share_connectivity_result(g.user_id, False, error)
+                return jsonify({
+                    "error": "personal AI API connection test failed",
+                    "share_check": {
+                        "ok": False,
+                        "status": "paused",
+                        "error": _compact_share_error(error),
+                    },
+                }), 400
+
+            # Do not accept health fields from the request. Keeping the
+            # previous suspension until after persistence lets the atomic
+            # transition own a restored notification exactly once.
             data["share_ai_results"] = 1
-            data["share_last_check_at"] = now_str
-            data["share_last_check_ok"] = 1
-            data["share_last_check_error"] = None
+            for key in (
+                "share_suspended",
+                "share_last_check_ok",
+                "share_last_check_at",
+                "share_last_check_error",
+            ):
+                data.pop(key, None)
+            share_check_ok = True
         else:
             data["share_ai_results"] = 0
+            data["share_suspended"] = 0
             for key in share_sub_keys:
                 data[key] = 0
     resulting_share_master = _is_enabled_value(
@@ -4653,6 +4693,9 @@ def update_settings():
     settings = set_user_settings(g.user_id, **data)
     if not settings:
         return jsonify({"error": "update failed"}), 400
+    if share_check_ok:
+        _apply_share_connectivity_result(g.user_id, True)
+        settings = get_user_settings(g.user_id) or {}
     # Parse back
     safe = dict(settings)
     nc = safe.get("notification_config", "{}")
@@ -4662,6 +4705,7 @@ def update_settings():
         except (json.JSONDecodeError, TypeError):
             nc = {}
     safe["notification_config"] = nc
+    safe["share_active"] = is_share_active(safe)
     if _is_enabled_value(data.get("auto_summary_enabled")):
         threading.Thread(target=_run_auto_summary_once, daemon=True).start()
     if _is_enabled_value(data.get("auto_translate_title")) or _is_enabled_value(data.get("auto_translate_content")):

@@ -423,3 +423,165 @@ def test_share_error_drops_provider_body_and_redacts_common_credentials(share_en
         assert secret not in persisted
         assert secret not in notification_body
     assert "provider response body" not in persisted
+
+
+def test_saving_new_api_tests_and_restores_suspended_share(share_env, monkeypatch):
+    client, user_id = share_env
+    opted_in(user_id, suspended=1)
+    monkeypatch.setattr(
+        web_server,
+        "_run_ai_connection_test",
+        lambda config: ({"ok": True, "response": "pong"}, 200),
+    )
+    notices = []
+    monkeypatch.setattr(web_server, "_notify_user", lambda *args, **kwargs: notices.append(args))
+
+    response = client.put(
+        "/ai/config",
+        json={
+            "provider": "OpenAI",
+            "api_key": "replacement-key",
+            "endpoint": "https://api.openai.com/v1",
+            "model": "gpt-4o-mini",
+            "provider_type": "openai",
+            "enabled": 1,
+        },
+        headers=auth_headers(user_id),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["share_check"] == {
+        "status": "restored",
+        "restored": True,
+    }
+    assert models.get_user_settings(user_id)["share_suspended"] == 0
+    assert [notice[1] for notice in notices] == ["share_restored"]
+
+
+def test_failed_saved_config_remains_saved_but_share_stays_suspended(share_env, monkeypatch):
+    client, user_id = share_env
+    opted_in(user_id, suspended=1)
+    monkeypatch.setattr(
+        web_server,
+        "_run_ai_connection_test",
+        lambda config: ({"error": "AI API HTTP 401"}, 502),
+    )
+
+    response = client.put(
+        "/ai/config",
+        json={"api_key": "still-invalid", "enabled": 1},
+        headers=auth_headers(user_id),
+    )
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["has_api_key"] is True
+    assert data["share_check"]["status"] == "unchanged"
+    assert data["share_check"]["restored"] is False
+    assert "401" in data["share_check"]["error"]
+    assert models.get_user_settings(user_id)["share_suspended"] == 1
+
+
+def test_manual_connection_test_can_restore(share_env, monkeypatch):
+    client, user_id = share_env
+    opted_in(user_id, suspended=1)
+    monkeypatch.setattr(
+        web_server,
+        "_run_ai_connection_test",
+        lambda config: ({"ok": True, "response": "pong"}, 200),
+    )
+    monkeypatch.setattr(web_server, "_notify_user", lambda *args, **kwargs: None)
+
+    response = client.post("/ai/test-connection", headers=auth_headers(user_id))
+
+    assert response.status_code == 200
+    assert response.get_json()["share_check"]["restored"] is True
+    assert models.get_user_settings(user_id)["share_suspended"] == 0
+
+
+def test_failed_share_enable_keeps_saved_preferences_and_pauses_existing_opt_in(
+    share_env, monkeypatch
+):
+    client, user_id = share_env
+    opted_in(user_id)
+    models.set_ai_config(user_id, api_key="key", enabled=1)
+    monkeypatch.setattr(
+        web_server,
+        "_run_ai_connection_test",
+        lambda config: ({"error": "AI API HTTP 401"}, 502),
+    )
+
+    response = client.put(
+        "/settings",
+        json={"share_ai_results": 1, "share_view_translation": 1},
+        headers=auth_headers(user_id),
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["share_check"] == {
+        "ok": False,
+        "status": "paused",
+        "error": "AI API HTTP 401",
+    }
+    settings = models.get_user_settings(user_id)
+    assert settings["share_ai_results"] == 1
+    assert settings["share_view_title"] == 1
+    assert settings["share_view_translation"] == 0
+    assert settings["share_view_summary"] == 1
+    assert settings["share_suspended"] == 1
+
+
+def test_share_enable_restores_prior_suspension_and_returns_active_state(share_env, monkeypatch):
+    client, user_id = share_env
+    opted_in(user_id, suspended=1)
+    models.set_ai_config(user_id, api_key="key", enabled=1)
+    monkeypatch.setattr(
+        web_server,
+        "_run_ai_connection_test",
+        lambda config: ({"ok": True, "response": "pong"}, 200),
+    )
+    notices = []
+    monkeypatch.setattr(web_server, "_notify_user", lambda *args, **kwargs: notices.append(args))
+
+    response = client.put(
+        "/settings",
+        json={"share_ai_results": 1, "share_view_translation": 1},
+        headers=auth_headers(user_id),
+    )
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["share_active"] is True
+    assert data["share_suspended"] == 0
+    assert data["share_view_title"] == 1
+    assert data["share_view_translation"] == 1
+    assert data["share_view_summary"] == 1
+    assert [notice[1] for notice in notices] == ["share_restored"]
+
+
+def test_manual_success_after_explicit_opt_out_does_not_restore_sharing(share_env, monkeypatch):
+    client, user_id = share_env
+    opted_in(user_id, suspended=1)
+    models.set_ai_config(user_id, api_key="key", enabled=1)
+    disabled = client.put(
+        "/settings",
+        json={"share_ai_results": 0},
+        headers=auth_headers(user_id),
+    )
+    assert disabled.status_code == 200
+    monkeypatch.setattr(
+        web_server,
+        "_run_ai_connection_test",
+        lambda config: ({"ok": True, "response": "pong"}, 200),
+    )
+
+    response = client.post("/ai/test-connection", headers=auth_headers(user_id))
+
+    assert response.status_code == 200
+    assert "share_check" not in response.get_json()
+    settings = models.get_user_settings(user_id)
+    assert settings["share_ai_results"] == 0
+    assert settings["share_suspended"] == 0
+    assert all(settings[key] == 0 for key in (
+        "share_view_title", "share_view_translation", "share_view_summary",
+    ))
