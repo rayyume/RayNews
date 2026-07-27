@@ -52,6 +52,7 @@ REFRESH_JOB = {
     "started_at": None,
     "finished_at": None,
     "new_count": 0,
+    "new_ids": [],
     "error": "",
 }
 REFRESH_JOB_HISTORY_LIMIT = 16
@@ -243,6 +244,22 @@ def _read_fetch_progress() -> dict | None:
         return None
 
 
+def _positive_article_ids(values) -> list[int]:
+    result = set()
+    try:
+        values = iter(values or [])
+    except TypeError:
+        return []
+    for value in values:
+        try:
+            article_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if article_id > 0:
+            result.add(article_id)
+    return sorted(result)
+
+
 def _refresh_job_json_locked() -> bytes:
     payload = dict(REFRESH_JOB)
     if payload.get("status") == "running":
@@ -253,6 +270,7 @@ def _refresh_job_json_locked() -> bytes:
         # file be mistaken for this job's progress.
         if progress and progress.get("job_id") and progress.get("job_id") == payload.get("job_id"):
             payload["new_count_so_far"] = progress.get("inserted", 0)
+            payload["new_ids_so_far"] = _positive_article_ids(progress.get("inserted_ids"))
     return json.dumps(payload).encode()
 
 
@@ -290,6 +308,7 @@ def get_refresh_job_status_response(job_id: str | None = None) -> tuple[bytes, i
 def _run_refresh_job(job_id: str) -> None:
     global CURRENT_FETCH_JOB_ID
     new_count = 0
+    new_ids = []
     error = ""
     try:
         before_ids = article_id_snapshot()
@@ -298,7 +317,9 @@ def _run_refresh_job(job_id: str) -> None:
         payload = json.loads(body)
         completed = 200 <= status < 300 and payload.get("status") == "ok"
         if completed:
-            new_count = len(article_id_snapshot() - before_ids)
+            after_ids = article_id_snapshot()
+            new_ids = sorted(after_ids - before_ids)
+            new_count = len(new_ids)
         else:
             payload_error = payload.get("error")
             error = (
@@ -317,6 +338,7 @@ def _run_refresh_job(job_id: str) -> None:
             "status": "completed" if completed else "failed",
             "finished_at": int(time.time()),
             "new_count": new_count,
+            "new_ids": new_ids if completed else [],
             "error": error,
         })
         _remember_terminal_job_locked()
@@ -334,6 +356,7 @@ def start_refresh_job(trigger: str = "manual") -> tuple[bytes, int]:
             "started_at": int(time.time()),
             "finished_at": None,
             "new_count": 0,
+            "new_ids": [],
             "error": "",
         })
         body = _refresh_job_json_locked()

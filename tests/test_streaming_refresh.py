@@ -238,7 +238,7 @@ def _reset_running_job(monkeypatch, started_at):
     monkeypatch.setattr(refresh_server, "REFRESH_JOB", {
         "job_id": "job-1", "status": "running", "trigger": "manual",
         "started_at": started_at, "finished_at": None,
-        "new_count": 0, "error": "",
+        "new_count": 0, "new_ids": [], "error": "",
     })
 
 
@@ -247,13 +247,38 @@ def test_status_reports_new_count_so_far_while_running(tmp_path, monkeypatch):
     _reset_running_job(monkeypatch, started_at)
     monkeypatch.setattr(refresh_server, "PROGRESS_FILE", tmp_path / "fetch_progress.json")
     (tmp_path / "fetch_progress.json").write_text(
-        json.dumps({"job_id": "job-1", "inserted": 7, "total_messages": 12, "updated_at": started_at + 1}),
+        json.dumps({
+            "job_id": "job-1",
+            "inserted": 3,
+            "inserted_ids": [9, 7, 8, 8],
+            "total_messages": 12,
+            "updated_at": started_at + 1,
+        }),
         encoding="utf-8",
     )
 
     payload = json.loads(refresh_server.get_refresh_job_status())
 
-    assert payload["new_count_so_far"] == 7
+    assert payload["new_count_so_far"] == 3
+    assert payload["new_ids_so_far"] == [7, 8, 9]
+
+
+def test_status_sanitizes_progress_ids(tmp_path, monkeypatch):
+    started_at = int(time.time())
+    _reset_running_job(monkeypatch, started_at)
+    monkeypatch.setattr(refresh_server, "PROGRESS_FILE", tmp_path / "fetch_progress.json")
+    (tmp_path / "fetch_progress.json").write_text(
+        json.dumps({
+            "job_id": "job-1",
+            "inserted": 2,
+            "inserted_ids": [3, "4", 0, None, "bad"],
+        }),
+        encoding="utf-8",
+    )
+
+    payload = json.loads(refresh_server.get_refresh_job_status())
+
+    assert payload["new_ids_so_far"] == [3, 4]
 
 
 def test_status_ignores_progress_file_from_a_different_job_id(tmp_path, monkeypatch):

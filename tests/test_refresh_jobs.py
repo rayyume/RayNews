@@ -13,7 +13,7 @@ def reset_job(monkeypatch):
     monkeypatch.setattr(refresh_server, "REFRESH_JOB", {
         "job_id": "", "status": "idle", "trigger": "",
         "started_at": None, "finished_at": None,
-        "new_count": 0, "error": "",
+        "new_count": 0, "new_ids": [], "error": "",
     })
     monkeypatch.setattr(refresh_server, "REFRESH_JOB_HISTORY", OrderedDict())
 
@@ -197,7 +197,7 @@ def test_thread_launch_failure_transitions_job_to_failed(monkeypatch, failure_po
     assert "/app/data" not in json.dumps(payload)
 
 
-def test_refresh_job_reports_new_count(monkeypatch):
+def test_refresh_job_reports_new_count_and_ids(monkeypatch):
     reset_job(monkeypatch)
     snapshots = iter(({1, 2}, {1, 2, 3, 4}))
     monkeypatch.setattr(refresh_server, "article_id_snapshot", lambda: next(snapshots))
@@ -210,6 +210,7 @@ def test_refresh_job_reports_new_count(monkeypatch):
     payload = wait_terminal()
     assert payload["status"] == "completed"
     assert payload["new_count"] == 2
+    assert payload["new_ids"] == [3, 4]
     assert payload["finished_at"] is not None
 
 
