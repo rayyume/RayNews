@@ -858,6 +858,23 @@ context.loadSince = async (timestamp, options) => {{
 """
 
 
+def test_refresh_id_merge_normalizes_and_deduplicates():
+    helpers = source_between(
+        "function mergeRefreshArticleIds(",
+        "async function triggerRefresh()",
+    )
+    run_node(
+        helpers,
+        """
+const ids = vm.runInContext('new Set()', context);
+assert.equal(context.mergeRefreshArticleIds(ids, [2, '3', 2, 0, null, 'bad']), 2);
+assert.deepEqual(Array.from(ids).sort((a, b) => a - b), [2, 3]);
+assert.equal(context.mergeRefreshArticleIds(ids, [{id: 3}, {id: 4}]), 3);
+assert.deepEqual(Array.from(ids).sort((a, b) => a - b), [2, 3, 4]);
+""",
+    )
+
+
 def test_manual_refresh_feeds_new_articles_into_pending_queue_when_not_on_page_one():
     trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
     setup = trigger_context_setup(
@@ -1344,12 +1361,31 @@ context.lastUserActivityAt = 0;
 context.IDLE_LATEST_DELAY_MS = 1;
 // { manual: true } bypasses the defer-while-refreshing early return that the
 // sibling test above (without `manual`) relies on.
-const added = await context.loadSince(100, { manual: true });
+context.discovered = [];
+context.discoveryCalls = 0;
+const recordDiscovery = items => {
+  context.discoveryCalls++;
+  context.discovered.push(...items.map(item => item.id));
+};
+const added = await context.loadSince(100, {
+  manual: true,
+  onDiscovered: recordDiscovery,
+});
 assert.equal(added, 1);
+assert.deepEqual(context.discovered, [2]);
+assert.equal(context.discoveryCalls, 1);
 assert.equal(context.sourceLoads, 1);
 assert.equal(context.pageFetches, 1);
 assert.equal(context.applies, 1); // atLatestTop on page 1 -> applyNewsPage()
 assert.equal(context.consumes, 1);
+// The same response is filtered out by seenArticleIds on a later check, so the
+// discovery callback must not run when there are no accepted new items.
+assert.equal(await context.loadSince(100, {
+  manual: true,
+  onDiscovered: recordDiscovery,
+}), 0);
+assert.deepEqual(context.discovered, [2]);
+assert.equal(context.discoveryCalls, 1);
 """,
     )
 

@@ -5058,6 +5058,20 @@ function reconcileVisibleArticles({ animate = false } = {}) {
   if (animate) animateArticleLayout(list, previousRects, newIds);
 }
 
+function mergeRefreshArticleIds(target, values) {
+  if (!(target instanceof Set) || !Array.isArray(values)) return target instanceof Set ? target.size : 0;
+  values.forEach(value => {
+    const raw = value && typeof value === 'object' ? value.id : value;
+    const id = Number(raw);
+    if (Number.isInteger(id) && id > 0) target.add(id);
+  });
+  return target.size;
+}
+
+function renderRefreshDiscoveredCount(ids) {
+  setRefreshProgressLabel(ids instanceof Set ? ids.size : 0);
+}
+
 async function triggerRefresh() {
   if (refreshInProgress || (typeof logoRefreshInProgress !== 'undefined' && logoRefreshInProgress)) return;
   // Unauthenticated users cannot refresh
@@ -6102,7 +6116,10 @@ async function loadData() {
 // deliberately runs while refreshInProgress is still true for the job's whole
 // duration. Every other caller (periodic timer, foreground resume, etc.) leaves this
 // false and keeps deferring while a refresh job is in flight, same as before.
-async function loadSince(timestamp, { forceApply = false, manual = false } = {}) {
+async function loadSince(
+  timestamp,
+  { forceApply = false, manual = false, onDiscovered = null } = {},
+) {
   const deferForRefresh = refreshInProgress;
   try {
     const controller = new AbortController();
@@ -6128,6 +6145,7 @@ async function loadSince(timestamp, { forceApply = false, manual = false } = {})
     });
     const added = newItems.length;
     if (!added) return 0;
+    if (typeof onDiscovered === 'function') onDiscovered(newItems.slice());
     latestKnownTimestamp = Math.max(latestKnownTimestamp, ...newItems.map(item => Number(item.timestamp) || 0));
     pendingNewArticleCount += added;
     pendingNewItems = pendingNewItems.concat(newItems);
