@@ -7320,6 +7320,7 @@ const lightboxGesture = {
   startScale: 1,
   startDistance: 0,
   startCenter: null,
+  startOffset: null,
   dragStart: null,
   moved: false,
 };
@@ -7389,6 +7390,7 @@ function resetLightboxGesture() {
   lightboxGesture.startScale = 1;
   lightboxGesture.startDistance = 0;
   lightboxGesture.startCenter = null;
+  lightboxGesture.startOffset = null;
   lightboxGesture.dragStart = null;
   lightboxGesture.moved = false;
   const image = document.getElementById('lbImg');
@@ -7462,8 +7464,17 @@ function lightboxPointerPair() {
   return Array.from(lightboxGesture.pointers.values()).slice(0, 2);
 }
 
+function lightboxStageCenter() {
+  const stage = document.getElementById('lbStage');
+  const rect = stage.getBoundingClientRect();
+  return {
+    x: rect.left + rect.width / 2,
+    y: rect.top + rect.height / 2,
+  };
+}
+
 function onLightboxPointerDown(event) {
-  if (!document.getElementById('lb').classList.contains('open')) return;
+  if (!document.getElementById('lb').classList.contains('open') || lightboxGesture.pointers.size >= 2) return;
   event.currentTarget.setPointerCapture(event.pointerId);
   lightboxGesture.pointers.set(event.pointerId, lightboxPoint(event));
   const pair = lightboxPointerPair();
@@ -7473,6 +7484,10 @@ function onLightboxPointerDown(event) {
     lightboxGesture.startCenter = {
       x: (pair[0].x + pair[1].x) / 2,
       y: (pair[0].y + pair[1].y) / 2,
+    };
+    lightboxGesture.startOffset = {
+      x: lightboxGesture.x,
+      y: lightboxGesture.y,
     };
     lightboxGesture.dragStart = null;
   } else if (pair.length === 1 && lightboxGesture.scale > 1) {
@@ -7494,6 +7509,22 @@ function onLightboxPointerMove(event) {
         * lightboxDistance(pair[0], pair[1])
         / lightboxGesture.startDistance,
     );
+    const center = {
+      x: (pair[0].x + pair[1].x) / 2,
+      y: (pair[0].y + pair[1].y) / 2,
+    };
+    const stageCenter = lightboxStageCenter();
+    const scaleRatio = lightboxGesture.scale / lightboxGesture.startScale;
+    lightboxGesture.x = lightboxGesture.startOffset.x
+      + center.x - lightboxGesture.startCenter.x
+      + (1 - scaleRatio) * (
+        lightboxGesture.startCenter.x - stageCenter.x - lightboxGesture.startOffset.x
+      );
+    lightboxGesture.y = lightboxGesture.startOffset.y
+      + center.y - lightboxGesture.startCenter.y
+      + (1 - scaleRatio) * (
+        lightboxGesture.startCenter.y - stageCenter.y - lightboxGesture.startOffset.y
+      );
     lightboxGesture.moved = true;
     applyLightboxTransform();
     return;
@@ -7519,6 +7550,7 @@ function onLightboxPointerEnd(event) {
   const pair = lightboxPointerPair();
   lightboxGesture.startDistance = 0;
   lightboxGesture.startCenter = null;
+  lightboxGesture.startOffset = null;
   lightboxGesture.dragStart = pair.length === 1 && lightboxGesture.scale > 1
     ? { pointer: pair[0], x: lightboxGesture.x, y: lightboxGesture.y }
     : null;

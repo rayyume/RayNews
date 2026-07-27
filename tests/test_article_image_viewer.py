@@ -198,3 +198,131 @@ def test_gesture_surface_uses_centered_transform_origin_without_browser_pinch_zo
     image_css = between('.lb img{', '\n.lb-close{')
     assert 'touch-action:none' in stage_css
     assert 'transform-origin:center' in image_css
+
+
+def test_gesture_runtime_dispatches_centered_pinch_pan_cancel_and_close_reset():
+    viewer = between("const lightboxGesture =", "function shareArticle()")
+    runtime = r'''
+const assert = require('node:assert/strict');
+
+class FakeClassList {
+  constructor(values = []) { this.values = new Set(values); }
+  add(value) { this.values.add(value); }
+  remove(value) { this.values.delete(value); }
+  contains(value) { return this.values.has(value); }
+}
+
+class FakeElement {
+  constructor(id) {
+    this.id = id;
+    this.attrs = new Map();
+    this.style = {};
+    this.classList = new FakeClassList();
+    this.listeners = {};
+    this.captured = [];
+    this.removed = [];
+  }
+  addEventListener(type, handler) {
+    (this.listeners[type] ||= []).push(handler);
+  }
+  setPointerCapture(pointerId) { this.captured.push(pointerId); }
+  setAttribute(name, value) { this.attrs.set(name, String(value)); }
+  removeAttribute(name) { this.removed.push(name); this.attrs.delete(name); }
+  getBoundingClientRect() {
+    return { left: 0, top: 0, width: this.clientWidth || 0, height: this.clientHeight || 0 };
+  }
+  focus() {}
+}
+
+const articleWrap = new FakeElement('articleWrap');
+const lb = new FakeElement('lb');
+lb.classList.add('open');
+const lbStage = new FakeElement('lbStage');
+lbStage.clientWidth = 320;
+lbStage.clientHeight = 640;
+const lbImg = new FakeElement('lbImg');
+lbImg.offsetWidth = 300;
+lbImg.offsetHeight = 400;
+const lbCloseBtn = new FakeElement('lbCloseBtn');
+const elements = { articleWrap, lb, lbStage, lbImg, lbCloseBtn };
+global.document = {
+  getElementById(id) { return elements[id]; },
+  addEventListener() {},
+  activeElement: null,
+};
+global.unlockBodyScroll = () => {};
+
+const parseTransform = () => {
+  const match = /^translate3d\(([-\d.]+)px,([-\d.]+)px,0\) scale\(([-\d.]+)\)$/.exec(lbImg.style.transform);
+  assert.ok(match, `expected transform, got ${lbImg.style.transform}`);
+  return { x: Number(match[1]), y: Number(match[2]), scale: Number(match[3]) };
+};
+const approx = (actual, expected, label) => {
+  assert.ok(Math.abs(actual - expected) < 1e-9, `${label}: expected ${expected}, got ${actual}`);
+};
+const dispatch = (type, pointerId, clientX, clientY) => {
+  const handlers = lbStage.listeners[type];
+  assert.equal(handlers.length, 1, `${type} listener registration`);
+  handlers[0]({ currentTarget: lbStage, pointerId, clientX, clientY });
+};
+
+eval(process.argv[1]);
+for (const type of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel']) {
+  assert.equal(lbStage.listeners[type].length, 1, `${type} registered exactly once`);
+}
+
+// The scale and translated midpoint are both preserved around the first pinch centre.
+dispatch('pointerdown', 1, 100, 300);
+dispatch('pointerdown', 2, 140, 300);
+dispatch('pointermove', 2, 180, 340);
+const scale = Math.hypot(80, 40) / 40;
+let transform = parseTransform();
+approx(transform.scale, scale, 'off-centre pinch scale');
+approx(transform.x, 20 + (scale - 1) * 40, 'off-centre pinch x');
+approx(transform.y, 20 + (scale - 1) * 20, 'off-centre pinch y');
+
+// Lifting one finger creates a one-finger drag baseline; oversized movement clamps it.
+dispatch('pointerup', 2, 180, 340);
+dispatch('pointermove', 1, 1000, 1000);
+transform = parseTransform();
+approx(transform.x, (300 * scale - 320) / 2, 'pan x clamp');
+approx(transform.y, (400 * scale - 640) / 2, 'pan y clamp');
+const beforeCancel = lbImg.style.transform;
+dispatch('pointercancel', 1, 1000, 1000);
+dispatch('pointermove', 1, 2000, 2000);
+assert.equal(lbImg.style.transform, beforeCancel, 'cancelled pointer no longer moves the image');
+
+// Runtime dispatch also proves both scale bounds.
+lb.classList.add('open');
+dispatch('pointerdown', 3, 10, 10);
+dispatch('pointerdown', 4, 20, 10);
+dispatch('pointermove', 4, 11, 10);
+assert.equal(parseTransform().scale, 1, 'pinch scale has a 1× floor');
+dispatch('pointercancel', 3, 10, 10);
+dispatch('pointercancel', 4, 11, 10);
+closeLightbox();
+lb.classList.add('open');
+dispatch('pointerdown', 5, 10, 10);
+dispatch('pointerdown', 6, 20, 10);
+dispatch('pointermove', 6, 1000, 10);
+assert.equal(parseTransform().scale, 4, 'pinch scale has a 4× cap');
+
+// Additional pointers are ignored, so the first two remain the gesture pair.
+const capturesBeforeThirdPointer = lbStage.captured.length;
+dispatch('pointerdown', 7, 30, 10);
+assert.equal(lbStage.captured.length, capturesBeforeThirdPointer, 'third pointer is ignored');
+assert.deepEqual(lbStage.captured.slice(-2), [5, 6], 'the first two pointers remain the gesture pair');
+closeLightbox();
+assert.equal(lbImg.style.transform, '', 'close clears the transform');
+assert.ok(lbImg.removed.includes('src'), 'close clears the image source');
+const capturesBeforeClosedPointer = lbStage.captured.length;
+dispatch('pointerdown', 8, 50, 50);
+assert.equal(lbStage.captured.length, capturesBeforeClosedPointer, 'closed viewer ignores pointer input');
+'''
+    result = subprocess.run(
+        ["node", "-e", runtime, viewer],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
