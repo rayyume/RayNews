@@ -55,6 +55,109 @@ def test_share_suspended_defaults_false_and_round_trips(share_env):
     assert settings["share_view_title"] == 1
 
 
+def test_real_legacy_app_db_preserves_share_intent_when_revision_columns_migrate(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / "legacy-raynews.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL UNIQUE,
+            password TEXT NOT NULL,
+            nickname TEXT NOT NULL DEFAULT '',
+            role TEXT NOT NULL DEFAULT 'user',
+            avatar_url TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE ai_configs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL UNIQUE,
+            provider TEXT NOT NULL DEFAULT 'openai',
+            api_key TEXT NOT NULL DEFAULT '',
+            endpoint TEXT NOT NULL DEFAULT 'https://api.openai.com/v1',
+            model TEXT NOT NULL DEFAULT 'gpt-4o-mini',
+            provider_type TEXT NOT NULL DEFAULT 'openai',
+            enabled INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE user_settings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL UNIQUE,
+            auto_translate_title INTEGER NOT NULL DEFAULT 0,
+            auto_translate_content INTEGER NOT NULL DEFAULT 0,
+            auto_title_summary_enabled INTEGER NOT NULL DEFAULT 0,
+            auto_summary_enabled INTEGER NOT NULL DEFAULT 0,
+            daily_summary_enabled INTEGER NOT NULL DEFAULT 0,
+            theme_preference TEXT NOT NULL DEFAULT 'system',
+            notification_config TEXT NOT NULL DEFAULT '{}',
+            share_ai_results INTEGER NOT NULL DEFAULT 0,
+            share_view_title INTEGER NOT NULL DEFAULT 0,
+            share_view_translation INTEGER NOT NULL DEFAULT 0,
+            share_view_summary INTEGER NOT NULL DEFAULT 0,
+            share_last_check_at TEXT,
+            share_last_check_ok INTEGER,
+            share_last_check_error TEXT
+        );
+        INSERT INTO users (id, email, password, nickname, role)
+        VALUES (7, 'legacy@example.com', 'hash', 'legacy', 'user');
+        INSERT INTO ai_configs (user_id, api_key, enabled)
+        VALUES (7, 'legacy-key', 1);
+        INSERT INTO user_settings (
+            user_id, share_ai_results, share_view_title,
+            share_view_translation, share_view_summary,
+            share_last_check_at, share_last_check_ok
+        ) VALUES (7, 1, 1, 0, 1, '2026-07-27T10:00:00', 1);
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    models.close_db()
+    monkeypatch.setattr(models, "DB_FILE", db_path)
+    settings = models.get_user_settings(7)
+    config = models.get_ai_config(7)
+
+    assert settings["share_ai_results"] == 1
+    assert settings["share_view_title"] == 1
+    assert settings["share_view_translation"] == 0
+    assert settings["share_view_summary"] == 1
+    assert settings["share_suspended"] == 0
+    assert settings["share_last_check_revision"] is None
+    assert settings["share_intent_revision"] == 1
+    assert config["revision"] == 1
+    assert web_server.is_share_active(settings) is False
+    models.close_db()
+
+
+def test_app_db_migration_propagates_nonduplicate_operational_error():
+    raw = sqlite3.connect(":memory:")
+    raw.execute(
+        """
+        CREATE TABLE ai_configs (
+            id INTEGER PRIMARY KEY,
+            user_id INTEGER NOT NULL UNIQUE,
+            provider_type TEXT NOT NULL DEFAULT 'openai'
+        )
+        """
+    )
+
+    class BrokenMigrationConnection:
+        def executescript(self, sql):
+            return raw.executescript(sql)
+
+        def execute(self, sql, *args, **kwargs):
+            if sql.startswith("ALTER TABLE ai_configs ADD COLUMN revision"):
+                raise sqlite3.OperationalError("database disk image is malformed")
+            return raw.execute(sql, *args, **kwargs)
+
+        def commit(self):
+            return raw.commit()
+
+    with pytest.raises(sqlite3.OperationalError, match="malformed"):
+        models._initialize_db(BrokenMigrationConnection())
+
+
 @pytest.mark.parametrize(
     ("settings", "expected"),
     (
@@ -120,6 +223,59 @@ def test_suspension_hides_cached_summary_and_translation_without_clearing_prefer
     assert settings["share_suspended"] == 1
 
 
+@pytest.mark.parametrize(
+    ("suspended", "view_translation", "view_title", "has_translation", "has_title"),
+    (
+        (1, 1, 1, False, False),
+        (0, 1, 0, True, False),
+        (0, 0, 1, False, False),
+        (0, 1, 1, True, True),
+    ),
+)
+def test_translation_cache_route_gates_html_and_embedded_title_independently(
+    share_env,
+    monkeypatch,
+    suspended,
+    view_translation,
+    view_title,
+    has_translation,
+    has_title,
+):
+    client, user_id = share_env
+    models.set_user_settings(
+        user_id,
+        share_ai_results=1,
+        share_view_title=view_title,
+        share_view_translation=view_translation,
+        share_view_summary=0,
+        share_suspended=suspended,
+        share_last_check_ok=0 if suspended else 1,
+    )
+    config = models.set_ai_config(user_id, api_key="key", enabled=1)
+    web_server._apply_share_connectivity_result(
+        user_id,
+        not suspended,
+        "AI API HTTP 401" if suspended else "",
+        config_revision=config["revision"],
+    )
+    monkeypatch.setattr(
+        web_server,
+        "_get_ai_result",
+        lambda article_id: {
+            "translation": '{"title":"共享译名","html":"<p>共享译文</p>"}',
+            "updated_at": "now",
+        },
+    )
+
+    data = client.get("/ai/result/42", headers=auth_headers(user_id)).get_json()
+
+    assert ("translation" in data) is has_translation
+    if has_translation:
+        payload = __import__("json").loads(data["translation"])
+        assert payload["html"] == "<p>共享译文</p>"
+        assert bool(payload.get("title")) is has_title
+
+
 def opted_in(user_id: int, *, suspended: int = 0):
     return models.set_user_settings(
         user_id,
@@ -143,6 +299,7 @@ def test_settings_returns_intent_suspension_and_effective_state(share_env):
     assert data["share_ai_results"] == 1
     assert data["share_suspended"] == 1
     assert data["share_active"] is False
+    assert "share_intent_revision" not in data
 
 
 def test_frontend_keeps_paused_preferences_visible_but_disabled():
@@ -519,6 +676,80 @@ def test_opt_out_winning_race_prevents_transition_notification(share_env, monkey
     settings = models.get_user_settings(user_id)
     assert settings["share_ai_results"] == 0
     assert settings["share_suspended"] == 0
+
+
+@pytest.mark.parametrize(
+    ("initial_suspended", "first_ok", "later_ok", "final_suspended"),
+    (
+        (0, False, True, 0),
+        (1, True, False, 1),
+    ),
+)
+def test_later_opposite_current_probe_retries_after_suspension_cas_mismatch(
+    share_env,
+    monkeypatch,
+    initial_suspended,
+    first_ok,
+    later_ok,
+    final_suspended,
+):
+    """A same-revision opposite probe must apply after the earlier real edge."""
+    _, user_id = share_env
+    opted_in(user_id, suspended=initial_suspended)
+    revision = _config_revision(user_id)
+    notices = []
+    notices_lock = threading.Lock()
+    original_get_settings = web_server.get_user_settings
+    original_transition = web_server.apply_share_connectivity_transition
+    both_initial_reads = threading.Barrier(2)
+    reads_lock = threading.Lock()
+    reads = 0
+    first_transition_done = threading.Event()
+    first_target = 0 if first_ok else 1
+    later_target = 0 if later_ok else 1
+
+    def synchronize_initial_read(uid):
+        nonlocal reads
+        settings = original_get_settings(uid)
+        with reads_lock:
+            reads += 1
+            synchronize = reads <= 2
+        if synchronize:
+            both_initial_reads.wait(timeout=5)
+        return settings
+
+    def order_transitions(*args, **kwargs):
+        expected = kwargs["expected_suspended"]
+        target = kwargs["next_suspended"]
+        if target == later_target and expected == initial_suspended:
+            assert first_transition_done.wait(timeout=5)
+        claimed = original_transition(*args, **kwargs)
+        if target == first_target and expected == initial_suspended:
+            first_transition_done.set()
+        return claimed
+
+    def record_notice(*args, **kwargs):
+        with notices_lock:
+            notices.append(args)
+
+    monkeypatch.setattr(web_server, "get_user_settings", synchronize_initial_read)
+    monkeypatch.setattr(
+        web_server, "apply_share_connectivity_transition", order_transitions
+    )
+    monkeypatch.setattr(web_server, "_notify_user", record_notice)
+
+    results = _run_concurrent_connectivity_results(
+        user_id,
+        (first_ok, "" if first_ok else "AI API HTTP 401", "2026-07-27T14:30:00", revision),
+        (later_ok, "" if later_ok else "AI API HTTP 401", "2026-07-27T14:30:01", revision),
+    )
+
+    assert sorted(results) == ["restored", "suspended"]
+    assert models.get_user_settings(user_id)["share_suspended"] == final_suspended
+    assert sorted(notice[1] for notice in notices) == [
+        "share_restored",
+        "share_suspended",
+    ]
 
 
 def test_share_error_drops_provider_body_and_redacts_common_credentials(share_env, monkeypatch):
@@ -1062,4 +1293,71 @@ def test_settings_enable_rejects_config_revision_changed_during_validation(
     assert settings["share_view_title"] == 0
     assert settings["share_suspended"] == 0
     assert web_server.is_share_active(settings) is False
+    assert notices == []
+
+
+def test_slow_settings_restore_cannot_overwrite_later_explicit_opt_out(
+    share_env, monkeypatch
+):
+    client, user_id = share_env
+    opted_in(user_id, suspended=1)
+    models.set_ai_config(user_id, api_key="validated-key", enabled=1)
+    observed_revision = models.get_user_settings(user_id)["share_intent_revision"]
+    probe_started = threading.Event()
+    allow_probe = threading.Event()
+    restore_response = {}
+    notices = []
+
+    def delayed_probe(config):
+        probe_started.set()
+        assert allow_probe.wait(timeout=5)
+        return {"ok": True, "response": "pong"}, 200
+
+    def restore_sharing():
+        try:
+            worker_client = web_server.app.test_client()
+            restore_response["response"] = worker_client.put(
+                "/settings",
+                json={
+                    "share_ai_results": 1,
+                    "share_view_title": 1,
+                    "share_view_translation": 1,
+                    "share_view_summary": 1,
+                },
+                headers=auth_headers(user_id),
+            )
+        finally:
+            models.close_db()
+
+    monkeypatch.setattr(web_server, "_run_ai_connection_test", delayed_probe)
+    monkeypatch.setattr(
+        web_server, "_notify_user", lambda *args, **kwargs: notices.append(args)
+    )
+    worker = threading.Thread(target=restore_sharing)
+    worker.start()
+    assert probe_started.wait(timeout=5)
+
+    disabled = client.put(
+        "/settings",
+        json={"share_ai_results": 0},
+        headers=auth_headers(user_id),
+    )
+    assert disabled.status_code == 200
+    opted_out = models.get_user_settings(user_id)
+    assert opted_out["share_intent_revision"] > observed_revision
+
+    allow_probe.set()
+    worker.join(timeout=10)
+    assert not worker.is_alive()
+
+    response = restore_response["response"]
+    assert response.status_code == 409
+    assert response.get_json()["share_check"]["status"] == "stale_settings"
+    settings = models.get_user_settings(user_id)
+    assert settings["share_ai_results"] == 0
+    assert settings["share_suspended"] == 0
+    assert settings["share_view_title"] == 0
+    assert settings["share_view_translation"] == 0
+    assert settings["share_view_summary"] == 0
+    assert settings["share_intent_revision"] == opted_out["share_intent_revision"]
     assert notices == []

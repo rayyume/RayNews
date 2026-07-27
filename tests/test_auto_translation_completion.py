@@ -1,9 +1,9 @@
-"""Automatic translation must publish its update only after article text commits."""
+"""Automatic translation must publish only after its gated cache commits."""
 
 import web_server
 
 
-def test_auto_translation_publishes_marker_after_translated_body_commit(monkeypatch):
+def test_auto_translation_publishes_marker_after_cache_without_body_writeback(monkeypatch):
     calls = []
 
     class TranslationService:
@@ -44,4 +44,4 @@ def test_auto_translation_publishes_marker_after_translated_body_commit(monkeypa
     )
 
     assert [call[0] for call in calls] == ["article", "cache", "marker"]
-    assert calls[0][3] == "<p>中文正文</p>"
+    assert calls[0][3] is None

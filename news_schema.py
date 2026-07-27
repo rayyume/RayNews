@@ -97,6 +97,17 @@ def ensure_article_schema(
         ).fetchone()
         if has_articles:
             columns = _article_columns(conn)
+            if "body_html" in columns:
+                _add_column_if_missing(conn, columns, "original_body_html", "TEXT")
+                # Existing databases predate the original-body column. Preserve
+                # their current canonical body before any future translation
+                # cache can be generated; never replace a previously captured
+                # original.
+                conn.execute(
+                    "UPDATE articles SET original_body_html = body_html "
+                    "WHERE (original_body_html IS NULL OR original_body_html = '') "
+                    "AND body_html IS NOT NULL AND body_html != ''"
+                )
             if include_source_columns and "feed_source" not in columns:
                 _add_column_if_missing(
                     conn, columns, "feed_source", "TEXT NOT NULL DEFAULT ''"

@@ -120,6 +120,7 @@ def init_db() -> sqlite3.Connection:
             has_full_content INTEGER DEFAULT 0,
             telegraph_url TEXT DEFAULT '',
             body_html TEXT DEFAULT '',
+            original_body_html TEXT DEFAULT '',
             summary TEXT DEFAULT ''
         )
     """)
@@ -149,8 +150,8 @@ def upsert_articles(
     """
     sql = """INSERT OR REPLACE INTO articles
         (id, title, source, feed_source, origin_source, time, date, timestamp, thumb,
-         has_full_content, telegraph_url, body_html, summary)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+         has_full_content, telegraph_url, body_html, original_body_html, summary)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
     rows = []
     deleted_ids = {
         int(row[0])
@@ -172,6 +173,7 @@ def upsert_articles(
             e.get("thumb", ""),
             1 if e.get("has_full_content") else 0,
             e.get("telegraph_url", ""),
+            e.get("body_html", ""),
             e.get("body_html", ""),
             e.get("summary", ""),
         ))
@@ -238,11 +240,18 @@ def backfill_missing_fulltext(conn: sqlite3.Connection) -> int:
                 """UPDATE articles
                       SET has_full_content = 1,
                           body_html = ?,
+                          original_body_html = ?,
                           thumb = ?,
                           origin_source = ?,
                           summary = ''
                     WHERE id = ?""",
-                (result["body_html"], new_thumb, origin, row["id"]),
+                (
+                    result["body_html"],
+                    result["body_html"],
+                    new_thumb,
+                    origin,
+                    row["id"],
+                ),
             )
             updated += 1
     if updated:

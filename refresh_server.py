@@ -794,6 +794,12 @@ def _build_news_detail_response(article_id: int) -> bytes:
         item["feed_source"] = item.get("feed_source") or item.get("source") or ""
         item["origin_source"] = item.get("origin_source") or ""
         item["source"] = item["feed_source"]
+        # /api/news/<id> is intentionally unauthenticated. Shared translated
+        # HTML is delivered only by the authenticated /ai/result endpoint.
+        item["body_html"] = (
+            item.get("original_body_html") or item.get("body_html") or ""
+        )
+        item.pop("original_body_html", None)
         item = _clean_article_display_fields(item)
         result = json.dumps(item, ensure_ascii=False).encode()
         return result

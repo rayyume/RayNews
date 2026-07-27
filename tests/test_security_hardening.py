@@ -115,7 +115,7 @@ def test_title_update_invalidates_refresh_server_cache(monkeypatch):
                 pass
 
 
-def test_body_translation_invalidates_refresh_server_cache(monkeypatch):
+def test_body_translation_does_not_mutate_or_invalidate_canonical_detail(monkeypatch):
     db_path = temp_db_path()
     calls = []
     monkeypatch.setattr(
@@ -132,7 +132,13 @@ def test_body_translation_invalidates_refresh_server_cache(monkeypatch):
 
         web_server.NEWS_DB = str(db_path)
         web_server._save_article_translation(1, body_html="<p>new body</p>")
-        assert ("http://127.0.0.1:8081/internal/cache-evict", {"id": 1}) in calls
+        conn = sqlite3.connect(db_path)
+        body_html = conn.execute(
+            "SELECT body_html FROM articles WHERE id = 1"
+        ).fetchone()[0]
+        conn.close()
+        assert body_html == "old body"
+        assert calls == []
     finally:
         web_server.NEWS_DB = old_news_db
         for suffix in ("", "-wal", "-shm"):

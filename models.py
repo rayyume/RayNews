@@ -64,7 +64,8 @@ CREATE TABLE IF NOT EXISTS user_settings (
     share_last_check_at     TEXT,
     share_last_check_ok     INTEGER,
     share_last_check_error  TEXT,
-    share_last_check_revision INTEGER
+    share_last_check_revision INTEGER,
+    share_intent_revision   INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS user_access_log (
@@ -122,56 +123,78 @@ _db_init_lock = threading.Lock()
 _initialized_db_paths: set[str] = set()
 
 
+def _table_columns(db: sqlite3.Connection, table: str) -> set[str]:
+    return {
+        str(row[1])
+        for row in db.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+
+
+def _add_column_if_missing(
+    db: sqlite3.Connection,
+    table: str,
+    column: str,
+    definition: str,
+) -> None:
+    """Add an app-DB column without hiding unrelated operational failures."""
+    if column in _table_columns(db, table):
+        return
+    try:
+        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    except sqlite3.OperationalError as exc:
+        # Only a concurrent identical migration may be accepted, and only
+        # after the schema itself confirms that the requested column exists.
+        refreshed = _table_columns(db, table)
+        if (
+            "duplicate column name" in str(exc).lower()
+            and column in refreshed
+        ):
+            return
+        raise
+
+
 def _initialize_db(db: sqlite3.Connection) -> None:
     """Create and migrate the model database on a newly opened connection."""
     db.executescript(SCHEMA_SQL)
-    # Migration: add provider_type column if it doesn't exist (pre-v3 schema)
-    try:
-        db.execute("ALTER TABLE ai_configs ADD COLUMN provider_type TEXT NOT NULL DEFAULT 'openai'")
-    except sqlite3.OperationalError:
-        pass  # column already exists
-    try:
-        db.execute("ALTER TABLE ai_configs ADD COLUMN revision INTEGER NOT NULL DEFAULT 1")
-    except sqlite3.OperationalError:
-        pass  # column already exists
-    try:
-        db.execute("ALTER TABLE user_settings ADD COLUMN auto_summary_enabled INTEGER NOT NULL DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass  # column already exists
-    try:
-        db.execute("ALTER TABLE user_settings ADD COLUMN auto_title_summary_enabled INTEGER NOT NULL DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass  # column already exists
-    try:
-        db.execute("ALTER TABLE user_settings ADD COLUMN theme_preference TEXT NOT NULL DEFAULT 'system'")
-    except sqlite3.OperationalError:
-        pass  # column already exists
-    try:
-        db.execute("ALTER TABLE users ADD COLUMN visit_count INTEGER NOT NULL DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass  # column already exists
-    try:
-        db.execute("ALTER TABLE users ADD COLUMN last_seen_at TEXT NOT NULL DEFAULT ''")
-    except sqlite3.OperationalError:
-        pass  # column already exists
-    for _col_sql in (
-        "ALTER TABLE user_settings ADD COLUMN share_ai_results INTEGER NOT NULL DEFAULT 0",
-        "ALTER TABLE user_settings ADD COLUMN share_view_title INTEGER NOT NULL DEFAULT 0",
-        "ALTER TABLE user_settings ADD COLUMN share_view_translation INTEGER NOT NULL DEFAULT 0",
-        "ALTER TABLE user_settings ADD COLUMN share_view_summary INTEGER NOT NULL DEFAULT 0",
-        "ALTER TABLE user_settings ADD COLUMN share_suspended INTEGER NOT NULL DEFAULT 0",
-        "ALTER TABLE user_settings ADD COLUMN share_last_check_at TEXT",
-        "ALTER TABLE user_settings ADD COLUMN share_last_check_ok INTEGER",
-        "ALTER TABLE user_settings ADD COLUMN share_last_check_error TEXT",
-        "ALTER TABLE user_settings ADD COLUMN share_last_check_revision INTEGER",
+    for table, column, definition in (
+        ("ai_configs", "provider_type", "TEXT NOT NULL DEFAULT 'openai'"),
+        ("ai_configs", "revision", "INTEGER NOT NULL DEFAULT 1"),
+        ("user_settings", "auto_summary_enabled", "INTEGER NOT NULL DEFAULT 0"),
+        (
+            "user_settings",
+            "auto_title_summary_enabled",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "user_settings",
+            "theme_preference",
+            "TEXT NOT NULL DEFAULT 'system'",
+        ),
+        ("users", "visit_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("users", "last_seen_at", "TEXT NOT NULL DEFAULT ''"),
+        ("user_settings", "share_ai_results", "INTEGER NOT NULL DEFAULT 0"),
+        ("user_settings", "share_view_title", "INTEGER NOT NULL DEFAULT 0"),
+        (
+            "user_settings",
+            "share_view_translation",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
+        ("user_settings", "share_view_summary", "INTEGER NOT NULL DEFAULT 0"),
+        ("user_settings", "share_suspended", "INTEGER NOT NULL DEFAULT 0"),
+        ("user_settings", "share_last_check_at", "TEXT"),
+        ("user_settings", "share_last_check_ok", "INTEGER"),
+        ("user_settings", "share_last_check_error", "TEXT"),
+        ("user_settings", "share_last_check_revision", "INTEGER"),
+        (
+            "user_settings",
+            "share_intent_revision",
+            "INTEGER NOT NULL DEFAULT 1",
+        ),
         # notifications gained a body format ('plain'|'markdown') after the
         # table already shipped, so existing DBs need the column backfilled.
-        "ALTER TABLE notifications ADD COLUMN format TEXT NOT NULL DEFAULT 'plain'",
+        ("notifications", "format", "TEXT NOT NULL DEFAULT 'plain'"),
     ):
-        try:
-            db.execute(_col_sql)
-        except sqlite3.OperationalError:
-            pass  # column already exists
+        _add_column_if_missing(db, table, column, definition)
     # Registration now requires a username, stored in the nickname column.
     # Backfill existing accounts that predate this requirement: keep their
     # nickname if they set one, otherwise fall back to their email.
@@ -537,7 +560,7 @@ def get_user_settings(user_id: int) -> dict | None:
         "s.daily_summary_enabled, s.theme_preference, s.notification_config, "
         "s.share_ai_results, s.share_view_title, s.share_view_translation, s.share_view_summary, "
         "s.share_suspended, s.share_last_check_at, s.share_last_check_ok, "
-        "s.share_last_check_error, s.share_last_check_revision, "
+        "s.share_last_check_error, s.share_last_check_revision, s.share_intent_revision, "
         "c.revision AS share_current_config_revision "
         "FROM user_settings AS s LEFT JOIN ai_configs AS c ON c.user_id = s.user_id "
         "WHERE s.user_id = ?",
@@ -568,10 +591,18 @@ def set_user_settings(user_id: int, **kwargs) -> dict:
         return get_user_settings(user_id) or {}
     db = get_db()
     existing = get_user_settings(user_id)
+    share_intent_fields = {
+        "share_ai_results",
+        "share_view_title",
+        "share_view_translation",
+        "share_view_summary",
+    }
     if existing:
-        sets = ", ".join(f"{k} = ?" for k in updates)
+        sets = [f"{k} = ?" for k in updates]
+        if share_intent_fields.intersection(updates):
+            sets.append("share_intent_revision = share_intent_revision + 1")
         vals = list(updates.values()) + [user_id]
-        db.execute(f"UPDATE user_settings SET {sets} WHERE user_id = ?", vals)
+        db.execute(f"UPDATE user_settings SET {', '.join(sets)} WHERE user_id = ?", vals)
     else:
         keys = ", ".join(updates.keys())
         placeholders = ", ".join("?" for _ in updates)
@@ -585,9 +616,12 @@ def set_user_settings(user_id: int, **kwargs) -> dict:
 
 
 def set_user_settings_for_ai_config_revision(
-    user_id: int, expected_config_revision: int, **kwargs
+    user_id: int,
+    expected_config_revision: int,
+    expected_intent_revision: int,
+    **kwargs,
 ) -> dict | None:
-    """Persist settings only while the validated personal config is current."""
+    """Persist settings only while the validated config and user intent are current."""
     allowed = {
         "auto_translate_title", "auto_translate_content",
         "auto_title_summary_enabled", "auto_summary_enabled", "daily_summary_enabled",
@@ -600,16 +634,31 @@ def set_user_settings_for_ai_config_revision(
         return None
     try:
         expected_config_revision = int(expected_config_revision)
+        expected_intent_revision = int(expected_intent_revision)
     except (TypeError, ValueError):
         return None
 
     db = get_db()
-    sets = ", ".join(f"{key} = ?" for key in updates)
+    share_intent_fields = {
+        "share_ai_results",
+        "share_view_title",
+        "share_view_translation",
+        "share_view_summary",
+    }
+    sets = [f"{key} = ?" for key in updates]
+    if share_intent_fields.intersection(updates):
+        sets.append("share_intent_revision = share_intent_revision + 1")
     values = list(updates.values())
     updated = db.execute(
-        f"UPDATE user_settings SET {sets} "
-        "WHERE user_id = ? AND COALESCE((SELECT revision FROM ai_configs WHERE user_id = ?), 0) = ?",
-        values + [user_id, user_id, expected_config_revision],
+        f"UPDATE user_settings SET {', '.join(sets)} "
+        "WHERE user_id = ? AND share_intent_revision = ? "
+        "AND COALESCE((SELECT revision FROM ai_configs WHERE user_id = ?), 0) = ?",
+        values + [
+            user_id,
+            expected_intent_revision,
+            user_id,
+            expected_config_revision,
+        ],
     ).rowcount == 1
     if not updated:
         keys = ", ".join(updates.keys())
@@ -617,8 +666,17 @@ def set_user_settings_for_ai_config_revision(
         inserted = db.execute(
             f"INSERT OR IGNORE INTO user_settings (user_id, {keys}) "
             f"SELECT ?, {placeholders} "
-            "WHERE COALESCE((SELECT revision FROM ai_configs WHERE user_id = ?), 0) = ?",
-            [user_id] + values + [user_id, expected_config_revision],
+            "WHERE ? = 0 "
+            "AND NOT EXISTS (SELECT 1 FROM user_settings WHERE user_id = ?) "
+            "AND COALESCE((SELECT revision FROM ai_configs WHERE user_id = ?), 0) = ?",
+            [user_id]
+            + values
+            + [
+                expected_intent_revision,
+                user_id,
+                user_id,
+                expected_config_revision,
+            ],
         ).rowcount == 1
         if not inserted:
             db.commit()

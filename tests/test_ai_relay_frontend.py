@@ -45,6 +45,18 @@ def _share_connection_actions_block():
     return HTML[start:end]
 
 
+def _user_settings_sync_block():
+    start = HTML.index("async function loadUserSettings()")
+    end = HTML.index("// ─── General Settings", start)
+    return HTML[start:end]
+
+
+def _notification_status_block():
+    start = HTML.index("let notifDetailId")
+    end = HTML.index("function openNotifications()", start)
+    return HTML[start:end]
+
+
 def _title_list_rendering_block():
     source_start = HTML.index("function renderSourceArticles(")
     source_end = HTML.index("async function saveSourceRow(", source_start)
@@ -105,7 +117,9 @@ context.fetch = async url => {{
     ? {{ share_check: {{ error: 'AI API HTTP 401' }} }}
     : mode === 'manual-failed'
       ? {{ error: 'AI API HTTP 401', share_check: {{ error: 'AI API HTTP 401' }} }}
-      : {{ response: 'pong', share_check: {{ restored: true }} }};
+      : mode === 'save-stale'
+        ? {{ share_check: {{ status: 'stale', restored: false }} }}
+        : {{ response: 'pong', share_check: {{ restored: true }} }};
   return {{ status: mode === 'manual-failed' ? 502 : 200, text: async () => JSON.stringify(body) }};
 }};
 vm.createContext(context);
@@ -125,15 +139,145 @@ assert.equal(renders, 2);
 assert.equal(renderedTitles.at(-1), 'Original title');
 assert.equal(statuses.at(-1)[0], '❌ AI API HTTP 401');
 
-mode = 'manual-restored';
-await context.testAIConnection();
+mode = 'save-stale';
+await context.saveAIConfig();
 assert.equal(reloads, 3);
 assert.equal(renders, 3);
+assert.equal(renderedTitles.at(-1), 'Original title');
+
+mode = 'manual-restored';
+await context.testAIConnection();
+assert.equal(reloads, 4);
+assert.equal(renders, 4);
 assert.match(statuses.at(-1)[0], /共享状态已自动恢复/);
 }})().catch(error => {{ console.error(error && error.stack ? error.stack : error); process.exitCode = 1; }});
 """
     result = subprocess.run(["node", "-e", script], cwd=ROOT,
                             capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_central_share_state_sync_revokes_and_recovers_every_open_surface():
+    script = f"""
+const assert = require('assert');
+const vm = require('vm');
+const classes = open => ({{ contains: name => name === 'open' && open }});
+const h1 = {{ textContent: 'Shared title' }};
+const body = {{
+  innerHTML: '<p>共享译文</p>',
+  dataset: {{
+    originalHtml: '<p>Original body</p>',
+    originalTitle: 'Original title',
+    translatedHtml: '<p>共享译文</p>',
+    translatedTitle: 'Shared title',
+    showingTranslation: 'true',
+    sharedTranslation: 'true',
+  }},
+}};
+const summary = {{ removed: false, remove() {{ this.removed = true; }} }};
+const elements = {{
+  overlay: {{ dataset: {{ articleId: '42' }}, classList: classes(true) }},
+  articleBody: body,
+  articleWrap: {{ querySelector: selector => selector === 'h1' ? h1 : null }},
+  aiSummaryTop: summary,
+  favOverlay: {{ classList: classes(true) }},
+  sourceArticlesOverlay: {{ classList: classes(true) }},
+  searchOverlay: {{ classList: classes(true) }},
+}};
+const calls = [];
+const context = {{
+  console,
+  userAutoSettings: {{ share_active: true, share_view_title: true }},
+  articleBodyCache: {{
+    42: {{ id: 42, title: 'Shared title', original_title: 'Original title', body_html: '<p>Original body</p>' }},
+  }},
+  news: [{{ id: 42, title: 'Shared title', original_title: 'Original title' }}],
+  searchItems: [{{ id: 42, title: 'Shared title', original_title: 'Original title' }}],
+  sourceArticlesState: {{ items: [{{ id: 42, title: 'Shared title', original_title: 'Original title' }}] }},
+  document: {{
+    getElementById: id => elements[id] || null,
+  }},
+  applyThemePreference: () => {{}},
+  renderList: () => calls.push('main'),
+  renderSearchResults: () => calls.push('search'),
+  loadFavorites: async () => calls.push('favorites'),
+  renderSourceArticles: () => calls.push('source'),
+  autoDisplaySummary: async id => calls.push('detail-shared-' + id),
+}};
+vm.createContext(context);
+vm.runInContext({json.dumps(_display_title_block() + _user_settings_sync_block())}, context);
+(async () => {{
+  await context.synchronizeShareAccessState({{
+    share_active: false,
+    share_view_title: true,
+    share_view_translation: true,
+    share_view_summary: true,
+  }});
+  assert.equal(body.innerHTML, '<p>Original body</p>');
+  assert.equal(h1.textContent, 'Original title');
+  assert.equal(summary.removed, true);
+  assert.equal(body.dataset.translatedHtml, undefined);
+  assert.deepEqual(calls, ['main', 'search', 'favorites', 'source']);
+
+  summary.removed = false;
+  await context.synchronizeShareAccessState({{
+    share_active: true,
+    share_view_title: true,
+    share_view_translation: true,
+    share_view_summary: true,
+  }});
+  assert.equal(h1.textContent, 'Shared title');
+  assert.deepEqual(calls, [
+    'main', 'search', 'favorites', 'source',
+    'main', 'search', 'favorites', 'source', 'detail-shared-42',
+  ]);
+}})().catch(error => {{ console.error(error && error.stack ? error.stack : error); process.exitCode = 1; }});
+"""
+    result = subprocess.run(
+        ["node", "-e", script], cwd=ROOT, capture_output=True, text=True, timeout=10
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_notification_poll_refreshes_settings_once_per_share_transition():
+    script = f"""
+const assert = require('assert');
+const vm = require('vm');
+let response = {{ items: [{{ id: 1, type: 'general' }}], unread: 1 }};
+let settingsRefreshes = 0;
+const context = {{
+  console,
+  authToken: 'token',
+  notifItems: [],
+  notifUnread: 0,
+  document: {{ querySelector: () => null, getElementById: () => null }},
+  apiFetch: async () => response,
+  loadUserSettings: async () => {{ settingsRefreshes++; }},
+}};
+vm.createContext(context);
+vm.runInContext({json.dumps(_notification_status_block())}, context);
+(async () => {{
+  await context.refreshNotifStatus();
+  assert.equal(settingsRefreshes, 0);
+  response = {{
+    items: [{{ id: 2, type: 'share_suspended' }}, {{ id: 1, type: 'general' }}],
+    unread: 2,
+  }};
+  await context.refreshNotifStatus();
+  assert.equal(settingsRefreshes, 1);
+  await context.refreshNotifStatus();
+  assert.equal(settingsRefreshes, 1);
+  response = {{
+    items: [{{ id: 3, type: 'share_restored' }}, {{ id: 2, type: 'share_suspended' }}],
+    unread: 3,
+  }};
+  await context.refreshNotifStatus();
+  assert.equal(settingsRefreshes, 2);
+}})().catch(error => {{ console.error(error && error.stack ? error.stack : error); process.exitCode = 1; }});
+"""
+    result = subprocess.run(
+        ["node", "-e", script], cwd=ROOT, capture_output=True, text=True, timeout=10
+    )
     assert result.returncode == 0, result.stderr or result.stdout
 
 
@@ -409,6 +553,44 @@ context.aiTranslate = async () => { manualCalls++; };
 await context.autoDisplaySummary(42);
 assert.equal(manualCalls, 0);
 assert.equal(body.innerHTML, '<p>English original</p>');
+""")
+
+
+def test_cached_translation_html_and_title_follow_independent_runtime_gates():
+    _run_auto_display("""
+const body = { dataset: {}, innerHTML: '<p>English original</p>', querySelectorAll: () => [] };
+const h1 = { textContent: 'Original title' };
+const wrap = {
+  querySelector: selector => selector === 'h1' ? h1 : null,
+  insertBefore: () => {},
+  prepend: () => {},
+};
+context.document.getElementById = id => id === 'articleBody' ? body : (id === 'articleWrap' ? wrap : null);
+context.fetch = async () => ({ json: async () => ({
+  translation: JSON.stringify({ title: '共享译名', html: '<p>共享译文</p>' }),
+}) });
+let synced = 0;
+context.syncArticleTitle = () => { synced++; };
+context.userAutoSettings = {
+  share_active: true,
+  share_view_translation: true,
+  share_view_title: false,
+};
+await context.autoDisplaySummary(42);
+assert.equal(body.innerHTML, '<p>共享译文</p>');
+assert.equal(h1.textContent, 'Original title');
+assert.equal(synced, 0);
+
+body.innerHTML = '<p>English original again</p>';
+body.dataset = {};
+context.userAutoSettings.share_view_translation = false;
+await context.autoDisplaySummary(42);
+assert.equal(body.innerHTML, '<p>English original again</p>');
+
+context.userAutoSettings.share_view_translation = true;
+context.userAutoSettings.share_active = false;
+await context.autoDisplaySummary(42);
+assert.equal(body.innerHTML, '<p>English original again</p>');
 """)
 
 

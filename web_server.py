@@ -1200,12 +1200,13 @@ def _apply_share_connectivity_result(
     checked_at: str | None = None,
     config_revision: int | None = None,
 ) -> str:
-    """Apply a probe only while the exact tested AI config is still current."""
-    import datetime as _dt
+    """Apply a probe only while the exact tested AI config is still current.
 
-    settings = get_user_settings(user_id) or {}
-    if not _is_enabled_value(settings.get("share_ai_results")):
-        return "not_opted_in"
+    A suspension CAS can lose to another current-revision probe. Re-read a
+    bounded number of times so a later opposite result still owns the edge it
+    actually applies, while opt-out and config changes remain terminal.
+    """
+    import datetime as _dt
 
     if config_revision is None:
         config_revision = (get_ai_config(user_id) or {}).get("revision", 0)
@@ -1215,25 +1216,39 @@ def _apply_share_connectivity_result(
         return "validation_failed"
 
     checked_at = checked_at or _dt.datetime.now().isoformat(timespec="seconds")
-    was_suspended = _is_enabled_value(settings.get("share_suspended"))
     target_suspended = 0 if ok else 1
     safe_error = None if ok else _compact_share_error(error)
-    claimed = apply_share_connectivity_transition(
-        user_id,
-        expected_suspended=int(was_suspended),
-        expected_config_revision=config_revision,
-        next_suspended=target_suspended,
-        checked_at=checked_at,
-        check_ok=int(ok),
-        error=safe_error,
-    )
-    if not claimed:
-        latest_settings = get_user_settings(user_id) or {}
-        if not _is_enabled_value(latest_settings.get("share_ai_results")):
+    was_suspended = False
+    claimed = False
+    for attempt in range(3):
+        settings = get_user_settings(user_id) or {}
+        if not _is_enabled_value(settings.get("share_ai_results")):
             return "not_opted_in"
-        current_revision = (get_ai_config(user_id) or {}).get("revision", 0)
-        if int(current_revision) != config_revision:
+        current_revision = settings.get("share_current_config_revision")
+        try:
+            current_revision = int(current_revision) if current_revision is not None else 0
+        except (TypeError, ValueError):
             return "stale"
+        if current_revision != config_revision:
+            return "stale"
+
+        was_suspended = _is_enabled_value(settings.get("share_suspended"))
+        # A failed CAS followed by the same target means the competing probe
+        # already applied this result. It is not another real edge.
+        if attempt and int(was_suspended) == target_suspended:
+            return "unchanged"
+        claimed = apply_share_connectivity_transition(
+            user_id,
+            expected_suspended=int(was_suspended),
+            expected_config_revision=config_revision,
+            next_suspended=target_suspended,
+            checked_at=checked_at,
+            check_ok=int(ok),
+            error=safe_error,
+        )
+        if claimed:
+            break
+    if not claimed:
         return "unchanged"
 
     if ok:
@@ -2447,10 +2462,12 @@ def _fetch_untranslated_articles(config: dict, limit: int = AUTO_TRANSLATION_BAT
     selected = []
     for row in rows:
         article = dict(row)
+        _, cached_html = _cached_full_translation(article.get("translation"))
         title_needed = translate_title and _needs_translation(article.get("title", ""))
         content_needed = (
             translate_content
             and bool(article.get("body_html"))
+            and not cached_html
             and _needs_translation(article.get("body_html") or article.get("summary") or "")
         )
         if title_needed or content_needed:
@@ -2464,29 +2481,14 @@ def _fetch_untranslated_articles(config: dict, limit: int = AUTO_TRANSLATION_BAT
 
 def _save_article_translation(article_id: int, title: str | None = None,
                               body_html: str | None = None) -> bool:
+    """Persist only title metadata; translated bodies live in ai_results.
+
+    ``body_html`` remains accepted for compatibility with callers/tests but is
+    deliberately never written to the canonical unauthenticated article row.
+    """
     if not os.path.exists(NEWS_DB):
         return False
-    sets = []
-    vals = []
-    if title:
-        _save_article_title_update(article_id, title, "translation")
-    if body_html:
-        sets.append("body_html = ?")
-        vals.append(body_html)
-    if not sets:
-        return False
-    vals.append(article_id)
-    conn = sqlite3.connect(NEWS_DB, timeout=30)
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        result = conn.execute(f"UPDATE articles SET {', '.join(sets)} WHERE id = ?", vals)
-        conn.commit()
-        # _save_article_title_update() above already invalidates on a title
-        # change; body_html has no such path, so cover it here too.
-        _invalidate_refresh_server_cache(article_id)
-        return result.rowcount > 0
-    finally:
-        conn.close()
+    return bool(title and _save_article_title_update(article_id, title, "translation"))
 
 
 def _cached_full_translation(translation: str | None) -> tuple[str, str]:
@@ -2544,16 +2546,12 @@ def _translate_article_background(article: dict, config: dict) -> bool:
     elif article.get("translate_title_needed"):
         translated_title = svc.translate_title(article.get("title", ""), "zh-CN")
 
-    body_writeback_committed = _save_article_translation(
-        article_id, title=translated_title, body_html=translated_html
-    )
-    # The browser's translation-update marker is visible independently of the
-    # article detail row.  Publish it only after the translated body commit so
-    # a poll can never evict a detail cache and then re-fetch English text.
+    _save_article_translation(article_id, title=translated_title)
+    # Publish only after the authenticated shared cache commit. The canonical
+    # detail body remains original and is safe for unauthenticated readers.
     if translation_cache_data is not None:
         _save_ai_result(article_id, translation=translation_cache_data)
-        if body_writeback_committed:
-            _publish_translation_update(article_id)
+        _publish_translation_update(article_id)
     return bool(translated_title or translated_html)
 
 
@@ -3639,6 +3637,16 @@ def ai_get_result(article_id):
         cached.pop("summary_error_at", None)
     if not share_active or not settings.get("share_view_translation"):
         cached.pop("translation", None)
+    elif not settings.get("share_view_title") and cached.get("translation"):
+        translation = str(cached["translation"]).strip()
+        if translation.startswith("{"):
+            try:
+                payload = json.loads(translation)
+            except (json.JSONDecodeError, TypeError):
+                payload = None
+            if isinstance(payload, dict):
+                payload.pop("title", None)
+                cached["translation"] = json.dumps(payload, ensure_ascii=False)
     return jsonify(cached)
 
 
@@ -4621,6 +4629,7 @@ def _settings_response(settings: dict | None) -> dict:
     safe["notification_config"] = nc
     safe.pop("share_last_check_revision", None)
     safe.pop("share_current_config_revision", None)
+    safe.pop("share_intent_revision", None)
     return safe
 
 @app.route("/settings", methods=["GET"])
@@ -4683,6 +4692,9 @@ def update_settings():
     share_sub_keys = ("share_view_title", "share_view_translation", "share_view_summary")
     share_check_ok = False
     share_check_revision = 0
+    observed_share_intent_revision = int(
+        (get_user_settings(g.user_id) or {}).get("share_intent_revision") or 0
+    )
     if "share_ai_results" in data:
         if _is_enabled_value(data.get("share_ai_results")):
             user_ai_config = get_ai_config(g.user_id)
@@ -4749,15 +4761,27 @@ def update_settings():
             }), 400
     if share_check_ok:
         settings = set_user_settings_for_ai_config_revision(
-            g.user_id, share_check_revision, **data
+            g.user_id,
+            share_check_revision,
+            observed_share_intent_revision,
+            **data,
         )
         if settings is None:
+            share_intent_changed = int(
+                (get_user_settings(g.user_id) or {}).get("share_intent_revision")
+                or 0
+            ) != observed_share_intent_revision
+            stale_error = (
+                "Sharing settings changed during validation; retry enabling sharing"
+                if share_intent_changed
+                else "AI config changed during validation; retry enabling sharing"
+            )
             return jsonify({
-                "error": "AI config changed during validation; retry enabling sharing",
+                "error": stale_error,
                 "share_check": {
                     "ok": False,
-                    "status": "stale_validation",
-                    "error": "AI config changed during validation; retry enabling sharing",
+                    "status": "stale_settings" if share_intent_changed else "stale_validation",
+                    "error": stale_error,
                 },
             }), 409
     else:

@@ -3213,21 +3213,19 @@ async function saveAIConfig() {
       showSettingsStatus('❌ 服务器返回异常: ' + text.substring(0, 200), 'err');
       return;
     }
+    await refreshShareStateAfterCheck(data.share_check);
     if (data.error) {
-      await refreshShareStateAfterCheck(data.share_check);
       showSettingsStatus('❌ ' + data.error, 'err');
       return;
     }
     if (data.share_check?.restored) {
       showSettingsStatus('✅ AI 配置已保存，共享状态已自动恢复', 'ok');
-      await refreshShareStateAfterCheck(data.share_check);
     } else if (data.share_check?.error) {
       showSettingsStatus(
         '⚠️ AI 配置已保存，但连接校验失败，共享仍处于暂停状态：'
           + data.share_check.error,
         'err',
       );
-      await refreshShareStateAfterCheck(data.share_check);
     } else {
       showSettingsStatus('✅ AI 配置已保存');
     }
@@ -3260,22 +3258,21 @@ async function testAIConnection() {
       }
       return;
     }
+    await refreshShareStateAfterCheck(testData.share_check);
     if (testData.error) {
-      await refreshShareStateAfterCheck(testData.share_check);
       showSettingsStatus('❌ ' + testData.error, 'err');
       return;
     }
     if (testData.share_check?.restored) {
       showSettingsStatus('✅ 连接成功，共享状态已自动恢复！模型响应：' + (testData.response || 'ok'), 'ok');
-      await refreshShareStateAfterCheck(testData.share_check);
     } else {
       showSettingsStatus('✅ 连接成功！模型响应：' + (testData.response || 'ok'), 'ok');
     }
   } catch (e) { showSettingsStatus('❌ 测试失败: ' + e.message, 'err'); }
 }
 
-// A personal API probe may change sharing access even when its top-level
-// response is an error. Reloading settings re-renders title/result gates.
+// Every share_check is authoritative, including stale/unchanged/error results.
+// Reloading settings centralizes all visible access revocation/recovery.
 async function refreshShareStateAfterCheck(shareCheck) {
   if (shareCheck) await loadUserSettings();
 }
@@ -3669,7 +3666,7 @@ async function loadUserSettings() {
   try {
     const data = await apiFetch('/settings');
     if (!data) return;
-    userAutoSettings = {
+    const nextSettings = {
       auto_translate_title: !!data.auto_translate_title,
       auto_translate_content: !!data.auto_translate_content,
       auto_summary_enabled: !!data.auto_summary_enabled,
@@ -3684,9 +3681,102 @@ async function loadUserSettings() {
       share_last_check_ok: data.share_last_check_ok,
       share_last_check_error: data.share_last_check_error || null,
     };
-    applyThemePreference(userAutoSettings.theme_preference);
-    renderList();
+    applyThemePreference(nextSettings.theme_preference);
+    await synchronizeShareAccessState(nextSettings);
   } catch (e) {}
+}
+
+function findOpenArticleShareData(articleId) {
+  const numericId = Number(articleId);
+  return articleBodyCache[numericId]
+    || news.find(item => Number(item.id) === numericId)
+    || searchItems.find(item => Number(item.id) === numericId)
+    || (sourceArticlesState.items || []).find(item => Number(item.id) === numericId)
+    || null;
+}
+
+function synchronizeOpenArticleShareView(previousSettings, nextSettings) {
+  const overlay = document.getElementById('overlay');
+  if (!overlay || !overlay.classList.contains('open')) return 0;
+  const articleId = Number(overlay.dataset.articleId);
+  if (!articleId) return 0;
+
+  const bodyEl = document.getElementById('articleBody');
+  const wrap = document.getElementById('articleWrap');
+  const h1 = wrap ? wrap.querySelector('h1') : null;
+  const article = findOpenArticleShareData(articleId);
+  const canViewTranslation = !!(
+    nextSettings.share_active && nextSettings.share_view_translation
+  );
+  const canViewSummary = !!(
+    nextSettings.share_active && nextSettings.share_view_summary
+  );
+  const canViewTitle = !!(
+    nextSettings.share_active && nextSettings.share_view_title
+  );
+
+  if (!canViewSummary) {
+    const summary = document.getElementById('aiSummaryTop');
+    if (summary) summary.remove();
+  }
+  if (bodyEl && !canViewTranslation && bodyEl.dataset.originalHtml) {
+    bodyEl.innerHTML = bodyEl.dataset.originalHtml;
+    const button = document.querySelector
+      ? document.querySelector('.ai-translate-btn')
+      : null;
+    if (button) button.textContent = '翻译';
+    delete bodyEl.dataset.translatedHtml;
+    delete bodyEl.dataset.translatedTitle;
+    delete bodyEl.dataset.showingTranslation;
+    delete bodyEl.dataset.sharedTranslation;
+  } else if (bodyEl && !canViewTitle && bodyEl.dataset.translatedTitle) {
+    bodyEl.dataset.translatedTitle = '';
+  }
+
+  if (h1) {
+    const displayed = article ? displayTitle(article) : (
+      (!canViewTitle && bodyEl && bodyEl.dataset.originalTitle)
+        ? bodyEl.dataset.originalTitle
+        : ''
+    );
+    if (displayed) h1.textContent = displayed;
+  }
+
+  return (
+    previousSettings
+    && !previousSettings.share_active
+    && nextSettings.share_active
+  ) ? articleId : 0;
+}
+
+async function synchronizeShareAccessState(nextSettings) {
+  const previousSettings = userAutoSettings || {};
+  userAutoSettings = nextSettings || {};
+  renderList();
+
+  const searchOverlay = document.getElementById('searchOverlay');
+  if (searchOverlay && searchOverlay.classList.contains('open')) {
+    renderSearchResults();
+  }
+  const favoriteOverlay = document.getElementById('favOverlay');
+  const favoritesPromise = (
+    favoriteOverlay && favoriteOverlay.classList.contains('open')
+  ) ? loadFavorites() : Promise.resolve();
+  const sourceOverlay = document.getElementById('sourceArticlesOverlay');
+  if (sourceOverlay && sourceOverlay.classList.contains('open')) {
+    renderSourceArticles(sourceArticlesState.items || []);
+  }
+
+  const recoveredArticleId = synchronizeOpenArticleShareView(
+    previousSettings,
+    userAutoSettings,
+  );
+  await favoritesPromise;
+  if (recoveredArticleId) {
+    // Fetch again through the authenticated, current settings gate. Never
+    // resurrect translated HTML from the pre-revocation dataset/cache.
+    await autoDisplaySummary(recoveredArticleId);
+  }
 }
 
 // ─── General Settings ────────────────────────────────────
@@ -4427,15 +4517,23 @@ async function aiTranslate(articleId) {
     // 1) Server already has a shared result — just show it, no LLM call.
     const cachedResp = await fetch('/ai/result/' + articleId, { headers: { 'Authorization': 'Bearer ' + authToken } });
     const cached = cachedResp.ok ? await cachedResp.json().catch(() => null) : null;
-    if (cached && cached.translation) {
+    if (
+      cached
+      && cached.translation
+      && userAutoSettings?.share_active
+      && userAutoSettings?.share_view_translation
+    ) {
       const t = cached.translation.trim();
       if (t.startsWith('{')) {
         let cachedData = null;
         try { cachedData = JSON.parse(t); } catch (e) { cachedData = null; }
         if (cachedData && cachedData.html) {
-          applyTranslation(cachedData.html, cachedData.title || '');
+          const cachedTitle = userAutoSettings?.share_view_title
+            ? (cachedData.title || '')
+            : '';
+          applyTranslation(cachedData.html, cachedTitle);
           showToast('✅ 翻译完成');
-          syncArticleTitle(articleId, cachedData.title || '');
+          if (cachedTitle) syncArticleTitle(articleId, cachedTitle);
           return;
         }
       } else if (t.startsWith('<')) {
@@ -4490,11 +4588,12 @@ async function autoDisplaySummary(articleId) {
     });
     const data = await resp.json();
     if (!data) return;
+    const shareActive = !!userAutoSettings?.share_active;
     const articleWrap = document.getElementById('articleWrap');
     if (!articleWrap) return;
     
     // Auto-display cached summary
-    if (data.summary) {
+    if (data.summary && shareActive && userAutoSettings?.share_view_summary) {
       const existingSummary = document.getElementById('aiSummaryTop');
       if (existingSummary) existingSummary.remove();
       const summaryDiv = document.createElement('div');
@@ -4513,7 +4612,7 @@ async function autoDisplaySummary(articleId) {
     }
 
     // Auto-display cached translations
-    if (data.translation) {
+    if (data.translation && shareActive && userAutoSettings?.share_view_translation) {
       const bodyEl = document.getElementById('articleBody');
       if (!bodyEl) return;
       const t = data.translation.trim();
@@ -4528,11 +4627,15 @@ async function autoDisplaySummary(articleId) {
         bodyEl.dataset.originalHtml = bodyEl.innerHTML;
         bodyEl.dataset.originalTitle = h1El ? h1El.textContent : '';
         bodyEl.dataset.translatedHtml = proxyImages(sanitizeTranslatedHtml(cachedData.html));
-        bodyEl.dataset.translatedTitle = cachedData.title || '';
+        const cachedTitle = userAutoSettings?.share_view_title
+          ? (cachedData.title || '')
+          : '';
+        bodyEl.dataset.translatedTitle = cachedTitle;
+        bodyEl.dataset.sharedTranslation = 'true';
         bodyEl.dataset.showingTranslation = 'true';
         bodyEl.innerHTML = bodyEl.dataset.translatedHtml;
-        if (h1El && cachedData.title) h1El.textContent = cachedData.title;
-        syncArticleTitle(articleId, cachedData.title);
+        if (h1El && cachedTitle) h1El.textContent = cachedTitle;
+        if (cachedTitle) syncArticleTitle(articleId, cachedTitle);
         const btn = document.querySelector('.ai-translate-btn');
         if (btn) btn.textContent = '原文';
         return;
@@ -4689,6 +4792,7 @@ let notifItems = [];
 let notifUnread = 0;
 let notifDetailId = null;
 let notifRequestSeq = 0;
+let lastShareTransitionNotificationId = 0;
 let notifReadChain = Promise.resolve();  // serializes 已读 writes (see markNotifRead)
 let notifLoadState = 'idle';  // 'idle' | 'loading' | 'ready' | 'error'
 
@@ -4707,6 +4811,7 @@ function resetNotifState() {
   notifUnread = 0;
   notifDetailId = null;
   notifLoadState = 'idle';
+  lastShareTransitionNotificationId = 0;
   updateNotifDot();
 }
 
@@ -4732,6 +4837,17 @@ async function refreshNotifStatus() {
     notifUnread = data.unread || 0;
     notifLoadState = 'ready';
     updateNotifDot();
+    const newestShareTransitionId = notifItems.reduce((latest, item) => {
+      if (!item || !['share_suspended', 'share_restored'].includes(item.type)) {
+        return latest;
+      }
+      const id = Number(item.id) || 0;
+      return Math.max(latest, id);
+    }, 0);
+    if (newestShareTransitionId > lastShareTransitionNotificationId) {
+      lastShareTransitionNotificationId = newestShareTransitionId;
+      await loadUserSettings();
+    }
     return true;
   } catch (e) {
     if (authToken === requestToken && seq === notifRequestSeq) notifLoadState = 'error';
