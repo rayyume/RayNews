@@ -493,10 +493,15 @@ NEWS_DB = os.path.join(DATA_DIR, "news.db")
 
 
 def _ensure_news_schema(conn: sqlite3.Connection) -> None:
-    ensure_article_source_columns(conn)
-    _ensure_article_title_columns(conn)
-    ensure_deleted_articles_table(conn)
-    conn.commit()
+    # A schema upgrade is a read-then-write sequence (PRAGMA followed by
+    # ALTER TABLE), so concurrent request connections must not run it in
+    # parallel.  Keep the guard here rather than only in _get_news_db():
+    # _get_article_meta and maintenance routes also invoke this helper.
+    with _news_schema_lock:
+        ensure_article_source_columns(conn)
+        _ensure_article_title_columns(conn)
+        ensure_deleted_articles_table(conn)
+        conn.commit()
 
 
 def _get_article_meta(article_id: int) -> dict | None:
@@ -531,16 +536,22 @@ def _get_article_meta(article_id: int) -> dict | None:
 # coexist cleanly — concurrent readers never block and writers serialize at the SQLite
 # level rather than clobbering a shared Python-level transaction.
 _news_conn_local = threading.local()
+# Schema checks can add columns for databases created by older releases.  Each
+# request thread owns its connection, but SQLite's PRAGMA-then-ALTER sequence
+# must still be serialized in this process: otherwise concurrent first-use
+# connections can all see a missing column and race to add it.
+_news_schema_lock = threading.RLock()
 
 
 def _get_news_db():
     """Per-thread persistent connection to news.db for batch queries."""
     conn = getattr(_news_conn_local, "conn", None)
     if conn is None and os.path.exists(NEWS_DB):
-        conn = sqlite3.connect(NEWS_DB, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        _ensure_news_schema(conn)
-        _news_conn_local.conn = conn
+        with _news_schema_lock:
+            conn = sqlite3.connect(NEWS_DB, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            _ensure_news_schema(conn)
+            _news_conn_local.conn = conn
     return conn
 
 
