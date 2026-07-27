@@ -5090,6 +5090,14 @@ async function triggerRefresh() {
     && !flowController.signal.aborted
     && !document.hidden
   );
+  const discoveredArticleIds = new Set();
+  const mergeDiscovered = values => {
+    if (!flowIsCurrent()) return discoveredArticleIds.size;
+    const before = discoveredArticleIds.size;
+    const size = mergeRefreshArticleIds(discoveredArticleIds, values);
+    if (size !== before) renderRefreshDiscoveredCount(discoveredArticleIds);
+    return size;
+  };
   const refreshView = {
     activeFilter: filter,
     page: currentPage,
@@ -5120,9 +5128,10 @@ async function triggerRefresh() {
   let lastStreamedApplyAt = 0;
   let streamApplyInFlight = false;
   const handleRefreshProgress = status => {
+    if (!flowIsCurrent()) return;
+    mergeDiscovered(status.new_ids_so_far || []);
     const soFar = Number(status.new_count_so_far || 0);
     if (soFar <= lastStreamedCount) return;
-    setRefreshProgressLabel(soFar);
     const now = Date.now();
     const canApply = !streamApplyInFlight
       && now - lastStreamedApplyAt >= 3000
@@ -5155,7 +5164,10 @@ async function triggerRefresh() {
   // surface the usual bubble (elsewhere) despite refreshInProgress being true —
   // it stays true for the job's full duration (see setRefreshRunning() below),
   // deliberately not shortened just because this check landed.
-  const immediateCheck = loadSince(sinceCursor, { manual: true });
+  const immediateCheck = loadSince(sinceCursor, {
+    manual: true,
+    onDiscovered: mergeDiscovered,
+  });
 
   try {
     const data = await requestRefreshOnce(flowController.signal);
@@ -5166,6 +5178,8 @@ async function triggerRefresh() {
     if (status.status === 'failed') {
       throw new Error(refreshErrorMessage(status));
     }
+    mergeDiscovered(status.new_ids || []);
+    await immediateCheck;
     let page1BranchRan = false;
     if (
       refreshView.page === 1
@@ -5206,7 +5220,7 @@ async function triggerRefresh() {
       await loadSince(latestKnownTimestamp || sinceCursor);
     }
     if (!flowIsCurrent()) return;
-    const count = Number(status.new_count || 0);
+    const count = discoveredArticleIds.size;
     showToast(count > 0 ? `✅ 更新完成，新增 ${count} 篇文章` : '✅ 已是最新');
   } catch (e) {
     if (flowIsCurrent() && (!e || e.name !== 'AbortError')) {

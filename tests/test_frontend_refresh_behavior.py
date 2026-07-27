@@ -831,6 +831,7 @@ context.pageRequestPendingSequence = 0;
 context.pageNavigationPending = false;
 context.cancelStartupEmptyRevalidation = () => {{}};
 context.hideNewArticlesPrompt = () => {{}};
+context.setRefreshProgressLabel = () => {{}};
 context.showToast = message => context.toasts.push(message);
 context.toasts = [];
 context.requestRefreshOnce = async () => ({{ job_id: 'job-1', status: 'running' }});
@@ -858,6 +859,13 @@ context.loadSince = async (timestamp, options) => {{
 """
 
 
+def refresh_trigger_source():
+    return source_between(
+        "function mergeRefreshArticleIds(",
+        "async function triggerRefresh()",
+    ) + source_between("async function triggerRefresh()", "function setRefreshRunning")
+
+
 def test_refresh_id_merge_normalizes_and_deduplicates():
     helpers = source_between(
         "function mergeRefreshArticleIds(",
@@ -875,10 +883,110 @@ assert.deepEqual(Array.from(ids).sort((a, b) => a - b), [2, 3, 4]);
     )
 
 
-def test_manual_refresh_feeds_new_articles_into_pending_queue_when_not_on_page_one():
-    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+def test_manual_refresh_unifies_immediate_progress_and_terminal_ids_without_double_counting():
+    trigger = refresh_trigger_source()
     setup = trigger_context_setup(
-        "return { job_id: 'job-1', status: 'completed', new_count: 3 };"
+        "return { job_id: 'job-1', status: 'completed', new_count: 2, new_ids: [2, 3] };"
+    )
+    run_node(
+        trigger,
+        setup
+        + """
+context.window = { scrollY: 0 };
+context.labels = [];
+context.setRefreshProgressLabel = count => context.labels.push(count);
+context.applyStreamedRefreshBatch = async () => true;
+context.loadNewsPage = async () => true;
+context.loadSince = async (timestamp, options) => {
+  options.onDiscovered([{ id: 1 }, { id: 2 }]);
+  return 2;
+};
+context.pollRefreshJob = async (jobId, timeout, signal, onProgress) => {
+  onProgress({ new_count_so_far: 2, new_ids_so_far: [2, 3] });
+  return { job_id: 'job-1', status: 'completed', new_count: 2, new_ids: [2, 3] };
+};
+await context.triggerRefresh();
+assert.equal(context.labels.at(-1), 3);
+assert.ok(context.toasts.includes('✅ 更新完成，新增 3 篇文章'));
+""",
+    )
+
+
+def test_refresh_discovery_count_is_global_not_filter_scoped():
+    trigger = refresh_trigger_source()
+    setup = trigger_context_setup(
+        "return { job_id: 'job-1', status: 'completed', new_count: 1, new_ids: [12] };"
+    )
+    run_node(
+        trigger,
+        setup
+        + """
+context.filter = 'cat:Tech';
+context.window = { scrollY: 0 };
+context.setRefreshProgressLabel = count => context.lastLabel = count;
+context.loadNewsPage = async () => true;
+context.loadSince = async (timestamp, options) => {
+  options.onDiscovered([{ id: 10, source: 'Tech' }, { id: 11, source: 'News' }]);
+  return 2;
+};
+await context.triggerRefresh();
+assert.equal(context.lastLabel, 3);
+assert.ok(context.toasts.includes('✅ 更新完成，新增 3 篇文章'));
+""",
+    )
+
+
+def test_manual_refresh_does_not_guess_ids_from_terminal_count_when_ids_are_missing():
+    trigger = refresh_trigger_source()
+    setup = trigger_context_setup(
+        "return { job_id: 'job-1', status: 'completed', new_count: 5 };"
+    )
+    run_node(
+        trigger,
+        setup
+        + """
+context.currentPage = 2;
+await context.triggerRefresh();
+assert.ok(context.toasts.includes('✅ 已是最新'));
+assert.ok(!context.toasts.includes('✅ 更新完成，新增 5 篇文章'));
+""",
+    )
+
+
+def test_unified_refresh_count_adds_no_fetch_or_status_poll():
+    trigger = refresh_trigger_source()
+    setup = trigger_context_setup(
+        "return { job_id: 'job-1', status: 'completed', new_count: 0, new_ids: [] };"
+    )
+    run_node(
+        trigger,
+        setup
+        + """
+context.startCalls = 0;
+context.pollCalls = 0;
+context.sinceCalls = 0;
+context.requestRefreshOnce = async () => {
+  context.startCalls++;
+  return { job_id: 'job-1', status: 'running' };
+};
+context.pollRefreshJob = async () => {
+  context.pollCalls++;
+  return { job_id: 'job-1', status: 'completed', new_count: 0, new_ids: [] };
+};
+context.loadSince = async () => { context.sinceCalls++; return 0; };
+await context.triggerRefresh();
+assert.deepEqual(
+  [context.startCalls, context.pollCalls, context.sinceCalls],
+  [1, 1, 1],
+);
+""",
+    )
+
+
+def test_manual_refresh_feeds_new_articles_into_pending_queue_when_not_on_page_one():
+    trigger = refresh_trigger_source()
+    setup = trigger_context_setup(
+        "return { job_id: 'job-1', status: 'completed', new_count: 3, new_ids: [101, 102, 103] };"
     )
     run_node(
         trigger,
@@ -899,7 +1007,7 @@ assert.ok(context.toasts.includes('✅ 更新完成，新增 3 篇文章'));
 
 
 def test_manual_refresh_immediate_check_fires_even_when_job_finds_nothing_new():
-    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    trigger = refresh_trigger_source()
     setup = trigger_context_setup(
         "return { job_id: 'job-1', status: 'completed', new_count: 0 };"
     )
@@ -919,7 +1027,7 @@ assert.ok(context.toasts.includes('✅ 已是最新'));
 
 
 def test_manual_refresh_skips_completion_time_check_when_page_one_branch_already_applied():
-    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    trigger = refresh_trigger_source()
     setup = trigger_context_setup(
         "return { job_id: 'job-1', status: 'completed', new_count: 4 };"
     )
@@ -943,7 +1051,7 @@ assert.equal(context.consumed, 1);
 
 
 def test_manual_refresh_pending_queue_feed_prefers_latest_known_timestamp_over_page_snapshot():
-    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    trigger = refresh_trigger_source()
     setup = trigger_context_setup(
         "return { job_id: 'job-1', status: 'completed', new_count: 1 };"
     )
@@ -964,7 +1072,7 @@ assert.deepEqual(context.loadSinceCalls, [
 
 
 def test_manual_refresh_skips_apply_after_navigation_changed_then_returned():
-    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    trigger = refresh_trigger_source()
     setup = trigger_context_setup(
         "context.pageNavigationSequence += 2; "
         "return { job_id: 'job-1', status: 'completed', new_count: 1 };"
@@ -984,7 +1092,7 @@ assert.deepEqual(context.promptStates, [false]);
 
 
 def test_manual_refresh_skips_apply_while_page_navigation_is_pending():
-    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    trigger = refresh_trigger_source()
     setup = trigger_context_setup(
         "context.pageNavigationPending = true; "
         "return { job_id: 'job-1', status: 'completed', new_count: 1 };"
@@ -1003,7 +1111,7 @@ assert.deepEqual(context.promptStates, [false]);
 
 
 def test_manual_refresh_does_not_replace_a_list_request_already_in_flight():
-    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    trigger = refresh_trigger_source()
     setup = trigger_context_setup(
         "return { job_id: 'job-1', status: 'completed', new_count: 1 };"
     )
@@ -1034,7 +1142,7 @@ assert.deepEqual(context.promptStates, [false]);
 
 
 def test_manual_refresh_application_guard_blocks_overlay_opened_mid_load():
-    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    trigger = refresh_trigger_source()
     setup = trigger_context_setup(
         "return { job_id: 'job-1', status: 'completed', new_count: 1 };"
     )
@@ -1061,7 +1169,7 @@ assert.deepEqual(context.promptStates, [false]);
 
 
 def test_manual_refresh_consumes_pending_only_after_confirmed_application():
-    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    trigger = refresh_trigger_source()
     setup = trigger_context_setup(
         "return { job_id: 'job-1', status: 'completed', new_count: 1 };"
     )
@@ -1094,9 +1202,9 @@ assert.deepEqual(context.promptStates, [false]);
 
 
 def test_manual_refresh_reports_streaming_progress_on_button_label():
-    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    trigger = refresh_trigger_source()
     setup = trigger_context_setup(
-        "return { job_id: 'job-1', status: 'completed', new_count: 3 };"
+        "return { job_id: 'job-1', status: 'completed', new_count: 3, new_ids: [101, 102, 103] };"
     )
     run_node(
         trigger,
@@ -1108,19 +1216,19 @@ context.setRefreshProgressLabel = count => context.labels.push(count);
 context.applyStreamedRefreshBatch = async () => { context.applyCalls++; };
 context.applyCalls = 0;
 context.pollRefreshJob = async (jobId, timeout, signal, onProgress) => {
-  onProgress({ new_count_so_far: 2 });
-  onProgress({ new_count_so_far: 2 }); // no increase — must not relabel or reapply
-  return { job_id: 'job-1', status: 'completed', new_count: 3 };
+  onProgress({ new_count_so_far: 2, new_ids_so_far: [101, 102] });
+  onProgress({ new_count_so_far: 2, new_ids_so_far: [101, 102] }); // no increase — must not relabel or reapply
+  return { job_id: 'job-1', status: 'completed', new_count: 3, new_ids: [101, 102, 103] };
 };
 await context.triggerRefresh();
-assert.deepEqual(context.labels, [2]);
+assert.deepEqual(context.labels, [2, 3]);
 assert.equal(context.applyCalls, 1);
 """,
     )
 
 
 def test_manual_refresh_skips_streamed_apply_when_scrolled_away_from_top():
-    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    trigger = refresh_trigger_source()
     setup = trigger_context_setup(
         "return { job_id: 'job-1', status: 'completed', new_count: 1 };"
     )
@@ -1134,8 +1242,8 @@ context.setRefreshProgressLabel = count => context.labels.push(count);
 context.applyStreamedRefreshBatch = async () => { context.applyCalls++; };
 context.applyCalls = 0;
 context.pollRefreshJob = async (jobId, timeout, signal, onProgress) => {
-  onProgress({ new_count_so_far: 4 });
-  return { job_id: 'job-1', status: 'completed', new_count: 4 };
+  onProgress({ new_count_so_far: 4, new_ids_so_far: [201, 202, 203, 204] });
+  return { job_id: 'job-1', status: 'completed', new_count: 4, new_ids: [201, 202, 203, 204] };
 };
 await context.triggerRefresh();
 assert.deepEqual(context.labels, [4]);
@@ -1145,7 +1253,7 @@ assert.equal(context.applyCalls, 0);
 
 
 def test_manual_refresh_skips_streamed_apply_after_page_navigation_changed_view():
-    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    trigger = refresh_trigger_source()
     setup = trigger_context_setup(
         "return { job_id: 'job-1', status: 'completed', new_count: 1 };"
     )
@@ -1169,7 +1277,7 @@ assert.equal(context.applyCalls, 0);
 
 
 def test_manual_refresh_streamed_apply_is_throttled_to_one_per_three_seconds():
-    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    trigger = refresh_trigger_source()
     setup = trigger_context_setup(
         "return { job_id: 'job-1', status: 'completed', new_count: 1 };"
     )
@@ -1206,7 +1314,7 @@ assert.equal(context.applyCalls, 2);
 
 def test_manual_refresh_flow_cancellation_aborts_poller_and_suppresses_stale_toast():
     helpers = source_between("function cancelRefreshFlow(", "function rebuildCategoryMap")
-    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    trigger = refresh_trigger_source()
     run_node(
         helpers + trigger,
         """
@@ -1235,6 +1343,8 @@ context.loadNewsPage = async () => true;
 context.latestKnownTimestamp = 0;
 context.latestNewsTimestamp = () => 0;
 context.loadSince = async () => 0;
+context.labels = [];
+context.setRefreshProgressLabel = count => context.labels.push(count);
 context.runningStates = [];
 context.setRefreshRunning = running => {
   context.refreshInProgress = running;
@@ -1246,9 +1356,11 @@ context.requestRefreshOnce = async signal => {
 };
 let markPollStarted;
 const pollStarted = new Promise(resolve => { markPollStarted = resolve; });
-context.pollRefreshJob = (jobId, timeout, signal) => new Promise((resolve, reject) => {
+let lateProgress;
+context.pollRefreshJob = (jobId, timeout, signal, onProgress) => new Promise((resolve, reject) => {
   assert.equal(jobId, 'job-a');
   assert.equal(signal, context.refreshFlowController.signal);
+  lateProgress = onProgress;
   markPollStarted();
   signal.addEventListener('abort', () => reject(
     Object.assign(new Error('cancelled'), { name: 'AbortError' })
@@ -1257,7 +1369,9 @@ context.pollRefreshJob = (jobId, timeout, signal) => new Promise((resolve, rejec
 const pending = context.triggerRefresh();
 await pollStarted;
 context.cancelRefreshFlow();
+lateProgress({ new_count_so_far: 1, new_ids_so_far: [999] });
 await pending;
+assert.deepEqual(context.labels, []);
 assert.deepEqual(context.runningStates, [true, false]);
 assert.deepEqual(context.toasts, ['🔄 正在后台抓取...']);
 assert.equal(context.promptCalls, 0);
@@ -3111,7 +3225,7 @@ assert.deepEqual(context.toasts, ['连接超时，请稍后重试']);
 
 
 def test_manual_refresh_failure_restores_prompt_only_after_running_state_clears():
-    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    trigger = refresh_trigger_source()
     setup = trigger_context_setup("throw Object.assign(new Error('timeout'), { name: 'AbortError' });")
     run_node(
         trigger,
@@ -3187,7 +3301,7 @@ assert.equal(prevented, 2);
 
 
 def test_manual_refresh_cancels_pending_startup_calibration_before_updating():
-    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    trigger = refresh_trigger_source()
     run_node(
         trigger,
         """
