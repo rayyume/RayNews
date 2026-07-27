@@ -1161,3 +1161,13 @@ def test_footer_supports_runtime_html_injection_before_fixed_suffix():
     assert "FOOTER_INJECT" not in entrypoint
     assert "`CUSTOM_FOOTER_HTML`" in readme
     assert "`CUSTOM_FOOTER_HTML`" in readme_en
+
+
+def test_article_cover_body_and_translation_images_share_one_fullscreen_viewer():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert 'id="articleWrap"' in html
+    assert 'id="lbStage"' in html
+    assert "function openImageViewer(image)" in html
+    assert "articleWrap.addEventListener('click'" in html
+    assert html.count("img.addEventListener('click'") == 0
+    assert ".lb-stage{" in html and "touch-action:none" in html
