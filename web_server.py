@@ -1100,46 +1100,86 @@ def _notify_user(user_id: int, ntype: str, title: str, body: str = "") -> None:
     _send_notification_email(user_id, title, body)
 
 
+def _compact_share_error(value: str) -> str:
+    """Keep provider failures useful without persisting a credential or body."""
+    text = re.sub(r"\s+", " ", str(value or "connection test failed")).strip()
+    text = re.sub(r"sk-[A-Za-z0-9_-]+", "[redacted]", text)
+    return text[:300]
+
+
+def _apply_share_connectivity_result(
+    user_id: int,
+    ok: bool,
+    error: str = "",
+    checked_at: str | None = None,
+) -> str:
+    """Apply one connectivity probe result without changing sharing intent."""
+    import datetime as _dt
+
+    settings = get_user_settings(user_id) or {}
+    if not _is_enabled_value(settings.get("share_ai_results")):
+        return "not_opted_in"
+
+    checked_at = checked_at or _dt.datetime.now().isoformat(timespec="seconds")
+    was_suspended = _is_enabled_value(settings.get("share_suspended"))
+    if ok:
+        set_user_settings(
+            user_id,
+            share_suspended=0,
+            share_last_check_at=checked_at,
+            share_last_check_ok=1,
+            share_last_check_error=None,
+        )
+        if not was_suspended:
+            return "unchanged"
+        _notify_user(
+            user_id,
+            "share_restored",
+            "共享 API 已恢复，共享状态已自动恢复",
+            "系统已确认你的个人 AI API 恢复连通。\n\n"
+            "「共享 AI 结果」及你此前选择的查看选项已自动恢复，无需手动重新开启。",
+        )
+        return "restored"
+
+    safe_error = _compact_share_error(error)
+    set_user_settings(
+        user_id,
+        share_suspended=1,
+        share_last_check_at=checked_at,
+        share_last_check_ok=0,
+        share_last_check_error=safe_error,
+    )
+    if was_suspended:
+        return "unchanged"
+    _notify_user(
+        user_id,
+        "share_suspended",
+        "共享 API 校验失败，共享已暂停",
+        "系统对你配置的个人 AI API 做连通性校验时失败，共享访问已暂停；"
+        "你的总开关和查看选项均已保留。\n\n"
+        f"失败原因：{safe_error}\n\n"
+        "请到 用户设置 → AI 更新配置。保存并校验成功后系统会自动恢复共享。",
+    )
+    return "suspended"
+
+
 def _run_ai_share_revalidation_once():
     """Re-verify every opted-in user's own AI connectivity.
 
     A user's "共享 AI 结果" access is only granted after a live connectivity
     test at save time (see update_settings); this loop periodically re-tests
     it so a key that later expires/runs out of credit doesn't leave shared
-    content permanently accessible. On failure, the master switch and all
-    three view sub-toggles are cascaded off — same invariant enforced by
-    update_settings (a sub-toggle must never be on while the master is off).
+    content permanently accessible. Opted-in users remain scheduled while
+    suspended, so a later successful check restores their saved preferences.
     """
-    import datetime as _dt
     for user_id in get_users_with_share_enabled():
         config = get_ai_config(user_id)
         body, status = _run_ai_connection_test(config)
-        now_str = _dt.datetime.now().isoformat(timespec="seconds")
-        if status == 200:
-            set_user_settings(
-                user_id,
-                share_last_check_at=now_str, share_last_check_ok=1, share_last_check_error=None,
-            )
-        else:
-            err_msg = body.get("error", "connection test failed")
-            set_user_settings(
-                user_id,
-                share_ai_results=0, share_view_title=0, share_view_translation=0, share_view_summary=0,
-                share_last_check_at=now_str, share_last_check_ok=0,
-                share_last_check_error=err_msg,
-            )
-            # The switch is now off, so this user drops out of
-            # get_users_with_share_enabled() and won't be re-checked (or
-            # re-notified) next cycle — the in-app notification and its email
-            # copy fire exactly once, on the transition to failed.
-            _notify_user(
-                user_id, "share_revoked",
-                "共享校验失败，共享状态已失效",
-                "系统对你在「共享」中配置的 AI API 做定期连通性校验时失败，"
-                "「共享 AI 结果」总开关及全部查看子开关已被自动关闭。\n\n"
-                f"失败原因：{err_msg}\n\n"
-                "请到 用户设置 → 共享 检查并更新你的 API 配置，重新保存以恢复共享资格。",
-            )
+        _apply_share_connectivity_result(
+            user_id,
+            status == 200,
+            body.get("error", "") if status != 200 else "",
+        )
         time.sleep(0.5)  # spread requests out instead of bursting every provider at once
 
 
