@@ -42,7 +42,7 @@ def test_viewer_no_longer_mutates_viewport_meta_for_zoom():
 
 
 def test_viewer_runtime_opens_resets_traps_focus_and_restores_trigger():
-    viewer = between("function closeLightbox()", "function shareArticle()")
+    viewer = between("const lightboxGesture =", "function shareArticle()")
     runtime = r'''
 const assert = require('node:assert/strict');
 
@@ -67,6 +67,7 @@ class FakeElement {
     this.focusCount = 0;
   }
   setAttribute(name, value) { this.attrs.set(name, String(value)); }
+  removeAttribute(name) { this.attrs.delete(name); }
   getAttribute(name) { return this.attrs.get(name) || null; }
   hasAttribute(name) { return this.attrs.has(name); }
   addEventListener(type, handler) { this.listeners[type] = handler; }
@@ -91,10 +92,11 @@ global.HTMLImageElement = FakeImage;
 const articleWrap = new FakeElement('articleWrap');
 const lb = new FakeElement('lb');
 const closeButton = new FakeElement('lbCloseBtn');
+const lbStage = new FakeElement('lbStage');
 const lbImage = new FakeImage('lbImg');
 const trigger = new FakeImage('trigger');
 lb.focusables = [closeButton];
-const elements = { articleWrap, lb, lbCloseBtn: closeButton, lbImg: lbImage };
+const elements = { articleWrap, lb, lbCloseBtn: closeButton, lbStage, lbImg: lbImage };
 const documentListeners = {};
 global.document = {
   body: { style: {} },
@@ -112,7 +114,7 @@ global.recoverImageLoad = () => { throw new Error('loaded image should not recov
 eval(process.argv[1]);
 
 openImageViewer(trigger);
-assert.equal(lbImage.style.transform, 'translate(0px, 0px) scale(1)', 'opening invokes the concrete gesture reset');
+assert.equal(lbImage.style.transform, '', 'opening clears any prior gesture transform');
 assert.equal(lbImage.src, trigger.currentSrc);
 assert.equal(lbImage.alt, trigger.alt);
 assert.equal(lb.classList.contains('open'), true);
@@ -144,3 +146,55 @@ assert.equal(trigger.focusCount, 1, 'connected focusable trigger regains focus')
         capture_output=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+def run_node(js: str) -> None:
+    subprocess.run(
+        ["node", "--input-type=module", "-e", js],
+        cwd=ROOT,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+
+def test_gesture_helpers_clamp_scale_distance_and_offsets():
+    helpers = between("function clampLightboxScale(", "function resetLightboxGesture(")
+    run_node(
+        """
+import assert from 'node:assert/strict';
+const context = globalThis;
+context.document = {
+  getElementById(id) {
+    if (id === 'lbStage') return { clientWidth: 320, clientHeight: 640 };
+    if (id === 'lbImg') return { offsetWidth: 300, offsetHeight: 200 };
+    return null;
+  }
+};
+"""
+        + helpers
+        + """
+assert.equal(clampLightboxScale(.2), 1);
+assert.equal(clampLightboxScale(2.5), 2.5);
+assert.equal(clampLightboxScale(8), 4);
+assert.equal(lightboxDistance({x:0,y:0}, {x:3,y:4}), 5);
+assert.deepEqual(clampLightboxOffset(999, -999, 1), {x:0,y:0});
+const limited = clampLightboxOffset(999, -999, 2);
+assert.ok(limited.x <= 140 && limited.x >= -140);
+assert.ok(limited.y <= 0 && limited.y >= -320);
+"""
+    )
+
+
+def test_close_resets_transform_and_pointer_state_before_unlocking_scroll():
+    close_block = between("function closeLightbox()", "function shareArticle()")
+    assert "resetLightboxGesture();" in close_block
+    assert close_block.index("resetLightboxGesture();") < close_block.index("unlockBodyScroll();")
+    assert "aria-hidden', 'true'" in close_block
+
+
+def test_gesture_surface_uses_centered_transform_origin_without_browser_pinch_zoom():
+    stage_css = between('.lb-stage{', '\n.lb img{')
+    image_css = between('.lb img{', '\n.lb-close{')
+    assert 'touch-action:none' in stage_css
+    assert 'transform-origin:center' in image_css

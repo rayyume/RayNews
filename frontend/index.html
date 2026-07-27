@@ -228,7 +228,7 @@ a:hover{text-decoration:underline}
 .lb{position:fixed;inset:0;z-index:600;background:rgba(0,0,0,.92);backdrop-filter:blur(10px);opacity:0;pointer-events:none;transition:opacity .25s;overflow:hidden}
 .lb.open{opacity:1;pointer-events:auto}
 .lb-stage{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;overflow:hidden;touch-action:none;cursor:zoom-out}
-.lb img{max-width:92vw;max-height:92vh;border-radius:8px;object-fit:contain;transform-origin:0 0;will-change:transform;user-select:none;-webkit-user-drag:none}
+.lb img{max-width:92vw;max-height:92vh;border-radius:8px;object-fit:contain;transform-origin:center;will-change:transform;user-select:none;-webkit-user-drag:none}
 .lb-close{position:absolute;z-index:2;top:calc(12px + env(safe-area-inset-top,0px));right:14px;width:44px;height:44px;border:0;border-radius:50%;background:rgba(0,0,0,.55);color:#fff;font:600 20px/1 var(--font);cursor:pointer;touch-action:manipulation}
 
 /* ═══ Toast ═══════════════════════════════════════ */
@@ -7312,10 +7312,59 @@ function showToast(msg) {
   el._t = setTimeout(() => el.classList.remove('show'), 2000);
 }
 
+const lightboxGesture = {
+  pointers: new Map(),
+  scale: 1,
+  x: 0,
+  y: 0,
+  startScale: 1,
+  startDistance: 0,
+  startCenter: null,
+  dragStart: null,
+  moved: false,
+};
+
+function clampLightboxScale(value) {
+  return Math.min(4, Math.max(1, Number(value) || 1));
+}
+
+function lightboxDistance(a, b) {
+  return Math.hypot(b.x - a.x, b.y - a.y);
+}
+
+function clampLightboxOffset(x, y, scale) {
+  const stage = document.getElementById('lbStage');
+  const image = document.getElementById('lbImg');
+  if (!stage || !image || scale <= 1) return { x: 0, y: 0 };
+  const width = image.offsetWidth * scale;
+  const height = image.offsetHeight * scale;
+  const maxX = Math.max(0, (width - stage.clientWidth) / 2);
+  const maxY = Math.max(0, (height - stage.clientHeight) / 2);
+  return {
+    x: Math.min(maxX, Math.max(-maxX, x)),
+    y: Math.min(maxY, Math.max(-maxY, y)),
+  };
+}
+
+function applyLightboxTransform() {
+  const image = document.getElementById('lbImg');
+  const offset = clampLightboxOffset(
+    lightboxGesture.x,
+    lightboxGesture.y,
+    lightboxGesture.scale,
+  );
+  lightboxGesture.x = offset.x;
+  lightboxGesture.y = offset.y;
+  image.style.transform =
+    `translate3d(${offset.x}px,${offset.y}px,0) scale(${lightboxGesture.scale})`;
+}
+
 function closeLightbox() {
   const lb = document.getElementById('lb');
   lb.classList.remove('open');
   lb.setAttribute('aria-hidden', 'true');
+  resetLightboxGesture();
+  document.getElementById('lbImg').removeAttribute('src');
   unlockBodyScroll();
   const trigger = lightboxTrigger;
   lightboxTrigger = null;
@@ -7333,9 +7382,17 @@ function closeLightbox() {
 let lightboxTrigger = null;
 
 function resetLightboxGesture() {
-  const lbImg = document.getElementById('lbImg');
-  if (!lbImg) return;
-  lbImg.style.transform = 'translate(0px, 0px) scale(1)';
+  lightboxGesture.pointers.clear();
+  lightboxGesture.scale = 1;
+  lightboxGesture.x = 0;
+  lightboxGesture.y = 0;
+  lightboxGesture.startScale = 1;
+  lightboxGesture.startDistance = 0;
+  lightboxGesture.startCenter = null;
+  lightboxGesture.dragStart = null;
+  lightboxGesture.moved = false;
+  const image = document.getElementById('lbImg');
+  if (image) image.style.transform = '';
 }
 
 function lightboxFocusableElements() {
@@ -7397,6 +7454,94 @@ function openImageViewer(image) {
 
 document.addEventListener('keydown', trapLightboxFocus);
 
+function lightboxPoint(event) {
+  return { x: event.clientX, y: event.clientY };
+}
+
+function lightboxPointerPair() {
+  return Array.from(lightboxGesture.pointers.values()).slice(0, 2);
+}
+
+function onLightboxPointerDown(event) {
+  if (!document.getElementById('lb').classList.contains('open')) return;
+  event.currentTarget.setPointerCapture(event.pointerId);
+  lightboxGesture.pointers.set(event.pointerId, lightboxPoint(event));
+  const pair = lightboxPointerPair();
+  if (pair.length === 2) {
+    lightboxGesture.startDistance = lightboxDistance(pair[0], pair[1]);
+    lightboxGesture.startScale = lightboxGesture.scale;
+    lightboxGesture.startCenter = {
+      x: (pair[0].x + pair[1].x) / 2,
+      y: (pair[0].y + pair[1].y) / 2,
+    };
+    lightboxGesture.dragStart = null;
+  } else if (pair.length === 1 && lightboxGesture.scale > 1) {
+    lightboxGesture.dragStart = {
+      pointer: pair[0],
+      x: lightboxGesture.x,
+      y: lightboxGesture.y,
+    };
+  }
+}
+
+function onLightboxPointerMove(event) {
+  if (!lightboxGesture.pointers.has(event.pointerId)) return;
+  lightboxGesture.pointers.set(event.pointerId, lightboxPoint(event));
+  const pair = lightboxPointerPair();
+  if (pair.length === 2 && lightboxGesture.startDistance > 0) {
+    lightboxGesture.scale = clampLightboxScale(
+      lightboxGesture.startScale
+        * lightboxDistance(pair[0], pair[1])
+        / lightboxGesture.startDistance,
+    );
+    lightboxGesture.moved = true;
+    applyLightboxTransform();
+    return;
+  }
+  if (pair.length === 1 && lightboxGesture.dragStart && lightboxGesture.scale > 1) {
+    lightboxGesture.x =
+      lightboxGesture.dragStart.x + pair[0].x - lightboxGesture.dragStart.pointer.x;
+    lightboxGesture.y =
+      lightboxGesture.dragStart.y + pair[0].y - lightboxGesture.dragStart.pointer.y;
+    lightboxGesture.moved = true;
+    applyLightboxTransform();
+  }
+}
+
+function onLightboxPointerEnd(event) {
+  lightboxGesture.pointers.delete(event.pointerId);
+  if (lightboxGesture.scale <= 1) {
+    lightboxGesture.scale = 1;
+    lightboxGesture.x = 0;
+    lightboxGesture.y = 0;
+    applyLightboxTransform();
+  }
+  const pair = lightboxPointerPair();
+  lightboxGesture.startDistance = 0;
+  lightboxGesture.startCenter = null;
+  lightboxGesture.dragStart = pair.length === 1 && lightboxGesture.scale > 1
+    ? { pointer: pair[0], x: lightboxGesture.x, y: lightboxGesture.y }
+    : null;
+}
+
+const lbStage = document.getElementById('lbStage');
+lbStage.addEventListener('pointerdown', onLightboxPointerDown);
+lbStage.addEventListener('pointermove', onLightboxPointerMove);
+lbStage.addEventListener('pointerup', onLightboxPointerEnd);
+lbStage.addEventListener('pointercancel', onLightboxPointerEnd);
+
+document.getElementById('lbCloseBtn').addEventListener('click', event => {
+  event.stopPropagation();
+  closeLightbox();
+});
+lbStage.addEventListener('click', event => {
+  if (event.target !== event.currentTarget || lightboxGesture.moved) {
+    lightboxGesture.moved = false;
+    return;
+  }
+  closeLightbox();
+});
+
 const articleWrap = document.getElementById('articleWrap');
 articleWrap.addEventListener('click', event => {
   const image = event.target.closest('img');
@@ -7414,6 +7559,9 @@ function shareArticle() {
 let _closingOverlay = false;
 
 function finishArticleClose(mobileNavigation) {
+  if (document.getElementById('lb').classList.contains('open')) {
+    closeLightbox();
+  }
   _closingOverlay = true;
   articleReturnInProgress = true;
   activeArticleRequestId++;
@@ -7527,7 +7675,7 @@ articleTopScrollZone.addEventListener('touchend', e => {
   }
   articleTopScrollLastTap = now;
 }, { passive: false });
-document.getElementById('lb').addEventListener('click', closeLightbox);
+// document.getElementById('lb').addEventListener is superseded by lbStage click handling.
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     if (document.getElementById('lb').classList.contains('open')) {
