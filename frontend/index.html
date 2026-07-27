@@ -7317,6 +7317,63 @@ function closeLightbox() {
   lb.classList.remove('open');
   lb.setAttribute('aria-hidden', 'true');
   unlockBodyScroll();
+  const trigger = lightboxTrigger;
+  lightboxTrigger = null;
+  if (
+    trigger
+    && trigger.isConnected
+    && !trigger.disabled
+    && typeof trigger.focus === 'function'
+    && (typeof trigger.getClientRects !== 'function' || trigger.getClientRects().length > 0)
+  ) {
+    trigger.focus({ preventScroll: true });
+  }
+}
+
+let lightboxTrigger = null;
+
+function resetLightboxGesture() {
+  const lbImg = document.getElementById('lbImg');
+  if (!lbImg) return;
+  lbImg.style.transform = 'translate(0px, 0px) scale(1)';
+}
+
+function lightboxFocusableElements() {
+  const lb = document.getElementById('lb');
+  if (!lb) return [];
+  return Array.from(lb.querySelectorAll(
+    'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+  )).filter(element => (
+    !element.disabled
+    && (typeof element.getClientRects !== 'function' || element.getClientRects().length > 0)
+  ));
+}
+
+function focusLightboxCloseButton() {
+  const closeButton = document.getElementById('lbCloseBtn');
+  if (closeButton && typeof closeButton.focus === 'function') {
+    closeButton.focus({ preventScroll: true });
+  }
+}
+
+function trapLightboxFocus(event) {
+  const lb = document.getElementById('lb');
+  if (!lb || !lb.classList.contains('open') || event.key !== 'Tab') return;
+  const focusable = lightboxFocusableElements();
+  if (!focusable.length) {
+    event.preventDefault();
+    focusLightboxCloseButton();
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && (document.activeElement === first || !lb.contains(document.activeElement))) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && (document.activeElement === last || !lb.contains(document.activeElement))) {
+    event.preventDefault();
+    first.focus();
+  }
 }
 
 function openImageViewer(image) {
@@ -7326,6 +7383,7 @@ function openImageViewer(image) {
     recoverImageLoad(image);
     return;
   }
+  lightboxTrigger = image;
   resetLightboxGesture();
   const lb = document.getElementById('lb');
   const lbImg = document.getElementById('lbImg');
@@ -7334,7 +7392,10 @@ function openImageViewer(image) {
   lb.classList.add('open');
   lb.setAttribute('aria-hidden', 'false');
   lockBodyScroll();
+  focusLightboxCloseButton();
 }
+
+document.addEventListener('keydown', trapLightboxFocus);
 
 const articleWrap = document.getElementById('articleWrap');
 articleWrap.addEventListener('click', event => {
