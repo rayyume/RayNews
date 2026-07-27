@@ -636,7 +636,7 @@ body.body-scroll-lock{overflow:hidden!important}
 </div>
 
 <div class="lb" id="lb" role="dialog" aria-modal="true"
-     aria-label="图片全屏查看" aria-hidden="true">
+     aria-label="图片全屏查看" aria-hidden="true" inert>
   <button class="lb-close" id="lbCloseBtn" type="button" aria-label="关闭图片">✕</button>
   <div class="lb-stage" id="lbStage">
     <img src="" id="lbImg" alt="" draggable="false">
@@ -7086,7 +7086,15 @@ function openArticle(id) {
   cancelViewBoundRefreshWork();
   const n = news.find(x => x.id === id);
   const wrap = document.getElementById('articleWrap');
-  if (!document.getElementById('overlay').classList.contains('open')) {
+  const overlay = document.getElementById('overlay');
+  const articleWasOpen = overlay.classList.contains('open');
+  const switchingArticle = articleWasOpen
+    && overlay.dataset.articleId
+    && overlay.dataset.articleId !== String(id);
+  if (switchingArticle && document.getElementById('lb').classList.contains('open')) {
+    closeLightbox(document.getElementById('backBtn'));
+  }
+  if (!articleWasOpen) {
     rememberArticleReturnState(id);
   }
 
@@ -7100,10 +7108,10 @@ function openArticle(id) {
 
   // If article not in memory, fetch metadata from API
   if (!n) {
-    document.getElementById('overlay').classList.add('open');
-    document.getElementById('overlay').scrollTop = 0;
-    lockArticleBackground();
-    document.getElementById('overlay').dataset.articleId = id;
+    overlay.classList.add('open');
+    overlay.scrollTop = 0;
+    if (!articleWasOpen) lockArticleBackground();
+    overlay.dataset.articleId = id;
     // Check favorite status
     if (!isRestrictedUser()) checkFavoriteStatus(id);
     wrap.innerHTML = '<p style="color:var(--text-2);text-align:center;padding:60px 0">加载中...</p>';
@@ -7147,7 +7155,7 @@ function openArticle(id) {
   }
 
   // Already open with loaded content — skip. If it is still loading, retry below.
-  const sameArticleOpen = document.getElementById('overlay').classList.contains('open') && document.getElementById('overlay').dataset.articleId == id;
+  const sameArticleOpen = articleWasOpen && overlay.dataset.articleId == id;
   if (sameArticleOpen && articleBodyCache[id]) return;
 
   // Show placeholder immediately while body loads
@@ -7172,10 +7180,10 @@ function openArticle(id) {
     </div>
   `;
 
-  document.getElementById('overlay').classList.add('open');
-  document.getElementById('overlay').scrollTop = 0;
-  lockArticleBackground();
-  document.getElementById('overlay').dataset.articleId = id;
+  overlay.classList.add('open');
+  overlay.scrollTop = 0;
+  if (!articleWasOpen) lockArticleBackground();
+  overlay.dataset.articleId = id;
   // Check favorite status
   if (!isRestrictedUser()) checkFavoriteStatus(id);
   syncArticleHistory(n.id, n.date);
@@ -7360,23 +7368,35 @@ function applyLightboxTransform() {
     `translate3d(${offset.x}px,${offset.y}px,0) scale(${lightboxGesture.scale})`;
 }
 
-function closeLightbox() {
+function isLightboxFocusTarget(element) {
+  return !!(
+    element
+    && element.isConnected
+    && !element.disabled
+    && element.tabIndex >= 0
+    && typeof element.focus === 'function'
+    && (typeof element.getClientRects !== 'function' || element.getClientRects().length > 0)
+  );
+}
+
+function focusLightboxTarget(element) {
+  if (!isLightboxFocusTarget(element)) return false;
+  element.focus({ preventScroll: true });
+  return document.activeElement === element;
+}
+
+function closeLightbox(focusTarget = null) {
   const lb = document.getElementById('lb');
   lb.classList.remove('open');
   lb.setAttribute('aria-hidden', 'true');
+  lb.setAttribute('inert', '');
   resetLightboxGesture();
   document.getElementById('lbImg').removeAttribute('src');
   unlockBodyScroll();
   const trigger = lightboxTrigger;
   lightboxTrigger = null;
-  if (
-    trigger
-    && trigger.isConnected
-    && !trigger.disabled
-    && typeof trigger.focus === 'function'
-    && (typeof trigger.getClientRects !== 'function' || trigger.getClientRects().length > 0)
-  ) {
-    trigger.focus({ preventScroll: true });
+  if (!focusLightboxTarget(focusTarget || trigger)) {
+    focusLightboxTarget(document.getElementById('backBtn'));
   }
 }
 
@@ -7442,12 +7462,14 @@ function openImageViewer(image) {
     recoverImageLoad(image);
     return;
   }
+  prepareArticleImage(image);
   lightboxTrigger = image;
   resetLightboxGesture();
   const lb = document.getElementById('lb');
   const lbImg = document.getElementById('lbImg');
   lbImg.src = image.currentSrc || image.src;
   lbImg.alt = image.alt || '';
+  lb.removeAttribute('inert');
   lb.classList.add('open');
   lb.setAttribute('aria-hidden', 'false');
   lockBodyScroll();
@@ -7576,7 +7598,35 @@ lbStage.addEventListener('click', event => {
 });
 
 const articleWrap = document.getElementById('articleWrap');
+
+function prepareArticleImage(image) {
+  if (!(image instanceof HTMLImageElement)) return;
+  image.setAttribute('tabindex', '0');
+  image.setAttribute('role', 'button');
+  if (!image.hasAttribute('aria-label')) {
+    image.setAttribute('aria-label', image.alt ? `查看大图：${image.alt}` : '查看大图');
+  }
+}
+
+function prepareArticleImages(root) {
+  root.querySelectorAll('img').forEach(prepareArticleImage);
+}
+
+prepareArticleImages(articleWrap);
+if (typeof MutationObserver !== 'undefined') {
+  const articleImageObserver = new MutationObserver(() => prepareArticleImages(articleWrap));
+  articleImageObserver.observe(articleWrap, { childList: true, subtree: true });
+}
+
 articleWrap.addEventListener('click', event => {
+  const image = event.target.closest('img');
+  if (!image || !articleWrap.contains(image)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  openImageViewer(image);
+});
+articleWrap.addEventListener('keydown', event => {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
   const image = event.target.closest('img');
   if (!image || !articleWrap.contains(image)) return;
   event.preventDefault();

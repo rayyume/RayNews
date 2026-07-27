@@ -36,7 +36,7 @@ def test_dynamic_translation_paths_do_not_bind_image_click_handlers():
 
 
 def test_viewer_no_longer_mutates_viewport_meta_for_zoom():
-    close_block = between("function closeLightbox()", "function shareArticle()")
+    close_block = between("function closeLightbox(", "function shareArticle()")
     assert "meta[name=viewport]" not in close_block
     assert "maximum-scale" not in close_block
 
@@ -187,7 +187,7 @@ assert.ok(limited.y <= 0 && limited.y >= -320);
 
 
 def test_close_resets_transform_and_pointer_state_before_unlocking_scroll():
-    close_block = between("function closeLightbox()", "function shareArticle()")
+    close_block = between("function closeLightbox(", "function shareArticle()")
     assert "resetLightboxGesture();" in close_block
     assert close_block.index("resetLightboxGesture();") < close_block.index("unlockBodyScroll();")
     assert "aria-hidden', 'true'" in close_block
@@ -228,6 +228,7 @@ class FakeElement {
   setPointerCapture(pointerId) { this.captured.push(pointerId); }
   setAttribute(name, value) { this.attrs.set(name, String(value)); }
   removeAttribute(name) { this.removed.push(name); this.attrs.delete(name); }
+  querySelectorAll() { return []; }
   getBoundingClientRect() {
     return { left: 0, top: 0, width: this.clientWidth || 0, height: this.clientHeight || 0 };
   }
@@ -327,6 +328,347 @@ assert.equal(lbStage.captured.length, capturesBeforeClosedPointer, 'closed viewe
 '''
     result = subprocess.run(
         ["node", "-e", runtime, viewer],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_closed_viewer_markup_starts_outside_the_interaction_tree():
+    assert '<div class="lb" id="lb" role="dialog" aria-modal="true"\n     aria-label="图片全屏查看" aria-hidden="true" inert>' in HTML
+
+
+def test_closed_viewer_and_dynamic_article_images_have_real_keyboard_focus_semantics():
+    viewer = between("const lightboxGesture =", "function shareArticle()")
+    runtime = r'''
+const assert = require('node:assert/strict');
+
+class FakeClassList {
+  constructor(values = []) { this.values = new Set(values); }
+  add(value) { this.values.add(value); }
+  remove(value) { this.values.delete(value); }
+  contains(value) { return this.values.has(value); }
+}
+
+class FakeElement {
+  constructor(id, { tabIndex = -1, parent = null } = {}) {
+    this.id = id;
+    this.tabIndex = tabIndex;
+    this.parentElement = parent;
+    this.isConnected = true;
+    this.disabled = false;
+    this.inert = false;
+    this.attrs = new Map();
+    this.style = {};
+    this.classList = new FakeClassList();
+    this.listeners = {};
+    this.images = [];
+    this.focusables = [];
+    this.lastFocusOptions = null;
+  }
+  setAttribute(name, value) {
+    this.attrs.set(name, String(value));
+    if (name === 'tabindex') this.tabIndex = Number(value);
+    if (name === 'inert') this.inert = true;
+  }
+  removeAttribute(name) {
+    this.attrs.delete(name);
+    if (name === 'inert') this.inert = false;
+  }
+  getAttribute(name) { return this.attrs.get(name) ?? null; }
+  hasAttribute(name) { return this.attrs.has(name); }
+  addEventListener(type, handler) { (this.listeners[type] ||= []).push(handler); }
+  querySelectorAll(selector) {
+    if (selector === 'img') return this.images;
+    return this.focusables;
+  }
+  getClientRects() { return this.isConnected ? [{}] : []; }
+  contains(node) {
+    return node === this
+      || node.parentElement === this
+      || this.focusables.includes(node)
+      || this.images.includes(node);
+  }
+  canReceiveFocus() {
+    for (let node = this; node; node = node.parentElement) {
+      if (!node.isConnected || node.inert) return false;
+    }
+    return !this.disabled && this.tabIndex >= 0;
+  }
+  focus(options) {
+    if (!this.canReceiveFocus()) return;
+    this.lastFocusOptions = options || null;
+    document.activeElement = this;
+  }
+}
+
+class FakeImage extends FakeElement {
+  constructor(id, parent) {
+    super(id, { tabIndex: -1, parent });
+    this.currentSrc = `https://cdn.example/${id}.jpg`;
+    this.src = this.currentSrc;
+    this.alt = '图片说明';
+    this.complete = true;
+    this.naturalWidth = 640;
+  }
+  closest(selector) { return selector === 'img' ? this : null; }
+}
+
+const observers = [];
+global.MutationObserver = class {
+  constructor(callback) { this.callback = callback; observers.push(this); }
+  observe() {}
+};
+global.HTMLImageElement = FakeImage;
+const articleWrap = new FakeElement('articleWrap');
+const overlay = new FakeElement('overlay');
+const backButton = new FakeElement('backBtn', { tabIndex: 0, parent: overlay });
+const lb = new FakeElement('lb');
+lb.setAttribute('inert', '');
+const closeButton = new FakeElement('lbCloseBtn', { tabIndex: 0, parent: lb });
+const lbStage = new FakeElement('lbStage', { parent: lb });
+const lbImage = new FakeImage('lbImg', lbStage);
+lb.focusables = [closeButton];
+const trigger = new FakeImage('dynamic-image', articleWrap);
+trigger.setAttribute('role', 'presentation');
+const elements = {
+  articleWrap,
+  overlay,
+  backBtn: backButton,
+  lb,
+  lbCloseBtn: closeButton,
+  lbStage,
+  lbImg: lbImage,
+};
+const documentListeners = {};
+global.document = {
+  body: { style: {} },
+  activeElement: backButton,
+  getElementById(id) { return elements[id]; },
+  addEventListener(type, handler) { (documentListeners[type] ||= []).push(handler); },
+};
+global.lockBodyScroll = () => {};
+global.unlockBodyScroll = () => {};
+global.recoverImageLoad = () => { throw new Error('loaded image should not recover'); };
+
+eval(process.argv[1]);
+assert.equal(observers.length, 1, 'dynamic article content is observed once');
+articleWrap.images = [trigger];
+observers[0].callback([{ addedNodes: [trigger] }]);
+assert.equal(trigger.tabIndex, 0, 'dynamic image joins the sequential focus order');
+assert.equal(trigger.getAttribute('role'), 'button');
+assert.equal(trigger.getAttribute('aria-label'), '查看大图：图片说明');
+assert.equal(articleWrap.listeners.keydown.length, 1, 'one delegated keyboard handler');
+
+const keydown = (key) => {
+  const event = {
+    key,
+    target: trigger,
+    prevented: false,
+    stopped: false,
+    preventDefault() { this.prevented = true; },
+    stopPropagation() { this.stopped = true; },
+  };
+  articleWrap.listeners.keydown[0](event);
+  assert.equal(event.prevented, true, `${key} prevents default browser behavior`);
+  assert.equal(event.stopped, true, `${key} uses the delegated viewer boundary`);
+};
+
+trigger.focus();
+keydown('Enter');
+assert.equal(lb.inert, false, 'open viewer enters the focus tree');
+assert.equal(lb.getAttribute('aria-hidden'), 'false');
+assert.equal(document.activeElement, closeButton, 'focus enters the close button');
+closeLightbox();
+assert.equal(lb.inert, true, 'closed viewer leaves the focus tree');
+assert.equal(document.activeElement, trigger, 'focus returns to the keyboard opener');
+assert.deepEqual(trigger.lastFocusOptions, { preventScroll: true });
+const closedTabOrder = [backButton, trigger, closeButton]
+  .filter(element => element.canReceiveFocus())
+  .map(element => element.id);
+assert.deepEqual(closedTabOrder, ['backBtn', 'dynamic-image']);
+
+trigger.focus();
+keydown(' ');
+assert.equal(document.activeElement, closeButton, 'Space opens through the same viewer');
+trigger.isConnected = false;
+closeLightbox();
+assert.equal(document.activeElement, backButton, 'disconnected opener falls back to article navigation');
+assert.deepEqual(backButton.lastFocusOptions, { preventScroll: true });
+closeButton.focus();
+assert.equal(document.activeElement, backButton, 'closed inert dialog cannot recapture focus');
+'''
+    result = subprocess.run(
+        ["node", "-e", runtime, viewer],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_switching_articles_closes_viewer_before_replacing_content_and_balances_scroll_lock():
+    viewer = between("const lightboxGesture =", "function shareArticle()")
+    open_article = between("function openArticle(id)", "function fetchArticleDetail(")
+    runtime = r'''
+const assert = require('node:assert/strict');
+
+class FakeClassList {
+  constructor(values = []) { this.values = new Set(values); }
+  add(value) { this.values.add(value); }
+  remove(value) { this.values.delete(value); }
+  contains(value) { return this.values.has(value); }
+}
+
+class FakeElement {
+  constructor(id, { tabIndex = -1, parent = null } = {}) {
+    this.id = id;
+    this.tabIndex = tabIndex;
+    this.parentElement = parent;
+    this.isConnected = true;
+    this.disabled = false;
+    this.inert = false;
+    this.attrs = new Map();
+    this.style = {};
+    this.classList = new FakeClassList();
+    this.listeners = {};
+    this.dataset = {};
+    this.children = [];
+    this._innerHTML = '';
+    this.viewerOpenDuringReplacement = null;
+    this.scrollTop = 0;
+  }
+  set innerHTML(value) {
+    this.viewerOpenDuringReplacement = lb.classList.contains('open');
+    for (const child of this.children) child.isConnected = false;
+    this.children = [];
+    this._innerHTML = value;
+  }
+  get innerHTML() { return this._innerHTML; }
+  setAttribute(name, value) {
+    this.attrs.set(name, String(value));
+    if (name === 'tabindex') this.tabIndex = Number(value);
+    if (name === 'inert') this.inert = true;
+  }
+  removeAttribute(name) {
+    this.attrs.delete(name);
+    if (name === 'src') this.src = '';
+    if (name === 'inert') this.inert = false;
+  }
+  getAttribute(name) { return this.attrs.get(name) ?? null; }
+  hasAttribute(name) { return this.attrs.has(name); }
+  addEventListener(type, handler) { (this.listeners[type] ||= []).push(handler); }
+  querySelectorAll() { return []; }
+  getClientRects() { return this.isConnected ? [{}] : []; }
+  getBoundingClientRect() {
+    return { left: 0, top: 0, width: this.clientWidth || 0, height: this.clientHeight || 0 };
+  }
+  contains(node) { return node === this || node.parentElement === this; }
+  focus(options) {
+    if (!this.isConnected || this.inert || this.tabIndex < 0) return;
+    this.lastFocusOptions = options;
+    document.activeElement = this;
+  }
+  setPointerCapture() {}
+}
+
+class FakeImage extends FakeElement {
+  constructor(id, parent) {
+    super(id, { tabIndex: 0, parent });
+    this.currentSrc = `https://cdn.example/${id}.jpg`;
+    this.src = this.currentSrc;
+    this.alt = '图片说明';
+    this.complete = true;
+    this.naturalWidth = 640;
+    this.offsetWidth = 300;
+    this.offsetHeight = 400;
+  }
+  closest(selector) { return selector === 'img' ? this : null; }
+}
+
+global.MutationObserver = class { constructor() {} observe() {} };
+global.HTMLImageElement = FakeImage;
+const overlay = new FakeElement('overlay');
+overlay.classList.add('open');
+overlay.dataset.articleId = '1';
+const articleWrap = new FakeElement('articleWrap', { parent: overlay });
+const trigger = new FakeImage('old-article-image', articleWrap);
+articleWrap.children = [trigger];
+const backButton = new FakeElement('backBtn', { tabIndex: 0, parent: overlay });
+const lb = new FakeElement('lb');
+lb.setAttribute('aria-hidden', 'true');
+lb.setAttribute('inert', '');
+const closeButton = new FakeElement('lbCloseBtn', { tabIndex: 0, parent: lb });
+const lbStage = new FakeElement('lbStage', { parent: lb });
+lbStage.clientWidth = 320;
+lbStage.clientHeight = 640;
+const lbImg = new FakeImage('lbImg', lbStage);
+const favBtn = new FakeElement('favBtn');
+favBtn.title = '';
+const elements = { overlay, articleWrap, backBtn: backButton, lb, lbCloseBtn: closeButton, lbStage, lbImg, favBtn };
+global.document = {
+  body: { style: {} },
+  activeElement: trigger,
+  getElementById(id) { return elements[id]; },
+  addEventListener() {},
+};
+
+let scrollLockCount = 1;
+global.lockBodyScroll = () => { scrollLockCount += 1; };
+global.unlockBodyScroll = () => { scrollLockCount = Math.max(0, scrollLockCount - 1); };
+global.lockArticleBackground = () => { scrollLockCount += 1; };
+global.cancelViewBoundRefreshWork = () => {};
+global.rememberArticleReturnState = () => {};
+global.isRestrictedUser = () => true;
+global.proxyImgSrc = value => value;
+global.displayTitle = item => item.title;
+global.feedSourceOf = item => item.source;
+global.displaySourceForArticle = value => value;
+global.badgeStyle = () => '';
+global.sourceBadgeTitle = value => value;
+global.sourceLabel = value => value;
+global.formatTime = () => '';
+global.esc = value => String(value);
+global.syncArticleHistory = () => {};
+global.fetchArticleDetail = () => new Promise(() => {});
+global.autoDisplaySummary = () => {};
+global.authToken = null;
+global.activeArticleRequestId = 0;
+global.news = [
+  { id: 1, title: '旧文章', source: 'test', date: '2026-07-26', time: '12:00', thumb: '' },
+  { id: 2, title: '新文章', source: 'test', date: '2026-07-27', time: '12:00', thumb: '' },
+];
+
+eval(process.argv[1] + '\nglobalThis.__lightboxGesture = lightboxGesture;');
+eval(process.argv[2]);
+openImageViewer(trigger);
+const dispatchPointer = (type, pointerId, clientX, clientY) => {
+  lbStage.listeners[type][0]({ currentTarget: lbStage, pointerId, clientX, clientY });
+};
+dispatchPointer('pointerdown', 1, 100, 300);
+dispatchPointer('pointerdown', 2, 140, 300);
+dispatchPointer('pointermove', 2, 180, 300);
+assert.equal(__lightboxGesture.scale, 2);
+assert.equal(__lightboxGesture.pointers.size, 2);
+assert.equal(scrollLockCount, 2, 'article and viewer each hold one lock');
+
+openArticle(2);
+assert.equal(articleWrap.viewerOpenDuringReplacement, false, 'viewer closes before article DOM replacement');
+assert.equal(lb.classList.contains('open'), false);
+assert.equal(lb.getAttribute('aria-hidden'), 'true');
+assert.equal(lb.inert, true);
+assert.equal(__lightboxGesture.scale, 1);
+assert.equal(__lightboxGesture.x, 0);
+assert.equal(__lightboxGesture.y, 0);
+assert.equal(__lightboxGesture.pointers.size, 0);
+assert.equal(lbImg.style.transform, '');
+assert.equal(lbImg.src, '');
+assert.equal(document.activeElement, backButton, 'article switch leaves focus on a connected fallback');
+assert.equal(scrollLockCount, 1, 'article switch retains only the existing article lock');
+'''
+    result = subprocess.run(
+        ["node", "-e", runtime, viewer, open_article],
         cwd=ROOT,
         text=True,
         capture_output=True,
