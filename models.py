@@ -575,6 +575,40 @@ def set_user_settings(user_id: int, **kwargs) -> dict:
     return get_user_settings(user_id)
 
 
+def apply_share_connectivity_transition(
+    user_id: int,
+    expected_suspended: int,
+    next_suspended: int,
+    checked_at: str,
+    check_ok: int,
+    error: str | None,
+) -> bool:
+    """Atomically apply a share-health result if the observed state is current.
+
+    The conditional update is the notification ownership claim: only the
+    caller whose observed suspension state still matches can report a state
+    transition. ``share_ai_results = 1`` also makes an opt-out that committed
+    after the read win over a delayed background probe.
+    """
+    db = get_db()
+    changed = db.execute(
+        "UPDATE user_settings "
+        "SET share_suspended = ?, share_last_check_at = ?, "
+        "share_last_check_ok = ?, share_last_check_error = ? "
+        "WHERE user_id = ? AND share_ai_results = 1 AND share_suspended = ?",
+        (
+            int(next_suspended),
+            checked_at,
+            int(check_ok),
+            error,
+            user_id,
+            int(expected_suspended),
+        ),
+    ).rowcount == 1
+    db.commit()
+    return changed
+
+
 # ─── In-App Notifications ──────────────────────────────────
 
 

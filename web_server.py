@@ -30,6 +30,7 @@ from models import (
     add_favorite, remove_favorite, get_favorites, get_all_favorite_article_ids, is_favorited,
     count_article_favorites,
     get_ai_config, set_ai_config, get_user_settings, set_user_settings,
+    apply_share_connectivity_transition,
     get_users_with_share_enabled,
     get_system_ai_config, set_system_ai_config,
     create_invitation_code, validate_invitation_code, use_invitation_code,
@@ -1101,10 +1102,40 @@ def _notify_user(user_id: int, ntype: str, title: str, body: str = "") -> None:
 
 
 def _compact_share_error(value: str) -> str:
-    """Keep provider failures useful without persisting a credential or body."""
+    """Return a safe summary, never an arbitrary provider response body."""
     text = re.sub(r"\s+", " ", str(value or "connection test failed")).strip()
+    # Redact common credential transports before classifying the error. The
+    # allowlist below intentionally drops unknown provider detail altogether,
+    # but keeping these redactions makes this safe if a new allowed summary is
+    # added later.
+    text = re.sub(
+        r"(?i)\b(?:proxy-)?authorization\s*:\s*(?:bearer\s+)?[^\s,;]+",
+        "[redacted]",
+        text,
+    )
+    text = re.sub(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [redacted]", text)
     text = re.sub(r"sk-[A-Za-z0-9_-]+", "[redacted]", text)
-    return text[:300]
+    text = re.sub(
+        r"(?i)(?:api[_-]?key|x-api-key|access[_-]?token|token|secret|password|key)"
+        r"\s*(?:=|:)\s*(?:[\"']?)[^\s,;&}\]\"']+",
+        "[redacted]",
+        text,
+    )
+
+    status = re.search(r"\bAI API HTTP\s+([1-5]\d{2})\b", text, flags=re.IGNORECASE)
+    if status:
+        return f"AI API HTTP {status.group(1)}"
+    if text == "AI not configured. Save API config first.":
+        return text
+    if text == "Connection test returned empty response":
+        return text
+    if text.startswith("无法连接 AI 服务"):
+        return "无法连接 AI 服务"
+    if text.startswith("连接 AI 服务超时"):
+        return "连接 AI 服务超时"
+    if text.startswith("AI 服务响应超时"):
+        return "AI 服务响应超时"
+    return "AI connectivity check failed"
 
 
 def _apply_share_connectivity_result(
@@ -1122,14 +1153,23 @@ def _apply_share_connectivity_result(
 
     checked_at = checked_at or _dt.datetime.now().isoformat(timespec="seconds")
     was_suspended = _is_enabled_value(settings.get("share_suspended"))
+    target_suspended = 0 if ok else 1
+    safe_error = None if ok else _compact_share_error(error)
+    claimed = apply_share_connectivity_transition(
+        user_id,
+        expected_suspended=int(was_suspended),
+        next_suspended=target_suspended,
+        checked_at=checked_at,
+        check_ok=int(ok),
+        error=safe_error,
+    )
+    if not claimed:
+        latest_settings = get_user_settings(user_id) or {}
+        if not _is_enabled_value(latest_settings.get("share_ai_results")):
+            return "not_opted_in"
+        return "unchanged"
+
     if ok:
-        set_user_settings(
-            user_id,
-            share_suspended=0,
-            share_last_check_at=checked_at,
-            share_last_check_ok=1,
-            share_last_check_error=None,
-        )
         if not was_suspended:
             return "unchanged"
         _notify_user(
@@ -1141,14 +1181,6 @@ def _apply_share_connectivity_result(
         )
         return "restored"
 
-    safe_error = _compact_share_error(error)
-    set_user_settings(
-        user_id,
-        share_suspended=1,
-        share_last_check_at=checked_at,
-        share_last_check_ok=0,
-        share_last_check_error=safe_error,
-    )
     if was_suspended:
         return "unchanged"
     _notify_user(

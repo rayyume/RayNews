@@ -1,6 +1,7 @@
 """Regression coverage for durable shared-AI suspension state."""
 
 import os
+import threading
 import uuid
 from pathlib import Path
 
@@ -246,3 +247,179 @@ def test_periodic_revalidation_restores_suspended_user(share_env, monkeypatch):
     assert settings["share_suspended"] == 0
     assert web_server.is_share_active(settings) is True
     assert notices == [user_id]
+
+
+def _run_concurrent_connectivity_results(user_id: int, *calls):
+    start = threading.Barrier(len(calls))
+    results = []
+    errors = []
+    lock = threading.Lock()
+
+    def run(args):
+        try:
+            models.close_db()
+            start.wait(timeout=5)
+            result = web_server._apply_share_connectivity_result(user_id, *args)
+            with lock:
+                results.append(result)
+        except Exception as exc:  # pragma: no cover - surfaced below
+            with lock:
+                errors.append(exc)
+        finally:
+            models.close_db()
+
+    threads = [threading.Thread(target=run, args=(args,)) for args in calls]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    assert not [thread for thread in threads if thread.is_alive()]
+    assert errors == []
+    return results
+
+
+def test_concurrent_failures_suspend_once_and_send_one_notification(share_env, monkeypatch):
+    _, user_id = share_env
+    opted_in(user_id)
+    notices = []
+    notices_lock = threading.Lock()
+    original_get_settings = web_server.get_user_settings
+    both_reads = threading.Barrier(2)
+    reads_lock = threading.Lock()
+    reads = 0
+
+    def synchronize_initial_read(uid):
+        nonlocal reads
+        settings = original_get_settings(uid)
+        with reads_lock:
+            reads += 1
+            synchronize = reads <= 2
+        if synchronize:
+            both_reads.wait(timeout=5)
+        return settings
+
+    def record_notice(*args, **kwargs):
+        with notices_lock:
+            notices.append(args)
+
+    monkeypatch.setattr(web_server, "get_user_settings", synchronize_initial_read)
+    monkeypatch.setattr(web_server, "_notify_user", record_notice)
+
+    results = _run_concurrent_connectivity_results(
+        user_id,
+        (False, "AI API HTTP 401", "2026-07-27T13:00:00"),
+        (False, "AI API HTTP 401", "2026-07-27T13:00:01"),
+    )
+
+    assert sorted(results) == ["suspended", "unchanged"]
+    assert [notice[1] for notice in notices] == ["share_suspended"]
+    assert models.get_user_settings(user_id)["share_suspended"] == 1
+
+
+def test_concurrent_successes_restore_once_and_send_one_notification(share_env, monkeypatch):
+    _, user_id = share_env
+    opted_in(user_id, suspended=1)
+    notices = []
+    notices_lock = threading.Lock()
+    original_get_settings = web_server.get_user_settings
+    both_reads = threading.Barrier(2)
+    reads_lock = threading.Lock()
+    reads = 0
+
+    def synchronize_initial_read(uid):
+        nonlocal reads
+        settings = original_get_settings(uid)
+        with reads_lock:
+            reads += 1
+            synchronize = reads <= 2
+        if synchronize:
+            both_reads.wait(timeout=5)
+        return settings
+
+    def record_notice(*args, **kwargs):
+        with notices_lock:
+            notices.append(args)
+
+    monkeypatch.setattr(web_server, "get_user_settings", synchronize_initial_read)
+    monkeypatch.setattr(web_server, "_notify_user", record_notice)
+
+    results = _run_concurrent_connectivity_results(
+        user_id,
+        (True, "", "2026-07-27T14:00:00"),
+        (True, "", "2026-07-27T14:00:01"),
+    )
+
+    assert sorted(results) == ["restored", "unchanged"]
+    assert [notice[1] for notice in notices] == ["share_restored"]
+    assert models.get_user_settings(user_id)["share_suspended"] == 0
+
+
+def test_opt_out_winning_race_prevents_transition_notification(share_env, monkeypatch):
+    _, user_id = share_env
+    opted_in(user_id)
+    notices = []
+    original_get_settings = web_server.get_user_settings
+    read_complete = threading.Event()
+    release_transition = threading.Event()
+
+    def pause_after_read(uid):
+        settings = original_get_settings(uid)
+        read_complete.set()
+        assert release_transition.wait(timeout=5)
+        return settings
+
+    monkeypatch.setattr(web_server, "get_user_settings", pause_after_read)
+    monkeypatch.setattr(web_server, "_notify_user", lambda *args, **kwargs: notices.append(args))
+    result = []
+
+    def apply_failure():
+        try:
+            models.close_db()
+            result.append(web_server._apply_share_connectivity_result(user_id, False, "AI API HTTP 401"))
+        finally:
+            models.close_db()
+
+    worker = threading.Thread(target=apply_failure)
+    worker.start()
+    assert read_complete.wait(timeout=5)
+    models.set_user_settings(user_id, share_ai_results=0)
+    release_transition.set()
+    worker.join(timeout=10)
+
+    assert not worker.is_alive()
+    assert result == ["not_opted_in"]
+    assert notices == []
+    settings = models.get_user_settings(user_id)
+    assert settings["share_ai_results"] == 0
+    assert settings["share_suspended"] == 0
+
+
+def test_share_error_drops_provider_body_and_redacts_common_credentials(share_env, monkeypatch):
+    _, user_id = share_env
+    opted_in(user_id)
+    notices = []
+    monkeypatch.setattr(web_server, "_notify_user", lambda *args, **kwargs: notices.append(args))
+    secrets = [
+        "bearer-secret-value",
+        "header-secret-value",
+        "provider-api-key-value",
+        "query-key-value",
+        "form-token-value",
+        "non-sk-provider-key-value",
+    ]
+    raw_error = (
+        "AI API HTTP 401: provider response body: "
+        "Bearer bearer-secret-value; Authorization: Bearer header-secret-value; "
+        "api_key=provider-api-key-value&key=query-key-value&token=form-token-value; "
+        "x-api-key: non-sk-provider-key-value"
+    )
+
+    web_server._apply_share_connectivity_result(user_id, False, raw_error)
+
+    persisted = models.get_user_settings(user_id)["share_last_check_error"]
+    notification_body = notices[0][3]
+    assert persisted == "AI API HTTP 401"
+    for secret in secrets:
+        assert secret not in persisted
+        assert secret not in notification_body
+    assert "provider response body" not in persisted
