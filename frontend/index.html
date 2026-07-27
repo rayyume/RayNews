@@ -3214,7 +3214,18 @@ async function saveAIConfig() {
       return;
     }
     if (data.error) { showSettingsStatus('❌ ' + data.error, 'err'); return; }
-    showSettingsStatus('✅ AI 配置已保存');
+    if (data.share_check?.restored) {
+      showSettingsStatus('✅ AI 配置已保存，共享状态已自动恢复', 'ok');
+      await loadUserSettings();
+    } else if (data.share_check?.error) {
+      showSettingsStatus(
+        '⚠️ AI 配置已保存，但连接校验失败，共享仍处于暂停状态：'
+          + data.share_check.error,
+        'err',
+      );
+    } else {
+      showSettingsStatus('✅ AI 配置已保存');
+    }
     loadAIConfig();
   } catch (e) { showSettingsStatus('❌ 保存失败: ' + e.message, 'err'); }
 }
@@ -3245,7 +3256,12 @@ async function testAIConnection() {
       return;
     }
     if (testData.error) { showSettingsStatus('❌ ' + testData.error, 'err'); return; }
-    showSettingsStatus('✅ 连接成功！模型响应：' + (testData.response || 'ok'), 'ok');
+    if (testData.share_check?.restored) {
+      showSettingsStatus('✅ 连接成功，共享状态已自动恢复！模型响应：' + (testData.response || 'ok'), 'ok');
+      await loadUserSettings();
+    } else {
+      showSettingsStatus('✅ 连接成功！模型响应：' + (testData.response || 'ok'), 'ok');
+    }
   } catch (e) { showSettingsStatus('❌ 测试失败: ' + e.message, 'err'); }
 }
 
@@ -3253,12 +3269,19 @@ async function testAIConnection() {
 
 function updateShareSubToggleState() {
   const masterOn = document.getElementById('shareAiResults').checked;
+  const suspended = !!userAutoSettings?.share_suspended;
   ['shareViewTitle', 'shareViewTranslation', 'shareViewSummary'].forEach(id => {
     const el = document.getElementById(id);
-    el.disabled = !masterOn;
+    el.disabled = !masterOn || suspended;
     if (!masterOn) el.checked = false;
   });
-  document.getElementById('shareSubHint').style.display = masterOn ? 'none' : '';
+  const hint = document.getElementById('shareSubHint');
+  hint.textContent = !masterOn
+    ? '需先开启共享 AI 结果'
+    : (suspended
+      ? 'API 校验失败，共享已暂停。更新 API 并校验成功后会自动恢复，无需重新开启。'
+      : '');
+  hint.style.display = hint.textContent ? '' : 'none';
 }
 
 async function loadShareTab() {
@@ -3270,13 +3293,18 @@ async function loadShareTab() {
   document.getElementById('shareViewSummary').checked = !!s.share_view_summary;
   updateShareSubToggleState();
   const statusEl = document.getElementById('shareCheckStatus');
-  if (!s.share_last_check_at) {
+  if (s.share_suspended) {
+    statusEl.textContent =
+      '⏸ API 校验失败，共享已暂停。原有选项已保留，API 恢复后会自动重新生效。'
+      + (s.share_last_check_error ? ' 原因：' + s.share_last_check_error : '');
+    statusEl.style.color = '#e5a84d';
+  } else if (!s.share_last_check_at) {
     statusEl.textContent = '';
   } else if (s.share_last_check_ok) {
     statusEl.textContent = '✅ 上次校验成功：' + s.share_last_check_at;
     statusEl.style.color = '';
   } else {
-    statusEl.textContent = '❌ 上次校验失败（' + s.share_last_check_at + '）：' + (s.share_last_check_error || '未知错误') + '，共享资格已被取消';
+    statusEl.textContent = '❌ 上次校验失败（' + s.share_last_check_at + '）：' + (s.share_last_check_error || '未知错误');
     statusEl.style.color = '#e5484d';
   }
 }
@@ -3635,6 +3663,8 @@ async function loadUserSettings() {
       share_view_title: !!data.share_view_title,
       share_view_translation: !!data.share_view_translation,
       share_view_summary: !!data.share_view_summary,
+      share_suspended: !!data.share_suspended,
+      share_active: !!data.share_active,
       share_last_check_at: data.share_last_check_at || null,
       share_last_check_ok: data.share_last_check_ok,
       share_last_check_error: data.share_last_check_error || null,
@@ -7949,7 +7979,7 @@ function esc(str) {
 // here on the client rather than by the (unauthenticated) news API.
 function displayTitle(item) {
   if (!item) return '';
-  if (userAutoSettings?.share_view_title) return item.title || item.original_title || '';
+  if (userAutoSettings?.share_active && userAutoSettings?.share_view_title) return item.title || item.original_title || '';
   return item.original_title || item.title || '';
 }
 

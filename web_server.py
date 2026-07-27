@@ -4597,12 +4597,32 @@ def redetect_single_source():
 
 # ─── Settings Routes ────────────────────────────────────────
 
+def _settings_response(settings: dict | None) -> dict:
+    """Serialize settings consistently for both settings endpoints."""
+    safe = dict(settings or {})
+    safe.setdefault("share_ai_results", 0)
+    safe.setdefault("share_view_title", 0)
+    safe.setdefault("share_view_translation", 0)
+    safe.setdefault("share_view_summary", 0)
+    safe.setdefault("share_suspended", 0)
+    safe["share_active"] = is_share_active(safe)
+    nc = safe.get("notification_config", "{}")
+    if isinstance(nc, str):
+        try:
+            nc = json.loads(nc)
+        except (json.JSONDecodeError, TypeError):
+            nc = {}
+    safe["notification_config"] = nc
+    safe.pop("share_last_check_revision", None)
+    safe.pop("share_current_config_revision", None)
+    return safe
+
 @app.route("/settings", methods=["GET"])
 @require_role("user", "admin")
 def get_settings():
     settings = get_user_settings(g.user_id)
     if not settings:
-        return jsonify({
+        settings = {
             "auto_translate_title": False,
             "auto_translate_content": False,
             "auto_title_summary_enabled": False,
@@ -4619,20 +4639,8 @@ def get_settings():
             "share_last_check_ok": None,
             "share_last_check_error": None,
             "share_active": False,
-        })
-    # Parse notification_config JSON
-    safe = dict(settings)
-    nc = safe.get("notification_config", "{}")
-    if isinstance(nc, str):
-        try:
-            nc = json.loads(nc)
-        except (json.JSONDecodeError, TypeError):
-            nc = {}
-    safe["notification_config"] = nc
-    safe["share_active"] = is_share_active(safe)
-    safe.pop("share_last_check_revision", None)
-    safe.pop("share_current_config_revision", None)
-    return jsonify(safe)
+        }
+    return jsonify(_settings_response(settings))
 
 
 @app.route("/settings", methods=["PUT"])
@@ -4755,25 +4763,13 @@ def update_settings():
             g.user_id, True, config_revision=share_check_revision
         )
         settings = get_user_settings(g.user_id) or {}
-    # Parse back
-    safe = dict(settings)
-    nc = safe.get("notification_config", "{}")
-    if isinstance(nc, str):
-        try:
-            nc = json.loads(nc)
-        except (json.JSONDecodeError, TypeError):
-            nc = {}
-    safe["notification_config"] = nc
-    safe["share_active"] = is_share_active(safe)
-    safe.pop("share_last_check_revision", None)
-    safe.pop("share_current_config_revision", None)
     if _is_enabled_value(data.get("auto_summary_enabled")):
         threading.Thread(target=_run_auto_summary_once, daemon=True).start()
     if _is_enabled_value(data.get("auto_translate_title")) or _is_enabled_value(data.get("auto_translate_content")):
         threading.Thread(target=_run_auto_translation_once, daemon=True).start()
     if _is_enabled_value(data.get("auto_title_summary_enabled")) or _is_enabled_value(data.get("auto_translate_title")):
         threading.Thread(target=_run_auto_title_process_once, daemon=True).start()
-    return jsonify(safe)
+    return jsonify(_settings_response(settings))
 
 
 def _is_enabled_value(value) -> bool:

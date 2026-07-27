@@ -33,6 +33,31 @@ def _article_detail_block():
     return HTML[start:end]
 
 
+def _display_title_block():
+    start = HTML.index("function displayTitle(")
+    end = HTML.index("\n}", start) + 2
+    return HTML[start:end]
+
+
+def test_display_title_requires_active_shared_access():
+    script = f"""
+const assert = require('assert');
+const vm = require('vm');
+const context = {{ userAutoSettings: {{ share_active: false, share_view_title: true }} }};
+vm.createContext(context);
+vm.runInContext({json.dumps(_display_title_block())}, context);
+const article = {{ title: '共享译名', original_title: 'Original title' }};
+assert.equal(context.displayTitle(article), 'Original title');
+context.userAutoSettings.share_active = true;
+assert.equal(context.displayTitle(article), '共享译名');
+context.userAutoSettings.share_view_title = false;
+assert.equal(context.displayTitle(article), 'Original title');
+"""
+    result = subprocess.run(["node", "-e", script], cwd=ROOT,
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def _run_translation_update(body):
     # Evaluate only translation-update handling with the article cache and overlay
     # dependencies supplied explicitly, keeping this a browser contract test.

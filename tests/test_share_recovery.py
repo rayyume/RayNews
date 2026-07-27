@@ -131,6 +131,33 @@ def opted_in(user_id: int, *, suspended: int = 0):
     )
 
 
+def test_settings_returns_intent_suspension_and_effective_state(share_env):
+    client, user_id = share_env
+    opted_in(user_id, suspended=1)
+
+    response = client.get("/settings", headers=auth_headers(user_id))
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["share_ai_results"] == 1
+    assert data["share_suspended"] == 1
+    assert data["share_active"] is False
+
+
+def test_frontend_keeps_paused_preferences_visible_but_disabled():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    load_start = html.index("async function loadShareTab()")
+    load_end = html.index("async function saveShareConfig()", load_start)
+    block = html[load_start:load_end]
+    assert "share_suspended" in html
+    assert "share_active" in html
+    assert "共享已暂停" in block
+    assert "el.disabled = !masterOn || suspended" in html
+    title_start = html.index("function displayTitle(")
+    title_end = html.index("\n}", title_start)
+    assert "share_active" in html[title_start:title_end]
+
+
 def test_failed_check_suspends_without_clearing_preferences(share_env, monkeypatch):
     _, user_id = share_env
     opted_in(user_id)
