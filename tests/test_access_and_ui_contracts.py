@@ -263,7 +263,13 @@ def test_idle_refresh_only_returns_to_latest_after_five_minutes_and_new_articles
     assert "const activeFilter = filter;" in idle_block
     assert "pendingRelevantCount(activeFilter)" in idle_block
     assert "hasBlockingOverlayOpen()" in idle_block
-    assert "scrollPageToTop({ onNearTop: applyLatest, auto: true })" in idle_block
+    # The auto-scroll belongs to the refresh flow too, so a cancelled/replaced
+    # flow cannot keep moving the viewport after its guarded page apply stops.
+    assert "const completed = await scrollPageToTop({" in idle_block
+    assert "onNearTop: applyLatest," in idle_block
+    assert "auto: true," in idle_block
+    assert "externalSignal," in idle_block
+    assert "applicationGuard," in idle_block
     assert "if (!mayApply() || !completed) return;" in idle_block
     assert "currentPage = 1;" in idle_block
     # Only the just-consumed category's pending items are dropped, not every

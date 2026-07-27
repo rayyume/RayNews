@@ -2514,6 +2514,77 @@ assert.equal(context.applyCalls, 0);
     )
 
 
+def test_idle_latest_scroll_stops_after_owning_refresh_flow_is_cancelled():
+    cancel_flow = source_between("function cancelRefreshFlow()", "function cancelViewBoundRefreshWork()")
+    show_latest = source_between("async function showLatestAfterIdle(", "function scheduleAdjacentPagePrefetch")
+    scroll_to_top = source_between("function scrollPageToTop(", "function stabilizePageTop")
+    run_node(
+        cancel_flow + show_latest + scroll_to_top,
+        """
+const frames = [];
+context.requestAnimationFrame = callback => { frames.push(callback); return frames.length; };
+context.performance = { now: () => 0 };
+context.window = {
+  scrollY: 100,
+  scrollTo: () => { context.scrollCalls++; },
+};
+context.document = { hidden: false, documentElement: { scrollTop: 0 } };
+context.activeScrollMotion = null;
+context.PAGE_SWITCH_TOP_THRESHOLD = 4;
+context.filter = 'all';
+context.currentPage = 2;
+context.contentEpoch = 5;
+context.pendingNewArticleCount = 1;
+context.pendingRelevantCount = () => context.pendingNewArticleCount;
+context.hasBlockingOverlayOpen = () => false;
+context.lastUserActivityAt = 0;
+context.IDLE_LATEST_DELAY_MS = 1;
+context.Date = { now: () => 100 };
+context.fetchNewsPage = async () => ({ items: [{ id: 7 }] });
+context.writeCachedNewsPage = async () => {};
+context.applyCalls = 0;
+context.applyNewsPage = () => { context.applyCalls++; };
+context.consumeCalls = 0;
+context.consumePendingNewArticles = () => { context.consumeCalls++; };
+context.syncCalls = 0;
+context.syncListUrl = () => { context.syncCalls++; };
+context.scrollCalls = 0;
+context.programmaticScrollUntil = 0;
+context.refreshInProgress = true;
+context.refreshFlowGeneration = 1;
+const controller = new AbortController();
+context.refreshFlowController = controller;
+context.setRefreshRunning = running => { context.refreshInProgress = running; };
+const applying = context.showLatestAfterIdle({
+  externalSignal: controller.signal,
+  applicationGuard: () => context.refreshFlowController === controller && !controller.signal.aborted,
+});
+while (frames.length === 0) await Promise.resolve();
+// Let the motion begin, then invalidate its owning refresh flow before its next frame.
+frames.shift()(0);
+await Promise.resolve();
+assert.equal(context.scrollCalls, 1);
+assert.ok(frames.length > 0);
+context.cancelRefreshFlow();
+const scrollCallsAtCancel = context.scrollCalls;
+const programmaticScrollAtCancel = context.programmaticScrollUntil;
+while (frames.length) {
+  frames.shift()(400);
+  await Promise.resolve();
+}
+await applying;
+assert.equal(context.scrollCalls, scrollCallsAtCancel);
+assert.equal(context.applyCalls, 0);
+assert.equal(context.consumeCalls, 0);
+assert.equal(context.syncCalls, 0);
+assert.equal(context.currentPage, 2);
+assert.equal(context.pendingNewArticleCount, 1);
+assert.equal(context.contentEpoch, 5);
+assert.equal(context.programmaticScrollUntil, programmaticScrollAtCancel);
+""",
+    )
+
+
 def test_bootstrap_starts_source_news_and_count_requests_without_serial_waits():
     bootstrap = source_between("async function bootstrapNews(", "// Initial load")
     run_node(

@@ -5903,7 +5903,12 @@ async function showLatestAfterIdle({
   };
   if (!mayApply()) return;
   programmaticScrollUntil = Date.now() + 800;
-  const completed = await scrollPageToTop({ onNearTop: applyLatest, auto: true });
+  const completed = await scrollPageToTop({
+    onNearTop: applyLatest,
+    auto: true,
+    externalSignal,
+    applicationGuard,
+  });
   if (!mayApply() || !completed) return;
   applyLatest();
   if (!mayApply() || !pageApplied) return;
@@ -6979,24 +6984,33 @@ function waitForScrollTop(timeout = 700) {
   });
 }
 
-function scrollPageToTop({ onNearTop, auto = false } = {}) {
+function scrollPageToTop({
+  onNearTop,
+  auto = false,
+  externalSignal = null,
+  applicationGuard = null,
+} = {}) {
+  const mayContinue = () => (
+    !(externalSignal && externalSignal.aborted)
+    && (!applicationGuard || applicationGuard())
+  );
   const startY = window.scrollY || document.documentElement.scrollTop || 0;
   let nearTopApplied = false;
   const applyNearTop = () => {
-    if (nearTopApplied) return;
+    if (nearTopApplied || !mayContinue()) return false;
     nearTopApplied = true;
     if (typeof onNearTop === 'function') onNearTop();
+    return mayContinue();
   };
+  if (!mayContinue()) return Promise.resolve(false);
   if (startY <= 4) {
-    applyNearTop();
-    return Promise.resolve(true);
+    return Promise.resolve(applyNearTop());
   }
   const reduceMotion = window.matchMedia
     && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   if (reduceMotion) {
     window.scrollTo(0, 0);
-    applyNearTop();
-    return Promise.resolve(true);
+    return Promise.resolve(applyNearTop());
   }
   if (activeScrollMotion) activeScrollMotion.cancelled = true;
   const motion = { auto, cancelled: false };
@@ -7004,24 +7018,26 @@ function scrollPageToTop({ onNearTop, auto = false } = {}) {
   const duration = Math.min(640, Math.max(340, 300 + startY * 0.055));
   return new Promise(resolve => {
     const startedAt = performance.now();
+    const finish = completed => {
+      if (activeScrollMotion === motion) activeScrollMotion = null;
+      resolve(completed);
+    };
     const step = now => {
-      if (motion.cancelled) {
-        if (activeScrollMotion === motion) activeScrollMotion = null;
-        resolve(false);
-        return;
-      }
+      if (motion.cancelled || !mayContinue()) return finish(false);
       const progress = Math.min(1, (now - startedAt) / duration);
       const eased = 1 - Math.pow(1 - progress, 4);
       const remaining = Math.round(startY * (1 - eased));
       window.scrollTo(0, remaining);
+      if (!mayContinue()) return finish(false);
       if (progress >= 0.75 || remaining <= PAGE_SWITCH_TOP_THRESHOLD) applyNearTop();
+      if (!mayContinue()) return finish(false);
       if (progress < 1) {
         requestAnimationFrame(step);
       } else {
         applyNearTop();
+        if (!mayContinue()) return finish(false);
         window.scrollTo(0, 0);
-        if (activeScrollMotion === motion) activeScrollMotion = null;
-        resolve(true);
+        finish(true);
       }
     };
     requestAnimationFrame(step);
