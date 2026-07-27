@@ -483,10 +483,15 @@ def test_manual_refresh_new_article_prompt_is_not_suppressed_while_running():
 def test_manual_refresh_checks_for_already_fetched_articles_immediately():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     trigger = html[html.index("async function triggerRefresh("):html.index("function setRefreshRunning")]
-    immediate_check = "const immediateCheck = loadSince(sinceCursor, { manual: true });"
-    assert immediate_check in trigger
-    assert trigger.index(immediate_check) < trigger.index("await requestRefreshOnce(")
-    assert "async function loadSince(timestamp, { forceApply = false, manual = false } = {})" in html
+    immediate_start = "const immediateCheck = loadSince(sinceCursor,"
+    immediate_end = trigger.index("await requestRefreshOnce(")
+    immediate_block = trigger[trigger.index(immediate_start):immediate_end]
+    # The immediate database check starts before the manual job, and its accepted
+    # article IDs feed the unified flow-scoped discovery Set rather than a separate
+    # numeric counter. Keep this contract independent of formatting/layout.
+    assert "manual: true" in immediate_block
+    assert "onDiscovered: mergeDiscovered" in immediate_block
+    assert "async function loadSince(" in html
     since_block = html[html.index("async function loadSince("):html.index("function rebuildSourceFilterGroups")]
     assert "if (!manual && (deferForRefresh || refreshInProgress)) return added;" in since_block
 
