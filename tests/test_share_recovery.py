@@ -884,3 +884,73 @@ def test_stale_manual_and_periodic_probes_cannot_block_current_settings_validati
     assert response.status_code == 200
     assert models.get_user_settings(user_id)["share_last_check_revision"] == new_config["revision"]
     assert response.get_json()["share_active"] is True
+
+
+def test_settings_enable_rejects_config_revision_changed_during_validation(
+    share_env, monkeypatch
+):
+    client, user_id = share_env
+    old_config = models.set_ai_config(user_id, api_key="old-key", enabled=1)
+    models.set_user_settings(
+        user_id,
+        share_ai_results=0,
+        share_view_title=0,
+        share_view_translation=0,
+        share_view_summary=0,
+        share_suspended=0,
+        share_last_check_ok=0,
+    )
+    probe_started = threading.Event()
+    allow_probe = threading.Event()
+    enable_response = {}
+    notices = []
+    monkeypatch.setattr(web_server, "_notify_user", lambda *args, **kwargs: notices.append(args))
+
+    def delayed_probe(config):
+        assert config["revision"] == old_config["revision"]
+        probe_started.set()
+        assert allow_probe.wait(timeout=5)
+        return {"ok": True, "response": "pong"}, 200
+
+    def enable_sharing():
+        try:
+            worker_client = web_server.app.test_client()
+            enable_response["response"] = worker_client.put(
+                "/settings",
+                json={"share_ai_results": 1, "share_view_title": 1},
+                headers=auth_headers(user_id),
+            )
+        finally:
+            models.close_db()
+
+    monkeypatch.setattr(web_server, "_run_ai_connection_test", delayed_probe)
+    worker = threading.Thread(target=enable_sharing)
+    worker.start()
+    assert probe_started.wait(timeout=5)
+
+    saved = client.put(
+        "/ai/config",
+        json={"api_key": "new-key", "enabled": 1},
+        headers=auth_headers(user_id),
+    )
+    assert saved.status_code == 200
+    assert "share_check" not in saved.get_json()
+    assert models.get_ai_config(user_id)["revision"] > old_config["revision"]
+
+    allow_probe.set()
+    worker.join(timeout=10)
+    assert not worker.is_alive()
+
+    response = enable_response["response"]
+    assert response.status_code == 409
+    assert response.get_json()["share_check"] == {
+        "ok": False,
+        "status": "stale_validation",
+        "error": "AI config changed during validation; retry enabling sharing",
+    }
+    settings = models.get_user_settings(user_id)
+    assert settings["share_ai_results"] == 0
+    assert settings["share_view_title"] == 0
+    assert settings["share_suspended"] == 0
+    assert web_server.is_share_active(settings) is False
+    assert notices == []

@@ -30,6 +30,7 @@ from models import (
     add_favorite, remove_favorite, get_favorites, get_all_favorite_article_ids, is_favorited,
     count_article_favorites,
     get_ai_config, set_ai_config, get_user_settings, set_user_settings,
+    set_user_settings_for_ai_config_revision,
     apply_share_connectivity_transition,
     get_users_with_share_enabled,
     get_system_ai_config, set_system_ai_config,
@@ -4732,7 +4733,21 @@ def update_settings():
             return jsonify({
                 "error": "请先在管理员设置→服务端API中配置系统AI"
             }), 400
-    settings = set_user_settings(g.user_id, **data)
+    if share_check_ok:
+        settings = set_user_settings_for_ai_config_revision(
+            g.user_id, share_check_revision, **data
+        )
+        if settings is None:
+            return jsonify({
+                "error": "AI config changed during validation; retry enabling sharing",
+                "share_check": {
+                    "ok": False,
+                    "status": "stale_validation",
+                    "error": "AI config changed during validation; retry enabling sharing",
+                },
+            }), 409
+    else:
+        settings = set_user_settings(g.user_id, **data)
     if not settings:
         return jsonify({"error": "update failed"}), 400
     if share_check_ok:

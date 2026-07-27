@@ -584,6 +584,49 @@ def set_user_settings(user_id: int, **kwargs) -> dict:
     return get_user_settings(user_id)
 
 
+def set_user_settings_for_ai_config_revision(
+    user_id: int, expected_config_revision: int, **kwargs
+) -> dict | None:
+    """Persist settings only while the validated personal config is current."""
+    allowed = {
+        "auto_translate_title", "auto_translate_content",
+        "auto_title_summary_enabled", "auto_summary_enabled", "daily_summary_enabled",
+        "theme_preference", "notification_config",
+        "share_ai_results", "share_view_title", "share_view_translation", "share_view_summary",
+        "share_suspended", "share_last_check_at", "share_last_check_ok", "share_last_check_error",
+    }
+    updates = {k: v for k, v in kwargs.items() if k in allowed}
+    if not updates:
+        return None
+    try:
+        expected_config_revision = int(expected_config_revision)
+    except (TypeError, ValueError):
+        return None
+
+    db = get_db()
+    sets = ", ".join(f"{key} = ?" for key in updates)
+    values = list(updates.values())
+    updated = db.execute(
+        f"UPDATE user_settings SET {sets} "
+        "WHERE user_id = ? AND COALESCE((SELECT revision FROM ai_configs WHERE user_id = ?), 0) = ?",
+        values + [user_id, user_id, expected_config_revision],
+    ).rowcount == 1
+    if not updated:
+        keys = ", ".join(updates.keys())
+        placeholders = ", ".join("?" for _ in updates)
+        inserted = db.execute(
+            f"INSERT OR IGNORE INTO user_settings (user_id, {keys}) "
+            f"SELECT ?, {placeholders} "
+            "WHERE COALESCE((SELECT revision FROM ai_configs WHERE user_id = ?), 0) = ?",
+            [user_id] + values + [user_id, expected_config_revision],
+        ).rowcount == 1
+        if not inserted:
+            db.commit()
+            return None
+    db.commit()
+    return get_user_settings(user_id)
+
+
 def apply_share_connectivity_transition(
     user_id: int,
     expected_suspended: int,
