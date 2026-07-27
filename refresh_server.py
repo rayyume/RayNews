@@ -25,6 +25,7 @@ from image_cache import (
     get_cached_image,
 )
 from news_schema import (
+    enable_wal_mode,
     ensure_article_schema,
     ensure_article_title_columns as _ensure_article_title_columns_shared,
 )
@@ -94,9 +95,10 @@ def ensure_article_title_columns(conn: sqlite3.Connection) -> None:
 def get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(str(DB_FILE), timeout=30)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=30000")
     ensure_schema_once(conn)
+    enable_wal_mode(conn)
+    conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 

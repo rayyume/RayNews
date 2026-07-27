@@ -162,3 +162,49 @@ Existing `datetime.utcnow()` deprecation warnings remain unrelated. The local
 execution harness still cuts off long single pytest invocations near 27
 seconds, so files that exceed that were deliberately split by collected nodeid
 with explicit timeouts rather than left running.
+
+---
+
+## Round 2/5 follow-up: WAL startup ordering
+
+### Remaining P1 fixed
+
+`fetcher.init_db()` and `refresh_server.get_db()` previously attempted
+`PRAGMA journal_mode=WAL` before the shared schema migrator. A concurrent web
+process holding the migrator's SQLite `BEGIN IMMEDIATE` could therefore make a
+cold startup fail with `database is locked`.
+
+Both paths now set `busy_timeout`, complete their shared schema migration, then
+call `news_schema.enable_wal_mode()`. That helper retries only SQLite
+busy/locked responses while enabling WAL and re-raises every other operational
+error unchanged; `synchronous=NORMAL` is applied only afterwards. Fetcher also
+commits its base-table `CREATE TABLE IF NOT EXISTS` before entering the shared
+migration protocol.
+
+### Strict RED → GREEN evidence
+
+New real cross-process cold-start tests launch bounded subprocesses behind a
+file gate. The web worker obtains `BEGIN IMMEDIATE` and enters the shared
+migrator before releasing the fetcher/refresh worker:
+
+- Before the change both tests failed at their pre-migration WAL PRAGMA with
+  `sqlite3.OperationalError: database is locked`.
+- After the change: web-vs-fetcher and web-vs-refresh both pass; final schema
+  has every source/title migration field.
+- Each child is bounded with `communicate(timeout=20)` and explicitly
+  terminated/joined on timeout; outer pytest commands use
+  `timeout --foreground 45s`.
+- A new unit regression confirms WAL setup does not mask a non-retryable
+  `OperationalError` (`disk I/O error`).
+
+### Round 2 verification
+
+- WAL cold-start races: 2 passed (4.34s)
+- Full news schema/thread-safety suite: 11 passed (9.94s)
+- Fetch/refresh/source related suites: 62 passed (2.05s)
+- Fetcher startup consumers (`fulltext_backfill`, `streaming_refresh`,
+  `image_cache`): 29 passed (3.52s)
+- `git diff --check` and `py_compile` of all changed production modules pass.
+
+No new concerns beyond the previously documented unrelated deprecation
+warnings and execution-harness single-command time window.

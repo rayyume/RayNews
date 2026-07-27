@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from news_schema import ensure_article_source_columns, ensure_deleted_articles_table
+from news_schema import enable_wal_mode, ensure_article_source_columns, ensure_deleted_articles_table
 from source_categories import cleanup_stale_source_categories, init_source_categories
 
 
@@ -49,6 +49,20 @@ def test_source_migration_does_not_mask_unrelated_operational_errors():
     except sqlite3.OperationalError as exc:
         assert "malformed" in str(exc)
     else:  # pragma: no cover - makes accidental broad exception handling obvious
+        raise AssertionError("unrelated OperationalError was incorrectly swallowed")
+
+
+def test_enable_wal_mode_does_not_mask_unrelated_operational_errors():
+    class BrokenConnection:
+        def execute(self, sql):
+            assert sql == "PRAGMA journal_mode=WAL"
+            raise sqlite3.OperationalError("disk I/O error")
+
+    try:
+        enable_wal_mode(BrokenConnection())
+    except sqlite3.OperationalError as exc:
+        assert "disk I/O" in str(exc)
+    else:  # pragma: no cover - makes accidental broad retry handling obvious
         raise AssertionError("unrelated OperationalError was incorrectly swallowed")
 
 

@@ -24,7 +24,7 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
-from news_schema import ensure_article_schema
+from news_schema import enable_wal_mode, ensure_article_schema
 from source_categories import (
     ensure_article_sources, init_source_categories,
     ensure_article_source_columns,
@@ -103,10 +103,9 @@ log = logging.getLogger("fetcher")
 def init_db() -> sqlite3.Connection:
     """Initialize SQLite DB and return connection."""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_FILE))
+    conn = sqlite3.connect(str(DB_FILE), timeout=30)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS articles (
             id INTEGER PRIMARY KEY,
@@ -124,7 +123,10 @@ def init_db() -> sqlite3.Connection:
             summary TEXT DEFAULT ''
         )
     """)
+    conn.commit()
     ensure_article_schema(conn)
+    enable_wal_mode(conn)
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON articles(timestamp DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_source ON articles(source)")
     init_source_categories(conn)

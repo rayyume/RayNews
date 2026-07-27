@@ -2,6 +2,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -178,3 +179,127 @@ finally:
     conn.close()
     assert {"feed_source", "origin_source", "original_title", "title_updated_at", "title_source"} <= columns
     assert tombstone_columns == {"article_id", "title", "source", "deleted_by", "deleted_at"}
+
+
+def _run_web_cold_start_race(tmp_path, startup_script: str, *, fetcher_compatible: bool = True):
+    """Run a web migrator and a second service from the same cold-start gate."""
+    db = tmp_path / "startup-race.db"
+    conn = sqlite3.connect(db)
+    if fetcher_compatible:
+        conn.execute(ARTICLES_DDL)
+    else:
+        conn.execute(
+            "CREATE TABLE articles (id INTEGER PRIMARY KEY, title TEXT, source TEXT NOT NULL DEFAULT '')"
+        )
+    conn.executemany(
+        "INSERT INTO articles (id, title, source) VALUES (?, ?, 'Feed')",
+        [(number, f"article-{number}") for number in range(1, 50001)],
+    )
+    conn.commit()
+    conn.close()
+    ready_web = tmp_path / "web-ready"
+    ready_other = tmp_path / "other-ready"
+    start = tmp_path / "start"
+    migration_lock = tmp_path / "migration-lock"
+    web_script = """
+import sqlite3
+import sys
+import time
+from pathlib import Path
+import web_server
+
+db, ready, start, migration_lock = sys.argv[1:]
+web_server.NEWS_DB = db
+Path(ready).touch()
+while not Path(start).exists():
+    time.sleep(0.01)
+conn = sqlite3.connect(db, timeout=10)
+try:
+    conn.execute("BEGIN IMMEDIATE")
+    Path(migration_lock).touch()
+    web_server._ensure_news_schema(conn)
+    conn.commit()
+finally:
+    conn.close()
+"""
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", web_script, str(db), str(ready_web), str(start), str(migration_lock)],
+            cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        ),
+        subprocess.Popen(
+            [sys.executable, "-c", startup_script, str(db), str(ready_other), str(start), str(migration_lock)],
+            cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        ),
+    ]
+    try:
+        deadline = time.monotonic() + 20
+        while not (ready_web.exists() and ready_other.exists()):
+            assert time.monotonic() < deadline, "cold-start workers did not become ready"
+            time.sleep(0.01)
+        start.touch()
+        outputs = []
+        for process in processes:
+            try:
+                outputs.append(process.communicate(timeout=20))
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                process.communicate(timeout=5)
+                raise AssertionError("cold-start worker timed out")
+        assert all(process.returncode == 0 for process in processes), outputs
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=5)
+
+    conn = sqlite3.connect(db)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(articles)")}
+    conn.close()
+    assert {"feed_source", "origin_source", "original_title", "title_updated_at", "title_source"} <= columns
+
+
+def test_web_migration_and_fetcher_cold_start_do_not_race_on_wal(tmp_path):
+    _run_web_cold_start_race(
+        tmp_path,
+        """
+import sys
+import time
+from pathlib import Path
+import fetcher
+
+db, ready, start, migration_lock = sys.argv[1:]
+fetcher.DB_FILE = Path(db)
+fetcher.OUTPUT_DIR = Path(db).parent
+Path(ready).touch()
+while not Path(start).exists():
+    time.sleep(0.01)
+while not Path(migration_lock).exists():
+    time.sleep(0.01)
+conn = fetcher.init_db()
+conn.close()
+""",
+    )
+
+
+def test_web_migration_and_refresh_cold_start_do_not_race_on_wal(tmp_path):
+    _run_web_cold_start_race(
+        tmp_path,
+        """
+import sys
+import time
+from pathlib import Path
+import refresh_server
+
+db, ready, start, migration_lock = sys.argv[1:]
+refresh_server.DB_FILE = Path(db)
+Path(ready).touch()
+while not Path(start).exists():
+    time.sleep(0.01)
+while not Path(migration_lock).exists():
+    time.sleep(0.01)
+conn = refresh_server.get_db()
+conn.close()
+        """,
+        fetcher_compatible=False,
+    )

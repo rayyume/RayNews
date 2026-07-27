@@ -9,6 +9,7 @@ the same cross-process-safe protocol.
 from __future__ import annotations
 
 import sqlite3
+import time
 
 
 _TITLE_COLUMNS = {
@@ -16,6 +17,26 @@ _TITLE_COLUMNS = {
     "title_updated_at": "TEXT",
     "title_source": "TEXT",
 }
+
+
+def enable_wal_mode(conn: sqlite3.Connection, *, attempts: int = 8, delay: float = 0.05) -> None:
+    """Enable WAL after schema migration without masking unrelated failures.
+
+    Switching journal mode needs an exclusive SQLite lock, so it may briefly
+    collide with another process's ``BEGIN IMMEDIATE`` migration.  Retry only
+    SQLite's documented busy/locked condition; any other operational error is
+    surfaced to the caller unchanged.
+    """
+    for attempt in range(attempts):
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            return
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            retryable = "database is locked" in message or "database is busy" in message
+            if not retryable or attempt + 1 == attempts:
+                raise
+            time.sleep(delay)
 
 
 def _article_columns(conn: sqlite3.Connection) -> set[str]:
