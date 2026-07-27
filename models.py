@@ -63,7 +63,8 @@ CREATE TABLE IF NOT EXISTS user_settings (
     share_suspended         INTEGER NOT NULL DEFAULT 0,
     share_last_check_at     TEXT,
     share_last_check_ok     INTEGER,
-    share_last_check_error  TEXT
+    share_last_check_error  TEXT,
+    share_last_check_revision INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS user_access_log (
@@ -162,6 +163,7 @@ def _initialize_db(db: sqlite3.Connection) -> None:
         "ALTER TABLE user_settings ADD COLUMN share_last_check_at TEXT",
         "ALTER TABLE user_settings ADD COLUMN share_last_check_ok INTEGER",
         "ALTER TABLE user_settings ADD COLUMN share_last_check_error TEXT",
+        "ALTER TABLE user_settings ADD COLUMN share_last_check_revision INTEGER",
         # notifications gained a body format ('plain'|'markdown') after the
         # table already shipped, so existing DBs need the column backfilled.
         "ALTER TABLE notifications ADD COLUMN format TEXT NOT NULL DEFAULT 'plain'",
@@ -530,13 +532,15 @@ def set_system_ai_config(**kwargs) -> dict:
 def get_user_settings(user_id: int) -> dict | None:
     db = get_db()
     row = db.execute(
-        "SELECT id, auto_translate_title, auto_translate_content, "
-        "auto_title_summary_enabled, auto_summary_enabled, "
-        "daily_summary_enabled, theme_preference, notification_config, "
-        "share_ai_results, share_view_title, share_view_translation, share_view_summary, "
-        "share_suspended, "
-        "share_last_check_at, share_last_check_ok, share_last_check_error "
-        "FROM user_settings WHERE user_id = ?",
+        "SELECT s.id, s.auto_translate_title, s.auto_translate_content, "
+        "s.auto_title_summary_enabled, s.auto_summary_enabled, "
+        "s.daily_summary_enabled, s.theme_preference, s.notification_config, "
+        "s.share_ai_results, s.share_view_title, s.share_view_translation, s.share_view_summary, "
+        "s.share_suspended, s.share_last_check_at, s.share_last_check_ok, "
+        "s.share_last_check_error, s.share_last_check_revision, "
+        "c.revision AS share_current_config_revision "
+        "FROM user_settings AS s LEFT JOIN ai_configs AS c ON c.user_id = s.user_id "
+        "WHERE s.user_id = ?",
         (user_id,),
     ).fetchone()
     return dict(row) if row else None
@@ -602,7 +606,8 @@ def apply_share_connectivity_transition(
     changed = db.execute(
         "UPDATE user_settings "
         "SET share_suspended = ?, share_last_check_at = ?, "
-        "share_last_check_ok = ?, share_last_check_error = ? "
+        "share_last_check_ok = ?, share_last_check_error = ?, "
+        "share_last_check_revision = ? "
         "WHERE user_id = ? AND share_ai_results = 1 AND share_suspended = ? "
         "AND COALESCE((SELECT revision FROM ai_configs WHERE user_id = ?), 0) = ?",
         (
@@ -610,6 +615,7 @@ def apply_share_connectivity_transition(
             checked_at,
             int(check_ok),
             error,
+            int(expected_config_revision),
             user_id,
             int(expected_suspended),
             user_id,

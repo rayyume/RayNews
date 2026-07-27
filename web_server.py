@@ -4629,6 +4629,8 @@ def get_settings():
             nc = {}
     safe["notification_config"] = nc
     safe["share_active"] = is_share_active(safe)
+    safe.pop("share_last_check_revision", None)
+    safe.pop("share_current_config_revision", None)
     return jsonify(safe)
 
 
@@ -4748,6 +4750,8 @@ def update_settings():
             nc = {}
     safe["notification_config"] = nc
     safe["share_active"] = is_share_active(safe)
+    safe.pop("share_last_check_revision", None)
+    safe.pop("share_current_config_revision", None)
     if _is_enabled_value(data.get("auto_summary_enabled")):
         threading.Thread(target=_run_auto_summary_once, daemon=True).start()
     if _is_enabled_value(data.get("auto_translate_title")) or _is_enabled_value(data.get("auto_translate_content")):
@@ -4764,10 +4768,20 @@ def _is_enabled_value(value) -> bool:
 def is_share_active(settings: dict | None) -> bool:
     """Whether the caller may currently read user-enabled shared AI results."""
     settings = settings or {}
+    try:
+        revision_is_current = (
+            settings.get("share_last_check_revision") is not None
+            and settings.get("share_current_config_revision") is not None
+            and int(settings["share_last_check_revision"])
+            == int(settings["share_current_config_revision"])
+        )
+    except (TypeError, ValueError):
+        revision_is_current = False
     return (
         _is_enabled_value(settings.get("share_ai_results"))
         and not _is_enabled_value(settings.get("share_suspended"))
         and _is_enabled_value(settings.get("share_last_check_ok"))
+        and revision_is_current
     )
 
 

@@ -59,7 +59,20 @@ def test_share_suspended_defaults_false_and_round_trips(share_env):
     (
         (None, False),
         ({}, False),
-        ({"share_ai_results": 1, "share_suspended": 0, "share_last_check_ok": 1}, True),
+        ({
+            "share_ai_results": 1,
+            "share_suspended": 0,
+            "share_last_check_ok": 1,
+            "share_last_check_revision": 2,
+            "share_current_config_revision": 2,
+        }, True),
+        ({
+            "share_ai_results": 1,
+            "share_suspended": 0,
+            "share_last_check_ok": 1,
+            "share_last_check_revision": None,
+            "share_current_config_revision": 2,
+        }, False),
         ({"share_ai_results": 1, "share_suspended": 1, "share_last_check_ok": 1}, False),
         ({"share_ai_results": 1, "share_suspended": 0, "share_last_check_ok": 0}, False),
         ({"share_ai_results": 0, "share_suspended": 0, "share_last_check_ok": 1}, False),
@@ -223,10 +236,15 @@ def test_suspended_opted_in_user_remains_scheduled_for_revalidation(share_env):
 def test_periodic_revalidation_restores_suspended_user(share_env, monkeypatch):
     _, user_id = share_env
     opted_in(user_id, suspended=1)
+    config = models.set_ai_config(user_id, api_key="key", enabled=1)
     monkeypatch.setattr(
         web_server,
         "get_ai_config",
-        lambda uid: {"base_url": "https://provider.example", "api_key": "key"},
+        lambda uid: {
+            "base_url": "https://provider.example",
+            "api_key": "key",
+            "revision": config["revision"],
+        },
     )
     monkeypatch.setattr(
         web_server,
@@ -725,3 +743,144 @@ def test_old_manual_probe_after_opt_out_does_not_change_health_or_notify(share_e
     assert share_check is None
     assert models.get_user_settings(user_id) == before
     assert notices == []
+
+
+def _validated_opted_in(user_id: int, *, suspended: int = 0) -> int:
+    opted_in(user_id, suspended=suspended)
+    config = models.set_ai_config(user_id, api_key="validated-key", enabled=1)
+    assert web_server._apply_share_connectivity_result(
+        user_id, not suspended, config_revision=config["revision"]
+    ) in {"unchanged", "restored"}
+    return config["revision"]
+
+
+def test_new_config_save_is_effectively_inactive_until_its_probe_finishes(share_env, monkeypatch):
+    client, user_id = share_env
+    old_revision = _validated_opted_in(user_id)
+    settings = models.get_user_settings(user_id)
+    assert settings["share_last_check_revision"] == old_revision
+    assert web_server.is_share_active(settings) is True
+    probe_started = threading.Event()
+    allow_probe = threading.Event()
+    probe_response = {}
+    notices = []
+    monkeypatch.setattr(web_server, "_notify_user", lambda *args, **kwargs: notices.append(args))
+
+    def delayed_probe(config):
+        if config["api_key"] == "new-key":
+            probe_started.set()
+            assert allow_probe.wait(timeout=5)
+        return {"ok": True, "response": "pong"}, 200
+
+    def save_new_config():
+        try:
+            worker_client = web_server.app.test_client()
+            probe_response["response"] = worker_client.put(
+                "/ai/config",
+                json={"api_key": "new-key", "enabled": 1},
+                headers=auth_headers(user_id),
+            )
+        finally:
+            models.close_db()
+
+    monkeypatch.setattr(
+        web_server,
+        "_get_ai_result",
+        lambda article_id: {"summary": "shared", "updated_at": "now"},
+    )
+    monkeypatch.setattr(web_server, "_run_ai_connection_test", delayed_probe)
+
+    worker = threading.Thread(target=save_new_config)
+    worker.start()
+    assert probe_started.wait(timeout=5)
+
+    settings = models.get_user_settings(user_id)
+    assert settings["share_suspended"] == 0
+    assert settings["share_last_check_revision"] == old_revision
+    assert settings["share_current_config_revision"] > old_revision
+    assert web_server.is_share_active(settings) is False
+    assert client.get("/settings", headers=auth_headers(user_id)).get_json()["share_active"] is False
+    assert client.get("/ai/result/42", headers=auth_headers(user_id)).get_json() == {
+        "updated_at": "now"
+    }
+    assert notices == []
+
+    allow_probe.set()
+    worker.join(timeout=10)
+    assert not worker.is_alive()
+    assert probe_response["response"].status_code == 200
+    assert probe_response["response"].get_json()["share_check"]["status"] == "unchanged"
+    assert web_server.is_share_active(models.get_user_settings(user_id)) is True
+    assert notices == []
+
+
+def test_new_config_success_validates_its_revision_without_fake_restore_notice(share_env, monkeypatch):
+    _, user_id = share_env
+    old_revision = _validated_opted_in(user_id)
+    notices = []
+    monkeypatch.setattr(web_server, "_notify_user", lambda *args, **kwargs: notices.append(args))
+    config = models.set_ai_config(user_id, api_key="new-key")
+
+    assert web_server._apply_share_connectivity_result(
+        user_id, True, config_revision=config["revision"]
+    ) == "unchanged"
+
+    settings = models.get_user_settings(user_id)
+    assert settings["share_last_check_revision"] == config["revision"]
+    assert settings["share_last_check_revision"] > old_revision
+    assert web_server.is_share_active(settings) is True
+    assert notices == []
+
+
+def test_new_config_failure_records_its_revision_and_pauses(share_env, monkeypatch):
+    _, user_id = share_env
+    _validated_opted_in(user_id)
+    notices = []
+    monkeypatch.setattr(web_server, "_notify_user", lambda *args, **kwargs: notices.append(args))
+    config = models.set_ai_config(user_id, api_key="new-key")
+
+    assert web_server._apply_share_connectivity_result(
+        user_id, False, "AI API HTTP 401", config_revision=config["revision"]
+    ) == "suspended"
+
+    settings = models.get_user_settings(user_id)
+    assert settings["share_suspended"] == 1
+    assert settings["share_last_check_ok"] == 0
+    assert settings["share_last_check_revision"] == config["revision"]
+    assert web_server.is_share_active(settings) is False
+    assert [notice[1] for notice in notices] == ["share_suspended"]
+
+
+def test_stale_manual_and_periodic_probes_cannot_block_current_settings_validation(
+    share_env, monkeypatch
+):
+    client, user_id = share_env
+    old_revision = _validated_opted_in(user_id)
+    old_config = models.get_ai_config(user_id)
+    new_config = models.set_ai_config(user_id, api_key="new-key")
+    before = models.get_user_settings(user_id)
+    notices = []
+    monkeypatch.setattr(web_server, "_notify_user", lambda *args, **kwargs: notices.append(args))
+
+    manual = web_server._share_check_after_personal_api_test(
+        user_id, {"error": "AI API HTTP 401"}, 502, old_revision
+    )
+    monkeypatch.setattr(web_server, "get_ai_config", lambda uid: old_config)
+    monkeypatch.setattr(web_server, "_run_ai_connection_test", lambda config: ({"ok": True}, 200))
+    monkeypatch.setattr(web_server.time, "sleep", lambda seconds: None)
+    web_server._run_ai_share_revalidation_once()
+
+    assert manual["status"] == "stale"
+    assert models.get_user_settings(user_id) == before
+    assert notices == []
+
+    monkeypatch.setattr(web_server, "get_ai_config", models.get_ai_config)
+    response = client.put(
+        "/settings",
+        json={"share_ai_results": 1},
+        headers=auth_headers(user_id),
+    )
+
+    assert response.status_code == 200
+    assert models.get_user_settings(user_id)["share_last_check_revision"] == new_config["revision"]
+    assert response.get_json()["share_active"] is True
