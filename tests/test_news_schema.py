@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from news_schema import ensure_deleted_articles_table
+from news_schema import ensure_article_source_columns, ensure_deleted_articles_table
 from source_categories import cleanup_stale_source_categories, init_source_categories
 
 
@@ -21,6 +21,35 @@ def test_deleted_articles_table_is_created_by_shared_helper():
         row[1] for row in conn.execute("PRAGMA table_info(deleted_articles)").fetchall()
     }
     assert columns == {"article_id", "title", "source", "deleted_by", "deleted_at"}
+
+
+def test_source_migration_does_not_mask_unrelated_operational_errors():
+    """Only a rechecked duplicate-column race is tolerated by the migrator."""
+    raw = sqlite3.connect(":memory:")
+    raw.execute("CREATE TABLE articles (id INTEGER PRIMARY KEY, source TEXT NOT NULL DEFAULT '')")
+
+    class BrokenAlterConnection:
+        @property
+        def in_transaction(self):
+            return raw.in_transaction
+
+        def execute(self, sql, *args, **kwargs):
+            if sql.startswith("ALTER TABLE articles ADD COLUMN feed_source"):
+                raise sqlite3.OperationalError("database disk image is malformed")
+            return raw.execute(sql, *args, **kwargs)
+
+        def commit(self):
+            return raw.commit()
+
+        def rollback(self):
+            return raw.rollback()
+
+    try:
+        ensure_article_source_columns(BrokenAlterConnection())
+    except sqlite3.OperationalError as exc:
+        assert "malformed" in str(exc)
+    else:  # pragma: no cover - makes accidental broad exception handling obvious
+        raise AssertionError("unrelated OperationalError was incorrectly swallowed")
 
 
 def test_empty_article_table_preserves_user_source_metadata():

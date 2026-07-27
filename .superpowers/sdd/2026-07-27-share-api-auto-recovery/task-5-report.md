@@ -102,3 +102,63 @@ loop, and settings validation—none in the news/homepage list handlers.
   and `source_categories.py`; they are unrelated to this task.
 - The environment’s single-command execution window prevents observing a full
   suite exit, hence the documented mutually exclusive batch evidence.
+
+---
+
+## Round 1/5 follow-up: shared migration safety and revalidation cadence
+
+### P1 — cross-process schema migration
+
+The request-thread-only lock was not sufficient: direct title maintenance and
+other processes could still independently execute PRAGMA → ALTER. Migration
+logic now lives in `news_schema.ensure_article_schema()`.
+
+- Standalone connections acquire SQLite `BEGIN IMMEDIATE` before inspecting
+  schema, then recheck under the database write lock.
+- Caller-owned transactions retain their boundary; only an exact
+  `duplicate column name` error followed by a successful column recheck is
+  tolerated. Other `sqlite3.OperationalError` values propagate.
+- Source fields, title fields, and deletion metadata now use compatibility
+  wrappers backed by this shared migrator. Web, refresh server, and fetcher
+  route their full-schema initialization through it.
+- Removed the title-maintenance path's competing `PRAGMA journal_mode=WAL`;
+  it could itself fail with `database is locked` while another request held the
+  migration write lock.
+
+Strict RED → GREEN evidence:
+
+- New direct title-maintenance vs request migration test failed before the
+  shared implementation (`_get_article_meta` returned `None` after a duplicate
+  column race); it now passes repeatedly.
+- New two-process cold migration test launches two subprocesses against the
+  same old database. Each uses `communicate(timeout=20)`; both exit cleanly,
+  and final schema contains all source/title columns plus tombstones.
+- New malformed/non-duplicate `OperationalError` guard passes, proving the
+  migrator does not broadly swallow SQLite operational failures.
+
+### P2 — periodic cadence
+
+`_run_ai_share_revalidation_once()` now sleeps 0.5 seconds **between** users,
+not after every user: N users cause N−1 sleeps and one user causes zero. Two
+new tests were first observed RED (`[0.5, 0.5]` vs `[0.5]`, and `[0.5]` vs
+`[]`) and pass after the minimal loop change.
+
+### Round 1 verification
+
+All commands used explicit outer `timeout --foreground 45s`; subprocess race
+children have their own bounded `communicate(timeout=20)`.
+
+- P1 direct-helper race: 1 passed (11.17s)
+- P1 separate-process cold migration: 1 passed (4.60s)
+- P1 non-duplicate error propagation: 1 passed
+- P2 cadence/recovery: 3 passed (7.89s)
+- Required specialized suites: 151 passed (`share_recovery` 42 split into five
+  bounded chunks; notifications 10; security 9; AI frontend 15; access/UI 75)
+- 451 tests collected. Full coverage was rerun as bounded, mutually exclusive
+  file groups: 105, 22, 127, 8, 5, 6+6, 10, 68, 6, and 46 passing tests; the
+  42 share-recovery tests were the bounded specialized/full share group.
+
+Existing `datetime.utcnow()` deprecation warnings remain unrelated. The local
+execution harness still cuts off long single pytest invocations near 27
+seconds, so files that exceed that were deliberately split by collected nodeid
+with explicit timeouts rather than left running.

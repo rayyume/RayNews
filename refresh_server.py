@@ -24,7 +24,10 @@ from image_cache import (
     fetch_remote_image,
     get_cached_image,
 )
-from news_schema import ensure_deleted_articles_table
+from news_schema import (
+    ensure_article_schema,
+    ensure_article_title_columns as _ensure_article_title_columns_shared,
+)
 from source_categories import (
     CATEGORY_NAMES, CATEGORY_ORDER, ensure_article_source_columns,
     maintain_source_categories, source_rows,
@@ -78,22 +81,14 @@ def ensure_schema_once(conn: sqlite3.Connection) -> None:
     with _schema_lock:
         if _schema_ready_event.is_set() and _schema_ready:
             return
-        ensure_article_source_columns(conn)
-        ensure_article_title_columns(conn)
-        ensure_deleted_articles_table(conn)
-        conn.commit()
+        ensure_article_schema(conn)
         globals()["_schema_ready"] = True
         _schema_ready_event.set()
 
 
 def ensure_article_title_columns(conn: sqlite3.Connection) -> None:
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(articles)").fetchall()}
-    if "original_title" not in cols:
-        conn.execute("ALTER TABLE articles ADD COLUMN original_title TEXT")
-    if "title_updated_at" not in cols:
-        conn.execute("ALTER TABLE articles ADD COLUMN title_updated_at TEXT")
-    if "title_source" not in cols:
-        conn.execute("ALTER TABLE articles ADD COLUMN title_source TEXT")
+    """Backward-compatible title helper backed by the shared migrator."""
+    _ensure_article_title_columns_shared(conn)
 
 
 def get_db() -> sqlite3.Connection:

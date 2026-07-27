@@ -348,6 +348,34 @@ def test_periodic_revalidation_restores_suspended_user(share_env, monkeypatch):
     assert notices == [user_id]
 
 
+def test_periodic_revalidation_sleeps_only_between_users(share_env, monkeypatch):
+    _, user_id = share_env
+    second_user = models.create_user("share-second@example.com", "pw", "share-second")["id"]
+    for uid in (user_id, second_user):
+        opted_in(uid)
+        models.set_ai_config(uid, api_key=f"key-{uid}", enabled=1)
+    sleeps = []
+    monkeypatch.setattr(web_server, "_run_ai_connection_test", lambda config: ({"ok": True}, 200))
+    monkeypatch.setattr(web_server.time, "sleep", sleeps.append)
+
+    web_server._run_ai_share_revalidation_once()
+
+    assert sleeps == [0.5]
+
+
+def test_periodic_revalidation_does_not_sleep_after_only_user(share_env, monkeypatch):
+    _, user_id = share_env
+    opted_in(user_id)
+    models.set_ai_config(user_id, api_key="key", enabled=1)
+    sleeps = []
+    monkeypatch.setattr(web_server, "_run_ai_connection_test", lambda config: ({"ok": True}, 200))
+    monkeypatch.setattr(web_server.time, "sleep", sleeps.append)
+
+    web_server._run_ai_share_revalidation_once()
+
+    assert sleeps == []
+
+
 def _run_concurrent_connectivity_results(user_id: int, *calls):
     start = threading.Barrier(len(calls))
     results = []

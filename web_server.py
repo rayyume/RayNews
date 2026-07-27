@@ -47,7 +47,7 @@ from image_cache import (
     enqueue_article_image_prefetch, unpin_article_images,
     cache_stats, evict_article_images, evict_unreferenced_images, collect_image_urls, open_cache_connection, _url_hash,
 )
-from news_schema import ensure_deleted_articles_table
+from news_schema import ensure_article_schema, ensure_article_title_columns
 from source_categories import (
     CATEGORY_NAMES, CATEGORY_ORDER, cleanup_stale_source_categories,
     clamp_weighted, ensure_article_source_columns, ensure_article_sources,
@@ -498,10 +498,7 @@ def _ensure_news_schema(conn: sqlite3.Connection) -> None:
     # parallel.  Keep the guard here rather than only in _get_news_db():
     # _get_article_meta and maintenance routes also invoke this helper.
     with _news_schema_lock:
-        ensure_article_source_columns(conn)
-        _ensure_article_title_columns(conn)
-        ensure_deleted_articles_table(conn)
-        conn.commit()
+        ensure_article_schema(conn)
 
 
 def _get_article_meta(article_id: int) -> dict | None:
@@ -1274,7 +1271,8 @@ def _run_ai_share_revalidation_once():
     content permanently accessible. Opted-in users remain scheduled while
     suspended, so a later successful check restores their saved preferences.
     """
-    for user_id in get_users_with_share_enabled():
+    user_ids = get_users_with_share_enabled()
+    for index, user_id in enumerate(user_ids):
         config = get_ai_config(user_id)
         body, status = _run_ai_connection_test(config)
         _apply_share_connectivity_result(
@@ -1283,7 +1281,8 @@ def _run_ai_share_revalidation_once():
             body.get("error", "") if status != 200 else "",
             config_revision=(config or {}).get("revision", 0),
         )
-        time.sleep(0.5)  # spread requests out instead of bursting every provider at once
+        if index + 1 < len(user_ids):
+            time.sleep(0.5)  # spread requests out instead of bursting every provider at once
 
 
 def _ai_share_revalidation_loop():
@@ -2357,13 +2356,8 @@ def _repair_title_summary(title: str | None) -> str:
 
 
 def _ensure_article_title_columns(conn) -> None:
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(articles)").fetchall()}
-    if "original_title" not in cols:
-        conn.execute("ALTER TABLE articles ADD COLUMN original_title TEXT")
-    if "title_updated_at" not in cols:
-        conn.execute("ALTER TABLE articles ADD COLUMN title_updated_at TEXT")
-    if "title_source" not in cols:
-        conn.execute("ALTER TABLE articles ADD COLUMN title_source TEXT")
+    """Compatibility wrapper for shared, cross-process-safe title migration."""
+    ensure_article_title_columns(conn)
 
 
 def _invalidate_refresh_server_cache(article_id: int) -> None:
@@ -2393,7 +2387,6 @@ def _save_article_title_update(article_id: int, title: str | None,
         return False
     conn = sqlite3.connect(NEWS_DB, timeout=30)
     try:
-        conn.execute("PRAGMA journal_mode=WAL")
         _ensure_article_title_columns(conn)
         row = conn.execute("SELECT title FROM articles WHERE id = ?", (article_id,)).fetchone()
         if not row:
