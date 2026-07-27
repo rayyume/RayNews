@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS user_settings (
     share_view_title        INTEGER NOT NULL DEFAULT 0,
     share_view_translation  INTEGER NOT NULL DEFAULT 0,
     share_view_summary      INTEGER NOT NULL DEFAULT 0,
+    share_suspended         INTEGER NOT NULL DEFAULT 0,
     share_last_check_at     TEXT,
     share_last_check_ok     INTEGER,
     share_last_check_error  TEXT
@@ -152,6 +153,7 @@ def _initialize_db(db: sqlite3.Connection) -> None:
         "ALTER TABLE user_settings ADD COLUMN share_view_title INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE user_settings ADD COLUMN share_view_translation INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE user_settings ADD COLUMN share_view_summary INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE user_settings ADD COLUMN share_suspended INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE user_settings ADD COLUMN share_last_check_at TEXT",
         "ALTER TABLE user_settings ADD COLUMN share_last_check_ok INTEGER",
         "ALTER TABLE user_settings ADD COLUMN share_last_check_error TEXT",
@@ -527,6 +529,7 @@ def get_user_settings(user_id: int) -> dict | None:
         "auto_title_summary_enabled, auto_summary_enabled, "
         "daily_summary_enabled, theme_preference, notification_config, "
         "share_ai_results, share_view_title, share_view_translation, share_view_summary, "
+        "share_suspended, "
         "share_last_check_at, share_last_check_ok, share_last_check_error "
         "FROM user_settings WHERE user_id = ?",
         (user_id,),
@@ -549,6 +552,7 @@ def set_user_settings(user_id: int, **kwargs) -> dict:
                "auto_title_summary_enabled", "auto_summary_enabled", "daily_summary_enabled",
                "theme_preference", "notification_config",
                "share_ai_results", "share_view_title", "share_view_translation", "share_view_summary",
+               "share_suspended",
                "share_last_check_at", "share_last_check_ok", "share_last_check_error"}
     updates = {k: v for k, v in kwargs.items() if k in allowed}
     if not updates:

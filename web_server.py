@@ -3496,11 +3496,12 @@ def ai_get_result(article_id):
     """
     cached = dict(_get_ai_result(article_id) or {})
     settings = get_user_settings(g.user_id) or {}
-    if not settings.get("share_view_summary"):
+    share_active = is_share_active(settings)
+    if not share_active or not settings.get("share_view_summary"):
         cached.pop("summary", None)
         cached.pop("summary_error", None)
         cached.pop("summary_error_at", None)
-    if not settings.get("share_view_translation"):
+    if not share_active or not settings.get("share_view_translation"):
         cached.pop("translation", None)
     return jsonify(cached)
 
@@ -4483,6 +4484,7 @@ def get_settings():
             "share_view_title": False,
             "share_view_translation": False,
             "share_view_summary": False,
+            "share_suspended": False,
             "share_last_check_at": None,
             "share_last_check_ok": None,
             "share_last_check_error": None,
@@ -4599,6 +4601,16 @@ def update_settings():
 
 def _is_enabled_value(value) -> bool:
     return value is True or value == 1 or str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def is_share_active(settings: dict | None) -> bool:
+    """Whether the caller may currently read user-enabled shared AI results."""
+    settings = settings or {}
+    return (
+        _is_enabled_value(settings.get("share_ai_results"))
+        and not _is_enabled_value(settings.get("share_suspended"))
+        and _is_enabled_value(settings.get("share_last_check_ok"))
+    )
 
 
 @app.route("/settings/test-notification", methods=["POST"])
