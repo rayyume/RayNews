@@ -20,14 +20,25 @@ def test_write_fetch_progress_writes_atomic_json(tmp_path, monkeypatch):
     _patch_fetcher_paths(monkeypatch, tmp_path)
     monkeypatch.setattr(fetcher, "FETCH_JOB_ID", "job-42")
 
-    fetcher.write_fetch_progress(3, 10)
+    fetcher.write_fetch_progress(3, 10, [103, 101, 103, 102])
 
     payload = json.loads(fetcher.PROGRESS_FILE.read_text(encoding="utf-8"))
     assert payload["inserted"] == 3
+    assert payload["inserted_ids"] == [101, 102, 103]
     assert payload["total_messages"] == 10
     assert payload["job_id"] == "job-42"
     assert payload["updated_at"] > 0
     assert not fetcher.PROGRESS_FILE.with_suffix(".json.tmp").exists()
+
+
+def test_write_fetch_progress_drops_invalid_ids(tmp_path, monkeypatch):
+    _patch_fetcher_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(fetcher, "FETCH_JOB_ID", "job-42")
+
+    fetcher.write_fetch_progress(2, 2, [7, "8", 0, -1, None, "bad"])
+
+    payload = json.loads(fetcher.PROGRESS_FILE.read_text(encoding="utf-8"))
+    assert payload["inserted_ids"] == [7, 8]
 
 
 def test_run_streams_articles_into_sqlite_in_batches_before_cycle_completes(tmp_path, monkeypatch):
@@ -85,6 +96,8 @@ def test_run_streams_articles_into_sqlite_in_batches_before_cycle_completes(tmp_
 
     progress = json.loads(fetcher.PROGRESS_FILE.read_text(encoding="utf-8"))
     assert progress["inserted"] == 6
+    assert progress["inserted_ids"] == [1, 2, 3, 4, 5, 6]
+    assert progress["inserted"] == len(progress["inserted_ids"])
     assert progress["total_messages"] == 6
 
 

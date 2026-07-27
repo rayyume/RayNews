@@ -245,15 +245,28 @@ def backfill_missing_fulltext(conn: sqlite3.Connection) -> int:
     return updated
 
 
-def write_fetch_progress(inserted: int, total: int) -> None:
+def write_fetch_progress(
+    inserted: int,
+    total: int,
+    inserted_ids: list[int] | None = None,
+) -> None:
     """Record streaming-ingest progress for the current fetch cycle so
     /refresh/status can report how many articles have already landed in SQLite
     while the cycle is still running. Written atomically (temp + rename), same
     pattern as news.json, so a concurrent reader never sees a half-written file."""
+    normalized_ids = []
+    for value in inserted_ids or []:
+        try:
+            article_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if article_id > 0:
+            normalized_ids.append(article_id)
     payload = {
         "pid": os.getpid(),
         "job_id": FETCH_JOB_ID,
         "inserted": inserted,
+        "inserted_ids": sorted(set(normalized_ids)),
         "total_messages": total,
         "updated_at": int(time.time()),
     }
@@ -1149,7 +1162,7 @@ def run():
     # Reset progress for this cycle before streaming starts, so a stale value from a
     # previous run/crash is never mistaken for current progress (see
     # write_fetch_progress() / refresh_server.py's started_at guard).
-    write_fetch_progress(0, len(messages))
+    write_fetch_progress(0, len(messages), [])
 
     # Process new messages with thread pool, streaming completed articles into SQLite
     # in small batches as they finish (rather than one big upsert at the end) so
@@ -1160,6 +1173,7 @@ def run():
     stream_conn = None
     stream_batch = []
     inserted_total = 0
+    inserted_ids: list[int] = []
     last_commit_at = time.monotonic()
     fulltext_started_at = time.monotonic()
     try:
@@ -1180,15 +1194,19 @@ def run():
                     len(stream_batch) >= STREAM_BATCH_SIZE
                     or time.monotonic() - last_commit_at >= STREAM_BATCH_SECONDS
                 ):
+                    committed_ids = [int(entry["id"]) for entry in stream_batch if int(entry.get("id", 0) or 0) > 0]
                     upsert_articles(stream_conn, stream_batch, sync_sources=False)
                     inserted_total += len(stream_batch)
+                    inserted_ids.extend(committed_ids)
                     stream_batch = []
                     last_commit_at = time.monotonic()
-                    write_fetch_progress(inserted_total, len(messages))
+                    write_fetch_progress(inserted_total, len(messages), inserted_ids)
         if stream_batch:
+            committed_ids = [int(entry["id"]) for entry in stream_batch if int(entry.get("id", 0) or 0) > 0]
             upsert_articles(stream_conn, stream_batch, sync_sources=False)
             inserted_total += len(stream_batch)
-            write_fetch_progress(inserted_total, len(messages))
+            inserted_ids.extend(committed_ids)
+            write_fetch_progress(inserted_total, len(messages), inserted_ids)
     except Exception as e:
         log.error(f"Streaming SQLite ingest failed: {e}")
     finally:
