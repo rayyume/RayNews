@@ -2831,7 +2831,7 @@ function renderSourceArticles(items) {
       ${canDelete ? `<input type="checkbox" class="source-article-check" data-article-id="${item.id}" onclick="event.stopPropagation();updateSourceArticleSelectedCount()">` : ''}
       ${item.thumb ? `<div class="fav-item-thumb"><img src="${proxyImgSrc(item.thumb)}" alt="" loading="lazy" decoding="async"></div>` : ''}
       <div class="fav-item-body">
-        <div class="fav-item-title">${esc(item.title)}</div>
+        <div class="fav-item-title">${esc(displayTitle(item))}</div>
         <div class="fav-item-meta">
           <span class="badge" style="${badgeStyle(displaySourceForArticle(feedSourceOf(item)))}" title="${esc(sourceBadgeTitle(feedSourceOf(item)))}">${esc(sourceLabel(displaySourceForArticle(feedSourceOf(item))))}</span>
           <span>${formatTime(item.date, item.time)}</span>
@@ -3213,16 +3213,21 @@ async function saveAIConfig() {
       showSettingsStatus('❌ 服务器返回异常: ' + text.substring(0, 200), 'err');
       return;
     }
-    if (data.error) { showSettingsStatus('❌ ' + data.error, 'err'); return; }
+    if (data.error) {
+      await refreshShareStateAfterCheck(data.share_check);
+      showSettingsStatus('❌ ' + data.error, 'err');
+      return;
+    }
     if (data.share_check?.restored) {
       showSettingsStatus('✅ AI 配置已保存，共享状态已自动恢复', 'ok');
-      await loadUserSettings();
+      await refreshShareStateAfterCheck(data.share_check);
     } else if (data.share_check?.error) {
       showSettingsStatus(
         '⚠️ AI 配置已保存，但连接校验失败，共享仍处于暂停状态：'
           + data.share_check.error,
         'err',
       );
+      await refreshShareStateAfterCheck(data.share_check);
     } else {
       showSettingsStatus('✅ AI 配置已保存');
     }
@@ -3255,14 +3260,24 @@ async function testAIConnection() {
       }
       return;
     }
-    if (testData.error) { showSettingsStatus('❌ ' + testData.error, 'err'); return; }
+    if (testData.error) {
+      await refreshShareStateAfterCheck(testData.share_check);
+      showSettingsStatus('❌ ' + testData.error, 'err');
+      return;
+    }
     if (testData.share_check?.restored) {
       showSettingsStatus('✅ 连接成功，共享状态已自动恢复！模型响应：' + (testData.response || 'ok'), 'ok');
-      await loadUserSettings();
+      await refreshShareStateAfterCheck(testData.share_check);
     } else {
       showSettingsStatus('✅ 连接成功！模型响应：' + (testData.response || 'ok'), 'ok');
     }
   } catch (e) { showSettingsStatus('❌ 测试失败: ' + e.message, 'err'); }
+}
+
+// A personal API probe may change sharing access even when its top-level
+// response is an error. Reloading settings re-renders title/result gates.
+async function refreshShareStateAfterCheck(shareCheck) {
+  if (shareCheck) await loadUserSettings();
 }
 
 // ─── Share Tab (opt-in access to shared server-side AI results) ──
@@ -4585,7 +4600,7 @@ function renderFavorites(data) {
     <div class="fav-item" onclick="openFavArticle(${item.article_id})">
       ${item.thumb ? `<div class="fav-item-thumb"><img src="${proxyImgSrc(item.thumb)}" alt="" loading="lazy" decoding="async"></div>` : ''}
       <div class="fav-item-body">
-        <div class="fav-item-title">${esc(item.title)}</div>
+        <div class="fav-item-title">${esc(displayTitle(item))}</div>
         <div class="fav-item-meta">
           <span class="badge" style="${badgeStyle(displaySourceForArticle(feedSourceOf(item)))}" title="${esc(sourceBadgeTitle(feedSourceOf(item)))}">${esc(sourceLabel(displaySourceForArticle(feedSourceOf(item))))}</span>
           <span>${formatTime(item.date, item.time)}</span>

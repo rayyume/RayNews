@@ -39,6 +39,20 @@ def _display_title_block():
     return HTML[start:end]
 
 
+def _share_connection_actions_block():
+    start = HTML.index("async function saveAIConfig()")
+    end = HTML.index("// ─── Share Tab", start)
+    return HTML[start:end]
+
+
+def _title_list_rendering_block():
+    source_start = HTML.index("function renderSourceArticles(")
+    source_end = HTML.index("async function saveSourceRow(", source_start)
+    favorites_start = HTML.index("function renderFavorites(")
+    favorites_end = HTML.index("function openFavArticle(", favorites_start)
+    return HTML[source_start:source_end] + "\n" + HTML[favorites_start:favorites_end]
+
+
 def test_display_title_requires_active_shared_access():
     script = f"""
 const assert = require('assert');
@@ -52,6 +66,110 @@ context.userAutoSettings.share_active = true;
 assert.equal(context.displayTitle(article), '共享译名');
 context.userAutoSettings.share_view_title = false;
 assert.equal(context.displayTitle(article), 'Original title');
+"""
+    result = subprocess.run(["node", "-e", script], cwd=ROOT,
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_failed_share_checks_refresh_effective_title_access_for_save_and_manual_probe():
+    script = f"""
+const assert = require('assert');
+const vm = require('vm');
+const elements = Object.fromEntries([
+  'aiProvider', 'aiEndpoint', 'aiModel', 'aiProviderType', 'aiApiKey',
+].map(id => [id, {{ value: '' }}]));
+elements.aiEnabled = {{ checked: true }};
+let mode = 'save-failed';
+let reloads = 0;
+let renders = 0;
+const statuses = [];
+const renderedTitles = [];
+const context = {{
+  console,
+  authToken: 'token',
+  userAutoSettings: {{ share_active: true, share_view_title: true }},
+  document: {{ getElementById: id => elements[id] || {{ value: '', checked: false }} }},
+  showSettingsStatus: (...args) => statuses.push(args),
+  loadAIConfig: () => {{}},
+  logout: () => {{}},
+  renderList: () => {{ renders++; renderedTitles.push(context.displayTitle({{ title: 'Shared title', original_title: 'Original title' }})); }},
+  loadUserSettings: async () => {{
+    reloads++;
+    context.userAutoSettings = {{ share_active: false, share_view_title: true, share_suspended: true }};
+    context.renderList();
+  }},
+}};
+context.fetch = async url => {{
+  const body = mode === 'save-failed'
+    ? {{ share_check: {{ error: 'AI API HTTP 401' }} }}
+    : mode === 'manual-failed'
+      ? {{ error: 'AI API HTTP 401', share_check: {{ error: 'AI API HTTP 401' }} }}
+      : {{ response: 'pong', share_check: {{ restored: true }} }};
+  return {{ status: mode === 'manual-failed' ? 502 : 200, text: async () => JSON.stringify(body) }};
+}};
+vm.createContext(context);
+vm.runInContext({json.dumps(_display_title_block() + _share_connection_actions_block())}, context);
+
+(async () => {{
+await context.saveAIConfig();
+assert.equal(reloads, 1);
+assert.equal(renders, 1);
+assert.deepEqual(renderedTitles, ['Original title']);
+assert.match(statuses.at(-1)[0], /AI 配置已保存，但连接校验失败/);
+
+mode = 'manual-failed';
+await context.testAIConnection();
+assert.equal(reloads, 2);
+assert.equal(renders, 2);
+assert.equal(renderedTitles.at(-1), 'Original title');
+assert.equal(statuses.at(-1)[0], '❌ AI API HTTP 401');
+
+mode = 'manual-restored';
+await context.testAIConnection();
+assert.equal(reloads, 3);
+assert.equal(renders, 3);
+assert.match(statuses.at(-1)[0], /共享状态已自动恢复/);
+}})().catch(error => {{ console.error(error && error.stack ? error.stack : error); process.exitCode = 1; }});
+"""
+    result = subprocess.run(["node", "-e", script], cwd=ROOT,
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_favorite_and_source_history_titles_use_effective_title_gate():
+    script = f"""
+const assert = require('assert');
+const vm = require('vm');
+const bodies = {{ sourceArticlesBody: {{ innerHTML: '' }}, favBody: {{ innerHTML: '' }} }};
+const context = {{
+  userAutoSettings: {{ share_active: false, share_view_title: true }},
+  authUser: {{ role: 'user' }},
+  document: {{ getElementById: id => bodies[id] }},
+  esc: value => String(value),
+  proxyImgSrc: value => value,
+  feedSourceOf: item => item.feed_source || item.source,
+  displaySourceForArticle: value => value,
+  badgeStyle: () => '',
+  sourceBadgeTitle: value => value,
+  sourceLabel: value => value,
+  formatTime: () => '',
+}};
+vm.createContext(context);
+vm.runInContext({json.dumps(_display_title_block() + _title_list_rendering_block())}, context);
+const item = {{ id: 7, article_id: 7, title: 'Shared title', original_title: 'Original title', source: 'Feed', feed_source: 'Feed', date: '', time: '' }};
+context.renderSourceArticles([item]);
+context.renderFavorites({{ items: [item] }});
+for (const html of [bodies.sourceArticlesBody.innerHTML, bodies.favBody.innerHTML]) {{
+  assert.match(html, /Original title/);
+  assert.doesNotMatch(html, /Shared title/);
+}}
+context.userAutoSettings.share_active = true;
+context.renderSourceArticles([item]);
+context.renderFavorites({{ items: [item] }});
+for (const html of [bodies.sourceArticlesBody.innerHTML, bodies.favBody.innerHTML]) {{
+  assert.match(html, /Shared title/);
+}}
 """
     result = subprocess.run(["node", "-e", script], cwd=ROOT,
                             capture_output=True, text=True, timeout=10)

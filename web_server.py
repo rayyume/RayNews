@@ -494,6 +494,7 @@ NEWS_DB = os.path.join(DATA_DIR, "news.db")
 
 def _ensure_news_schema(conn: sqlite3.Connection) -> None:
     ensure_article_source_columns(conn)
+    _ensure_article_title_columns(conn)
     ensure_deleted_articles_table(conn)
     conn.commit()
 
@@ -507,7 +508,7 @@ def _get_article_meta(article_id: int) -> dict | None:
         conn.row_factory = sqlite3.Row
         _ensure_news_schema(conn)
         row = conn.execute(
-            "SELECT id, title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
+            "SELECT id, title, original_title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
             "       COALESCE(NULLIF(feed_source, ''), source) AS feed_source, origin_source, "
             "       date, time, thumb, has_full_content, timestamp "
             "FROM articles WHERE id = ?",
@@ -553,7 +554,7 @@ def _get_article_meta_batch(article_ids: list[int]) -> dict[int, dict]:
     try:
         placeholders = ",".join("?" * len(article_ids))
         rows = conn.execute(
-            "SELECT id, title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
+            "SELECT id, title, original_title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
             "       COALESCE(NULLIF(feed_source, ''), source) AS feed_source, origin_source, "
             f"      date, time, thumb, has_full_content, timestamp FROM articles WHERE id IN ({placeholders})",
             article_ids,
@@ -626,6 +627,7 @@ def list_favorites():
                 "article_id": f["article_id"],
                 "created_at": f["created_at"],
                 "title": meta["title"],
+                "original_title": meta.get("original_title", ""),
                 "source": meta["source"],
                 "feed_source": meta.get("feed_source", meta["source"]),
                 "origin_source": meta.get("origin_source", ""),
@@ -3705,7 +3707,7 @@ def list_source_articles():
     sources = list(dict.fromkeys(sources))
     placeholders = ",".join("?" * len(sources))
     rows = conn.execute(
-        "SELECT id, title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
+        "SELECT id, title, original_title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
         "       COALESCE(NULLIF(feed_source, ''), source) AS feed_source, origin_source, "
         "       date, time, timestamp, thumb, has_full_content "
         f"FROM articles WHERE COALESCE(NULLIF(feed_source, ''), source) IN ({placeholders}) "

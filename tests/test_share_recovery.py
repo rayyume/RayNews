@@ -1,6 +1,7 @@
 """Regression coverage for durable shared-AI suspension state."""
 
 import os
+import sqlite3
 import threading
 import uuid
 from pathlib import Path
@@ -156,6 +157,59 @@ def test_frontend_keeps_paused_preferences_visible_but_disabled():
     title_start = html.index("function displayTitle(")
     title_end = html.index("\n}", title_start)
     assert "share_active" in html[title_start:title_end]
+
+
+def test_favorites_and_source_history_return_original_titles_for_effective_title_gate(
+    share_env, tmp_path, monkeypatch
+):
+    """Both user-visible title lists need the original title for the client gate."""
+    client, user_id = share_env
+    news_db = tmp_path / "news.db"
+    conn = sqlite3.connect(news_db)
+    conn.execute(
+        """
+        CREATE TABLE articles (
+            id INTEGER PRIMARY KEY,
+            title TEXT NOT NULL DEFAULT '',
+            original_title TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL DEFAULT '',
+            feed_source TEXT NOT NULL DEFAULT '',
+            origin_source TEXT NOT NULL DEFAULT '',
+            date TEXT DEFAULT '',
+            time TEXT DEFAULT '',
+            timestamp INTEGER DEFAULT 0,
+            thumb TEXT DEFAULT '',
+            has_full_content INTEGER DEFAULT 0
+        )
+        """
+    )
+    conn.execute(
+        "CREATE TABLE source_aliases (alias_source TEXT PRIMARY KEY, target_source TEXT NOT NULL)"
+    )
+    conn.execute(
+        """INSERT INTO articles
+        (id, title, original_title, source, feed_source, origin_source, date, time, timestamp)
+        VALUES (42, 'Shared translation', 'Original title', 'Feed', 'Feed', '', '2026-07-27', '10:00', 1)"""
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(web_server, "NEWS_DB", str(news_db))
+    monkeypatch.setattr(web_server, "_news_conn_local", threading.local())
+    assert models.add_favorite(user_id, 42)
+
+    favorites = client.get("/favorites", headers=auth_headers(user_id))
+    source_history = client.get(
+        "/sources/articles?source=Feed", headers=auth_headers(user_id)
+    )
+
+    assert favorites.status_code == 200
+    favorite = favorites.get_json()["items"][0]
+    assert favorite["title"] == "Shared translation"
+    assert favorite["original_title"] == "Original title"
+    assert source_history.status_code == 200
+    source_item = source_history.get_json()["items"][0]
+    assert source_item["title"] == "Shared translation"
+    assert source_item["original_title"] == "Original title"
 
 
 def test_failed_check_suspends_without_clearing_preferences(share_env, monkeypatch):
