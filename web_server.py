@@ -34,6 +34,7 @@ from models import (
     apply_share_connectivity_transition,
     get_users_with_share_enabled,
     get_daily_summary_inapp_user_ids,
+    get_app_state, set_app_state, claim_app_state_flag,
     get_system_ai_config, set_system_ai_config,
     create_invitation_code, validate_invitation_code, use_invitation_code,
     list_pending_invitations, delete_invitation_code, delete_invitation_code_by_code,
@@ -1296,12 +1297,54 @@ _system_ai_health = {"failures": 0, "alerted": False, "last_error": "", "jobs": 
 _system_ai_health_lock = threading.Lock()
 
 
+# "Admins have already been told about this outage" is persisted, not just held
+# in memory: the process restarts (deploys, watchdog, OOM) and an in-memory flag
+# would let one ongoing outage re-alert on every restart. One outage, one alert —
+# same rule the user-side share suspension gets from its share_suspended column.
+SYSTEM_AI_ALERTED_STATE_KEY = "system_ai_failure_alerted"
+
+
+def _system_ai_alert_already_sent() -> bool:
+    try:
+        return get_app_state(SYSTEM_AI_ALERTED_STATE_KEY) == "1"
+    except Exception as exc:
+        print(f"[system-ai] alert state read failed: {exc}")
+        return False
+
+
+def _claim_system_ai_alert() -> bool:
+    """True only for the caller that flips the persisted flag 0 → 1."""
+    try:
+        return claim_app_state_flag(SYSTEM_AI_ALERTED_STATE_KEY)
+    except Exception as exc:
+        # A DB hiccup must not turn into a silent outage; alerting twice is the
+        # safer failure mode than never alerting.
+        print(f"[system-ai] alert claim failed: {exc}")
+        return True
+
+
+def _clear_system_ai_alert() -> bool:
+    """Clear the persisted flag, returning whether it had been set."""
+    try:
+        was_set = get_app_state(SYSTEM_AI_ALERTED_STATE_KEY) == "1"
+        if was_set:
+            set_app_state(SYSTEM_AI_ALERTED_STATE_KEY, "0")
+        return was_set
+    except Exception as exc:
+        print(f"[system-ai] alert state clear failed: {exc}")
+        return False
+
+
 def _reset_system_ai_health() -> None:
     """Forget the current streak — used when the admin saves a new system AI
     config, so a fresh key starts from zero (and can alert again if it is also
-    broken, instead of being muted by the previous key's `alerted` flag)."""
+    broken, instead of being muted by the previous config's flag)."""
     with _system_ai_health_lock:
         _system_ai_health.update({"failures": 0, "alerted": False, "last_error": "", "jobs": []})
+    try:
+        set_app_state(SYSTEM_AI_ALERTED_STATE_KEY, "0")
+    except Exception as exc:
+        print(f"[system-ai] alert state reset failed: {exc}")
 
 
 def _note_system_ai_success() -> None:
@@ -1309,10 +1352,15 @@ def _note_system_ai_success() -> None:
     AI was down, tells them it is back — matching the share_suspended /
     share_restored pair users already get."""
     with _system_ai_health_lock:
-        if not _system_ai_health["failures"] and not _system_ai_health["alerted"]:
-            return
-        recovered = _system_ai_health["alerted"]
+        streak = _system_ai_health["failures"]
+        alerted_here = _system_ai_health["alerted"]
         _system_ai_health.update({"failures": 0, "alerted": False, "last_error": "", "jobs": []})
+    # Either signal means admins are owed a recovery notice: the persisted flag
+    # covers an outage that started before a restart, the in-memory one covers a
+    # deployment whose state table is momentarily unreadable.
+    recovered = _clear_system_ai_alert() or alerted_here
+    if not streak and not recovered:
+        return
     if recovered:
         _notify_admins(
             "system_ai_recovered",
@@ -1339,6 +1387,11 @@ def _note_system_ai_failure(job: str, error) -> None:
         _system_ai_health["alerted"] = True
         failures = _system_ai_health["failures"]
         jobs = list(_system_ai_health["jobs"])
+    # The persisted claim is what actually guarantees one alert per outage: a
+    # restart empties the counter above, and without this the same outage would
+    # alert again three failures later.
+    if not _claim_system_ai_alert():
+        return
     body = (
         f"服务端 AI 已连续 {failures} 次调用失败，受影响的后台任务："
         f"{'、'.join(jobs)}。\n\n"

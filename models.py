@@ -117,6 +117,16 @@ CREATE TABLE IF NOT EXISTS broadcast_publications (
     recipients   INTEGER NOT NULL DEFAULT 0,
     email        INTEGER NOT NULL DEFAULT 0,
     created_at   TEXT    NOT NULL
+);
+
+-- Small, long-lived process state that must survive a restart. Notification
+-- de-duplication lives here: an "already told the admins" flag kept in memory
+-- would re-fire on every container restart, turning one outage into a stream of
+-- identical alerts.
+CREATE TABLE IF NOT EXISTS app_state (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
 );"""
 
 # ─── Connection ───────────────────────────────────────────────
@@ -579,6 +589,47 @@ def get_user_settings(user_id: int) -> dict | None:
         (user_id,),
     ).fetchone()
     return dict(row) if row else None
+
+
+def get_app_state(key: str, default: str = "") -> str:
+    db = get_db()
+    row = db.execute("SELECT value FROM app_state WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_app_state(key: str, value: str) -> None:
+    db = get_db()
+    db.execute(
+        "INSERT INTO app_state (key, value, updated_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        (key, str(value), datetime.now().isoformat(timespec="seconds")),
+    )
+    db.commit()
+
+
+def claim_app_state_flag(key: str) -> bool:
+    """Set a flag to '1' and report whether this caller is the one that set it.
+
+    One transaction, so two threads (or a restarted process racing a running
+    one) cannot both read "not yet notified" and both send the notification.
+    """
+    db = get_db()
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute("SELECT value FROM app_state WHERE key = ?", (key,)).fetchone()
+        if row and row["value"] == "1":
+            db.rollback()
+            return False
+        db.execute(
+            "INSERT INTO app_state (key, value, updated_at) VALUES (?, '1', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = '1', updated_at = excluded.updated_at",
+            (key, datetime.now().isoformat(timespec="seconds")),
+        )
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        raise
 
 
 def get_daily_summary_inapp_user_ids() -> list[int]:

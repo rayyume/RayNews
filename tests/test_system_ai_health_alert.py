@@ -300,3 +300,51 @@ def test_fixing_the_config_sends_the_recovery_notice(admin_with_auto_jobs, alert
     web_server._note_system_ai_success()
 
     assert [a["type"] for a in alerts] == ["system_ai_recovered"] * 2
+
+
+# ─── One outage, one alert — across restarts too ───────────────────────
+
+
+def test_a_restart_mid_outage_does_not_re_alert(admin_with_auto_jobs, alerts, monkeypatch):
+    monkeypatch.setattr(web_server, "get_system_ai_config", lambda: {"enabled": 0, "api_key": ""})
+    for _ in range(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD):
+        web_server._system_auto_config("auto_summary_enabled")
+    assert len(alerts) == 2
+
+    # Restart: the in-memory streak is gone, the outage and the settings DB are not.
+    web_server._system_ai_health.update(
+        {"failures": 0, "alerted": False, "last_error": "", "jobs": []})
+    for _ in range(3 * web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD):
+        web_server._system_auto_config("auto_summary_enabled")
+
+    assert len(alerts) == 2   # still the one alert from before the restart
+
+
+def test_after_recovery_a_new_outage_alerts_again_across_a_restart(admin_with_auto_jobs, alerts,
+                                                                   monkeypatch):
+    monkeypatch.setattr(web_server, "get_system_ai_config", lambda: {"enabled": 0, "api_key": ""})
+    for _ in range(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD):
+        web_server._system_auto_config("auto_summary_enabled")
+    web_server._note_system_ai_success()          # fixed
+    alerts.clear()
+
+    web_server._system_ai_health.update(
+        {"failures": 0, "alerted": False, "last_error": "", "jobs": []})   # restart
+    for _ in range(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD):
+        web_server._system_auto_config("auto_summary_enabled")
+
+    assert [a["type"] for a in alerts] == ["system_ai_failed"] * 2
+
+
+def test_the_recovery_notice_is_owed_even_if_the_alert_predates_the_restart(
+        admin_with_auto_jobs, alerts, monkeypatch):
+    monkeypatch.setattr(web_server, "get_system_ai_config", lambda: {"enabled": 0, "api_key": ""})
+    for _ in range(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD):
+        web_server._system_auto_config("auto_summary_enabled")
+    alerts.clear()
+    web_server._system_ai_health.update(
+        {"failures": 0, "alerted": False, "last_error": "", "jobs": []})   # restart
+
+    web_server._note_system_ai_success()
+
+    assert [a["type"] for a in alerts] == ["system_ai_recovered"] * 2

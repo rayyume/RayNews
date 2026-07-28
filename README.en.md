@@ -79,6 +79,8 @@ AI results are stored in the database to avoid duplicate calls. Administrators s
   Tune with `SYSTEM_AI_FAILURE_ALERT_THRESHOLD`
 - If an auto AI job is enabled while the server API config is cleared or disabled, nothing calls the provider at all, so
   that state is itself counted toward the same streak — the alert lands within about a minute, with no probe requests
+- Both the server-side and user-side AI alerts are edge-triggered: one alert per outage, one notice on recovery, nothing
+  in between. The server-side "already alerted" flag is persisted, so a container restart mid-outage does not re-send it
 - A failed generation is retried every 10 minutes; after 3 failed retries the scheduler stops for the day and alerts every admin
   by email and in-app notification with the reason. Admins then see the reason and a "retry" button on the home page ✨ daily
   digest panel (the button appears only after a failure, and only for admins)
