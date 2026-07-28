@@ -1126,6 +1126,22 @@ def admin_system_ai_test_connection():
     return jsonify(body), status
 
 
+def _resend_to_email(config) -> str:
+    """The notification address out of a notification_config, in either shape it
+    travels in: a dict (request payload) or the JSON string it is stored as."""
+    if isinstance(config, str):
+        try:
+            config = json.loads(config or "{}")
+        except (json.JSONDecodeError, TypeError):
+            config = {}
+    if not isinstance(config, dict):
+        return ""
+    resend = config.get("resend")
+    if not isinstance(resend, dict):
+        return ""
+    return str(resend.get("to_email") or "").strip()
+
+
 def _notification_recipient(user_id: int) -> str:
     """Best email to reach a user at: prefer the address they set for
     notifications, fall back to their account email."""
@@ -4956,6 +4972,25 @@ def update_settings():
             "auto_title_summary_enabled",
         ):
             data.pop(key, None)
+    # 邮件推送 needs an address to push to. Refuse the save rather than storing a
+    # subscription that can never deliver: _deliver_daily_summary_email() only
+    # collects recipients that have a to_email, so the user would be left looking
+    # at an enabled toggle that silently sends nothing. Evaluated against the
+    # merged state (payload over stored), so clearing the address while the
+    # toggle is already on is rejected too, not just enabling without one.
+    if "daily_summary_enabled" in data or "notification_config" in data:
+        stored_settings = get_user_settings(g.user_id) or {}
+        email_push_on = _is_enabled_value(
+            data["daily_summary_enabled"] if "daily_summary_enabled" in data
+            else stored_settings.get("daily_summary_enabled")
+        )
+        to_email = _resend_to_email(
+            data["notification_config"] if "notification_config" in data
+            else stored_settings.get("notification_config")
+        )
+        if email_push_on and not to_email:
+            return jsonify({"error": "开启邮件推送前请先填写接收邮箱"}), 400
+
     # Normalize notification_config to JSON string for storage
     if "notification_config" in data:
         nc = data["notification_config"]

@@ -3655,11 +3655,19 @@ async function loadNotifyConfig() {
 }
 
 async function saveNotifyConfig() {
+  const toEmail = document.getElementById('notifyToEmail').value.trim();
+  // The server rejects this too (see update_settings); checking here as well
+  // keeps the message instant and points at the field that needs filling.
+  if (document.getElementById('dailySummaryToggle').checked && !toEmail) {
+    showSettingsStatus('❌ 开启邮件推送前请先填写接收邮箱', 'err');
+    document.getElementById('notifyToEmail').focus();
+    return;
+  }
   // First get existing settings
   const existing = await apiFetch('/settings') || {};
   const nc = (existing.notification_config || {});
   nc.resend = {
-    to_email: document.getElementById('notifyToEmail').value,
+    to_email: toEmail,
   };
   try {
     const resp = await fetch('/settings', {
