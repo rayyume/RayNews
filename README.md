@@ -52,7 +52,7 @@ RayNews 提供“用户端 AI”和“服务端 AI”两套独立能力；两者
 | 主要用途 | 手动摘要、手动翻译、按需生成每日总结 | 自动摘要、自动翻译标题/正文、自动短标题、全局每日总结、订阅源 AI 分类 |
 | 结果范围 | 可选择共享摘要、翻译和标题结果；共享前需验证自己的 AI 连通性 | 生成结果写入全局缓存，所有用户可复用 |
 
-**用户端 AI：** 在“用户设置 → AI”配置并启用自己的 Endpoint、模型、协议和 Key 后，可在文章详情中手动生成摘要或翻译；也可按需生成每日总结。浏览器会将 Key 用于直接请求所选 AI 服务商，因此请只在受信任设备上配置。生成的结果会保存到 RayNews；开启“共享 AI 结果”前会进行连通性验证，后续也会定期复核。
+**用户端 AI：** 在“用户设置 → AI”配置并启用自己的 Endpoint、模型、协议和 Key 后，可在文章详情中手动生成摘要或翻译；也可按需生成每日总结。浏览器会将 Key 用于直接请求所选 AI 服务商，因此请只在受信任设备上配置。生成的结果会保存到 RayNews；开启“共享 AI 结果”前会进行连通性验证，之后每小时复核一次（`AI_SHARE_REVALIDATION_INTERVAL_HOURS`，支持小数，最短 5 分钟）：校验失败会自动暂停共享，并给该用户发送站内通知和邮件；恢复后自动复原并再通知一次。
 
 **服务端 AI：** 管理员在“管理员设置 → 服务端 API”配置系统 Endpoint、模型、协议和 Key，并在摘要/翻译设置中开启对应后台任务。系统会以小批次处理新文章的自动摘要、英文标题或正文翻译、过长标题简写；系统每日总结使用同一系统 AI 生成一次，再向开启每日总结邮件的用户发送。服务端 AI 的 Key 不会提供给普通用户浏览器。
 
@@ -227,6 +227,10 @@ AI Endpoint、API Key、模型和供应商由用户在网页的“设置 → AI�
 | `TITLE_SUMMARY_MAX_TOTAL_CHARS` | `40` | 短标题允许的加权总长度 |
 | `AUTO_SOURCE_CLASSIFY_BATCH_LIMIT` | `20` | 每轮管理员 AI 分类的订阅源数量 |
 | `AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS` | `120` | 订阅源分类轮询间隔，单位秒 |
+| `AI_SHARE_REVALIDATION_INTERVAL_HOURS` | `1` | 复核开启共享用户的个人 AI 连通性的间隔，支持小数，最短 5 分钟 |
+| `SYSTEM_AI_FAILURE_ALERT_THRESHOLD` | `5` | 服务端 AI 连续失败多少次后给管理员发告警 |
+| `DAILY_SUMMARY_RETRY_INTERVAL_SECONDS` | `600` | 每日摘要生成失败后的重试间隔，单位秒 |
+| `DAILY_SUMMARY_MAX_RETRIES` | `3` | 每日摘要生成失败后的最大重试次数，用尽后告警管理员 |
 | `TELEGRAM_EMBED_TIMEOUT_SECONDS` | `12` | 读取 Telegram 嵌入页面的超时 |
 
 每日总结还有 `AI_DAILY_*` 高级调优变量。通常保留代码默认值即可；如需使用，请将变量显式加入 Compose 的 `environment`。

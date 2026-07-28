@@ -170,3 +170,17 @@ def test_the_revalidation_loop_reaches_a_suspended_user_and_restores_it(share_us
     assert settings["share_suspended"] == 0
     assert [i["type"] for i in models.list_notifications(share_user)][0] == "share_restored"
     assert len(sent_emails) == 1
+
+
+def test_revalidation_interval_defaults_to_hourly_and_never_goes_hot(monkeypatch):
+    # The loop is the only detector of a bad personal key when every AI job runs
+    # on the system config, so the interval is the detection delay.
+    monkeypatch.delenv("AI_SHARE_REVALIDATION_INTERVAL_HOURS", raising=False)
+    assert web_server._share_revalidation_interval_seconds() == 3600
+
+    monkeypatch.setenv("AI_SHARE_REVALIDATION_INTERVAL_HOURS", "0.5")
+    assert web_server._share_revalidation_interval_seconds() == 1800
+
+    for bad in ("0", "-4", "", "abc"):
+        monkeypatch.setenv("AI_SHARE_REVALIDATION_INTERVAL_HOURS", bad)
+        assert web_server._share_revalidation_interval_seconds() >= 300

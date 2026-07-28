@@ -68,9 +68,29 @@ AUTO_TITLE_PROCESS_INTERVAL_SECONDS = int(os.environ.get("AUTO_TITLE_PROCESS_INT
 AUTO_TITLE_PROCESS_SCAN_LIMIT = int(os.environ.get("AUTO_TITLE_PROCESS_SCAN_LIMIT", "1000"))
 AUTO_SOURCE_CLASSIFY_BATCH_LIMIT = int(os.environ.get("AUTO_SOURCE_CLASSIFY_BATCH_LIMIT", "50"))
 AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS = int(os.environ.get("AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS", "60"))
-AI_SHARE_REVALIDATION_INTERVAL_SECONDS = int(
-    os.environ.get("AI_SHARE_REVALIDATION_INTERVAL_HOURS", "6")
-) * 3600
+def _share_revalidation_interval_seconds() -> int:
+    """How often each sharing user's own AI key is re-tested.
+
+    This loop is the only thing that notices a personal key going bad: the
+    background AI jobs all run on the *system* config, and a deployment with
+    those jobs on gives users almost no reason to make an on-demand call that
+    would surface the failure themselves. So the interval is the detection
+    delay for "共享 API 失效" — hourly rather than the original six hours, which
+    could leave shared results served off a dead key most of a day.
+
+    The probe is one max_tokens=50 ping per sharing user (see
+    AIService.test_connection), spread 0.5s apart, so hourly stays cheap.
+    Accepts fractions of an hour, and floors at five minutes so a typo like 0
+    can't turn the loop into a hot loop against everyone's provider.
+    """
+    try:
+        hours = float(os.environ.get("AI_SHARE_REVALIDATION_INTERVAL_HOURS", "1"))
+    except (TypeError, ValueError):
+        hours = 1.0
+    return max(300, int(hours * 3600))
+
+
+AI_SHARE_REVALIDATION_INTERVAL_SECONDS = _share_revalidation_interval_seconds()
 TELEGRAM_EMBED_TIMEOUT_SECONDS = int(os.environ.get("TELEGRAM_EMBED_TIMEOUT_SECONDS", "12"))
 # Daily summary is now server-generated once and broadcast to every subscribed
 # user — the send time is a fixed ops-level setting, not user-configurable.
