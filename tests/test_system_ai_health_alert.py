@@ -26,8 +26,9 @@ def alerts(monkeypatch):
         {"id": 1, "role": "admin"}, {"id": 2, "role": "user"}, {"id": 3, "role": "admin"},
     ])
     monkeypatch.setattr(web_server, "_notify_user",
-                        lambda user_id, ntype, title, body: sent.append(
-                            {"user_id": user_id, "type": ntype, "title": title, "body": body}))
+                        lambda user_id, ntype, title, body: (sent.append(
+                            {"user_id": user_id, "type": ntype, "title": title, "body": body})
+                            or True))
     web_server._reset_system_ai_health()
     yield sent
     web_server._reset_system_ai_health()
@@ -54,6 +55,37 @@ def test_the_threshold_alerts_every_admin_once(alerts):
     # A provider that keeps failing must not keep notifying.
     _fail(20)
     assert len(alerts) == 2
+
+
+def test_undelivered_system_ai_alert_is_retried(alerts, monkeypatch):
+    deliveries = []
+    persisted = {"value": "0"}
+
+    def claim(key):
+        if persisted["value"] == "1":
+            return False
+        persisted["value"] = "1"
+        return True
+
+    def deliver(*args, **kwargs):
+        deliveries.append((args, kwargs))
+        return 0 if len(deliveries) == 1 else 1
+
+    monkeypatch.setattr(web_server, "get_app_state", lambda key: persisted["value"])
+    monkeypatch.setattr(web_server, "set_app_state",
+                        lambda key, value: persisted.update(value=str(value)))
+    monkeypatch.setattr(web_server, "claim_app_state_flag", claim)
+    monkeypatch.setattr(web_server, "_notify_admins", deliver)
+
+    _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
+
+    assert len(deliveries) == 1
+    assert persisted["value"] == "0"
+
+    _fail(1)
+
+    assert len(deliveries) == 2
+    assert persisted["value"] == "1"
 
 
 def test_the_alert_names_every_affected_job(alerts):

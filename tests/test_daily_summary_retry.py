@@ -131,6 +131,22 @@ def test_gives_up_after_three_retries_and_alerts_every_admin_once(
     assert len(alerts) == 2
 
 
+def test_undelivered_daily_summary_alert_releases_the_claim(
+        news_db, clock, alerts, monkeypatch):
+    _fail_generation(monkeypatch)
+    monkeypatch.setattr(web_server, "_notify_admins", lambda *args, **kwargs: 0)
+
+    web_server._send_daily_summaries()
+    for _ in range(web_server.DAILY_SUMMARY_MAX_RETRIES):
+        clock["now"] += web_server.DAILY_SUMMARY_RETRY_INTERVAL_SECONDS
+        web_server._send_daily_summaries()
+
+    state = web_server._get_daily_summary_failure(TODAY)
+    assert state["given_up"] == 1
+    assert state["alerted"] == 0
+    assert web_server._claim_daily_summary_alert(TODAY) is True
+
+
 def test_an_admin_ad_hoc_resend_does_not_seed_the_retry_chain(news_db, clock, alerts, monkeypatch):
     # 管理员设置 → 立即发送 at an arbitrary hour must not turn a one-off failure
     # into half an hour of retries plus a failure alert to every admin.

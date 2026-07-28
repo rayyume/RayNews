@@ -1282,15 +1282,22 @@ h1{{color:#6e8efb;font-size:18px}}
         return False
 
 
-def _notify_user(user_id: int, ntype: str, title: str, body: str = "") -> None:
+def _notify_user(user_id: int, ntype: str, title: str, body: str = "") -> bool:
     """Deliver a notification to a user on both channels: insert an in-app
     row (头像菜单 → 我的通知) and email a copy. Each leg is best-effort and
-    independent, so a DB or mail hiccup never breaks the caller."""
+    independent, so a DB or mail hiccup never breaks the caller.
+
+    Returns whether the durable in-app copy was written. Callers use that as
+    the minimum delivery signal; email remains best-effort.
+    """
+    inapp_delivered = False
     try:
         add_notification(user_id, ntype, title, body)
+        inapp_delivered = True
     except Exception as exc:
         print(f"[notify] Failed to add in-app notification for user {user_id}: {exc}")
     _send_notification_email(user_id, title, body)
+    return inapp_delivered
 
 
 def _notify_admins(ntype: str, title: str, body: str) -> int:
@@ -1305,8 +1312,8 @@ def _notify_admins(ntype: str, title: str, body: str) -> int:
     notified = 0
     for admin in admins:
         try:
-            _notify_user(admin["id"], ntype, title, body)
-            notified += 1
+            if _notify_user(admin["id"], ntype, title, body):
+                notified += 1
         except Exception as exc:
             print(f"[notify] {ntype} to admin {admin['id']} failed: {exc}")
     return notified
@@ -1360,6 +1367,16 @@ def _claim_system_ai_alert() -> bool:
         # safer failure mode than never alerting.
         print(f"[system-ai] alert claim failed: {exc}")
         return True
+
+
+def _release_system_ai_alert() -> None:
+    """Release an alert claim that reached no administrator."""
+    with _system_ai_health_lock:
+        _system_ai_health["alerted"] = False
+    try:
+        set_app_state(SYSTEM_AI_ALERTED_STATE_KEY, "0")
+    except Exception as exc:
+        print(f"[system-ai] alert state release failed: {exc}")
 
 
 def _clear_system_ai_alert() -> bool:
@@ -1439,7 +1456,8 @@ def _note_system_ai_failure(job: str, error) -> None:
         "可用「测试连接」验证。恢复后系统会再发一条通知。"
     )
     print(f"[system-ai] {failures} consecutive failures ({', '.join(jobs)}): {reason}")
-    _notify_admins("system_ai_failed", SYSTEM_AI_FAILURE_TITLE, body)
+    if _notify_admins("system_ai_failed", SYSTEM_AI_FAILURE_TITLE, body) == 0:
+        _release_system_ai_alert()
 
 
 def _compact_share_error(value: str) -> str:
@@ -2080,6 +2098,24 @@ def _claim_daily_summary_alert(date_str: str) -> bool:
         return False
 
 
+def _release_daily_summary_alert(date_str: str) -> None:
+    """Release a claim when no administrator received the in-app alert."""
+    if not os.path.exists(NEWS_DB):
+        return
+    try:
+        _init_daily_summary_failures_table()
+        conn = _news_db_connect()
+        conn.execute(
+            "UPDATE daily_summary_failures SET alerted = 0 "
+            "WHERE date = ? AND alerted = 1",
+            (date_str,),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[daily-summary] alert claim release failed: {e}")
+
+
 def _daily_summary_retry_due(state: dict | None, now: int | None = None) -> bool:
     """True when an auto-retry for a failed day is owed right now."""
     if not state or int(state.get("given_up") or 0):
@@ -2213,7 +2249,8 @@ def _broadcast_daily_summary(force: bool = False, bypass_window: bool = False) -
                 return {"status": "error", "reason": reason}
             state = _record_daily_summary_failure(today_str, reason)
             if int(state.get("given_up") or 0) and _claim_daily_summary_alert(today_str):
-                _alert_admins_daily_summary_failure(today_str, state)
+                if _alert_admins_daily_summary_failure(today_str, state) == 0:
+                    _release_daily_summary_alert(today_str)
             return {"status": "error", "reason": reason,
                     "attempts": state.get("attempts"),
                     "given_up": bool(state.get("given_up"))}
