@@ -1281,8 +1281,13 @@ def _notify_admins(ntype: str, title: str, body: str) -> int:
 # arrives at ~21:30, hours after the failures start. Track consecutive failures
 # across all of them instead and tell the admins once the streak makes it clear
 # the AI itself, not one article, is the problem.
+# Three, not five: the evening daily-summary chain makes exactly four attempts
+# (21:00 plus three retries), so a threshold of five could only ever be reached
+# by the article jobs — which stay idle when there is nothing pending. At three
+# the failure is reported around 21:20, ahead of the daily-summary alert, on a
+# quiet day too.
 SYSTEM_AI_FAILURE_ALERT_THRESHOLD = int(
-    os.environ.get("SYSTEM_AI_FAILURE_ALERT_THRESHOLD", "5")
+    os.environ.get("SYSTEM_AI_FAILURE_ALERT_THRESHOLD", "3")
 )
 SYSTEM_AI_FAILURE_TITLE = "服务端 AI 调用连续失败"
 SYSTEM_AI_RECOVERED_TITLE = "服务端 AI 已恢复"

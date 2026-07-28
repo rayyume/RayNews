@@ -57,12 +57,13 @@ def test_the_threshold_alerts_every_admin_once(alerts):
 
 
 def test_the_alert_names_every_affected_job(alerts):
-    _fail(2, job="自动翻译")
-    _fail(2, job="标题精简")
-    _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD, job="每日摘要")
+    jobs = ("自动翻译", "标题精简", "每日摘要")
+    for job in jobs:                       # one failure each…
+        _fail(1, job=job)
+    _fail(max(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD - len(jobs), 0), job=jobs[-1])
 
     body = alerts[0]["body"]
-    for job in ("自动翻译", "标题精简", "每日摘要"):
+    for job in jobs:
         assert job in body
 
 
@@ -172,3 +173,35 @@ def test_a_failing_admin_connection_test_does_not_push_the_streak(alerts, monkey
         web_server.admin_system_ai_test_connection.__wrapped__()
 
     assert alerts == []
+
+
+def test_the_evening_retry_chain_alone_reaches_the_threshold(news_db_free, monkeypatch, alerts):
+    """A day with no pending article work still reports the outage.
+
+    The article jobs only call the AI when they have something to process, so on
+    a quiet day the daily-summary chain is the only caller: 21:00 plus three
+    retries, four attempts. The threshold has to sit under that or the outage
+    would be invisible until the 21:30 daily-summary alert.
+    """
+    assert web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD <= 4
+
+    class BoomService:
+        def __init__(self, **kwargs):
+            pass
+
+        def daily_summary(self, articles):
+            raise RuntimeError("401 invalid api key")
+
+    monkeypatch.setattr(web_server, "get_system_ai_config",
+                        lambda: {"enabled": True, "api_key": "k", "endpoint": "e", "model": "m"})
+    monkeypatch.setattr(web_server, "_fetch_articles_by_date",
+                        lambda date_str, include_shared_summary=False: [{"id": 1, "title": "t"}])
+    monkeypatch.setattr(web_server, "_dedup_articles", lambda articles: articles)
+    monkeypatch.setattr(web_server, "AIService", BoomService)
+
+    attempts = 1 + web_server.DAILY_SUMMARY_MAX_RETRIES
+    for _ in range(attempts):
+        web_server._generate_daily_summary_global("2026-07-10")
+
+    assert [a["type"] for a in alerts] == ["system_ai_failed"] * 2
+    assert "每日摘要" in alerts[0]["body"]

@@ -74,7 +74,7 @@ AI results are stored in the database to avoid duplicate calls. Administrators s
 - Resend can deliver invitation codes, registration notices, test messages, scheduled daily digests, and historical-purge result emails
 - The daily digest is generated server-side exactly once per day at 21:00 Beijing time using the admin-configured server API; it cannot be triggered manually.
   Every user gets an in-app copy by default (avatar menu -> My Notifications); the email copy is opted into separately under Settings -> Notifications
-- After 5 consecutive system-AI call failures (counted across auto summary/translation/title/source classification and the
+- After 3 consecutive system-AI call failures (counted across auto summary/translation/title/source classification and the
   daily digest), every admin gets one email + in-app alert naming the affected jobs and the reason; recovery sends one more.
   Tune with `SYSTEM_AI_FAILURE_ALERT_THRESHOLD`
 - A failed generation is retried every 10 minutes; after 3 failed retries the scheduler stops for the day and alerts every admin
