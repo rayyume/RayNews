@@ -3053,6 +3053,9 @@ async function classifySources(force) {
       body: JSON.stringify({ limit: 50, force: !!force }),
     });
     const data = await parseJsonResponse(resp);
+    // e.g. the server API isn't configured yet — without this the refusal read
+    // as "分类完成：已处理 0 个来源".
+    if (data.error) throw new Error(data.error);
     const okCount = (data.processed || []).length;
     const failCount = (data.failed || []).length;
     showSettingsStatus(`分类完成：已处理 ${okCount} 个来源，失败 ${failCount} 个，剩余 ${data.remaining || 0} 个`, failCount ? 'warn' : 'ok');

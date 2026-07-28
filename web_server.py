@@ -3321,24 +3321,6 @@ def _auto_title_process_loop():
         _time.sleep(AUTO_TITLE_PROCESS_INTERVAL_SECONDS)
 
 
-def _get_source_classification_config() -> dict | None:
-    """Return the first enabled administrator AI config."""
-    try:
-        db = get_db()
-        row = db.execute(
-            "SELECT c.user_id, c.endpoint, c.model, c.api_key, c.provider_type, c.enabled "
-            "FROM ai_configs c JOIN users u ON u.id = c.user_id "
-            "WHERE c.enabled = 1 "
-            "AND c.api_key != '' "
-            "AND u.role = 'admin' "
-            "ORDER BY c.user_id ASC LIMIT 1"
-        ).fetchone()
-        return dict(row) if row else None
-    except Exception as e:
-        print(f"[source-classify] settings DB error: {e}")
-        return None
-
-
 def _get_source_classification_users() -> list[dict]:
     """The server API config for shared source classification.
 
@@ -3368,15 +3350,14 @@ def _get_source_classification_users() -> list[dict]:
 
 def _classify_source_batch(config: dict, limit: int = AUTO_SOURCE_CLASSIFY_BATCH_LIMIT,
                            force: bool = False) -> dict:
-    """Classify sources with an admin's *personal* AI config.
+    """Classify sources with the server API, like every other server-side job.
 
-    Deliberately outside the system-AI health signal (_note_system_ai_*): the
-    credentials here come from ai_configs, not system_ai_config, so its results
-    say nothing about the system AI. Reporting them made the two keys cancel
-    each other out — with the system key suspended and the admin's own key still
-    working, every successful classification reset the failure streak the auto
-    summary/translation/title jobs were building, and the outage never reached
-    the threshold to alert.
+    `config` comes from _get_source_classification_users(), i.e. from
+    system_ai_config. It used to come from an admin's own ai_configs row, which
+    meant two different keys drove server-side work: with the server API
+    suspended and that key still valid, this job kept succeeding and cancelled
+    the failure streak the summary/translation/title jobs were building, so the
+    outage never reached the alert threshold.
     """
     conn = _get_news_db()
     if not conn:
@@ -4745,16 +4726,17 @@ def classify_sources():
     conn = _get_news_db()
     if not conn:
         return jsonify({"error": "news db not found"}), 404
-    config = get_ai_config(g.user_id)
-    if not config or not config.get("enabled") or not config.get("api_key"):
-        return jsonify({"error": "请先在AI菜单中设置API"}), 400
+    # Source labels are site-wide, so they are produced with the server API —
+    # never with whichever admin happened to click. See
+    # _get_source_classification_users().
+    configs = _get_source_classification_users()
+    if not configs:
+        return jsonify({"error": "请先在 管理员设置 → 服务端 API 配置并启用服务端 API"}), 400
 
     data = request.get_json(silent=True) or {}
     limit = min(max(int(data.get("limit", 50) or 50), 1), 100)
     force = bool(data.get("force"))
-    config = dict(config)
-    config["user_id"] = g.user_id
-    return jsonify(_classify_source_batch(config, limit, force))
+    return jsonify(_classify_source_batch(configs[0], limit, force))
 
 
 @app.route("/sources/reinitialize", methods=["POST"])
@@ -4785,9 +4767,10 @@ def classify_sources_job():
     conn = _get_news_db()
     if not conn:
         return jsonify({"error": "news db not found"}), 404
-    config = get_ai_config(g.user_id)
-    if not config or not config.get("enabled") or not config.get("api_key"):
-        return jsonify({"error": "请先在AI菜单中设置API"}), 400
+    configs = _get_source_classification_users()
+    if not configs:
+        return jsonify({"error": "请先在 管理员设置 → 服务端 API 配置并启用服务端 API"}), 400
+    config = configs[0]
 
     data = request.get_json(silent=True) or {}
     force = bool(data.get("force"))

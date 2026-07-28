@@ -447,3 +447,44 @@ def test_source_classification_stops_when_the_server_api_is_unusable(monkeypatch
     for config in (None, {"enabled": 0, "api_key": "k"}, {"enabled": 1, "api_key": ""}):
         monkeypatch.setattr(web_server, "get_system_ai_config", lambda config=config: config)
         assert web_server._get_source_classification_users() == []
+
+
+def test_admin_triggered_classification_also_uses_the_server_api(monkeypatch):
+    """The 管理员设置 → 订阅源 buttons must not spend whoever clicked's own key.
+
+    Source labels are site-wide, so both the synchronous batch and the
+    background job run on the server API, and refuse with a message pointing at
+    it when it isn't configured.
+    """
+    from flask import g
+
+    used = []
+    monkeypatch.setattr(web_server, "_get_news_db", lambda: object())
+    monkeypatch.setattr(web_server, "get_ai_config",
+                        lambda user_id: {"api_key": "personal", "enabled": 1, "endpoint": "e",
+                                         "model": "m"})
+    monkeypatch.setattr(web_server, "_classify_source_batch",
+                        lambda config, limit=50, force=False: (
+                            used.append(config["api_key"]),
+                            {"processed": [], "failed": [], "remaining": 0},
+                        )[1])
+    monkeypatch.setattr(web_server, "get_system_ai_config", lambda: {
+        "enabled": 1, "api_key": "server-key", "endpoint": "e", "model": "m",
+        "provider_type": "openai",
+    })
+
+    with web_server.app.test_request_context("/sources/classify", method="POST", json={}):
+        g.user_id = 1
+        g.user_role = "admin"
+        web_server.classify_sources.__wrapped__()
+    assert used == ["server-key"]
+
+    # No server API configured: refuse, and say where to configure it.
+    monkeypatch.setattr(web_server, "get_system_ai_config", lambda: None)
+    with web_server.app.test_request_context("/sources/classify", method="POST", json={}):
+        g.user_id = 1
+        g.user_role = "admin"
+        body, status = web_server.classify_sources.__wrapped__()
+    assert status == 400
+    assert "服务端 API" in body.get_json()["error"]
+    assert used == ["server-key"]        # the personal key was never reached
