@@ -41,6 +41,27 @@ function withSwFallbackMarker(cached) {
   });
 }
 
+// A request issued right after an iOS PWA resume can hang on a socket the OS
+// froze — the promise neither resolves nor rejects until the connection is
+// reaped, which can outlast the page's own 12s abort and leaves the app on a
+// spinner with no way to recover but a manual refresh. Bound the wait so the
+// cache fallback (or a clean failure the page can retry) happens promptly.
+const NETWORK_TIMEOUT_MS = 8000;
+
+function fetchWithTimeout(request, timeoutMs = NETWORK_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const error = new Error('SW network timeout');
+      error.name = 'SwNetworkTimeoutError';
+      reject(error);
+    }, timeoutMs);
+    fetch(request).then(
+      response => { clearTimeout(timer); resolve(response); },
+      error => { clearTimeout(timer); reject(error); },
+    );
+  });
+}
+
 self.addEventListener('install', event => {
   event.waitUntil(
     caches.open(CACHE).then(cache => {
@@ -101,7 +122,7 @@ self.addEventListener('fetch', event => {
     // fallback — mirroring the list handler below.
     if (/^\/api\/news\/\d+$/.test(url.pathname)) {
       event.respondWith(
-        fetch(event.request).then(network => {
+        fetchWithTimeout(event.request).then(network => {
           if (network.ok) {
             const cloned = network.clone();
             caches.open(API_CACHE).then(cache => {
@@ -122,7 +143,7 @@ self.addEventListener('fetch', event => {
     }
     // List / other API: network-first (avoids cold-start cache delay)
     event.respondWith(
-      fetch(event.request).then(network => {
+      fetchWithTimeout(event.request).then(network => {
         if (network.ok) {
           const cloned = network.clone();
           caches.open(API_CACHE).then(cache => {
@@ -163,7 +184,7 @@ self.addEventListener('fetch', event => {
   // ── Navigation / HTML: network-first, fallback to cache ──
   if (event.request.mode === 'navigate' || url.pathname === '/' || url.pathname === '/index.html') {
     event.respondWith(
-      fetch(event.request).then(network => {
+      fetchWithTimeout(event.request).then(network => {
         const cloned = network.clone();
         return caches.open(CACHE).then(cache => {
           cache.put(event.request, cloned).catch(err => {

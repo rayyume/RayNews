@@ -72,6 +72,11 @@ AI results are stored in the database to avoid duplicate calls. Administrators s
 - Later registrations require an invitation code and start with the User role
 - Administrators manage user roles, global sources, and global article deletion
 - Resend can deliver invitation codes, registration notices, test messages, scheduled daily digests, and historical-purge result emails
+- The daily digest is generated server-side exactly once per day at 21:00 Beijing time using the admin-configured server API; it cannot be triggered manually.
+  Every user gets an in-app copy by default (avatar menu -> My Notifications); the email copy is opted into separately under Settings -> Notifications
+- A failed generation is retried every 10 minutes; after 3 failed retries the scheduler stops for the day and alerts every admin
+  by email and in-app notification with the reason. Admins then see the reason and a "retry" button on the home page ✨ daily
+  digest panel (the button appears only after a failure, and only for admins)
 
 ## Architecture
 

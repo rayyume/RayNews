@@ -54,6 +54,9 @@ CREATE TABLE IF NOT EXISTS user_settings (
     auto_title_summary_enabled INTEGER NOT NULL DEFAULT 0,
     auto_summary_enabled    INTEGER NOT NULL DEFAULT 0,
     daily_summary_enabled   INTEGER NOT NULL DEFAULT 0,
+    -- The in-app copy of the daily summary is on by default; the email copy
+    -- (daily_summary_enabled above) stays opt-in because it needs an address.
+    daily_summary_inapp_enabled INTEGER NOT NULL DEFAULT 1,
     theme_preference        TEXT    NOT NULL DEFAULT 'system',
     notification_config     TEXT    NOT NULL DEFAULT '{}',
     share_ai_results        INTEGER NOT NULL DEFAULT 0,
@@ -169,6 +172,14 @@ def _initialize_db(db: sqlite3.Connection) -> None:
             "user_settings",
             "theme_preference",
             "TEXT NOT NULL DEFAULT 'system'",
+        ),
+        # ALTER TABLE ADD COLUMN backfills every existing row with the default,
+        # so accounts that predate in-app summary delivery get it switched on
+        # without a separate backfill statement.
+        (
+            "user_settings",
+            "daily_summary_inapp_enabled",
+            "INTEGER NOT NULL DEFAULT 1",
         ),
         ("users", "visit_count", "INTEGER NOT NULL DEFAULT 0"),
         ("users", "last_seen_at", "TEXT NOT NULL DEFAULT ''"),
@@ -557,7 +568,8 @@ def get_user_settings(user_id: int) -> dict | None:
     row = db.execute(
         "SELECT s.id, s.auto_translate_title, s.auto_translate_content, "
         "s.auto_title_summary_enabled, s.auto_summary_enabled, "
-        "s.daily_summary_enabled, s.theme_preference, s.notification_config, "
+        "s.daily_summary_enabled, s.daily_summary_inapp_enabled, "
+        "s.theme_preference, s.notification_config, "
         "s.share_ai_results, s.share_view_title, s.share_view_translation, s.share_view_summary, "
         "s.share_suspended, s.share_last_check_at, s.share_last_check_ok, "
         "s.share_last_check_error, s.share_last_check_revision, s.share_intent_revision, "
@@ -567,6 +579,23 @@ def get_user_settings(user_id: int) -> dict | None:
         (user_id,),
     ).fetchone()
     return dict(row) if row else None
+
+
+def get_daily_summary_inapp_user_ids() -> list[int]:
+    """User ids that should receive the in-app copy of the daily summary.
+
+    LEFT JOIN rather than a plain filter on user_settings: an account that has
+    never opened the settings page has no settings row at all, and the in-app
+    copy is on by default — such a user must still be a recipient.
+    """
+    db = get_db()
+    rows = db.execute(
+        "SELECT u.id FROM users AS u "
+        "LEFT JOIN user_settings AS s ON s.user_id = u.id "
+        "WHERE COALESCE(s.daily_summary_inapp_enabled, 1) = 1 "
+        "ORDER BY u.id"
+    ).fetchall()
+    return [int(r["id"]) for r in rows]
 
 
 def get_users_with_share_enabled() -> list[int]:
@@ -582,6 +611,7 @@ def set_user_settings(user_id: int, **kwargs) -> dict:
     """Upsert settings."""
     allowed = {"auto_translate_title", "auto_translate_content",
                "auto_title_summary_enabled", "auto_summary_enabled", "daily_summary_enabled",
+               "daily_summary_inapp_enabled",
                "theme_preference", "notification_config",
                "share_ai_results", "share_view_title", "share_view_translation", "share_view_summary",
                "share_suspended",
@@ -625,6 +655,7 @@ def set_user_settings_for_ai_config_revision(
     allowed = {
         "auto_translate_title", "auto_translate_content",
         "auto_title_summary_enabled", "auto_summary_enabled", "daily_summary_enabled",
+        "daily_summary_inapp_enabled",
         "theme_preference", "notification_config",
         "share_ai_results", "share_view_title", "share_view_translation", "share_view_summary",
         "share_suspended", "share_last_check_at", "share_last_check_ok", "share_last_check_error",
@@ -770,7 +801,7 @@ def add_notification_bulk(user_ids: list[int], ntype: str, title: str,
 
 def publish_broadcast_atomically(
     user_ids: list[int], broadcast_id: str, title: str, body: str,
-    fmt: str, email: bool,
+    fmt: str, email: bool, ntype: str = "admin_broadcast",
 ) -> tuple[bool, dict]:
     """Commit a site-wide in-app broadcast as one transaction.
 
@@ -778,12 +809,18 @@ def publish_broadcast_atomically(
     ``(False, result)`` when ``broadcast_id`` was already committed. A fan-out
     failure rolls back both the claim row and all notification rows, so a retry
     with the same id can safely try again.
+
+    ``ntype`` lets non-admin publishers reuse this claim-then-fan-out unit. The
+    daily summary passes a date-derived ``broadcast_id``, which is what stops
+    the 21:00 scheduler — it ticks once a minute through a ten-minute window,
+    and restarts inside that window — from inserting the same summary twice.
     """
-    # This transaction must not use get_db(): that function returns the
-    # process-wide connection shared by every Flask request. A commit/rollback
-    # from another thread on that same connection would split or undo this
-    # transaction. A short-lived connection gives this unit its own transaction
-    # boundary; WAL + busy_timeout let concurrent writers serialize normally.
+    # This transaction must not use get_db(): that connection is reused for the
+    # whole life of the calling thread, and every other model helper commits on
+    # it. A commit from any of them (the email fan-out below calls into several)
+    # would split this multi-statement unit, leaving the claim row committed
+    # without its notification rows. A short-lived connection gives this unit its
+    # own transaction boundary; WAL + busy_timeout let writers serialize normally.
     db = sqlite3.connect(str(DB_FILE), timeout=30)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys=ON")
@@ -809,8 +846,8 @@ def publish_broadcast_atomically(
 
         db.executemany(
             "INSERT INTO notifications (user_id, type, title, body, format, created_at) "
-            "VALUES (?, 'admin_broadcast', ?, ?, ?, ?)",
-            [(uid, title, body, fmt, now) for uid in user_ids],
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            [(uid, ntype, title, body, fmt, now) for uid in user_ids],
         )
         db.execute(
             "UPDATE broadcast_publications SET title = ?, recipients = ?, email = ? "

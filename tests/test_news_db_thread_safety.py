@@ -303,3 +303,87 @@ conn.close()
         """,
         fetcher_compatible=False,
     )
+
+
+def _reset_news_schema_latch(monkeypatch):
+    """Give a test its own migration latch and thread-local connection store."""
+    monkeypatch.setattr(web_server, "_news_schema_ready_paths", set())
+    monkeypatch.setattr(web_server, "_news_conn_local", threading.local())
+
+
+def test_news_schema_migration_runs_once_per_process_not_per_connection(tmp_path, monkeypatch):
+    # ensure_article_schema() takes SQLite's exclusive write lock (BEGIN IMMEDIATE)
+    # before it can read PRAGMA table_info. Werkzeug hands every request a brand new
+    # thread, so re-running the migration for each thread-local connection made every
+    # single request contend for the write lock with the fetcher's streaming commits.
+    _make_db(tmp_path, monkeypatch)
+    _reset_news_schema_latch(monkeypatch)
+
+    calls = []
+    real = web_server.ensure_article_schema
+    monkeypatch.setattr(
+        web_server, "ensure_article_schema",
+        lambda conn, *a, **kw: (calls.append(1), real(conn, *a, **kw))[1],
+    )
+
+    def touch():
+        web_server._get_news_db()
+
+    threads = [threading.Thread(target=touch) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(calls) == 1, f"migration ran {len(calls)} times across 6 request threads"
+
+
+def test_news_schema_migration_reruns_when_news_db_path_changes(tmp_path, monkeypatch):
+    # The latch is keyed by path, not a bare bool: a second database still has to be
+    # migrated even though the first one already was.
+    _reset_news_schema_latch(monkeypatch)
+    _make_db(tmp_path, monkeypatch)
+    web_server._get_news_db()
+
+    second = tmp_path / "second"
+    second.mkdir()
+    _make_db(second, monkeypatch)
+    conn = web_server._get_news_db()
+
+    # A stale connection to the previous file must not be handed back.
+    assert conn is not None
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(articles)").fetchall()}
+    assert "original_body_html" in columns
+
+
+def test_news_schema_latch_waits_for_articles_table_to_exist(tmp_path, monkeypatch):
+    # news.db can exist before the fetcher has created `articles`. Latching on that
+    # empty pass would permanently skip the real column migration.
+    _reset_news_schema_latch(monkeypatch)
+    db = tmp_path / "news.db"
+    sqlite3.connect(db).close()
+    monkeypatch.setattr(web_server, "NEWS_DB", str(db))
+
+    conn = web_server._news_db_connect()
+    try:
+        web_server._ensure_news_schema(conn)
+        assert str(db.resolve()) not in web_server._news_schema_ready_paths
+        conn.execute(ARTICLES_DDL)
+        conn.commit()
+        web_server._ensure_news_schema(conn)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(articles)").fetchall()}
+        assert "original_body_html" in columns
+    finally:
+        conn.close()
+
+
+def test_news_db_connections_carry_a_busy_timeout(tmp_path, monkeypatch):
+    # The fetcher commits a streaming batch every couple of seconds and holds the
+    # write lock while it does. sqlite3's 5s default surfaces as a hard
+    # "database is locked" mid-cycle; every other writer in the tree uses 30s.
+    _make_db(tmp_path, monkeypatch)
+    conn = web_server._news_db_connect()
+    try:
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
+    finally:
+        conn.close()

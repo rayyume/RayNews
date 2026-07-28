@@ -173,13 +173,16 @@ def run_fetcher():
                 # are still caught within that window by whichever refresh (this
                 # one, the next manual click, or the 15-minute periodic cycle)
                 # lands after the throttle expires.
-                result = maintain_source_categories(conn, force=False)
+                # Deliberately not named `result`: that name holds the fetcher
+                # subprocess's CompletedProcess, which the return value below
+                # still depends on.
+                maintenance = maintain_source_categories(conn, force=False)
                 conn.commit()
                 conn.close()
-                if result.get("discovered") or result.get("deleted"):
+                if maintenance.get("discovered") or maintenance.get("deleted"):
                     log.info(
-                        f"Source maintenance: discovered {result.get('discovered', 0)}, "
-                        f"cleaned up {result.get('deleted', 0)} stale source(s)"
+                        f"Source maintenance: discovered {maintenance.get('discovered', 0)}, "
+                        f"cleaned up {maintenance.get('deleted', 0)} stale source(s)"
                     )
             except Exception as e:
                 log.warning(f"Source cleanup failed: {e}")

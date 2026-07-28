@@ -11,7 +11,7 @@ import time
 import calendar
 import uuid
 import requests
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from urllib.parse import urlsplit
 
 from bs4 import BeautifulSoup
@@ -33,6 +33,7 @@ from models import (
     set_user_settings_for_ai_config_revision,
     apply_share_connectivity_transition,
     get_users_with_share_enabled,
+    get_daily_summary_inapp_user_ids,
     get_system_ai_config, set_system_ai_config,
     create_invitation_code, validate_invitation_code, use_invitation_code,
     list_pending_invitations, delete_invitation_code, delete_invitation_code_by_code,
@@ -76,6 +77,11 @@ TELEGRAM_EMBED_TIMEOUT_SECONDS = int(os.environ.get("TELEGRAM_EMBED_TIMEOUT_SECO
 DAILY_SUMMARY_HOUR = int(os.environ.get("DAILY_SUMMARY_HOUR", "21"))
 DAILY_SUMMARY_MINUTE = int(os.environ.get("DAILY_SUMMARY_MINUTE", "0"))
 DAILY_SUMMARY_WINDOW_MINUTES = int(os.environ.get("DAILY_SUMMARY_WINDOW_MINUTES", "10"))
+# A failed generation is retried on a fixed cadence outside the send window; after
+# DAILY_SUMMARY_MAX_RETRIES further failures the scheduler stops trying for the day
+# and alerts every admin (email + in-app) with the reason.
+DAILY_SUMMARY_RETRY_INTERVAL_SECONDS = int(os.environ.get("DAILY_SUMMARY_RETRY_INTERVAL_SECONDS", "600"))
+DAILY_SUMMARY_MAX_RETRIES = int(os.environ.get("DAILY_SUMMARY_MAX_RETRIES", "3"))
 TITLE_SUMMARY_MAX_CHARS = int(os.environ.get("TITLE_SUMMARY_MAX_CHARS", "30"))
 TITLE_SUMMARY_MAX_WEIGHT = TITLE_SUMMARY_MAX_CHARS * 2
 # The list UI already CSS-clamps titles to 2 lines with an ellipsis
@@ -492,13 +498,47 @@ def admin_set_system_ai_config():
 NEWS_DB = os.path.join(DATA_DIR, "news.db")
 
 
-def _ensure_news_schema(conn: sqlite3.Connection) -> None:
+def _news_db_connect() -> sqlite3.Connection:
+    """Open news.db with the busy semantics every other writer already uses.
+
+    The fetcher commits a streaming batch every couple of seconds and holds the
+    write lock while it does. Without an explicit timeout these connections take
+    sqlite3's 5s default and surface a hard "database is locked" mid-cycle, so
+    match the timeout=30 / busy_timeout=30000 pairing used by fetcher.py,
+    refresh_server.py and models.py.
+    """
+    conn = sqlite3.connect(NEWS_DB, timeout=30, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
+
+
+def _ensure_news_schema(conn: sqlite3.Connection, *, force: bool = False) -> None:
     # A schema upgrade is a read-then-write sequence (PRAGMA followed by
     # ALTER TABLE), so concurrent request connections must not run it in
     # parallel.  Keep the guard here rather than only in _get_news_db():
     # _get_article_meta and maintenance routes also invoke this helper.
+    #
+    # ensure_article_schema() opens BEGIN IMMEDIATE — SQLite's exclusive write
+    # lock — before it can even read PRAGMA table_info. Werkzeug serves every
+    # request on a brand new thread, so a purely thread-local connection means a
+    # fresh connection (and a fresh migration pass) per request: every request
+    # would contend for the write lock just to confirm nothing changed. Latch it
+    # per database path instead, the same way models.get_db() guards the app
+    # database. Keying on the path rather than a bare bool keeps this correct
+    # when a test repoints NEWS_DB at a fresh file.
+    db_path = os.path.abspath(NEWS_DB)
     with _news_schema_lock:
+        if db_path in _news_schema_ready_paths and not force:
+            return
         ensure_article_schema(conn)
+        # Only latch once `articles` exists. A news.db file can be present before
+        # the fetcher has created the table (schema migration then has nothing to
+        # upgrade), and the real column migration still has to run afterwards.
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'articles'"
+        ).fetchone():
+            _news_schema_ready_paths.add(db_path)
 
 
 def _get_article_meta(article_id: int) -> dict | None:
@@ -506,8 +546,7 @@ def _get_article_meta(article_id: int) -> dict | None:
     if not os.path.exists(NEWS_DB):
         return None
     try:
-        conn = sqlite3.connect(NEWS_DB)
-        conn.row_factory = sqlite3.Row
+        conn = _news_db_connect()
         _ensure_news_schema(conn)
         row = conn.execute(
             "SELECT id, title, original_title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
@@ -538,17 +577,30 @@ _news_conn_local = threading.local()
 # must still be serialized in this process: otherwise concurrent first-use
 # connections can all see a missing column and race to add it.
 _news_schema_lock = threading.RLock()
+# Database paths whose migration has already run in this process. See
+# _ensure_news_schema() for why this must not be re-run per connection.
+_news_schema_ready_paths: set[str] = set()
 
 
 def _get_news_db():
     """Per-thread persistent connection to news.db for batch queries."""
     conn = getattr(_news_conn_local, "conn", None)
+    db_path = os.path.abspath(NEWS_DB)
+    # A cached connection to a different file is stale (tests repoint NEWS_DB);
+    # drop it rather than answering queries against the previous database.
+    if conn is not None and getattr(_news_conn_local, "path", None) != db_path:
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
+        conn = None
+        _news_conn_local.conn = None
+        _news_conn_local.path = None
     if conn is None and os.path.exists(NEWS_DB):
-        with _news_schema_lock:
-            conn = sqlite3.connect(NEWS_DB, check_same_thread=False)
-            conn.row_factory = sqlite3.Row
-            _ensure_news_schema(conn)
-            _news_conn_local.conn = conn
+        conn = _news_db_connect()
+        _ensure_news_schema(conn)
+        _news_conn_local.conn = conn
+        _news_conn_local.path = db_path
     return conn
 
 
@@ -1313,121 +1365,125 @@ def _ai_share_revalidation_loop():
 @app.route("/ai/daily-summary", methods=["POST"])
 @require_role("user", "admin")
 def ai_daily_summary():
-    today_str = _today_str()
+    """Retired: the daily summary is generated by the server on a fixed schedule.
 
-    # Reuse today's shared summary if it already exists (from the fixed
-    # 21:00 broadcast or another user's request) instead of spending this
-    # user's own key on a duplicate AI call.
-    shared = _get_daily_summary_global_cache(today_str)
-    if shared:
-        _cleanup_daily_summary_jobs()
-        job_id = uuid.uuid4().hex
-        with _daily_summary_jobs_lock:
-            _daily_summary_jobs[job_id] = {
-                "job_id": job_id,
-                "user_id": g.user_id,
-                "date": today_str,
-                "status": "completed",
-                "created_at": time.time(),
-                "updated_at": time.time(),
-                "summary": shared["summary"],
-                "article_count": shared["article_count"],
-                "stats": shared["stats"],
-                "error": "",
-            }
-        return jsonify({"job_id": job_id, "status": "completed"}), 202
-
-    config = get_ai_config(g.user_id)
-    if not config or not config.get("enabled"):
-        return jsonify({"error": "AI not configured. Go to Settings → AI to set up."}), 400
-    if not config.get("api_key"):
-        return jsonify({"error": "API key not configured"}), 400
-
-    _cleanup_daily_summary_jobs()
-    with _daily_summary_jobs_lock:
-        for job in _daily_summary_jobs.values():
-            if job.get("user_id") == g.user_id and job.get("status") in ("queued", "running"):
-                return jsonify({"job_id": job["job_id"], "status": job["status"]}), 202
-
-        job_id = uuid.uuid4().hex
-        _daily_summary_jobs[job_id] = {
-            "job_id": job_id,
-            "user_id": g.user_id,
-            "date": today_str,
-            "status": "queued",
-            "created_at": time.time(),
-            "updated_at": time.time(),
-            "summary": "",
-            "article_count": 0,
-            "stats": {},
-            "error": "",
-        }
-
-    threading.Thread(
-        target=_run_daily_summary_job,
-        args=(job_id, g.user_id, config),
-        daemon=True,
-    ).start()
-    return jsonify({"job_id": job_id, "status": "queued"}), 202
+    It used to run an AI call against the *calling user's* own API key, which
+    meant the content of a shared, site-wide summary depended on whoever
+    happened to click first. Generation now happens once per day from the
+    admin-configured system AI (see _broadcast_daily_summary), so there is
+    nothing for a client to trigger. Kept as an explicit 403 rather than
+    deleted: a browser running a cached build still posts here, and a clear
+    message beats a bare 404 or, worse, a route that silently reappears.
+    """
+    return jsonify({
+        "error": (
+            f"每日摘要由服务器在北京时间每天 "
+            f"{DAILY_SUMMARY_HOUR:02d}:{DAILY_SUMMARY_MINUTE:02d} 统一生成，不支持手动触发"
+        ),
+        "status": "scheduled",
+        "generate_at": f"{DAILY_SUMMARY_HOUR:02d}:{DAILY_SUMMARY_MINUTE:02d}",
+    }), 403
 
 
 @app.route("/ai/daily-summary/today", methods=["GET"])
 @require_role("user", "admin")
 def ai_daily_summary_today():
+    """Today's shared summary, or why it isn't showing yet.
+
+    The client renders four states off `status`, so the "not yet" cases are
+    distinguished here rather than in the UI: `scheduled` (today's generation
+    time hasn't arrived), `generating` (it has, but the summary isn't stored
+    yet), `completed`, `unavailable` (the day ended with nothing produced —
+    typically no articles, or the system AI isn't configured).
+    """
     today_str = _today_str()
-    _cleanup_daily_summary_jobs()
-    with _daily_summary_jobs_lock:
-        for job in _daily_summary_jobs.values():
-            if (
-                job.get("user_id") == g.user_id
-                and job.get("date") == today_str
-                and job.get("status") in ("queued", "running")
-            ):
-                return jsonify({
-                    "status": job["status"],
-                    "job_id": job["job_id"],
-                    "date": today_str,
-                    "created_at": job.get("created_at"),
-                    "updated_at": job.get("updated_at"),
-                })
+    generate_at = f"{DAILY_SUMMARY_HOUR:02d}:{DAILY_SUMMARY_MINUTE:02d}"
 
     shared = _get_daily_summary_global_cache(today_str)
     if shared:
         return jsonify({
             "status": "completed",
             "date": today_str,
+            "generate_at": generate_at,
             "summary": shared["summary"],
             "article_count": shared["article_count"],
             "stats": shared["stats"],
             "updated_at": shared["updated_at"],
         })
 
-    cached = _get_daily_summary_cache(g.user_id, today_str)
-    if cached:
+    # A day that has failed at least once reports differently to admins: they get
+    # the reason and the retry control, everyone else gets the ordinary
+    # "generating"/"unavailable" wording — a failing system AI key is an ops
+    # detail, not something to show every reader.
+    failure = _get_daily_summary_failure(today_str)
+    if failure and int(failure.get("attempts") or 0) > 0:
+        given_up = bool(int(failure.get("given_up") or 0))
+        if getattr(g, "user_role", "") == "admin":
+            return jsonify({
+                "status": "failed" if given_up else "retrying",
+                "date": today_str,
+                "generate_at": generate_at,
+                "error": failure.get("last_error") or "",
+                "attempts": int(failure.get("attempts") or 0),
+                "max_retries": DAILY_SUMMARY_MAX_RETRIES,
+                "next_retry_at": failure.get("next_retry_at"),
+                "retry_interval_minutes": DAILY_SUMMARY_RETRY_INTERVAL_SECONDS // 60,
+                "can_retry": True,
+            })
         return jsonify({
-            "status": "completed",
+            "status": "unavailable" if given_up else "generating",
             "date": today_str,
-            "summary": cached["summary"],
-            "article_count": cached["article_count"],
-            "stats": cached["stats"],
-            "updated_at": cached["updated_at"],
+            "generate_at": generate_at,
         })
-    return jsonify({"status": "idle", "date": today_str})
+
+    now = _beijing_now()
+    target_minutes = DAILY_SUMMARY_HOUR * 60 + DAILY_SUMMARY_MINUTE
+    now_minutes = now.hour * 60 + now.minute
+    if now_minutes < target_minutes:
+        status = "scheduled"
+    elif now_minutes < target_minutes + max(DAILY_SUMMARY_WINDOW_MINUTES, 1) + 5:
+        # Inside (or just past) the scheduler's send window: a tick is either
+        # running or about to. Slack on the tail so a slow AI call reads as
+        # "still working" rather than flipping straight to unavailable.
+        status = "generating"
+    else:
+        status = "unavailable"
+    return jsonify({"status": status, "date": today_str, "generate_at": generate_at})
 
 
-@app.route("/ai/daily-summary/<job_id>", methods=["GET"])
-@require_role("user", "admin")
-def ai_daily_summary_status(job_id):
-    with _daily_summary_jobs_lock:
-        job = _daily_summary_jobs.get(job_id)
-        if not job or job.get("user_id") != g.user_id:
-            return jsonify({"error": "job not found"}), 404
-        safe = {k: v for k, v in job.items() if k != "user_id"}
-    return jsonify(safe)
+@app.route("/ai/daily-summary/retry", methods=["POST"])
+@require_role("admin")
+def ai_daily_summary_retry():
+    """Admin-triggered retry of today's failed generation.
 
+    Not a general "generate now" button: it refuses unless the day actually has
+    a failure record, which keeps the retired manual-generation path retired —
+    the only way to reach the AI from a client is to re-run a run that already
+    failed. A successful retry clears the failure record and delivers on both
+    channels exactly as the scheduled run would; a failed one restarts the
+    automatic retry chain from attempt 1.
+    """
+    today_str = _today_str()
+    failure = _get_daily_summary_failure(today_str)
+    if not failure or int(failure.get("attempts") or 0) <= 0:
+        return jsonify({
+            "error": "今日每日摘要没有失败记录，无需重试",
+            "status": "not_failed",
+        }), 409
 
-_daily_summary_jobs = {}
-_daily_summary_jobs_lock = threading.Lock()
+    _clear_daily_summary_failure(today_str)
+    result = _broadcast_daily_summary(force=False, bypass_window=True)
+    if result.get("status") == "error":
+        state = _get_daily_summary_failure(today_str) or {}
+        return jsonify({
+            "status": "failed" if int(state.get("given_up") or 0) else "retrying",
+            "error": result.get("reason") or "",
+            "attempts": int(state.get("attempts") or 0),
+            "can_retry": True,
+        }), 502
+    if result.get("status") == "skipped" and result.get("reason") == "generation already running":
+        return jsonify({"status": "retrying", "error": "", "message": "正在生成，请稍候"}), 202
+    return jsonify({"status": "completed", "message": "每日摘要生成成功"})
 
 
 def _beijing_now():
@@ -1441,89 +1497,11 @@ def _today_str() -> str:
     return _beijing_now().strftime("%Y-%m-%d")
 
 
-def _init_daily_summary_cache_table():
-    if not os.path.exists(NEWS_DB):
-        return
-    try:
-        conn = sqlite3.connect(NEWS_DB)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS daily_summary_cache (
-                user_id       INTEGER NOT NULL,
-                date          TEXT NOT NULL,
-                summary       TEXT NOT NULL,
-                article_count INTEGER NOT NULL DEFAULT 0,
-                stats         TEXT NOT NULL DEFAULT '{}',
-                updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
-                PRIMARY KEY (user_id, date)
-            )
-        """)
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"[daily-summary] cache table init failed: {e}")
-
-
-def _get_daily_summary_cache(user_id: int, date_str: str) -> dict | None:
-    if not os.path.exists(NEWS_DB):
-        return None
-    try:
-        _init_daily_summary_cache_table()
-        conn = sqlite3.connect(NEWS_DB)
-        conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            "SELECT summary, article_count, stats, updated_at "
-            "FROM daily_summary_cache WHERE user_id = ? AND date = ?",
-            (user_id, date_str),
-        ).fetchone()
-        conn.close()
-        if not row:
-            return None
-        data = dict(row)
-        try:
-            data["stats"] = json.loads(data.get("stats") or "{}")
-        except (json.JSONDecodeError, TypeError):
-            data["stats"] = {}
-        return data
-    except Exception as e:
-        print(f"[daily-summary] cache read failed: {e}")
-        return None
-
-
-def _save_daily_summary_cache(user_id: int, date_str: str, summary: str,
-                              article_count: int, stats: dict):
-    if not os.path.exists(NEWS_DB):
-        return
-    try:
-        _init_daily_summary_cache_table()
-        conn = sqlite3.connect(NEWS_DB)
-        conn.execute(
-            "INSERT INTO daily_summary_cache "
-            "(user_id, date, summary, article_count, stats, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, datetime('now')) "
-            "ON CONFLICT(user_id, date) DO UPDATE SET "
-            "summary = excluded.summary, "
-            "article_count = excluded.article_count, "
-            "stats = excluded.stats, "
-            "updated_at = datetime('now')",
-            (user_id, date_str, summary, article_count, json.dumps(stats or {}, ensure_ascii=False)),
-        )
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"[daily-summary] cache write failed: {e}")
-
-
-# ─── Shared (server-wide) daily summary ───────────────────────
-# One summary per day, generated with the admin-configured system AI and
-# broadcast by email to every user with daily_summary_enabled — replaces the
-# old per-user generation so N subscribers no longer cost N AI calls.
-
-
 def _init_daily_summary_global_table():
     if not os.path.exists(NEWS_DB):
         return
     try:
-        conn = sqlite3.connect(NEWS_DB)
+        conn = _news_db_connect()
         conn.execute("""
             CREATE TABLE IF NOT EXISTS daily_summary_global (
                 date          TEXT PRIMARY KEY,
@@ -1544,7 +1522,7 @@ def _get_daily_summary_global_cache(date_str: str) -> dict | None:
         return None
     try:
         _init_daily_summary_global_table()
-        conn = sqlite3.connect(NEWS_DB)
+        conn = _news_db_connect()
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             "SELECT summary, article_count, stats, updated_at "
@@ -1571,7 +1549,7 @@ def _save_daily_summary_global_cache(date_str: str, summary: str,
         return
     try:
         _init_daily_summary_global_table()
-        conn = sqlite3.connect(NEWS_DB)
+        conn = _news_db_connect()
         conn.execute(
             "INSERT INTO daily_summary_global "
             "(date, summary, article_count, stats, updated_at) "
@@ -1589,10 +1567,28 @@ def _save_daily_summary_global_cache(date_str: str, summary: str,
         print(f"[daily-summary] global cache write failed: {e}")
 
 
+# Why the reason travels in a module global instead of the return value: the
+# generator's contract (dict | None) is depended on by callers and tests, and the
+# only consumer of the reason is _broadcast_daily_summary, which calls it
+# synchronously on the same thread one line earlier. Generation is serialized by
+# _daily_summary_generation_lock, so there is no second writer to race with.
+_daily_summary_last_error = ""
+
+
+def _set_daily_summary_error(reason: str) -> None:
+    global _daily_summary_last_error
+    # Provider errors can carry a whole response body; keep the stored/emailed
+    # reason short enough to read at a glance.
+    text = re.sub(r"\s+", " ", str(reason or "")).strip()
+    _daily_summary_last_error = text[:400]
+
+
 def _generate_daily_summary_global(date_str: str) -> dict | None:
     """Return (generating if needed) the one shared daily summary for date_str,
     using the admin-configured system AI. Returns None if it can't be produced
-    yet (no system AI configured, or no articles for that date)."""
+    yet (no system AI configured, or no articles for that date); the reason is
+    left in _daily_summary_last_error for the caller to record and report."""
+    _set_daily_summary_error("")
     cached = _get_daily_summary_global_cache(date_str)
     if cached:
         return cached
@@ -1600,11 +1596,13 @@ def _generate_daily_summary_global(date_str: str) -> dict | None:
     sys_config = get_system_ai_config()
     if not sys_config or not sys_config.get("enabled") or not sys_config.get("api_key"):
         print("[daily-summary] system AI not configured (管理员设置→服务端API), cannot generate")
+        _set_daily_summary_error("系统 AI 未配置或未启用（管理员设置 → 服务端 API）")
         return None
 
     articles = _fetch_articles_by_date(date_str, include_shared_summary=True)
     if not articles:
         print(f"[daily-summary] no articles for {date_str}")
+        _set_daily_summary_error(f"{date_str} 当日没有可用于生成摘要的文章")
         return None
 
     try:
@@ -1627,68 +1625,8 @@ def _generate_daily_summary_global(date_str: str) -> dict | None:
         }
     except Exception as e:
         print(f"[daily-summary] global generation failed: {e}")
+        _set_daily_summary_error(f"AI 生成失败：{e}")
         return None
-
-
-def _cleanup_daily_summary_jobs():
-    cutoff = time.time() - 3600
-    with _daily_summary_jobs_lock:
-        old_ids = [
-            job_id
-            for job_id, job in _daily_summary_jobs.items()
-            if job.get("updated_at", job.get("created_at", 0)) < cutoff
-        ]
-        for job_id in old_ids:
-            _daily_summary_jobs.pop(job_id, None)
-
-
-def _update_daily_summary_job(job_id, **updates):
-    updates["updated_at"] = time.time()
-    with _daily_summary_jobs_lock:
-        if job_id in _daily_summary_jobs:
-            _daily_summary_jobs[job_id].update(updates)
-
-
-def _run_daily_summary_job(job_id, user_id, config):
-    _update_daily_summary_job(job_id, status="running")
-    try:
-        today_str = _today_str()
-        articles = _fetch_articles_by_date(
-            today_str,
-            include_shared_summary=True,
-        )
-        if not articles:
-            _update_daily_summary_job(job_id, status="failed", error="no articles today")
-            return
-
-        raw_article_count = len(articles)
-        articles = _dedup_articles(articles)
-        deduped_article_count = len(articles)
-        svc = AIService(
-            api_key=config["api_key"],
-            endpoint=config["endpoint"],
-            model=config["model"],
-            provider_type=config.get("provider_type", "openai"),
-        )
-        result = svc.daily_summary(articles)
-        result["stats"]["total_articles"] = raw_article_count
-        result["stats"]["articles_after_dedup"] = deduped_article_count
-        _save_daily_summary_cache(
-            user_id,
-            today_str,
-            result["summary"],
-            raw_article_count,
-            result["stats"],
-        )
-        _update_daily_summary_job(
-            job_id,
-            status="completed",
-            summary=result["summary"],
-            article_count=raw_article_count,
-            stats=result["stats"],
-        )
-    except Exception as e:
-        _update_daily_summary_job(job_id, status="failed", error=f"AI request failed: {str(e)}")
 
 
 _auto_summary_lock = threading.Lock()
@@ -1703,7 +1641,7 @@ def _init_daily_summary_sends_table():
     if not os.path.exists(NEWS_DB):
         return
     try:
-        conn = sqlite3.connect(NEWS_DB)
+        conn = _news_db_connect()
         conn.execute("""
             CREATE TABLE IF NOT EXISTS daily_summary_sends (
                 date       TEXT NOT NULL,
@@ -1727,7 +1665,7 @@ def _get_daily_summary_sent_user_ids(date_str: str) -> set[int]:
         return set()
     try:
         _init_daily_summary_sends_table()
-        conn = sqlite3.connect(NEWS_DB)
+        conn = _news_db_connect()
         rows = conn.execute(
             "SELECT user_id FROM daily_summary_sends WHERE date = ? AND status = 'sent'",
             (date_str,),
@@ -1744,7 +1682,7 @@ def _record_daily_summary_send(date_str: str, user_id: int, email: str, status: 
         return
     try:
         _init_daily_summary_sends_table()
-        conn = sqlite3.connect(NEWS_DB)
+        conn = _news_db_connect()
         conn.execute(
             "INSERT INTO daily_summary_sends (date, user_id, email, status, sent_at) "
             "VALUES (?, ?, ?, ?, datetime('now')) "
@@ -1758,37 +1696,323 @@ def _record_daily_summary_send(date_str: str, user_id: int, email: str, status: 
         print(f"[daily-summary] sends write failed: {e}")
 
 
-def _broadcast_daily_summary(force: bool = False) -> dict:
-    """Generate (once) and email the one shared daily summary to every user
-    with daily_summary_enabled. Runs automatically at DAILY_SUMMARY_HOUR:MINUTE
-    Beijing time; `force=True` (admin manual trigger) bypasses the time
-    window and resends to every subscriber regardless of history.
+def _init_daily_summary_failures_table():
+    if not os.path.exists(NEWS_DB):
+        return
+    try:
+        conn = _news_db_connect()
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS daily_summary_failures (
+                date            TEXT PRIMARY KEY,
+                attempts        INTEGER NOT NULL DEFAULT 0,
+                last_error      TEXT NOT NULL DEFAULT '',
+                last_attempt_at INTEGER NOT NULL DEFAULT 0,
+                next_retry_at   INTEGER,
+                given_up        INTEGER NOT NULL DEFAULT 0,
+                alerted         INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[daily-summary] failures table init failed: {e}")
 
-    Send state is persisted in daily_summary_sends (date, user_id) rather than
-    kept in memory: an in-memory "already sent today" set is lost on every
+
+def _epoch_now() -> int:
+    """Wall-clock seconds, isolated so retry scheduling can be driven in tests."""
+    return int(time.time())
+
+
+def _get_daily_summary_failure(date_str: str) -> dict | None:
+    """This date's failure record, or None if the day has not failed (yet)."""
+    if not os.path.exists(NEWS_DB):
+        return None
+    try:
+        _init_daily_summary_failures_table()
+        conn = _news_db_connect()
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT date, attempts, last_error, last_attempt_at, next_retry_at, "
+            "given_up, alerted FROM daily_summary_failures WHERE date = ?",
+            (date_str,),
+        ).fetchone()
+        conn.close()
+        return dict(row) if row else None
+    except Exception as e:
+        print(f"[daily-summary] failure read failed: {e}")
+        return None
+
+
+def _record_daily_summary_failure(date_str: str, reason: str) -> dict:
+    """Count one failed attempt for date_str and schedule (or stop) the retry.
+
+    Attempt 1 is the scheduled 21:00 run; each subsequent attempt is a retry
+    DAILY_SUMMARY_RETRY_INTERVAL_SECONDS later. Once attempts exceed
+    1 + DAILY_SUMMARY_MAX_RETRIES the day is given up on and next_retry_at is
+    cleared, which is what makes the admin alert fire exactly once.
+
+    Persisted rather than kept in memory so a restart mid-retry-chain neither
+    restarts the count from zero (endless retrying) nor loses the failure state
+    the ✨ panel reads to show the admin's retry button.
+    """
+    now = _epoch_now()
+    state = {
+        "date": date_str,
+        "attempts": 1,
+        "last_error": reason,
+        "last_attempt_at": now,
+        "next_retry_at": now + DAILY_SUMMARY_RETRY_INTERVAL_SECONDS,
+        "given_up": 0,
+        "alerted": 0,
+    }
+    if not os.path.exists(NEWS_DB):
+        return state
+    try:
+        _init_daily_summary_failures_table()
+        conn = _news_db_connect()
+        conn.row_factory = sqlite3.Row
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT attempts, alerted FROM daily_summary_failures WHERE date = ?",
+            (date_str,),
+        ).fetchone()
+        attempts = int(row["attempts"]) + 1 if row else 1
+        alerted = int(row["alerted"]) if row else 0
+        given_up = 1 if attempts >= 1 + DAILY_SUMMARY_MAX_RETRIES else 0
+        next_retry_at = None if given_up else now + DAILY_SUMMARY_RETRY_INTERVAL_SECONDS
+        conn.execute(
+            "INSERT INTO daily_summary_failures "
+            "(date, attempts, last_error, last_attempt_at, next_retry_at, given_up, alerted) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(date) DO UPDATE SET "
+            "attempts = excluded.attempts, last_error = excluded.last_error, "
+            "last_attempt_at = excluded.last_attempt_at, "
+            "next_retry_at = excluded.next_retry_at, given_up = excluded.given_up",
+            (date_str, attempts, reason, now, next_retry_at, given_up, alerted),
+        )
+        # Only the current day is ever consulted; keep a short tail for support
+        # questions ("did last Tuesday fail?") and drop the rest.
+        conn.execute("DELETE FROM daily_summary_failures WHERE date < ?",
+                     ((_beijing_now() - timedelta(days=7)).strftime("%Y-%m-%d"),))
+        conn.commit()
+        conn.close()
+        state.update({
+            "attempts": attempts,
+            "next_retry_at": next_retry_at,
+            "given_up": given_up,
+            "alerted": alerted,
+        })
+    except Exception as e:
+        print(f"[daily-summary] failure write failed: {e}")
+    return state
+
+
+def _clear_daily_summary_failure(date_str: str) -> None:
+    """Drop the failure record — a later attempt succeeded, or an admin asked
+    for a manual retry and the count should start over."""
+    if not os.path.exists(NEWS_DB):
+        return
+    try:
+        _init_daily_summary_failures_table()
+        conn = _news_db_connect()
+        conn.execute("DELETE FROM daily_summary_failures WHERE date = ?", (date_str,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[daily-summary] failure clear failed: {e}")
+
+
+def _claim_daily_summary_alert(date_str: str) -> bool:
+    """Flip alerted 0→1 for this date, returning True only for the caller that
+    won the flip. Guards against a second alert if two ticks (or a restart
+    racing the tick that gave up) reach the notification step for one day."""
+    if not os.path.exists(NEWS_DB):
+        return True
+    try:
+        _init_daily_summary_failures_table()
+        conn = _news_db_connect()
+        cur = conn.execute(
+            "UPDATE daily_summary_failures SET alerted = 1 "
+            "WHERE date = ? AND alerted = 0",
+            (date_str,),
+        )
+        conn.commit()
+        claimed = cur.rowcount > 0
+        conn.close()
+        return claimed
+    except Exception as e:
+        print(f"[daily-summary] alert claim failed: {e}")
+        return False
+
+
+def _daily_summary_retry_due(state: dict | None, now: int | None = None) -> bool:
+    """True when an auto-retry for a failed day is owed right now."""
+    if not state or int(state.get("given_up") or 0):
+        return False
+    next_retry_at = state.get("next_retry_at")
+    if next_retry_at is None:
+        return False
+    return (now if now is not None else _epoch_now()) >= int(next_retry_at)
+
+
+def _alert_admins_daily_summary_failure(date_str: str, state: dict) -> int:
+    """Tell every admin the day's summary is not coming, and why.
+
+    Both channels go through _notify_user, so the alert lands in 头像菜单 →
+    我的通知 even when RESEND_API_KEY is unset or the mail send fails.
+    """
+    attempts = int(state.get("attempts") or 0)
+    reason = state.get("last_error") or "未知原因"
+    body = (
+        f"{date_str} 的每日摘要生成失败，已重试 {max(attempts - 1, 0)} 次仍未成功，"
+        f"今日不再自动重试。\n\n"
+        f"失败原因：{reason}\n\n"
+        f"共尝试 {attempts} 次（首次为北京时间 "
+        f"{DAILY_SUMMARY_HOUR:02d}:{DAILY_SUMMARY_MINUTE:02d} 的定时生成，"
+        f"之后每 {DAILY_SUMMARY_RETRY_INTERVAL_SECONDS // 60} 分钟重试一次）。\n\n"
+        f"可在首页 ✨ 每日摘要面板点击「重试生成」手动再试一次。"
+    )
+    notified = 0
+    try:
+        admins = [u for u in list_users() if u.get("role") == "admin"]
+    except Exception as e:
+        print(f"[daily-summary] admin lookup for failure alert failed: {e}")
+        return 0
+    for admin in admins:
+        try:
+            _notify_user(admin["id"], "daily_summary_failed",
+                         DAILY_SUMMARY_FAILURE_TITLE, body)
+            notified += 1
+        except Exception as e:
+            print(f"[daily-summary] failure alert to admin {admin['id']} failed: {e}")
+    print(f"[daily-summary] {date_str} gave up after {attempts} attempt(s); "
+          f"alerted {notified} admin(s): {reason}")
+    return notified
+
+
+DAILY_SUMMARY_NOTIFICATION_TITLE = "每日摘要已生成"
+DAILY_SUMMARY_FAILURE_TITLE = "每日摘要生成失败"
+
+
+def _daily_summary_broadcast_id(date_str: str) -> str:
+    """Claim key for one date's in-app fan-out (see publish_broadcast_atomically)."""
+    return f"daily-summary-{date_str}"
+
+
+def _deliver_daily_summary_inapp(date_str: str, result: dict) -> dict:
+    """Drop the day's summary into every opted-in user's notification list.
+
+    Delivery is idempotent on the date-derived broadcast id, which matters here:
+    the scheduler ticks once a minute across a ten-minute window and a restart
+    inside that window replays the same date. The claim row makes every tick
+    after the first a no-op instead of a second copy in everyone's list.
+
+    Independent of the email leg by design — a user with no email address
+    configured, or a deployment with no RESEND_API_KEY at all, still gets the
+    in-app copy.
+    """
+    try:
+        user_ids = get_daily_summary_inapp_user_ids()
+        if not user_ids:
+            return {"status": "skipped", "reason": "no in-app recipients", "recipients": 0}
+        published, info = publish_broadcast_atomically(
+            user_ids,
+            _daily_summary_broadcast_id(date_str),
+            DAILY_SUMMARY_NOTIFICATION_TITLE,
+            result["summary"],
+            # The summary is Markdown (with in-app article links); the client
+            # renders it through the same escape → markdown → sanitize pipeline
+            # it uses for translated article bodies.
+            "markdown",
+            email=False,
+            ntype="daily_summary",
+        )
+        if not published:
+            return {"status": "skipped", "reason": "already delivered today",
+                    "recipients": int(info.get("recipients") or 0)}
+        print(f"[scheduler] Daily summary in-app delivery for {date_str}: {len(user_ids)} recipient(s)")
+        return {"status": "ok", "recipients": len(user_ids)}
+    except Exception as e:
+        # Never let the in-app leg take the email leg down with it.
+        print(f"[scheduler] in-app daily summary delivery failed: {e}")
+        return {"status": "error", "reason": str(e), "recipients": 0}
+
+
+_daily_summary_generation_lock = threading.Lock()
+
+
+def _broadcast_daily_summary(force: bool = False, bypass_window: bool = False) -> dict:
+    """Generate the one shared daily summary and deliver it on both channels.
+
+    Runs automatically at DAILY_SUMMARY_HOUR:MINUTE Beijing time; `force=True`
+    (admin manual trigger) bypasses the time window and resends to every email
+    subscriber regardless of history.
+
+    Generation happens before either channel is consulted. It used to sit behind
+    the RESEND_API_KEY and "any email subscribers?" checks, which was fine when
+    email was the only channel — but the in-app copy goes to everyone by
+    default, so a deployment with no mail configured must still produce and
+    deliver the summary.
+
+    Email send state is persisted in daily_summary_sends (date, user_id) rather
+    than kept in memory: an in-memory "already sent today" set is lost on every
     restart, which could cause a duplicate broadcast if the process restarts
     inside the same day's send window. Persisting per-recipient status also
     lets a transient per-recipient failure (e.g. one bad email) get retried
     on the next scheduler tick instead of being silently skipped for the rest
-    of the day.
+    of the day. The in-app leg uses its own all-or-nothing claim row instead —
+    it fans out in a single transaction, so it has no partial state to resume.
     """
-    import json as _json
-    from notifier import send_daily_summary_email
-
     now = _beijing_now()
     today_str = now.strftime("%Y-%m-%d")
 
-    resend_api_key = os.environ.get("RESEND_API_KEY", "")
-    if not resend_api_key:
-        print("[scheduler] RESEND_API_KEY not set, skipping")
-        return {"status": "skipped", "reason": "RESEND_API_KEY not set"}
-
-    if not force:
+    if not force and not bypass_window:
         target_minutes = DAILY_SUMMARY_HOUR * 60 + DAILY_SUMMARY_MINUTE
         now_minutes = now.hour * 60 + now.minute
         diff = now_minutes - target_minutes
         if diff < 0 or diff >= DAILY_SUMMARY_WINDOW_MINUTES:
             return {"status": "skipped", "reason": "outside daily send window"}
+
+    # A retry tick, an admin's manual retry and the scheduled run can all land on
+    # the same minute; only one may hold an AI call for the day at a time.
+    if not _daily_summary_generation_lock.acquire(blocking=False):
+        return {"status": "skipped", "reason": "generation already running"}
+    try:
+        result = _generate_daily_summary_global(today_str)
+        if not result:
+            reason = _daily_summary_last_error or "生成失败（请检查 管理员设置 → 服务端 API，或当日是否有文章）"
+            if force:
+                # An admin's ad-hoc resend (管理员设置 → 立即发送) is not the day's
+                # scheduled run: a failed one reports back to the caller and stops
+                # there. Letting it seed the retry record would start a half-hour
+                # retry chain — and eventually a failure alert to every admin —
+                # for what was a manual experiment at an arbitrary hour.
+                return {"status": "error", "reason": reason}
+            state = _record_daily_summary_failure(today_str, reason)
+            if int(state.get("given_up") or 0) and _claim_daily_summary_alert(today_str):
+                _alert_admins_daily_summary_failure(today_str, state)
+            return {"status": "error", "reason": reason,
+                    "attempts": state.get("attempts"),
+                    "given_up": bool(state.get("given_up"))}
+
+        _clear_daily_summary_failure(today_str)
+        inapp = _deliver_daily_summary_inapp(today_str, result)
+        email = _deliver_daily_summary_email(today_str, result, force=force)
+        return {**email, "inapp": inapp}
+    finally:
+        _daily_summary_generation_lock.release()
+
+
+def _deliver_daily_summary_email(date_str: str, result: dict, force: bool = False) -> dict:
+    """Email the already-generated summary to every opted-in subscriber."""
+    import json as _json
+    from notifier import send_daily_summary_email
+
+    today_str = date_str
+    resend_api_key = os.environ.get("RESEND_API_KEY", "")
+    if not resend_api_key:
+        print("[scheduler] RESEND_API_KEY not set, skipping")
+        return {"status": "skipped", "reason": "RESEND_API_KEY not set"}
 
     try:
         db = get_db()
@@ -1821,10 +2045,6 @@ def _broadcast_daily_summary(force: bool = False) -> dict:
     if not pending:
         return {"status": "skipped", "reason": "already sent today"}
 
-    result = _generate_daily_summary_global(today_str)
-    if not result:
-        return {"status": "error", "reason": "generation failed (check 管理员设置→服务端API, or no articles yet)"}
-
     sent = 0
     for user_id, to_email in pending.items():
         try:
@@ -1848,7 +2068,23 @@ def _broadcast_daily_summary(force: bool = False) -> dict:
 
 
 def _send_daily_summaries():
-    _broadcast_daily_summary(force=False)
+    """One scheduler tick: either the scheduled run, or a due retry.
+
+    Retries have to live outside _broadcast_daily_summary's send window — the
+    window is ten minutes wide while the retry chain runs for half an hour — so
+    the decision of *whether* this tick may generate is made here, and the
+    window check is bypassed once the day has a failure record.
+    """
+    today_str = _today_str()
+    state = _get_daily_summary_failure(today_str)
+    if state and int(state.get("attempts") or 0) > 0:
+        if int(state.get("given_up") or 0):
+            return {"status": "skipped", "reason": "gave up for today"}
+        if not _daily_summary_retry_due(state):
+            return {"status": "skipped", "reason": "waiting for next retry"}
+        print(f"[scheduler] Daily summary retry #{int(state['attempts'])} for {today_str}")
+        return _broadcast_daily_summary(force=False, bypass_window=True)
+    return _broadcast_daily_summary(force=False)
 
 
 def _daily_summary_loop():
@@ -2436,7 +2672,7 @@ def _fetch_untranslated_articles(config: dict, limit: int = AUTO_TRANSLATION_BAT
     try:
         _init_ai_results_table()
         today_str = _dt.datetime.now().strftime("%Y-%m-%d")
-        conn = sqlite3.connect(NEWS_DB)
+        conn = _news_db_connect()
         conn.row_factory = sqlite3.Row
         ensure_article_source_columns(conn)
         rows = conn.execute(
@@ -3138,7 +3374,7 @@ def _fetch_recent_articles(limit: int = 20) -> list[dict]:
     if not os.path.exists(NEWS_DB):
         return []
     try:
-        conn = sqlite3.connect(NEWS_DB)
+        conn = _news_db_connect()
         conn.row_factory = sqlite3.Row
         ensure_article_source_columns(conn)
         rows = conn.execute(
@@ -3183,7 +3419,7 @@ def _fetch_articles_by_date(date_str: str, include_shared_summary: bool = True) 
         return []
     try:
         _init_ai_results_table()
-        conn = sqlite3.connect(NEWS_DB)
+        conn = _news_db_connect()
         conn.row_factory = sqlite3.Row
         ensure_article_source_columns(conn)
         summary_expr = (
@@ -3215,7 +3451,7 @@ def _fetch_unsummarized_articles(limit: int = AUTO_SUMMARY_BATCH_LIMIT) -> list[
     try:
         _init_ai_results_table()
         today_str = _dt.datetime.now().strftime("%Y-%m-%d")
-        conn = sqlite3.connect(NEWS_DB)
+        conn = _news_db_connect()
         conn.row_factory = sqlite3.Row
         ensure_article_source_columns(conn)
         rows = conn.execute(
@@ -3242,7 +3478,7 @@ def _fetch_article_body(article_id: int) -> dict | None:
     if not os.path.exists(NEWS_DB):
         return None
     try:
-        conn = sqlite3.connect(NEWS_DB)
+        conn = _news_db_connect()
         conn.row_factory = sqlite3.Row
         ensure_article_source_columns(conn)
         row = conn.execute(
@@ -3265,7 +3501,7 @@ def _init_ai_results_table():
     if not os.path.exists(NEWS_DB):
         return
     try:
-        conn = sqlite3.connect(NEWS_DB)
+        conn = _news_db_connect()
         conn.execute("""
             CREATE TABLE IF NOT EXISTS ai_results (
                 article_id   INTEGER PRIMARY KEY,
@@ -3326,7 +3562,7 @@ def _get_ai_result(article_id: int) -> dict | None:
     if not os.path.exists(NEWS_DB):
         return None
     try:
-        conn = sqlite3.connect(NEWS_DB)
+        conn = _news_db_connect()
         conn.row_factory = sqlite3.Row
         _init_ai_results_table()
         row = conn.execute(
@@ -3448,7 +3684,7 @@ def _save_ai_result(article_id: int, summary: str | None = None,
         return
     conn = None
     try:
-        conn = sqlite3.connect(NEWS_DB)
+        conn = _news_db_connect()
         _init_ai_results_table()
         conn.execute(
             """
@@ -3540,7 +3776,7 @@ def _publish_translation_update(article_id: int):
         return
     conn = None
     try:
-        conn = sqlite3.connect(NEWS_DB)
+        conn = _news_db_connect()
         _init_ai_results_table()
         conn.execute(
             """
@@ -3591,7 +3827,7 @@ def ai_translation_updates():
 
     conn = None
     try:
-        conn = sqlite3.connect(NEWS_DB)
+        conn = _news_db_connect()
         conn.row_factory = sqlite3.Row
         _init_ai_results_table()
         if not since:
@@ -3749,7 +3985,13 @@ def _delete_article_ids(article_ids: list[int], deleted_by: int | None = None,
         ids,
     ).fetchall()
     if not existing:
-        return {"deleted": 0, "deleted_sources": cleanup_stale_source_categories(conn)}
+        # Honour cleanup_sources here too. A batch whose articles were all already
+        # gone would otherwise still trigger the full-table stale-source scan that
+        # the batched purge passes cleanup_sources=False precisely to avoid.
+        return {
+            "deleted": 0,
+            "deleted_sources": cleanup_stale_source_categories(conn) if cleanup_sources else 0,
+        }
     for row in existing:
         conn.execute(
             """
@@ -4020,7 +4262,28 @@ _container_cpu_sample: list[tuple[int, float] | None] = [None]
 PURGE_BATCH_SIZE = 200
 _purge_tasks: dict[str, dict] = {}
 _purge_tasks_lock = threading.Lock()
-_purge_previews: dict[str, dict] = {}
+# Terminal purge tasks stay queryable so the admin UI can still poll for a result
+# after the run finishes, but the dict must not grow for the life of the process.
+# Mirrors refresh_server.py's REFRESH_JOB_HISTORY_LIMIT.
+PURGE_TASK_HISTORY_LIMIT = 16
+
+
+def _trim_purge_tasks_locked() -> None:
+    """Drop the oldest finished tasks once the history exceeds its limit.
+
+    Callers must already hold _purge_tasks_lock. Running tasks are never evicted:
+    a long purge must stay pollable no matter how many short ones ran after it.
+    """
+    finished = [
+        (task.get("finished_at") or 0, task_id)
+        for task_id, task in _purge_tasks.items()
+        if task.get("status") != "running"
+    ]
+    excess = len(_purge_tasks) - PURGE_TASK_HISTORY_LIMIT
+    if excess <= 0:
+        return
+    for _finished_at, task_id in sorted(finished)[:excess]:
+        _purge_tasks.pop(task_id, None)
 
 
 def _parse_purge_before_date(value: str) -> date | None:
@@ -4078,6 +4341,7 @@ def _purge_articles_before(before_date: str, dry_run: bool,
     }
     with _purge_tasks_lock:
         _purge_tasks[task_id] = task
+        _trim_purge_tasks_locked()
 
     def _notify(final_task: dict) -> None:
         try:
@@ -4115,7 +4379,8 @@ def _purge_articles_before(before_date: str, dry_run: bool,
                             protected_hashes=protected_hashes, conn=cache_conn,
                         )
                     except Exception as exc:
-                        task["errors"] += 1
+                        with _purge_tasks_lock:
+                            task["errors"] += 1
                         print(f"[purge] image eviction failed for {article_id}: {exc}")
                 cache_conn.commit()
                 with _purge_tasks_lock:
@@ -4125,19 +4390,32 @@ def _purge_articles_before(before_date: str, dry_run: bool,
                 time.sleep(0.02)
             orphaned = evict_unreferenced_images(protected_hashes, conn=cache_conn)
             cache_conn.commit()
-            task["images_deleted"] += orphaned
-            cleanup_stale_source_categories(conn)
-            task["status"] = "completed" if not task["errors"] else "completed_with_errors"
+            # Every per-batch _delete_article_ids() call above ran with
+            # cleanup_sources=False, so the stale-source sweep the batches skipped
+            # happens once here. _get_news_db() must be called from *this* thread:
+            # it returns a thread-local connection, and reusing the requesting
+            # thread's connection would drive one sqlite3 connection from two
+            # threads at once — the exact hazard the per-thread design removes.
+            purge_conn = _get_news_db()
+            if purge_conn is not None:
+                cleanup_stale_source_categories(purge_conn)
+                purge_conn.commit()
+            with _purge_tasks_lock:
+                task["images_deleted"] += orphaned
+                task["status"] = "completed" if not task["errors"] else "completed_with_errors"
         except Exception as exc:
-            task["status"] = "failed"
-            task["errors"] += 1
-            task["error"] = str(exc)[:240]
+            with _purge_tasks_lock:
+                task["status"] = "failed"
+                task["errors"] += 1
+                task["error"] = str(exc)[:240]
             print(f"[purge] task failed: {exc}")
         finally:
             if cache_conn:
                 cache_conn.close()
-            task["finished_at"] = int(time.time())
-            _notify(task)
+            with _purge_tasks_lock:
+                task["finished_at"] = int(time.time())
+                final_task = dict(task)
+            _notify(final_task)
 
     threading.Thread(target=_run_purge, daemon=True, name=f"article-purge-{task_id[:8]}").start()
 
@@ -4619,6 +4897,10 @@ def _settings_response(settings: dict | None) -> dict:
     safe.setdefault("share_view_translation", 0)
     safe.setdefault("share_view_summary", 0)
     safe.setdefault("share_suspended", 0)
+    # On by default, including for accounts with no settings row yet — this must
+    # agree with models.get_daily_summary_inapp_user_ids(), which is what
+    # actually decides who receives the in-app copy.
+    safe.setdefault("daily_summary_inapp_enabled", 1)
     safe["share_active"] = is_share_active(safe)
     nc = safe.get("notification_config", "{}")
     if isinstance(nc, str):
@@ -4643,6 +4925,7 @@ def get_settings():
             "auto_title_summary_enabled": False,
             "auto_summary_enabled": False,
             "daily_summary_enabled": False,
+            "daily_summary_inapp_enabled": True,
             "theme_preference": "system",
             "notification_config": {},
             "share_ai_results": False,
@@ -4933,9 +5216,9 @@ def scheduler_status():
 
 if __name__ == "__main__":
     _init_ai_results_table()
-    _init_daily_summary_cache_table()
     _init_daily_summary_global_table()
     _init_daily_summary_sends_table()
+    _init_daily_summary_failures_table()
     import threading as _th
     _th.Thread(target=_daily_summary_loop, daemon=True).start()
     _th.Thread(target=_auto_summary_loop, daemon=True).start()

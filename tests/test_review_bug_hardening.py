@@ -186,7 +186,11 @@ def test_news_db_connection_is_thread_local_not_process_wide():
     source = (ROOT / "web_server.py").read_text(encoding="utf-8")
     local_pos = source.index("_news_conn_local = threading.local()")
     get_news_pos = source.index("def _get_news_db()")
-    block = source[local_pos:get_news_pos + 500]
+    # Bound the block by the *next* top-level def rather than a byte count, so
+    # growing _get_news_db() (e.g. adding the stale-path check) doesn't silently
+    # slide the assertions below out of the window.
+    block_end = source.index("\ndef ", get_news_pos + 1)
+    block = source[local_pos:block_end]
 
     assert "getattr(_news_conn_local, \"conn\", None)" in block
     assert "_news_conn_local.conn = conn" in block

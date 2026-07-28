@@ -4,5 +4,8 @@ __pycache__/
 *.pyc
 .env
 
-# stray test scratch DBs
-tmp-hardening-*.db
+# stray test scratch DBs — tests clean up in tearDown, but an interrupted run
+# (or a killed process) leaves these behind
+tmp-*.db
+tmp-*.db-wal
+tmp-*.db-shm

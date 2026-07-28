@@ -438,6 +438,12 @@ def run_node(source, body):
 const assert = require('assert');
 const vm = require('vm');
 const context = {{ console, URLSearchParams, AbortController }};
+// Resume-recovery collaborators (index.html, next to renderColdStartError) sit
+// outside most extracted ranges. Default them to no-ops here; a test that
+// asserts on the recovery chain overrides them in its own body.
+context.cancelNetworkRecoveryRetry = () => {{}};
+context.scheduleNetworkRecoveryRetry = () => {{}};
+context.listLoadDegraded = false;
 vm.createContext(context);
 vm.runInContext({json.dumps(source)}, context);
 (async () => {{

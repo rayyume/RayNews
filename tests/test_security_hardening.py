@@ -173,6 +173,13 @@ def _setup_daily_summary_test(monkeypatch, db_path, subscriber_rows, send_result
         web_server, "_generate_daily_summary_global",
         lambda date_str: {"summary": "today's news", "stats": {}},
     )
+    # These cases cover the email leg only. Stub the in-app leg so they don't
+    # reach the real app database (models.get_db()/publish_broadcast_atomically
+    # open DATA_DIR/raynews.db, which the NEWS_DB patch above doesn't redirect).
+    monkeypatch.setattr(
+        web_server, "_deliver_daily_summary_inapp",
+        lambda date_str, result: {"status": "skipped", "recipients": 0},
+    )
     # Beijing 21:00 — inside the default 10-minute send window.
     fixed_now = dt.datetime(2026, 7, 10, 21, 3, tzinfo=dt.timezone(dt.timedelta(hours=8)))
     monkeypatch.setattr(web_server, "_beijing_now", lambda: fixed_now)

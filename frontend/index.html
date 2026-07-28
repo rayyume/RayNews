@@ -101,6 +101,9 @@ a:hover{text-decoration:underline}
 .daily-summary-btn{position:relative;width:32px;height:32px;font-size:16px}
 .daily-summary-btn.running{color:var(--accent)!important;animation:summaryPulse 1.6s infinite}
 .daily-summary-btn.ready{color:#fbbf24!important;text-shadow:0 0 12px rgba(251,191,36,0.45)}
+/* Admin-only: today's generation failed. Same dot slot as .ready, red instead of amber. */
+.daily-summary-btn.failed{color:#f87171!important}
+.daily-summary-btn.failed::after{content:'';position:absolute;right:0;top:1px;width:7px;height:7px;border-radius:50%;background:#f87171;box-shadow:0 0 0 3px rgba(248,113,113,0.18)}
 .daily-summary-btn.ready::after,.daily-summary-btn.running::after{content:'';position:absolute;right:0;top:1px;width:7px;height:7px;border-radius:50%;background:#fbbf24;box-shadow:0 0 0 3px rgba(251,191,36,0.18)}
 .daily-summary-btn.running::after{background:var(--accent);box-shadow:0 0 0 3px rgba(110,142,251,0.18)}
 @keyframes summaryPulse{0%,100%{opacity:1}50%{opacity:0.55}}
@@ -202,7 +205,9 @@ a:hover{text-decoration:underline}
 .article-body{width:100%;min-width:0;max-width:100%;overflow-x:hidden;font-size:15.5px;line-height:1.85;overflow-wrap:anywhere;word-break:break-word}
 .article-body *{min-width:0;max-width:100%;overflow-wrap:anywhere;word-break:break-word}
 .article-body p{margin-bottom:1.2em}
-.article-body img{width:auto;height:auto;max-width:100%!important;border-radius:var(--radius);margin:1.2em 0;background:var(--bg-surface);cursor:zoom-in}
+/* touch-action:manipulation kills the double-tap-to-zoom on the image itself:
+   enlarging happens in the fullscreen lightbox (one tap), never in place. */
+.article-body img{width:auto;height:auto;max-width:100%!important;border-radius:var(--radius);margin:1.2em 0;background:var(--bg-surface);cursor:zoom-in;touch-action:manipulation}
 .article-body figure{margin:1.2em 0}
 .article-body figcaption{font-size:12px;color:var(--text-3);margin-top:4px;text-align:center}
 .article-body h2{display:block;font-size:18px;font-weight:700;margin:1.6em 0 0.6em}
@@ -972,15 +977,25 @@ body.body-scroll-lock{overflow:hidden!important}
 
       <!-- Notification Tab -->
       <div id="settingsTabNotify" style="display:none">
-        <label class="ai-label">接收邮箱</label>
+        <div id="dailySummaryPushSection">
+          <label class="ai-label">每日摘要推送</label>
+          <div class="ai-toggle" onclick="document.getElementById('dailySummaryInappToggle').click()">
+            <input type="checkbox" id="dailySummaryInappToggle" onclick="event.stopPropagation()">
+            <span>🔔 站内通知</span>
+          </div>
+          <p class="ai-hint" style="margin-top:4px">默认开启。摘要生成后会出现在 头像菜单 → 我的通知 中。</p>
+
+          <div class="ai-toggle" onclick="document.getElementById('dailySummaryToggle').click()">
+            <input type="checkbox" id="dailySummaryToggle" onclick="event.stopPropagation()">
+            <span>📅 邮件推送</span>
+          </div>
+          <p class="ai-hint" style="margin-top:4px">需填写下方接收邮箱。两个通道相互独立，可只留其一。</p>
+          <p class="ai-hint" style="margin-top:4px">摘要在北京时间每天晚 9 点（21:00）由系统统一生成，生成时间不支持自定义。</p>
+        </div>
+
+        <label class="ai-label" style="margin-top:14px">接收邮箱</label>
         <input class="ai-input" id="notifyToEmail" type="email" placeholder="you@example.com">
         <p class="ai-hint">用于接收每日摘要和测试通知。发件人由服务端 RAYNEWS_FROM_EMAIL 配置。</p>
-
-        <div class="ai-toggle" onclick="document.getElementById('dailySummaryToggle').click()">
-          <input type="checkbox" id="dailySummaryToggle" onclick="event.stopPropagation()">
-          <span>📅 每日摘要推送</span>
-        </div>
-        <p class="ai-hint" style="margin-top:4px">开启后将在北京时间每天晚 9 点（21:00）推送当日新闻摘要，推送时间由系统统一安排，暂不支持自定义。</p>
 
         <button class="ai-save-btn" onclick="saveNotifyConfig()" style="margin-top:14px">保存通知配置</button>
         <button class="ai-save-btn" onclick="testNotification()" style="margin-top:8px;background:var(--bg-card);color:var(--text);border:1px solid var(--border)">📧 发送测试邮件</button>
@@ -1021,10 +1036,12 @@ body.body-scroll-lock{overflow:hidden!important}
       <h2>📊 每日摘要</h2>
       <button class="ai-close" onclick="closeDailySummary()">✕</button>
     </div>
+    <!-- Placeholder only: renderDailySummaryBody() replaces this as soon as the
+         panel opens, once the real schedule state is known. -->
     <div class="ai-body" id="dailySummaryBody">
-      <div style="text-align:center;padding:20px;color:var(--text-3)">
-        <button class="ai-save-btn" onclick="generateDailySummary()">📊 生成每日摘要</button>
-        <p class="ai-hint" style="margin-top:8px">基于最近文章由 AI 生成摘要</p>
+      <div style="text-align:center;padding:36px;color:var(--text-3)">
+        <div style="font-size:20px;margin-bottom:10px">🕘</div>
+        <p>每日摘要将在北京时间每天晚 9 点（21:00）生成显示</p>
       </div>
     </div>
   </div>
@@ -3626,6 +3643,14 @@ async function loadNotifyConfig() {
     const resend = nc.resend || {};
     document.getElementById('notifyToEmail').value = resend.to_email || '';
     document.getElementById('dailySummaryToggle').checked = !!data.daily_summary_enabled;
+    // On by default: an account whose settings row predates this toggle (or has
+    // no row at all) reports 1 from the server, and a missing field must not
+    // read as "off" — that would silently disagree with who actually receives
+    // the notification.
+    document.getElementById('dailySummaryInappToggle').checked =
+      data.daily_summary_inapp_enabled === undefined
+        ? true
+        : !!data.daily_summary_inapp_enabled;
   } catch (e) {}
 }
 
@@ -3643,6 +3668,7 @@ async function saveNotifyConfig() {
       body: JSON.stringify({
         notification_config: nc,
         daily_summary_enabled: document.getElementById('dailySummaryToggle').checked ? 1 : 0,
+        daily_summary_inapp_enabled: document.getElementById('dailySummaryInappToggle').checked ? 1 : 0,
       }),
     });
     const data = await resp.json();
@@ -3910,14 +3936,24 @@ async function refreshTodayArticleCount(
 }
 
 let dailySummaryState = {
-  jobId: '',
-  status: 'idle',
+  status: 'scheduled',
   result: null,
   error: '',
   unread: false,
-  startedAt: 0,
-  pollTimer: null,
+  generateAt: '21:00',
+  // Failure detail, only ever populated for admins — the server keeps the
+  // reason (bad system AI key, no articles…) out of ordinary users' responses.
+  attempts: 0,
+  maxRetries: 3,
+  nextRetryAt: null,
+  retryIntervalMinutes: 10,
+  canRetry: false,
 };
+let dailySummaryRetryInFlight = false;
+
+function isDailySummaryFailureState() {
+  return dailySummaryState.status === 'failed' || dailySummaryState.status === 'retrying';
+}
 
 function isDailySummaryOpen() {
   const overlay = document.getElementById('dailySummaryOverlay');
@@ -3927,9 +3963,12 @@ function isDailySummaryOpen() {
 function updateDailySummaryButton() {
   const btn = document.getElementById('dailySummaryBtn');
   if (!btn) return;
-  btn.classList.toggle('running', dailySummaryState.status === 'running');
+  btn.classList.toggle('running', dailySummaryState.status === 'generating');
   btn.classList.toggle('ready', dailySummaryState.status === 'completed' && dailySummaryState.unread);
-  if (dailySummaryState.status === 'running') {
+  btn.classList.toggle('failed', isDailySummaryFailureState());
+  if (isDailySummaryFailureState()) {
+    btn.title = dailySummaryState.status === 'failed' ? '每日摘要生成失败' : '每日摘要生成失败，重试中';
+  } else if (dailySummaryState.status === 'generating') {
     btn.title = '每日摘要生成中';
   } else if (dailySummaryState.status === 'completed' && dailySummaryState.unread) {
     btn.title = '每日摘要已生成';
@@ -3938,20 +3977,74 @@ function updateDailySummaryButton() {
   }
 }
 
+// Opens 用户设置 → 通知, where both daily-summary delivery toggles live. The
+// digest panel closes first: the settings overlay would otherwise stack behind
+// it, leaving the user looking at an unchanged screen.
+function openDailySummaryPushSettings() {
+  closeDailySummary();
+  openSettings();
+  switchSettingsTab('notify');
+  const section = document.getElementById('dailySummaryPushSection');
+  if (section && typeof section.scrollIntoView === 'function') {
+    section.scrollIntoView({ block: 'start' });
+  }
+}
+
+function dailySummaryPushSettingsButton(marginTop) {
+  return '<button class="ai-save-btn" onclick="openDailySummaryPushSettings()" style="width:auto;margin:' +
+    (marginTop || '14px') + ' auto 0;padding:8px 16px;font-size:12px">🔔 每日摘要推送设置</button>';
+}
+
+function isDailySummaryAdmin() {
+  return !!(typeof authUser !== 'undefined' && authUser && authUser.role === 'admin');
+}
+
+function dailySummaryRetryCountdownText(intervalMinutes) {
+  const at = dailySummaryState.nextRetryAt;
+  if (!at) return '约 ' + intervalMinutes + ' 分钟后';
+  const minutes = Math.ceil((Number(at) * 1000 - Date.now()) / 60000);
+  if (!Number.isFinite(minutes) || minutes <= 0) return '即将';
+  return '约 ' + minutes + ' 分钟后';
+}
+
+// Admin-only: re-run today's failed generation. The button that calls this is
+// rendered only in the failure states, and the server refuses the route unless
+// today actually has a failure record — manual generation stays retired.
+async function retryDailySummary() {
+  if (dailySummaryRetryInFlight) return;
+  dailySummaryRetryInFlight = true;
+  renderDailySummaryBody();
+  try {
+    const resp = await fetch('/ai/daily-summary/retry', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + authToken },
+    });
+    if (resp.status === 401) {
+      logout();
+      return;
+    }
+    const data = await parseJsonResponse(resp);
+    if (resp.ok && data && data.status === 'completed') {
+      showToast('✅ 每日摘要生成成功');
+    } else if (resp.status === 202) {
+      showToast('⏳ 正在生成，请稍候');
+    } else {
+      showToast('❌ 重试失败：' + ((data && (data.error || data.message)) || resp.status));
+    }
+  } catch (e) {
+    showToast('❌ 重试失败，请稍后再试');
+  } finally {
+    dailySummaryRetryInFlight = false;
+    await syncDailySummaryToday();
+    renderDailySummaryBody();
+  }
+}
+
 function renderDailySummaryBody() {
   const body = document.getElementById('dailySummaryBody');
   if (!body) return;
-  const count = countTodayArticles();
-  if (dailySummaryState.status === 'running') {
-    const elapsed = dailySummaryState.startedAt ? Math.max(1, Math.floor((Date.now() - dailySummaryState.startedAt) / 1000)) : 1;
-    body.innerHTML =
-      '<div style="text-align:center;padding:36px;color:var(--text-3)">' +
-      '<div style="font-size:20px;margin-bottom:10px">⏳</div>' +
-      '<p>每日摘要正在后台生成，已等待 ' + elapsed + ' 秒。</p>' +
-      '<p class="ai-hint" style="margin-top:8px">你可以关闭此窗口，生成完成后首页 ✨ 会高亮提示。</p>' +
-      '</div>';
-    return;
-  }
+  const generateAt = dailySummaryState.generateAt || '21:00';
+
   if (dailySummaryState.status === 'completed' && dailySummaryState.result) {
     const data = dailySummaryState.result;
     const generatedTime = formatDailySummaryTime(data.updated_at);
@@ -3960,21 +4053,69 @@ function renderDailySummaryBody() {
       renderMarkdown(normalizeDailySummaryMarkdown(data.summary)) +
       '</div><div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:10px">' +
       '<p style="font-size:11px;color:var(--text-3);margin:0">于 ' + generatedTime + ' 基于 ' + data.article_count + ' 篇文章生成</p>' +
-      '<button class="ai-save-btn" onclick="generateDailySummary()" style="width:auto;margin:0;padding:7px 12px;font-size:12px">重新生成</button>' +
       '</div>';
     return;
   }
-  if (dailySummaryState.status === 'failed') {
+
+  // Failure states reach the client only for admins (see ai_daily_summary_today),
+  // which is what keeps the retry control off every other reader's panel.
+  if (isDailySummaryFailureState() && isDailySummaryAdmin()) {
+    const gaveUp = dailySummaryState.status === 'failed';
+    const attempts = dailySummaryState.attempts || 1;
+    const retried = Math.max(attempts - 1, 0);
+    const interval = dailySummaryState.retryIntervalMinutes || 10;
+    const nextLine = gaveUp
+      ? '已重试 ' + retried + ' 次仍失败，今日不再自动重试。已给管理员发送邮件和站内通知。'
+      : '已尝试 ' + attempts + ' 次，' + dailySummaryRetryCountdownText(interval) + '自动重试（最多重试 '
+        + (dailySummaryState.maxRetries || 3) + ' 次）。';
     body.innerHTML =
-      '<div style="text-align:center;padding:36px;color:var(--text-3)">❌ 生成失败: ' +
-      esc(dailySummaryState.error || '未知错误') +
-      '<br><button class="ai-save-btn" onclick="generateDailySummary()" style="margin-top:14px">重新生成</button></div>';
+      '<div style="text-align:center;padding:32px 20px;color:var(--text-3)">' +
+      '<div style="font-size:20px;margin-bottom:10px">' + (gaveUp ? '❌' : '🔁') + '</div>' +
+      '<p style="color:var(--text-2);font-weight:600">今日摘要生成失败</p>' +
+      '<p class="ai-hint" style="margin-top:10px;text-align:left;word-break:break-word;' +
+      'background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:10px 12px">' +
+      '失败原因：' + esc(dailySummaryState.error || '未知原因') + '</p>' +
+      '<p class="ai-hint" style="margin-top:8px">' + esc(nextLine) + '</p>' +
+      '<button class="ai-save-btn" id="dailySummaryRetryBtn" onclick="retryDailySummary()" ' +
+      'style="width:auto;margin:14px auto 0;padding:8px 16px;font-size:12px"' +
+      (dailySummaryRetryInFlight ? ' disabled' : '') + '>' +
+      (dailySummaryRetryInFlight ? '⏳ 重试中…' : '🔄 重试生成') + '</button>' +
+      dailySummaryPushSettingsButton('10px') +
+      '</div>';
     return;
   }
+
+  if (dailySummaryState.status === 'generating' || dailySummaryState.status === 'retrying') {
+    body.innerHTML =
+      '<div style="text-align:center;padding:36px;color:var(--text-3)">' +
+      '<div style="font-size:20px;margin-bottom:10px">⏳</div>' +
+      '<p>今日摘要正在生成，稍后回来查看。</p>' +
+      '<p class="ai-hint" style="margin-top:8px">生成完成后首页 ✨ 会高亮提示。</p>' +
+      dailySummaryPushSettingsButton() +
+      '</div>';
+    return;
+  }
+
+  if (dailySummaryState.status === 'unavailable' || dailySummaryState.status === 'failed') {
+    body.innerHTML =
+      '<div style="text-align:center;padding:36px;color:var(--text-3)">' +
+      '<div style="font-size:20px;margin-bottom:10px">🌙</div>' +
+      '<p>今日暂无可用摘要。</p>' +
+      '<p class="ai-hint" style="margin-top:8px">明天 ' + esc(generateAt) + ' 会生成新的每日摘要。</p>' +
+      dailySummaryPushSettingsButton() +
+      '</div>';
+    return;
+  }
+
+  // 'scheduled' — today's generation time hasn't arrived yet. This is the state
+  // a user sees for most of the day, so it explains the schedule rather than
+  // offering a button that no longer exists: generation is server-owned and
+  // runs once per day (see ai_daily_summary() in web_server.py).
   body.innerHTML =
-    '<div style="text-align:center;padding:20px;color:var(--text-3)">' +
-    '<button class="ai-save-btn" onclick="generateDailySummary()">📊 生成每日摘要</button>' +
-    '<p class="ai-hint" style="margin-top:8px">基于今日 ' + count + ' 条新闻由 AI 生成摘要</p>' +
+    '<div style="text-align:center;padding:36px;color:var(--text-3)">' +
+    '<div style="font-size:20px;margin-bottom:10px">🕘</div>' +
+    '<p>每日摘要将在北京时间每天晚 9 点（' + esc(generateAt) + '）生成显示</p>' +
+    dailySummaryPushSettingsButton() +
     '</div>';
 }
 
@@ -4031,112 +4172,64 @@ function formatDailySummaryTime(value) {
   return '--:--';
 }
 
-async function pollDailySummaryJob(jobId) {
-  if (!jobId || dailySummaryState.jobId !== jobId) return;
-  try {
-    const resp = await fetch('/ai/daily-summary/' + encodeURIComponent(jobId), {
-      headers: { 'Authorization': 'Bearer ' + authToken },
-    });
-    if (resp.status === 401) {
-      logout();
-      setDailySummaryState({ status: 'failed', error: '登录已过期，请重新登录', pollTimer: null });
-      return;
-    }
-    const data = await parseJsonResponse(resp);
-    if (data.status === 'completed') {
-      setDailySummaryState({
-        status: 'completed',
-        result: data,
-        error: '',
-        unread: !isDailySummaryOpen(),
-        pollTimer: null,
-      });
-      showToast('✅ 每日摘要已生成');
-      return;
-    }
-    if (data.status === 'failed') {
-      setDailySummaryState({ status: 'failed', error: data.error || '生成失败', pollTimer: null });
-      showToast('❌ 每日摘要生成失败');
-      return;
-    }
-    if (isDailySummaryOpen()) renderDailySummaryBody();
-    dailySummaryState.pollTimer = setTimeout(() => pollDailySummaryJob(jobId), 2000);
-  } catch (e) {
-    setDailySummaryState({ status: 'failed', error: e.message || '生成失败', pollTimer: null });
-  }
-}
-
-function startDailySummaryPolling(jobId, startedAt) {
-  if (dailySummaryState.pollTimer) clearTimeout(dailySummaryState.pollTimer);
-  setDailySummaryState({
-    jobId,
-    status: 'running',
-    result: null,
-    error: '',
-    unread: false,
-    startedAt: startedAt ? startedAt * 1000 : Date.now(),
-    pollTimer: null,
-  });
-  dailySummaryState.pollTimer = setTimeout(() => pollDailySummaryJob(jobId), 800);
-}
-
 async function syncDailySummaryToday() {
   if (!authToken) return;
   try {
     const resp = await fetch('/ai/daily-summary/today', {
       headers: { 'Authorization': 'Bearer ' + authToken },
+      cache: 'no-store',
     });
     if (resp.status === 401) {
       logout();
       return;
     }
     const data = await parseJsonResponse(resp);
+    if (!data || !data.status) return;
     if (data.status === 'completed') {
+      // Only flag it unread the first time this session sees it, so reopening
+      // the panel (which re-syncs) doesn't relight the ✨ dot after the user
+      // has already read today's digest.
+      const isNew = !(dailySummaryState.status === 'completed'
+        && dailySummaryState.result
+        && dailySummaryState.result.updated_at === data.updated_at);
       setDailySummaryState({
-        jobId: '',
         status: 'completed',
         result: data,
         error: '',
-        unread: true,
-        startedAt: 0,
+        generateAt: data.generate_at || dailySummaryState.generateAt,
+        unread: isNew ? !isDailySummaryOpen() : dailySummaryState.unread,
+        attempts: 0,
+        nextRetryAt: null,
+        canRetry: false,
       });
       return;
     }
-    if ((data.status === 'queued' || data.status === 'running') && data.job_id) {
-      startDailySummaryPolling(data.job_id, data.created_at);
+    if (data.status === 'failed' || data.status === 'retrying') {
+      setDailySummaryState({
+        status: data.status,
+        result: null,
+        error: data.error || '',
+        unread: false,
+        generateAt: data.generate_at || dailySummaryState.generateAt,
+        attempts: data.attempts || 0,
+        maxRetries: data.max_retries === undefined ? dailySummaryState.maxRetries : data.max_retries,
+        nextRetryAt: data.next_retry_at || null,
+        retryIntervalMinutes: data.retry_interval_minutes || dailySummaryState.retryIntervalMinutes,
+        canRetry: !!data.can_retry,
+      });
       return;
     }
     setDailySummaryState({
-      jobId: '',
-      status: 'idle',
+      status: data.status,
       result: null,
       error: '',
       unread: false,
-      startedAt: 0,
+      generateAt: data.generate_at || dailySummaryState.generateAt,
+      attempts: 0,
+      nextRetryAt: null,
+      canRetry: false,
     });
   } catch (e) {}
-}
-
-// ─── Daily Summary ───────────────────────────────────────
-
-async function triggerDailySummary() {
-  await refreshTodayArticleCount();
-  const count = countTodayArticles();
-  showSettingsStatus(`📊 正在汇集今日共 ${count} 条新闻生成摘要，请耐心等待。`);
-  try {
-    const resp = await fetch('/ai/daily-summary', { method: 'POST', headers: { 'Authorization': 'Bearer ' + authToken } });
-    if (resp.status === 401) { logout(); showSettingsStatus('❌ 登录已过期，请重新登录', 'err'); return; }
-    let data = await parseJsonResponse(resp);
-    if (data.job_id) {
-      startDailySummaryPolling(data.job_id);
-      showSettingsStatus('📊 每日摘要已在后台生成，完成后首页 ✨ 会高亮提示。');
-      return;
-    }
-    if (!data) { showSettingsStatus('❌ 请求失败', 'err'); return; }
-    if (data.error) { showSettingsStatus('❌ ' + data.error, 'err'); return; }
-    // Show result in a scrollable area
-    showSettingsStatus('✅ 每日摘要已生成，可在首页摘要弹窗查看');
-  } catch (e) { showSettingsStatus('❌ 生成失败: ' + (e.message || ''), 'err'); }
 }
 
 // ═══ Daily Summary (Sidebar) ════════════════════════════
@@ -4167,7 +4260,9 @@ async function showDailySummary() {
   closeSidebar();
   renderDailySummaryBody();
   await syncDailySummaryToday();
-  if (dailySummaryState.status === 'completed') {
+  // Opening the panel *is* reading it: drop the ✨ highlight regardless of which
+  // state the sync landed on.
+  if (dailySummaryState.unread) {
     dailySummaryState.unread = false;
     updateDailySummaryButton();
   }
@@ -4177,33 +4272,6 @@ async function showDailySummary() {
 function closeDailySummary() {
   document.getElementById('dailySummaryOverlay').classList.remove('open');
   unlockBodyScroll();
-}
-
-async function generateDailySummary() {
-  const body = document.getElementById('dailySummaryBody');
-  await refreshTodayArticleCount();
-  const count = countTodayArticles();
-  if (dailySummaryState.status === 'running') {
-    renderDailySummaryBody();
-    return;
-  }
-  body.innerHTML = `<div style="text-align:center;padding:40px;color:var(--text-3)">⏳ 已提交生成任务，系统将在后台处理今日 ${count} 条新闻。</div>`;
-  try {
-    const resp = await fetch('/ai/daily-summary', { method: 'POST', headers: { 'Authorization': 'Bearer ' + authToken } });
-    if (resp.status === 401) { logout(); body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)">❌ 登录已过期，请重新登录</div>'; return; }
-    let data = await parseJsonResponse(resp);
-    if (data.job_id) {
-      startDailySummaryPolling(data.job_id);
-      showToast('📊 每日摘要正在后台生成');
-      renderDailySummaryBody();
-      return;
-    }
-    if (!data) { body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)">❌ 请求失败</div>'; return; }
-    if (data.error) { body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)">❌ ' + esc(data.error) + '</div>'; return; }
-    setDailySummaryState({ status: 'completed', result: data, unread: false, error: '' });
-  } catch (e) {
-    setDailySummaryState({ status: 'failed', error: e.message || '生成失败' });
-  }
 }
 
 function closeSidebar() {
@@ -4859,6 +4927,15 @@ function openNotifications() {
   closeUserMenu();
   if (!authToken) { showToast('🔒 登录后才能查看通知'); showAuth(); return; }
   const overlay = document.getElementById('notifOverlay');
+  // The daily-summary notification body is the digest Markdown, whose article
+  // links are absolute (https://…/#/article/…) and are sanitized with
+  // target="_blank". Intercept them the same way the digest panel does so a tap
+  // opens the in-app article overlay instead of a new browser tab.
+  const notifBody = document.getElementById('notifBody');
+  if (notifBody && !notifBody.dataset.linkHandlerBound) {
+    notifBody.addEventListener('click', handleDailySummaryLinkClick);
+    notifBody.dataset.linkHandlerBound = '1';
+  }
   overlay.classList.add('open');
   lockBodyScroll();
   notifDetailId = null;
@@ -5735,10 +5812,90 @@ function startStartupEmptyRevalidation(initialData, {
   return true;
 }
 
+// ── Recovery after an iOS PWA resume ────────────────────────────────────
+//
+// When the app is opened after a long time in the background, the first
+// requests routinely fail: iOS hasn't brought the network stack back, so the
+// fetch either hangs until our own AbortController fires or the Service Worker
+// answers it from its cache (X-SW-Fallback). Both land in loadNewsPage()'s
+// failure path. Without this, the user was left on the "内容可能不是最新" /
+// "连接超时" card until they hit the manual refresh button by hand — by which
+// time the network was back and the very same request succeeded.
+//
+// So: never leave the list in a failed state waiting for a tap. Retry on a
+// backoff for as long as the page is visible, and retry immediately when the
+// OS tells us connectivity returned ('online') or when the app is brought
+// forward again.
+let listLoadDegraded = false;
+let networkRecoveryTimer = null;
+let networkRecoveryAttempt = 0;
+let networkRecoveryTarget = null;
+const NETWORK_RECOVERY_DELAYS_MS = [1500, 4000, 8000, 15000, 30000];
+const NETWORK_RECOVERY_MAX_ATTEMPTS = 8;
+
+function cancelNetworkRecoveryRetry() {
+  if (networkRecoveryTimer) clearTimeout(networkRecoveryTimer);
+  networkRecoveryTimer = null;
+  networkRecoveryAttempt = 0;
+  networkRecoveryTarget = null;
+  listLoadDegraded = false;
+}
+
+function scheduleNetworkRecoveryRetry({ page = currentPage, activeFilter = filter, immediate = false } = {}) {
+  listLoadDegraded = true;
+  networkRecoveryTarget = { page, activeFilter };
+  if (networkRecoveryTimer) {
+    if (!immediate) return;
+    clearTimeout(networkRecoveryTimer);
+    networkRecoveryTimer = null;
+  }
+  if (networkRecoveryAttempt >= NETWORK_RECOVERY_MAX_ATTEMPTS) return;
+  const delayMs = immediate
+    ? 0
+    : NETWORK_RECOVERY_DELAYS_MS[Math.min(networkRecoveryAttempt, NETWORK_RECOVERY_DELAYS_MS.length - 1)];
+  networkRecoveryAttempt++;
+  networkRecoveryTimer = setTimeout(() => {
+    networkRecoveryTimer = null;
+    // Hidden again: the retry would race the freeze. onReturnToForeground()
+    // re-arms this the moment the app comes back.
+    if (document.hidden) return;
+    const target = networkRecoveryTarget || { page, activeFilter };
+    loadNewsPage(target.page, {
+      activeFilter: target.activeFilter,
+      useCache: false,
+      forceNetwork: true,
+      networkRetries: 1,
+      suppressFailureToast: true,
+    });
+    // Success cancels the chain from inside loadNewsPage(); a further failure
+    // schedules the next (longer) step from its failure path.
+  }, delayMs);
+}
+
+// The 重试 button on the cold-start error card. Distinct from loadData(): it
+// retries the *list* several times without waiting on source metadata first —
+// on a just-resumed connection the first attempt is the one most likely to hang,
+// and blocking the list behind loadSourceCategories() only added to the wait.
+function retryColdStartLoad() {
+  if (networkRecoveryTimer) {
+    clearTimeout(networkRecoveryTimer);
+    networkRecoveryTimer = null;
+  }
+  networkRecoveryAttempt = 0;
+  loadSourceCategories();
+  return loadNewsPage(currentPage, {
+    activeFilter: filter,
+    useCache: false,
+    forceNetwork: true,
+    userInitiated: true,
+    networkRetries: 2,
+  });
+}
+
 function renderColdStartError(message) {
   const list = document.getElementById('list');
   if (!list || news.length || list.querySelector('.item[data-id]')) return;
-  list.innerHTML = '<div class="empty"><div class="empty-icon">📡</div><p>' + esc(message) + '</p><button class="refresh-btn" onclick="loadData()" style="margin-top:12px">重试</button></div>';
+  list.innerHTML = '<div class="empty"><div class="empty-icon">📡</div><p>' + esc(message) + '</p><button class="refresh-btn" onclick="retryColdStartLoad()" style="margin-top:12px">重试</button></div>';
 }
 
 function renderSourceDeepLinkError(message) {
@@ -5801,11 +5958,27 @@ function swFallbackError() {
   return error;
 }
 
-async function fetchNewsPage(page, activeFilter, signal, sourceSnapshot = null) {
+async function fetchNewsPage(page, activeFilter, signal, sourceSnapshot = null, { cacheBust = false } = {}) {
   const params = buildNewsPageParams(page, activeFilter, sourceSnapshot);
+  // A retry after a hung request must not be answered by the connection that
+  // hung (or by an intermediate cache): on iOS PWA resume the original socket
+  // can stay stuck until the OS tears it down, so vary the URL. sw.js's
+  // normalizedApiRequest() strips `t` again before touching its cache key, so
+  // this costs nothing on the cache side.
+  if (cacheBust) params.set('t', String(Date.now()));
   const resp = await fetch('/api/news?' + params.toString(), { signal });
   if (!resp.ok) throw new Error('HTTP ' + resp.status);
-  if (isSwFallbackResponse(resp)) throw swFallbackError();
+  if (isSwFallbackResponse(resp)) {
+    // Still a failure — the caller must not mistake it for a fresh 200 — but
+    // carry the stale body along. When the app has nothing else to show (cold
+    // start right after a resume), rendering this beats an error card, and the
+    // caller says so explicitly by reading `staleData`.
+    const error = swFallbackError();
+    try {
+      error.staleData = await resp.json();
+    } catch (e) {}
+    throw error;
+  }
   const data = await resp.json();
   if (data.error) throw new Error(data.error);
   return data;
@@ -6125,6 +6298,10 @@ async function loadNewsPageRequest(requestSeq, page = 1, {
   sourceSnapshot = null,
   coldStartErrorHandler = null,
   externalSignal = null,
+  // Automatic resume-recovery retries (scheduleNetworkRecoveryRetry) already
+  // told the user once; repeating the toast on every backoff step would turn a
+  // recovering app into a stream of failure notices.
+  suppressFailureToast = false,
 } = {}) {
   let cacheApplied = false;
   // Captured once, up front, so every write below stamps the epoch that was live when
@@ -6160,11 +6337,18 @@ async function loadNewsPageRequest(requestSeq, page = 1, {
       if (pageRequestController) pageRequestController.abort();
       pageRequestController = new AbortController();
       const controller = pageRequestController;
-      const timeout = setTimeout(() => controller.abort(), 12000);
+      // A socket that survived an iOS background freeze can hang until the OS
+      // reaps it, so an attempt that still has a retry behind it gives up early
+      // and reissues on a fresh (cache-busted) URL rather than burning the full
+      // budget on a connection that will never answer.
+      const attemptTimeoutMs = attempt < networkRetries ? 6000 : 12000;
+      const timeout = setTimeout(() => controller.abort(), attemptTimeoutMs);
       const abortFromExternal = () => controller.abort();
       if (externalSignal) externalSignal.addEventListener('abort', abortFromExternal, { once: true });
       try {
-        const data = await fetchNewsPage(page, activeFilter, controller.signal, sourceSnapshot);
+        const data = await fetchNewsPage(page, activeFilter, controller.signal, sourceSnapshot,
+                                         { cacheBust: attempt > 0 });
+        cancelNetworkRecoveryRetry();
         if (externalSignal && externalSignal.aborted) return false;
         const startupInitializing = typeof isStartupInitializationResponse === 'function'
           && isStartupInitializationResponse(data);
@@ -6225,16 +6409,33 @@ async function loadNewsPageRequest(requestSeq, page = 1, {
       : isSwFallbackFailure
       ? '内容可能不是最新，下拉或点击刷新重试'
       : '加载失败，请检查网络';
-    if (cacheApplied) showToast(message);
+    // Nothing on screen, but the Service Worker handed us its cached copy on the
+    // way past (see fetchNewsPage): show that rather than an error card the user
+    // has to tap through. This is the common iOS-PWA-resume case — the content
+    // was there all along, it just wasn't fresh.
+    const staleItems = lastError && lastError.staleData && Array.isArray(lastError.staleData.items)
+      ? lastError.staleData.items
+      : null;
+    const notify = text => { if (!suppressFailureToast) showToast(text); };
+    if (!cacheApplied && !news.length && staleItems && staleItems.length) {
+      if (!applicationGuard || applicationGuard()) {
+        applyNewsPage(lastError.staleData, page, activeFilter, { animate });
+        notify(message);
+        scheduleNetworkRecoveryRetry({ page, activeFilter });
+        return true;
+      }
+    }
+    if (cacheApplied) notify(message);
     else if (!cacheApplied && !news.length) {
       (coldStartErrorHandler || renderColdStartError)(message);
+      scheduleNetworkRecoveryRetry({ page, activeFilter });
     }
     // Otherwise (cache missed, but the page already has news rendered from an
     // earlier load, and this wasn't a user-initiated fetch): ordinarily silent —
     // background prefetch failures shouldn't nag the user — except a SW-fallback
     // failure specifically, which per isSwFallbackResponse()'s doc must never be
     // silently mistaken for "up to date".
-    else if (userInitiated || isSwFallbackFailure) showToast(message);
+    else if (userInitiated || isSwFallbackFailure) notify(message);
     return cacheApplied;
   } finally {
     if (requestSeq === pageRequestSequence && showPageProgress) setPageLoading(false);
@@ -7925,6 +8126,17 @@ lbStage.addEventListener('click', event => {
   closeLightbox();
 });
 
+// Pinch-zoom belongs to the fullscreen viewer, not the article body. iOS Safari
+// ignores `user-scalable=no` in the viewport meta, so a pinch on an inline image
+// used to magnify the whole page — leaving the reader zoomed into a blurry
+// upscale of a layout-sized <img> with everything else shifted. Swallowing the
+// gesture events makes tapping an image (→ lightbox) the only way to enlarge it;
+// the lightbox runs its own pinch on .lb-stage through pointer events
+// (touch-action:none), which these listeners do not touch.
+['gesturestart', 'gesturechange', 'gestureend'].forEach(type => {
+  document.addEventListener(type, event => event.preventDefault(), { passive: false });
+});
+
 const articleWrap = document.getElementById('articleWrap');
 
 function prepareArticleImage(image) {
@@ -8330,6 +8542,11 @@ document.addEventListener('error', event => {
 }, true);
 document.addEventListener('visibilitychange', retryBrokenVisibleImages);
 window.addEventListener('online', retryBrokenVisibleImages);
+// Connectivity came back: if the list is sitting on an error card or on stale
+// cached content, reload it right away rather than waiting out the backoff.
+window.addEventListener('online', () => {
+  if (listLoadDegraded && !document.hidden) scheduleNetworkRecoveryRetry({ immediate: true });
+});
 
 // Dynamic badge color from source name hash
 const BADGE_COLORS = [
@@ -8508,6 +8725,9 @@ setInterval(function() {
   // of only surfacing when the user opens the menu. Self-guards on authToken
   // and carries the same token/seq protection against out-of-order overwrites.
   if (authToken && !document.hidden) refreshNotifStatus();
+  // Same poll keeps the ✨ badge honest: 'completed' lights it amber, and a
+  // failed generation lights it red for admins without needing a reload.
+  if (authToken && !document.hidden) syncDailySummaryToday();
 }, 60000);
 setInterval(showLatestAfterIdle, 15000);
 setInterval(function() {
@@ -8559,6 +8779,11 @@ function onReturnToForeground() {
   lastUserActivityAt = now;
   const cursor = latestKnownTimestamp || latestNewsTimestamp();
   if (cursor > 0) checkForNewArticlesAfterForegroundResume(cursor);
+  // A load that failed while the app was going away (or during the last resume,
+  // before the network was back) left the list on an error card or on stale
+  // Service-Worker content. Retry it now instead of waiting for the user to
+  // find the refresh button.
+  if (listLoadDegraded) scheduleNetworkRecoveryRetry({ immediate: true });
   // If source metadata never loaded (e.g. backgrounded through the whole retry
   // window), recover now so the drawer/labels — and any stuck source deep link —
   // don't stay broken until a manual refresh.
