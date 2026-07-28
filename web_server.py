@@ -483,6 +483,9 @@ def admin_set_system_ai_config():
             else:
                 data.pop("api_key", None)
         config = set_system_ai_config(**data)
+        # A new key/endpoint deserves a clean slate: without this, the previous
+        # config's `alerted` flag would mute the alert for an equally broken one.
+        _reset_system_ai_health()
         safe = dict(config)
         safe["has_api_key"] = bool(safe.get("api_key"))
         safe.pop("api_key", None)
@@ -1123,6 +1126,12 @@ def ai_chat_relay():
 def admin_system_ai_test_connection():
     """Test the admin-configured system AI (drives background auto summary/translate)."""
     body, status = _run_ai_connection_test(get_system_ai_config())
+    # A passing test is as good as a background call succeeding — clear the
+    # streak (and send the recovery notice) without waiting for the next job.
+    # A failing one is not counted: a manual probe shouldn't push the streak
+    # toward an alert the admin is already looking at.
+    if status == 200:
+        _note_system_ai_success()
     return jsonify(body), status
 
 
@@ -1222,6 +1231,98 @@ def _notify_user(user_id: int, ntype: str, title: str, body: str = "") -> None:
     except Exception as exc:
         print(f"[notify] Failed to add in-app notification for user {user_id}: {exc}")
     _send_notification_email(user_id, title, body)
+
+
+def _notify_admins(ntype: str, title: str, body: str) -> int:
+    """Send one notification to every admin, both channels. Returns how many
+    admins were reached. Never raises: alerting is best-effort by definition —
+    the caller is usually a background job that must keep running."""
+    try:
+        admins = [u for u in list_users() if u.get("role") == "admin"]
+    except Exception as exc:
+        print(f"[notify] admin lookup failed for {ntype}: {exc}")
+        return 0
+    notified = 0
+    for admin in admins:
+        try:
+            _notify_user(admin["id"], ntype, title, body)
+            notified += 1
+        except Exception as exc:
+            print(f"[notify] {ntype} to admin {admin['id']} failed: {exc}")
+    return notified
+
+
+# ─── System AI health ──────────────────────────────────────
+#
+# Every background job (auto summary/translation/title/source classification)
+# and the daily summary run on the one admin-configured system AI. Until now a
+# dead key only showed up as log lines: the jobs kept retrying forever and the
+# daily-summary alert was the single notification anyone got — and that one
+# arrives at ~21:30, hours after the failures start. Track consecutive failures
+# across all of them instead and tell the admins once the streak makes it clear
+# the AI itself, not one article, is the problem.
+SYSTEM_AI_FAILURE_ALERT_THRESHOLD = int(
+    os.environ.get("SYSTEM_AI_FAILURE_ALERT_THRESHOLD", "5")
+)
+SYSTEM_AI_FAILURE_TITLE = "服务端 AI 调用连续失败"
+SYSTEM_AI_RECOVERED_TITLE = "服务端 AI 已恢复"
+
+_system_ai_health = {"failures": 0, "alerted": False, "last_error": "", "jobs": []}
+_system_ai_health_lock = threading.Lock()
+
+
+def _reset_system_ai_health() -> None:
+    """Forget the current streak — used when the admin saves a new system AI
+    config, so a fresh key starts from zero (and can alert again if it is also
+    broken, instead of being muted by the previous key's `alerted` flag)."""
+    with _system_ai_health_lock:
+        _system_ai_health.update({"failures": 0, "alerted": False, "last_error": "", "jobs": []})
+
+
+def _note_system_ai_success() -> None:
+    """A system-AI call came back. Ends the streak, and if admins were told the
+    AI was down, tells them it is back — matching the share_suspended /
+    share_restored pair users already get."""
+    with _system_ai_health_lock:
+        if not _system_ai_health["failures"] and not _system_ai_health["alerted"]:
+            return
+        recovered = _system_ai_health["alerted"]
+        _system_ai_health.update({"failures": 0, "alerted": False, "last_error": "", "jobs": []})
+    if recovered:
+        _notify_admins(
+            "system_ai_recovered",
+            SYSTEM_AI_RECOVERED_TITLE,
+            "服务端 AI 调用已恢复正常，自动摘要、翻译、标题精简和每日摘要等后台任务会继续运行。",
+        )
+
+
+def _note_system_ai_failure(job: str, error) -> None:
+    """Count one failed system-AI call. Alerts every admin exactly once per
+    outage: the flag only clears on the next success (see above), so a provider
+    that fails every 30 seconds can't turn into a stream of notifications."""
+    reason = re.sub(r"\s+", " ", str(error or "")).strip()[:300]
+    with _system_ai_health_lock:
+        _system_ai_health["failures"] += 1
+        _system_ai_health["last_error"] = reason
+        if job not in _system_ai_health["jobs"]:
+            _system_ai_health["jobs"].append(job)
+        if (
+            _system_ai_health["failures"] < SYSTEM_AI_FAILURE_ALERT_THRESHOLD
+            or _system_ai_health["alerted"]
+        ):
+            return
+        _system_ai_health["alerted"] = True
+        failures = _system_ai_health["failures"]
+        jobs = list(_system_ai_health["jobs"])
+    body = (
+        f"服务端 AI 已连续 {failures} 次调用失败，受影响的后台任务："
+        f"{'、'.join(jobs)}。\n\n"
+        f"最近一次失败原因：{reason or '未知原因'}\n\n"
+        "请到 管理员设置 → 服务端 API 检查 Endpoint、API Key、模型和余额，"
+        "可用「测试连接」验证。恢复后系统会再发一条通知。"
+    )
+    print(f"[system-ai] {failures} consecutive failures ({', '.join(jobs)}): {reason}")
+    _notify_admins("system_ai_failed", SYSTEM_AI_FAILURE_TITLE, body)
 
 
 def _compact_share_error(value: str) -> str:
@@ -1631,6 +1732,7 @@ def _generate_daily_summary_global(date_str: str) -> dict | None:
         raw_article_count = len(articles)
         deduped = _dedup_articles(articles)
         result = svc.daily_summary(deduped)
+        _note_system_ai_success()
         result["stats"]["total_articles"] = raw_article_count
         result["stats"]["articles_after_dedup"] = len(deduped)
         _save_daily_summary_global_cache(date_str, result["summary"], raw_article_count, result["stats"])
@@ -1641,6 +1743,7 @@ def _generate_daily_summary_global(date_str: str) -> dict | None:
         }
     except Exception as e:
         print(f"[daily-summary] global generation failed: {e}")
+        _note_system_ai_failure("每日摘要", e)
         _set_daily_summary_error(f"AI 生成失败：{e}")
         return None
 
@@ -1888,19 +1991,7 @@ def _alert_admins_daily_summary_failure(date_str: str, state: dict) -> int:
         f"之后每 {DAILY_SUMMARY_RETRY_INTERVAL_SECONDS // 60} 分钟重试一次）。\n\n"
         f"可在首页 ✨ 每日摘要面板点击「重试生成」手动再试一次。"
     )
-    notified = 0
-    try:
-        admins = [u for u in list_users() if u.get("role") == "admin"]
-    except Exception as e:
-        print(f"[daily-summary] admin lookup for failure alert failed: {e}")
-        return 0
-    for admin in admins:
-        try:
-            _notify_user(admin["id"], "daily_summary_failed",
-                         DAILY_SUMMARY_FAILURE_TITLE, body)
-            notified += 1
-        except Exception as e:
-            print(f"[daily-summary] failure alert to admin {admin['id']} failed: {e}")
+    notified = _notify_admins("daily_summary_failed", DAILY_SUMMARY_FAILURE_TITLE, body)
     print(f"[daily-summary] {date_str} gave up after {attempts} attempt(s); "
           f"alerted {notified} admin(s): {reason}")
     return notified
@@ -2824,8 +2915,10 @@ def _run_auto_translation_once():
                 try:
                     if _translate_article_background(article, config):
                         print(f"[auto-translate] Translated article {article['id']}: {article.get('title', '')[:50]}")
+                    _note_system_ai_success()
                 except Exception as e:
                     print(f"[auto-translate] Article {article.get('id')}: failed: {e}")
+                    _note_system_ai_failure("自动翻译", e)
     finally:
         _auto_translation_lock.release()
 
@@ -3085,8 +3178,10 @@ def _run_auto_title_process_once():
                 try:
                     if _process_article_title(article, config):
                         print(f"[auto-title] Updated article {article['id']}: {article.get('title', '')[:50]}")
+                    _note_system_ai_success()
                 except Exception as e:
                     print(f"[auto-title] Article {article.get('id')}: failed: {e}")
+                    _note_system_ai_failure("标题精简", e)
     finally:
         _auto_title_process_lock.release()
 
@@ -3188,6 +3283,7 @@ def _classify_source_batch(config: dict, limit: int = AUTO_SOURCE_CLASSIFY_BATCH
                 sample_titles=titles,
             )
             processed.append(saved)
+            _note_system_ai_success()
         except Exception as e:
             try:
                 update_source_category(
@@ -3202,6 +3298,7 @@ def _classify_source_batch(config: dict, limit: int = AUTO_SOURCE_CLASSIFY_BATCH
             except Exception:
                 pass
             failed.append({"source": source, "error": str(e)})
+            _note_system_ai_failure("订阅源分类", e)
 
     remaining = [
         row for row in source_rows(conn)
@@ -3357,9 +3454,11 @@ def _run_auto_summary_once():
                     summary, cached = _generate_article_summary(article["id"], config)
                     if not cached:
                         print(f"[auto-summary] Cached summary for article {article['id']}: {article.get('title', '')[:50]}")
+                    _note_system_ai_success()
                 except Exception as e:
                     _save_ai_result(article["id"], summary_error=str(e))
                     print(f"[auto-summary] Article {article.get('id')}: failed: {e}")
+                    _note_system_ai_failure("自动摘要", e)
     finally:
         _auto_summary_lock.release()
 
