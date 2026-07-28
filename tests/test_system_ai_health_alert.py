@@ -205,3 +205,98 @@ def test_the_evening_retry_chain_alone_reaches_the_threshold(news_db_free, monke
 
     assert [a["type"] for a in alerts] == ["system_ai_failed"] * 2
     assert "每日摘要" in alerts[0]["body"]
+
+
+# ─── A cleared/disabled config, without probing anything ───────────────
+
+
+@pytest.fixture
+def admin_with_auto_jobs(tmp_path, monkeypatch):
+    """An admin with a background AI job switched on, on a real settings DB."""
+    import uuid
+
+    import models
+
+    db_path = tmp_path / f"auto-config-{uuid.uuid4().hex}.db"
+    old_db_file = models.DB_FILE
+    models.close_db()
+    models.DB_FILE = db_path
+    try:
+        models.get_db()
+        admin = models.create_user("admin@example.com", "pw", "A", role="admin")["id"]
+        models.set_user_settings(admin, auto_summary_enabled=1)
+        monkeypatch.setattr(web_server, "get_db", models.get_db)
+        yield admin
+    finally:
+        models.close_db()
+        models.DB_FILE = old_db_file
+
+
+def test_an_enabled_job_with_no_usable_system_ai_alerts(admin_with_auto_jobs, alerts, monkeypatch):
+    # The jobs skip this state without calling the provider, so the
+    # misconfiguration itself has to be what gets counted.
+    monkeypatch.setattr(web_server, "get_system_ai_config", lambda: {"enabled": 0, "api_key": ""})
+
+    for _ in range(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD):
+        assert web_server._system_auto_config("auto_summary_enabled") is None
+
+    assert [a["type"] for a in alerts] == ["system_ai_failed"] * 2
+    assert "未配置或未启用" in alerts[0]["body"]
+    assert "服务端 API 配置" in alerts[0]["body"]
+
+
+def test_a_key_that_is_present_but_empty_counts_the_same(admin_with_auto_jobs, alerts, monkeypatch):
+    monkeypatch.setattr(web_server, "get_system_ai_config",
+                        lambda: {"enabled": 1, "api_key": "", "endpoint": "e", "model": "m"})
+
+    for _ in range(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD):
+        web_server._system_auto_config("auto_summary_enabled")
+
+    assert [a["type"] for a in alerts] == ["system_ai_failed"] * 2
+
+
+def test_no_enabled_job_means_no_alert_however_broken_the_config(tmp_path, alerts, monkeypatch):
+    import uuid
+
+    import models
+
+    db_path = tmp_path / f"auto-config-off-{uuid.uuid4().hex}.db"
+    old_db_file = models.DB_FILE
+    models.close_db()
+    models.DB_FILE = db_path
+    try:
+        models.get_db()
+        models.create_user("admin@example.com", "pw", "A", role="admin")
+        monkeypatch.setattr(web_server, "get_db", models.get_db)
+        monkeypatch.setattr(web_server, "get_system_ai_config", lambda: None)
+
+        for _ in range(10):
+            assert web_server._system_auto_config("auto_summary_enabled") is None
+
+        assert alerts == []
+    finally:
+        models.close_db()
+        models.DB_FILE = old_db_file
+
+
+def test_a_usable_config_is_returned_and_counts_nothing(admin_with_auto_jobs, alerts, monkeypatch):
+    monkeypatch.setattr(web_server, "get_system_ai_config", lambda: {
+        "enabled": 1, "api_key": "k", "endpoint": "e", "model": "m", "provider_type": "openai",
+    })
+
+    config = web_server._system_auto_config("auto_summary_enabled")
+
+    assert config["api_key"] == "k"
+    assert alerts == []
+
+
+def test_fixing_the_config_sends_the_recovery_notice(admin_with_auto_jobs, alerts, monkeypatch):
+    monkeypatch.setattr(web_server, "get_system_ai_config", lambda: {"enabled": 0, "api_key": ""})
+    for _ in range(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD):
+        web_server._system_auto_config("auto_summary_enabled")
+    alerts.clear()
+
+    # The admin saves a working config and the next job call succeeds.
+    web_server._note_system_ai_success()
+
+    assert [a["type"] for a in alerts] == ["system_ai_recovered"] * 2

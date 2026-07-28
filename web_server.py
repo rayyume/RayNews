@@ -2254,6 +2254,16 @@ def _system_auto_config(*flag_columns: str) -> dict | None:
             return None
         sys_config = get_system_ai_config()
         if not sys_config or not sys_config.get("enabled") or not sys_config.get("api_key"):
+            # An admin asked for this job (the flag above matched) and there is no
+            # usable system AI to run it with. Nothing will call the provider, so
+            # no call can fail and report it — count the misconfiguration itself,
+            # or a cleared/disabled config would stay silent until the 21:30
+            # daily-summary alert. Costs nothing: this is the local check the
+            # loops already run every 10–60s, not a probe.
+            _note_system_ai_failure(
+                "服务端 API 配置",
+                "系统 AI 未配置或未启用（管理员设置 → 服务端 API），已开启的后台 AI 任务无法运行",
+            )
             return None
         config = dict(row)
         config.update({

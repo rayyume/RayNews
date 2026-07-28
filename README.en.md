@@ -77,6 +77,8 @@ AI results are stored in the database to avoid duplicate calls. Administrators s
 - After 3 consecutive system-AI call failures (counted across auto summary/translation/title/source classification and the
   daily digest), every admin gets one email + in-app alert naming the affected jobs and the reason; recovery sends one more.
   Tune with `SYSTEM_AI_FAILURE_ALERT_THRESHOLD`
+- If an auto AI job is enabled while the server API config is cleared or disabled, nothing calls the provider at all, so
+  that state is itself counted toward the same streak — the alert lands within about a minute, with no probe requests
 - A failed generation is retried every 10 minutes; after 3 failed retries the scheduler stops for the day and alerts every admin
   by email and in-app notification with the reason. Admins then see the reason and a "retry" button on the home page ✨ daily
   digest panel (the button appears only after a failure, and only for admins)
