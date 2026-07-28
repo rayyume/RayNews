@@ -5369,6 +5369,14 @@ function renderRefreshDiscoveredCount(ids) {
   setRefreshProgressLabel(ids instanceof Set ? ids.size : 0);
 }
 
+// Set while a manual refresh is running. Any loadSince() that discovers articles
+// during that window — the periodic 60s poll and the foreground-resume check as
+// much as the flow's own checks — queues them into the same pendingNewItems the
+// "有 N 篇新文章" bubble counts, so all of them must reach the refresh's counter
+// too. Otherwise the bubble can outnumber the button label (see
+// triggerRefresh()'s fallback check).
+let activeRefreshDiscoverySink = null;
+
 async function triggerRefresh() {
   if (refreshInProgress || (typeof logoRefreshInProgress !== 'undefined' && logoRefreshInProgress)) return;
   // Unauthenticated users cannot refresh
@@ -5412,6 +5420,7 @@ async function triggerRefresh() {
     && !hasBlockingOverlayOpen()
   );
   setRefreshRunning(true);
+  activeRefreshDiscoverySink = mergeDiscovered;
   hideNewArticlesPrompt();
   showToast('🔄 正在后台抓取...');
 
@@ -5520,6 +5529,13 @@ async function triggerRefresh() {
       await loadSince(latestKnownTimestamp || sinceCursor, {
         externalSignal: flowController.signal,
         applicationGuard: flowIsCurrent,
+        // Same counter the button label and completion toast read from. What
+        // this call queues is exactly what the "有 N 篇新文章" bubble counts, so
+        // omitting it let the two disagree on screen: after a cold start with a
+        // long gap the job itself ingests only the tail (+10 on the button)
+        // while this check picks up the whole backlog the startup fetch had
+        // already landed (65 in the bubble).
+        onDiscovered: mergeDiscovered,
       });
     }
     if (!flowIsCurrent()) return;
@@ -5532,6 +5548,7 @@ async function triggerRefresh() {
   } finally {
     if (refreshFlowGeneration === flowGeneration && refreshFlowController === flowController) {
       refreshFlowController = null;
+      activeRefreshDiscoverySink = null;
       setRefreshRunning(false);
       showNewArticlesPrompt();
     }
@@ -6627,7 +6644,10 @@ async function loadSince(
     if (!flowIsActive()) return -1;
     newItems.forEach(item => seenArticleIds.add(Number(item.id)));
     if (!flowIsActive()) return -1;
-    if (typeof onDiscovered === 'function') onDiscovered(newItems.slice());
+    const discoverySink = typeof onDiscovered === 'function'
+      ? onDiscovered
+      : activeRefreshDiscoverySink;
+    if (typeof discoverySink === 'function') discoverySink(newItems.slice());
     if (!flowIsActive()) return -1;
     latestKnownTimestamp = Math.max(latestKnownTimestamp, ...newItems.map(item => Number(item.timestamp) || 0));
     pendingNewArticleCount += added;

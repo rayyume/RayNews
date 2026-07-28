@@ -444,6 +444,7 @@ const context = {{ console, URLSearchParams, AbortController }};
 context.cancelNetworkRecoveryRetry = () => {{}};
 context.scheduleNetworkRecoveryRetry = () => {{}};
 context.listLoadDegraded = false;
+context.activeRefreshDiscoverySink = null;
 vm.createContext(context);
 vm.runInContext({json.dumps(source)}, context);
 (async () => {{
@@ -4017,5 +4018,89 @@ context.applyPurgeDatePicker();
 assert.equal(elements.purgeBeforeDate.value, '2026/01/01');
 assert.equal(elements.purgeConfirmBtn.disabled, false);
 assert.equal(elements.purgeStatus.textContent, 'old status');
+""",
+    )
+
+
+def test_refresh_counts_articles_the_fallback_check_discovers():
+    """Cold start after a long gap: the button said +10 while the bubble said 65.
+
+    When the page-1 completion branch can't run (a background page request was
+    still in flight when the user clicked — routine right after a cold start),
+    the flow falls back to loadSince() to queue what the job found. That call is
+    what fills the "有 N 篇新文章" bubble, so its discoveries have to reach the
+    same counter the button label and completion toast read from, or the two
+    numbers disagree on screen.
+    """
+    trigger = refresh_trigger_source()
+    setup = trigger_context_setup(
+        "return { job_id: 'job-1', status: 'completed', new_count: 10, "
+        "new_ids: [1,2,3,4,5,6,7,8,9,10] };"
+    )
+    run_node(
+        trigger,
+        setup
+        + """
+// A page request was still in flight at click time, so the completion branch
+// is skipped and the fallback loadSince() is the one that finds the backlog.
+context.pageRequestPendingSequence = 4;
+context.window = { scrollY: 0 };
+context.labels = [];
+context.setRefreshProgressLabel = count => context.labels.push(count);
+context.loadNewsPage = async () => { throw new Error('page-1 branch must not run here'); };
+context.loadSince = async (timestamp, options) => {
+  if (options && options.manual) return 0;          // immediate check: DB not filled yet
+  const backlog = Array.from({ length: 65 }, (_, i) => ({ id: 100 + i }));
+  if (options && typeof options.onDiscovered === 'function') options.onDiscovered(backlog);
+  return backlog.length;                            // these are what the bubble counts
+};
+
+await context.triggerRefresh();
+
+// 65 backlog articles + the 10 this job ingested, deduped into one set.
+assert.equal(context.labels.at(-1), 75);
+assert.ok(context.toasts.includes('✅ 更新完成，新增 75 篇文章'));
+""",
+    )
+
+
+def test_a_background_check_during_a_manual_refresh_feeds_the_same_counter():
+    """The 60s poll and the resume check queue into the bubble too.
+
+    They know nothing about the running refresh, so without the sink their
+    discoveries would show up in "有 N 篇新文章" while the button label ignored
+    them — the same mismatch the fallback check caused.
+    """
+    incremental = source_between("async function loadSince(", "function rebuildSourceFilterGroups")
+    run_node(
+        incremental,
+        """
+context.refreshInProgress = true;
+context.INCREMENTAL_FETCH_LIMIT = 200;
+context.seenArticleIds = new Set();
+context.latestKnownTimestamp = 100;
+context.pendingNewArticleCount = 0;
+context.pendingNewItems = [];
+context.contentEpoch = 0;
+context.bumpContentEpoch = () => {};
+context.fetch = async () => ({
+  json: async () => ({ items: [
+    { id: 2, timestamp: 101, source: 's' },
+    { id: 3, timestamp: 102, source: 's' },
+  ] }),
+});
+context.isSwFallbackResponse = () => false;
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
+context.refreshTodayArticleCount = () => {};
+context.discovered = [];
+context.activeRefreshDiscoverySink = items => context.discovered.push(...items.map(i => i.id));
+
+// No onDiscovered passed — this is the plain periodic poll.
+const added = await context.loadSince(100);
+
+assert.equal(added, 2);
+assert.deepEqual(Array.from(context.pendingNewItems, item => item.id), [2, 3]);
+assert.deepEqual(context.discovered, [2, 3]);   // the bubble's items reached the counter
 """,
     )
