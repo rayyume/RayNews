@@ -205,3 +205,120 @@ def test_the_evening_retry_chain_alone_reaches_the_threshold(news_db_free, monke
 
     assert [a["type"] for a in alerts] == ["system_ai_failed"] * 2
     assert "每日摘要" in alerts[0]["body"]
+
+
+# ─── Heartbeat: the guarantee for "any auto AI feature is on" ───────────
+
+
+@pytest.fixture
+def heartbeat_env(monkeypatch):
+    """Auto features on, and a drivable clock for the activity window."""
+    clock = {"now": 1_000_000}
+    monkeypatch.setattr(web_server, "_epoch_now", lambda: clock["now"])
+    monkeypatch.setattr(web_server, "_system_ai_auto_features_enabled", lambda: True)
+    return clock
+
+
+def test_heartbeat_alerts_when_the_config_was_cleared(heartbeat_env, alerts, monkeypatch):
+    # The article jobs skip a cleared config without ever calling the AI, so
+    # without this probe nothing would be counted at all.
+    monkeypatch.setattr(web_server, "get_system_ai_config", lambda: {"enabled": 0, "api_key": ""})
+
+    for _ in range(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD):
+        assert web_server._run_system_ai_heartbeat_once()["status"] == "error"
+        heartbeat_env["now"] += web_server.SYSTEM_AI_HEARTBEAT_INTERVAL_SECONDS
+
+    assert [a["type"] for a in alerts] == ["system_ai_failed"] * 2
+    assert "未配置或未启用" in alerts[0]["body"]
+
+
+def test_heartbeat_alerts_on_an_idle_day_with_a_dead_key(heartbeat_env, alerts, monkeypatch):
+    monkeypatch.setattr(web_server, "get_system_ai_config",
+                        lambda: {"enabled": 1, "api_key": "k", "endpoint": "e", "model": "m"})
+    monkeypatch.setattr(web_server, "_run_ai_connection_test",
+                        lambda config: ({"error": "401 invalid api key"}, 502))
+
+    for _ in range(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD):
+        web_server._run_system_ai_heartbeat_once()
+        heartbeat_env["now"] += web_server.SYSTEM_AI_HEARTBEAT_INTERVAL_SECONDS
+
+    assert [a["type"] for a in alerts] == ["system_ai_failed"] * 2
+    assert "401 invalid api key" in alerts[0]["body"]
+
+
+def test_heartbeat_is_silent_when_no_auto_feature_is_on(alerts, monkeypatch):
+    monkeypatch.setattr(web_server, "_system_ai_auto_features_enabled", lambda: False)
+    monkeypatch.setattr(web_server, "get_system_ai_config", lambda: {"enabled": 0, "api_key": ""})
+
+    for _ in range(10):
+        assert web_server._run_system_ai_heartbeat_once()["status"] == "skipped"
+    assert alerts == []
+
+
+def test_heartbeat_skips_while_the_jobs_are_exercising_the_ai(heartbeat_env, alerts, monkeypatch):
+    probes = []
+    monkeypatch.setattr(web_server, "get_system_ai_config",
+                        lambda: {"enabled": 1, "api_key": "k", "endpoint": "e", "model": "m"})
+    monkeypatch.setattr(web_server, "_run_ai_connection_test",
+                        lambda config: (probes.append(1), ({"ok": True}, 200))[1])
+
+    web_server._note_system_ai_success()          # a job just succeeded
+    heartbeat_env["now"] += 60
+    assert web_server._run_system_ai_heartbeat_once()["reason"] == "recent system AI activity"
+    assert probes == []
+
+    heartbeat_env["now"] += web_server.SYSTEM_AI_HEARTBEAT_INTERVAL_SECONDS
+    assert web_server._run_system_ai_heartbeat_once()["status"] == "ok"
+    assert len(probes) == 1
+
+
+def test_heartbeat_recovery_clears_an_outstanding_alert(heartbeat_env, alerts, monkeypatch):
+    monkeypatch.setattr(web_server, "get_system_ai_config",
+                        lambda: {"enabled": 1, "api_key": "k", "endpoint": "e", "model": "m"})
+    monkeypatch.setattr(web_server, "_run_ai_connection_test",
+                        lambda config: ({"error": "timeout"}, 502))
+    for _ in range(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD):
+        web_server._run_system_ai_heartbeat_once()
+        heartbeat_env["now"] += web_server.SYSTEM_AI_HEARTBEAT_INTERVAL_SECONDS
+    alerts.clear()
+
+    monkeypatch.setattr(web_server, "_run_ai_connection_test", lambda config: ({"ok": True}, 200))
+    web_server._run_system_ai_heartbeat_once()
+
+    assert [a["type"] for a in alerts] == ["system_ai_recovered"] * 2
+
+
+def test_heartbeat_interval_is_bounded(monkeypatch):
+    monkeypatch.delenv("SYSTEM_AI_HEARTBEAT_INTERVAL_MINUTES", raising=False)
+    assert web_server._system_ai_heartbeat_interval_seconds() == 900
+    for bad in ("0", "-1", "", "abc"):
+        monkeypatch.setenv("SYSTEM_AI_HEARTBEAT_INTERVAL_MINUTES", bad)
+        assert web_server._system_ai_heartbeat_interval_seconds() >= 300
+
+
+def test_auto_feature_lookup_reads_admin_flags_only(tmp_path, monkeypatch):
+    import uuid
+
+    import models
+
+    db_path = tmp_path / f"heartbeat-{uuid.uuid4().hex}.db"
+    old_db_file = models.DB_FILE
+    models.close_db()
+    models.DB_FILE = db_path
+    try:
+        models.get_db()
+        admin = models.create_user("admin@example.com", "pw", "A", role="admin")["id"]
+        user = models.create_user("user@example.com", "pw", "U")["id"]
+        monkeypatch.setattr(web_server, "get_db", models.get_db)
+
+        assert web_server._system_ai_auto_features_enabled() is False
+
+        # A non-admin flag must not count: background jobs only read admin rows.
+        models.set_user_settings(user, auto_summary_enabled=1)
+        assert web_server._system_ai_auto_features_enabled() is False
+
+        models.set_user_settings(admin, auto_translate_title=1)
+        assert web_server._system_ai_auto_features_enabled() is True
+    finally:
+        models.close_db()
+        models.DB_FILE = old_db_file
