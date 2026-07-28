@@ -39,9 +39,25 @@ def auth_headers(user_id: int, role: str = "user") -> dict:
     return {"Authorization": f"Bearer {web_server.create_token(user_id, role)}"}
 
 
+_SHARE_HEALTH_KEYS = {
+    "share_suspended",
+    "share_last_check_at",
+    "share_last_check_ok",
+    "share_last_check_error",
+    "share_last_check_revision",
+}
+
+
+def _set_user_settings(user_id: int, **kwargs):
+    """Test setup helper that keeps user intent and server health writes explicit."""
+    health = {key: kwargs.pop(key) for key in tuple(kwargs) if key in _SHARE_HEALTH_KEYS}
+    settings = models.set_user_settings(user_id, **kwargs)
+    return models.set_share_health(user_id, **health) if health else settings
+
+
 def test_share_suspended_defaults_false_and_round_trips(share_env):
     _, user_id = share_env
-    settings = models.set_user_settings(
+    settings = _set_user_settings(
         user_id,
         share_ai_results=1,
         share_view_title=1,
@@ -49,7 +65,7 @@ def test_share_suspended_defaults_false_and_round_trips(share_env):
     )
     assert settings["share_suspended"] == 0
 
-    settings = models.set_user_settings(user_id, share_suspended=1)
+    settings = _set_user_settings(user_id, share_suspended=1)
     assert settings["share_suspended"] == 1
     assert settings["share_ai_results"] == 1
     assert settings["share_view_title"] == 1
@@ -190,7 +206,7 @@ def test_suspension_hides_cached_summary_and_translation_without_clearing_prefer
     share_env, monkeypatch
 ):
     client, user_id = share_env
-    models.set_user_settings(
+    _set_user_settings(
         user_id,
         share_ai_results=1,
         share_view_title=1,
@@ -242,7 +258,7 @@ def test_translation_cache_route_gates_html_and_embedded_title_independently(
     has_title,
 ):
     client, user_id = share_env
-    models.set_user_settings(
+    _set_user_settings(
         user_id,
         share_ai_results=1,
         share_view_title=view_title,
@@ -277,7 +293,7 @@ def test_translation_cache_route_gates_html_and_embedded_title_independently(
 
 
 def opted_in(user_id: int, *, suspended: int = 0):
-    return models.set_user_settings(
+    return _set_user_settings(
         user_id,
         share_ai_results=1,
         share_view_title=1,
@@ -300,6 +316,52 @@ def test_settings_returns_intent_suspension_and_effective_state(share_env):
     assert data["share_suspended"] == 1
     assert data["share_active"] is False
     assert "share_intent_revision" not in data
+
+
+def test_settings_cannot_forge_server_owned_share_health(share_env):
+    client, user_id = share_env
+    config = models.set_ai_config(user_id, api_key="expired-key", enabled=1)
+    _set_user_settings(
+        user_id,
+        share_ai_results=1,
+        share_view_summary=1,
+        theme_preference="system",
+    )
+    assert models.apply_share_connectivity_transition(
+        user_id,
+        expected_suspended=0,
+        expected_config_revision=config["revision"],
+        next_suspended=1,
+        checked_at="2026-07-28T08:00:00",
+        check_ok=0,
+        error="AI API HTTP 401",
+    )
+
+    response = client.put(
+        "/settings",
+        headers=auth_headers(user_id),
+        json={
+            "theme_preference": "dark",
+            "share_suspended": 0,
+            "share_last_check_ok": 1,
+            "share_last_check_at": "2099-01-01T00:00:00",
+            "share_last_check_error": "",
+            "share_last_check_revision": config["revision"],
+            "share_current_config_revision": config["revision"],
+            "share_intent_revision": 999,
+            "share_active": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["share_active"] is False
+    settings = models.get_user_settings(user_id)
+    assert settings["theme_preference"] == "dark"
+    assert settings["share_suspended"] == 1
+    assert settings["share_last_check_ok"] == 0
+    assert settings["share_last_check_at"] == "2026-07-28T08:00:00"
+    assert settings["share_last_check_error"] == "AI API HTTP 401"
+    assert settings["share_last_check_revision"] == config["revision"]
 
 
 def test_frontend_keeps_paused_preferences_visible_but_disabled():
@@ -433,7 +495,7 @@ def test_success_restores_exact_preferences_once(share_env, monkeypatch):
 
 def test_explicitly_disabled_user_is_never_auto_restored(share_env, monkeypatch):
     _, user_id = share_env
-    models.set_user_settings(
+    _set_user_settings(
         user_id,
         share_ai_results=0,
         share_suspended=0,
@@ -666,7 +728,7 @@ def test_opt_out_winning_race_prevents_transition_notification(share_env, monkey
     worker = threading.Thread(target=apply_failure)
     worker.start()
     assert read_complete.wait(timeout=5)
-    models.set_user_settings(user_id, share_ai_results=0)
+    _set_user_settings(user_id, share_ai_results=0)
     release_transition.set()
     worker.join(timeout=10)
 
@@ -1073,7 +1135,7 @@ def test_old_manual_probe_after_opt_out_does_not_change_health_or_notify(share_e
     old_revision = _config_revision(user_id)
     notices = []
     monkeypatch.setattr(web_server, "_notify_user", lambda *args, **kwargs: notices.append(args))
-    models.set_user_settings(user_id, share_ai_results=0, share_suspended=0)
+    _set_user_settings(user_id, share_ai_results=0, share_suspended=0)
     before = models.get_user_settings(user_id)
 
     share_check = web_server._share_check_after_personal_api_test(
@@ -1231,7 +1293,7 @@ def test_settings_enable_rejects_config_revision_changed_during_validation(
 ):
     client, user_id = share_env
     old_config = models.set_ai_config(user_id, api_key="old-key", enabled=1)
-    models.set_user_settings(
+    _set_user_settings(
         user_id,
         share_ai_results=0,
         share_view_title=0,

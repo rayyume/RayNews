@@ -31,6 +31,7 @@ from models import (
     count_article_favorites,
     get_ai_config, set_ai_config, get_user_settings, set_user_settings,
     set_user_settings_for_ai_config_revision,
+    set_share_health,
     apply_share_connectivity_transition,
     get_users_with_share_enabled,
     get_daily_summary_inapp_user_ids,
@@ -5182,6 +5183,20 @@ def get_settings():
 @require_role("user", "admin")
 def update_settings():
     data = request.get_json(silent=True) or {}
+    # Connectivity health and derived access are server-owned. Ignore forged
+    # values on every settings request, including requests that do not carry the
+    # sharing master switch.
+    for key in (
+        "share_suspended",
+        "share_last_check_at",
+        "share_last_check_ok",
+        "share_last_check_error",
+        "share_last_check_revision",
+        "share_current_config_revision",
+        "share_intent_revision",
+        "share_active",
+    ):
+        data.pop(key, None)
     # Auto-summary/auto-translate are admin-only; silently drop these fields
     # for non-admin requests instead of erroring, so the rest of the payload
     # (theme, notifications, daily summary) still saves normally.
@@ -5230,6 +5245,7 @@ def update_settings():
     # the master is off.
     share_sub_keys = ("share_view_title", "share_view_translation", "share_view_summary")
     share_check_ok = False
+    clear_share_suspension = False
     share_check_revision = 0
     observed_share_intent_revision = int(
         (get_user_settings(g.user_id) or {}).get("share_intent_revision") or 0
@@ -5273,7 +5289,7 @@ def update_settings():
             share_check_ok = True
         else:
             data["share_ai_results"] = 0
-            data["share_suspended"] = 0
+            clear_share_suspension = True
             for key in share_sub_keys:
                 data[key] = 0
     resulting_share_master = _is_enabled_value(
@@ -5325,6 +5341,8 @@ def update_settings():
             }), 409
     else:
         settings = set_user_settings(g.user_id, **data)
+    if clear_share_suspension:
+        settings = set_share_health(g.user_id, share_suspended=0)
     if not settings:
         return jsonify({"error": "update failed"}), 400
     if share_check_ok:

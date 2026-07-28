@@ -40,6 +40,9 @@ def share_user(monkeypatch):
         share_ai_results=1,
         share_view_title=1,
         share_view_summary=1,
+    )
+    models.set_share_health(
+        user["id"],
         share_suspended=0,
         share_last_check_ok=1,
         share_last_check_revision=config["revision"],

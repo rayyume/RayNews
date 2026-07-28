@@ -659,14 +659,16 @@ def get_users_with_share_enabled() -> list[int]:
 
 
 def set_user_settings(user_id: int, **kwargs) -> dict:
-    """Upsert settings."""
+    """Upsert user-owned settings and sharing intent.
+
+    Connectivity health is server-owned and must go through
+    ``set_share_health`` or ``apply_share_connectivity_transition``.
+    """
     allowed = {"auto_translate_title", "auto_translate_content",
                "auto_title_summary_enabled", "auto_summary_enabled", "daily_summary_enabled",
                "daily_summary_inapp_enabled",
                "theme_preference", "notification_config",
-               "share_ai_results", "share_view_title", "share_view_translation", "share_view_summary",
-               "share_suspended",
-               "share_last_check_at", "share_last_check_ok", "share_last_check_error"}
+               "share_ai_results", "share_view_title", "share_view_translation", "share_view_summary"}
     updates = {k: v for k, v in kwargs.items() if k in allowed}
     if not updates:
         return get_user_settings(user_id) or {}
@@ -696,6 +698,37 @@ def set_user_settings(user_id: int, **kwargs) -> dict:
     return get_user_settings(user_id)
 
 
+def set_share_health(user_id: int, **kwargs) -> dict:
+    """Update server-owned sharing connectivity state."""
+    allowed = {
+        "share_suspended",
+        "share_last_check_at",
+        "share_last_check_ok",
+        "share_last_check_error",
+        "share_last_check_revision",
+    }
+    updates = {key: value for key, value in kwargs.items() if key in allowed}
+    if not updates:
+        return get_user_settings(user_id) or {}
+    db = get_db()
+    existing = get_user_settings(user_id)
+    if existing:
+        sets = ", ".join(f"{key} = ?" for key in updates)
+        db.execute(
+            f"UPDATE user_settings SET {sets} WHERE user_id = ?",
+            list(updates.values()) + [user_id],
+        )
+    else:
+        keys = ", ".join(updates)
+        placeholders = ", ".join("?" for _ in updates)
+        db.execute(
+            f"INSERT INTO user_settings (user_id, {keys}) VALUES (?, {placeholders})",
+            [user_id] + list(updates.values()),
+        )
+    db.commit()
+    return get_user_settings(user_id)
+
+
 def set_user_settings_for_ai_config_revision(
     user_id: int,
     expected_config_revision: int,
@@ -709,7 +742,6 @@ def set_user_settings_for_ai_config_revision(
         "daily_summary_inapp_enabled",
         "theme_preference", "notification_config",
         "share_ai_results", "share_view_title", "share_view_translation", "share_view_summary",
-        "share_suspended", "share_last_check_at", "share_last_check_ok", "share_last_check_error",
     }
     updates = {k: v for k, v in kwargs.items() if k in allowed}
     if not updates:
