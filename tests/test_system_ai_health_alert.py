@@ -350,61 +350,100 @@ def test_the_recovery_notice_is_owed_even_if_the_alert_predates_the_restart(
     assert [a["type"] for a in alerts] == ["system_ai_recovered"] * 2
 
 
-# ─── Source classification runs on a different key ─────────────────────
+# ─── Only real provider calls move the health signal ───────────────────
 
 
-def _classification_stubs(monkeypatch, classify_result=None, error=None):
-    """Drive _classify_source_batch without a news DB or a real provider."""
+def test_a_cached_result_does_not_count_as_the_ai_working(alerts, monkeypatch):
+    """The reported flapping: 失败/恢复 pairs every 30 seconds.
+
+    A cached summary finishes a job iteration without touching the AI. Counting
+    that as a success cleared the outage the failing calls had just reported, so
+    the admin got an alert, a recovery notice, an alert…
+    """
+    monkeypatch.setattr(web_server, "_get_ai_result",
+                        lambda article_id: {"summary": "cached"})
+
+    web_server._note_system_ai_failure("自动摘要", "AI API HTTP 401: Invalid API key.")
+    web_server._note_system_ai_failure("自动翻译", "AI API HTTP 401: Invalid API key.")
+
+    summary, cached = web_server._generate_article_summary(
+        1, {"api_key": "k", "endpoint": "e", "model": "m"})
+    assert (summary, cached) == ("cached", True)
+    assert alerts == []          # nothing was called, so nothing recovered
+
+    web_server._note_system_ai_failure("标题精简", "AI API HTTP 401: Invalid API key.")
+
+    assert [a["type"] for a in alerts] == ["system_ai_failed"] * 2
+    # And the outage stays reported — no recovery notice from further cache hits.
+    alerts.clear()
+    web_server._generate_article_summary(1, {"api_key": "k", "endpoint": "e", "model": "m"})
+    assert alerts == []
+
+
+def test_a_real_call_that_returns_is_what_clears_an_outage(alerts, monkeypatch):
     class FakeService:
         def __init__(self, **kwargs):
             pass
 
-        def classify_source(self, source, titles, domains=None):
-            if error:
-                raise error
-            return classify_result or {"category": "News", "label": source, "confidence": 0.9}
+        def summarize(self, article_text="", title=""):
+            return "fresh summary"
 
-    monkeypatch.setattr(web_server, "_get_news_db", lambda: object())
-    monkeypatch.setattr(web_server, "ensure_article_sources", lambda conn: None)
-    monkeypatch.setattr(web_server, "source_rows",
-                        lambda conn: [{"source": "财经早餐", "status": "pending"}])
-    monkeypatch.setattr(web_server, "recent_titles_for_source",
-                        lambda conn, source, limit=8: ["t1", "t2"])
-    monkeypatch.setattr(web_server, "_extract_domains_for_source", lambda conn, source: [])
-    monkeypatch.setattr(web_server, "update_source_category",
-                        lambda conn, source, category, label, **kwargs: {"source": source})
+    monkeypatch.setattr(web_server, "_get_ai_result", lambda article_id: None)
+    monkeypatch.setattr(web_server, "_fetch_article_body",
+                        lambda article_id: {"body_html": "b", "title": "t"})
+    monkeypatch.setattr(web_server, "_save_ai_result", lambda *args, **kwargs: None)
     monkeypatch.setattr(web_server, "AIService", FakeService)
 
+    for _ in range(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD):
+        web_server._note_system_ai_failure("自动摘要", "AI API HTTP 401: Invalid API key.")
+    alerts.clear()
 
-def test_a_working_personal_key_cannot_clear_a_system_ai_outage(alerts, monkeypatch):
-    """The reported case: system API suspended, admin's own key still valid.
+    summary, cached = web_server._generate_article_summary(
+        1, {"api_key": "k", "endpoint": "e", "model": "m"})
 
-    Auto summary/translation/title were failing with 401 on the *system* key
-    while source classification kept succeeding on the admin's *personal* key.
-    Counting those successes as system-AI health reset the streak every minute,
-    so the outage never reached the alert threshold.
-    """
-    _classification_stubs(monkeypatch)
-    config = {"api_key": "personal", "endpoint": "e", "model": "m", "user_id": 1}
+    assert (summary, cached) == ("fresh summary", False)
+    assert [a["type"] for a in alerts] == ["system_ai_recovered"] * 2
 
-    web_server._note_system_ai_failure("自动翻译", "AI API HTTP 401: Invalid API key.")
-    web_server._note_system_ai_failure("标题精简", "AI API HTTP 401: Invalid API key.")
 
-    result = web_server._classify_source_batch(config, limit=10)
-    assert result["processed"]           # the personal key worked, as in the log
-    assert alerts == []                  # …and it must not have reset anything
+def test_a_failing_call_is_recorded_from_the_call_site(alerts, monkeypatch):
+    class BoomService:
+        def __init__(self, **kwargs):
+            pass
 
-    web_server._note_system_ai_failure("自动摘要", "AI API HTTP 401: Invalid API key.")
+        def summarize(self, article_text="", title=""):
+            raise RuntimeError("AI API HTTP 401: Invalid API key.")
+
+    monkeypatch.setattr(web_server, "_get_ai_result", lambda article_id: None)
+    monkeypatch.setattr(web_server, "_fetch_article_body",
+                        lambda article_id: {"body_html": "b", "title": "t"})
+    monkeypatch.setattr(web_server, "AIService", BoomService)
+
+    for _ in range(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD):
+        with pytest.raises(RuntimeError):
+            web_server._generate_article_summary(
+                1, {"api_key": "k", "endpoint": "e", "model": "m"})
 
     assert [a["type"] for a in alerts] == ["system_ai_failed"] * 2
     assert "401" in alerts[0]["body"]
+    assert "自动摘要" in alerts[0]["body"]
 
 
-def test_a_failing_personal_key_does_not_blame_the_system_ai(alerts, monkeypatch):
-    _classification_stubs(monkeypatch, error=RuntimeError("personal key 401"))
-    config = {"api_key": "personal", "endpoint": "e", "model": "m", "user_id": 1}
+# ─── Every server-side job runs on the server API ──────────────────────
 
-    for _ in range(3 * web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD):
-        web_server._classify_source_batch(config, limit=10)
 
-    assert alerts == []
+def test_source_classification_uses_the_server_api(monkeypatch):
+    monkeypatch.setattr(web_server, "get_system_ai_config", lambda: {
+        "enabled": 1, "api_key": "server-key", "endpoint": "e", "model": "m",
+        "provider_type": "openai",
+    })
+
+    configs = web_server._get_source_classification_users()
+
+    assert len(configs) == 1
+    assert configs[0]["api_key"] == "server-key"
+
+
+def test_source_classification_stops_when_the_server_api_is_unusable(monkeypatch):
+    for config in (None, {"enabled": 0, "api_key": "k"}, {"enabled": 1, "api_key": ""}):
+        monkeypatch.setattr(web_server, "get_system_ai_config", lambda config=config: config)
+        assert web_server._get_source_classification_users() == []

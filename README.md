@@ -227,8 +227,8 @@ AI Endpoint、API Key、模型和供应商由用户在网页的“设置 → AI�
 | `AUTO_TITLE_PROCESS_SCAN_LIMIT` | `1000` | 每轮标题任务最大扫描数 |
 | `TITLE_SUMMARY_MAX_CHARS` | `30` | AI 短标题目标中文字符数 |
 | `TITLE_SUMMARY_MAX_TOTAL_CHARS` | `40` | 短标题允许的加权总长度 |
-| `AUTO_SOURCE_CLASSIFY_BATCH_LIMIT` | `20` | 每轮管理员 AI 分类的订阅源数量 |
-| `AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS` | `120` | 订阅源分类轮询间隔，单位秒 |
+| `AUTO_SOURCE_CLASSIFY_BATCH_LIMIT` | `50` | 每轮用服务端 API 分类的订阅源数量 |
+| `AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS` | `60` | 订阅源分类轮询间隔，单位秒 |
 | `AI_SHARE_REVALIDATION_INTERVAL_HOURS` | `1` | 复核开启共享用户的个人 AI 连通性的间隔，支持小数，最短 5 分钟 |
 | `SYSTEM_AI_FAILURE_ALERT_THRESHOLD` | `3` | 服务端 AI 连续失败多少次后给管理员发告警 |
 | `DAILY_SUMMARY_RETRY_INTERVAL_SECONDS` | `600` | 每日摘要生成失败后的重试间隔，单位秒 |

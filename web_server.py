@@ -947,6 +947,43 @@ def get_ai_config_client_route():
     return jsonify(safe)
 
 
+class _SystemAIService:
+    """AIService for a server-side job, reporting into the system-AI health signal.
+
+    Health has to be recorded per *provider call*, not per job iteration. A
+    cached summary/translation, or an article that turned out to need nothing,
+    finishes the iteration without touching the AI at all — counting that as
+    "the AI works" cleared a real outage, and with the key suspended the admin
+    got a 失败/恢复 pair every 30 seconds instead of one alert.
+
+    Only the background jobs use this: every call it wraps runs on the server
+    API, so a user's own key can never move this signal.
+    """
+
+    def __init__(self, job: str, **kwargs):
+        object.__setattr__(self, "_job", job)
+        object.__setattr__(self, "_svc", AIService(**kwargs))
+
+    def __getattr__(self, name):
+        attr = getattr(self._svc, name)
+        if not callable(attr):
+            return attr
+
+        def call(*args, **kwargs):
+            try:
+                result = attr(*args, **kwargs)
+            except Exception as exc:
+                _note_system_ai_failure(self._job, exc)
+                raise
+            _note_system_ai_success()
+            return result
+
+        return call
+
+    def __setattr__(self, name, value):
+        setattr(self._svc, name, value)
+
+
 def _generate_article_summary(article_id: int, config: dict,
                               use_shared_cache: bool = True,
                               save_shared_cache: bool = True) -> tuple[str, bool]:
@@ -959,7 +996,8 @@ def _generate_article_summary(article_id: int, config: dict,
     if not article:
         raise KeyError("article not found")
 
-    svc = AIService(
+    svc = _SystemAIService(
+        "自动摘要",
         api_key=config["api_key"],
         endpoint=config["endpoint"],
         model=config["model"],
@@ -1801,7 +1839,8 @@ def _generate_daily_summary_global(date_str: str) -> dict | None:
         return None
 
     try:
-        svc = AIService(
+        svc = _SystemAIService(
+            "每日摘要",
             api_key=sys_config["api_key"],
             endpoint=sys_config["endpoint"],
             model=sys_config["model"],
@@ -1810,7 +1849,6 @@ def _generate_daily_summary_global(date_str: str) -> dict | None:
         raw_article_count = len(articles)
         deduped = _dedup_articles(articles)
         result = svc.daily_summary(deduped)
-        _note_system_ai_success()
         result["stats"]["total_articles"] = raw_article_count
         result["stats"]["articles_after_dedup"] = len(deduped)
         _save_daily_summary_global_cache(date_str, result["summary"], raw_article_count, result["stats"])
@@ -1821,7 +1859,6 @@ def _generate_daily_summary_global(date_str: str) -> dict | None:
         }
     except Exception as e:
         print(f"[daily-summary] global generation failed: {e}")
-        _note_system_ai_failure("每日摘要", e)
         _set_daily_summary_error(f"AI 生成失败：{e}")
         return None
 
@@ -2938,7 +2975,8 @@ def _cached_full_translation(translation: str | None) -> tuple[str, str]:
 
 
 def _translate_article_background(article: dict, config: dict) -> bool:
-    svc = AIService(
+    svc = _SystemAIService(
+        "自动翻译",
         api_key=config["api_key"],
         endpoint=config["endpoint"],
         model=config["model"],
@@ -3003,10 +3041,8 @@ def _run_auto_translation_once():
                 try:
                     if _translate_article_background(article, config):
                         print(f"[auto-translate] Translated article {article['id']}: {article.get('title', '')[:50]}")
-                    _note_system_ai_success()
                 except Exception as e:
                     print(f"[auto-translate] Article {article.get('id')}: failed: {e}")
-                    _note_system_ai_failure("自动翻译", e)
     finally:
         _auto_translation_lock.release()
 
@@ -3094,8 +3130,9 @@ def _fetch_title_process_articles(config: dict, limit: int = AUTO_TITLE_PROCESS_
     return selected
 
 
-def _title_service(config: dict) -> AIService:
-    return AIService(
+def _title_service(config: dict) -> "_SystemAIService":
+    return _SystemAIService(
+        "标题精简",
         api_key=config["api_key"],
         endpoint=config["endpoint"],
         model=config["model"],
@@ -3266,10 +3303,8 @@ def _run_auto_title_process_once():
                 try:
                     if _process_article_title(article, config):
                         print(f"[auto-title] Updated article {article['id']}: {article.get('title', '')[:50]}")
-                    _note_system_ai_success()
                 except Exception as e:
                     print(f"[auto-title] Article {article.get('id')}: failed: {e}")
-                    _note_system_ai_failure("标题精简", e)
     finally:
         _auto_title_process_lock.release()
 
@@ -3305,20 +3340,29 @@ def _get_source_classification_config() -> dict | None:
 
 
 def _get_source_classification_users() -> list[dict]:
-    """Return one administrator AI config for shared source classification."""
+    """The server API config for shared source classification.
+
+    Source classification is a server-side job producing shared, site-wide
+    labels, so it runs on the admin-managed server API (管理员设置 → 服务端 API)
+    like every other background job. It used to read an admin's personal
+    ai_configs row instead, which meant two different keys drove server work:
+    with the server API suspended and that personal key still valid, this job
+    kept succeeding and the health signal could not tell the two apart.
+    """
     try:
-        db = get_db()
-        rows = db.execute(
-            "SELECT c.user_id, c.endpoint, c.model, c.api_key, c.provider_type, c.enabled "
-            "FROM ai_configs c JOIN users u ON u.id = c.user_id "
-            "WHERE c.enabled = 1 "
-            "AND c.api_key != '' "
-            "AND u.role = 'admin' "
-            "ORDER BY c.user_id ASC LIMIT 1"
-        ).fetchall()
-        return [dict(r) for r in rows]
+        sys_config = get_system_ai_config()
+        if not sys_config or not sys_config.get("enabled") or not sys_config.get("api_key"):
+            return []
+        return [{
+            "user_id": 0,
+            "endpoint": sys_config["endpoint"],
+            "model": sys_config["model"],
+            "api_key": sys_config["api_key"],
+            "provider_type": sys_config.get("provider_type", "openai"),
+            "enabled": sys_config.get("enabled", 1),
+        }]
     except Exception as e:
-        print(f"[source-classify] settings DB error: {e}")
+        print(f"[source-classify] server API config error: {e}")
         return []
 
 
@@ -3355,7 +3399,8 @@ def _classify_source_batch(config: dict, limit: int = AUTO_SOURCE_CLASSIFY_BATCH
         )
     ][:limit]
 
-    svc = AIService(
+    svc = _SystemAIService(
+        "订阅源分类",
         api_key=config["api_key"],
         endpoint=config["endpoint"],
         model=config["model"],
@@ -3550,11 +3595,9 @@ def _run_auto_summary_once():
                     summary, cached = _generate_article_summary(article["id"], config)
                     if not cached:
                         print(f"[auto-summary] Cached summary for article {article['id']}: {article.get('title', '')[:50]}")
-                    _note_system_ai_success()
                 except Exception as e:
                     _save_ai_result(article["id"], summary_error=str(e))
                     print(f"[auto-summary] Article {article.get('id')}: failed: {e}")
-                    _note_system_ai_failure("自动摘要", e)
     finally:
         _auto_summary_lock.release()
 
