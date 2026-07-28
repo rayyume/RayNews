@@ -348,3 +348,63 @@ def test_the_recovery_notice_is_owed_even_if_the_alert_predates_the_restart(
     web_server._note_system_ai_success()
 
     assert [a["type"] for a in alerts] == ["system_ai_recovered"] * 2
+
+
+# ─── Source classification runs on a different key ─────────────────────
+
+
+def _classification_stubs(monkeypatch, classify_result=None, error=None):
+    """Drive _classify_source_batch without a news DB or a real provider."""
+    class FakeService:
+        def __init__(self, **kwargs):
+            pass
+
+        def classify_source(self, source, titles, domains=None):
+            if error:
+                raise error
+            return classify_result or {"category": "News", "label": source, "confidence": 0.9}
+
+    monkeypatch.setattr(web_server, "_get_news_db", lambda: object())
+    monkeypatch.setattr(web_server, "ensure_article_sources", lambda conn: None)
+    monkeypatch.setattr(web_server, "source_rows",
+                        lambda conn: [{"source": "财经早餐", "status": "pending"}])
+    monkeypatch.setattr(web_server, "recent_titles_for_source",
+                        lambda conn, source, limit=8: ["t1", "t2"])
+    monkeypatch.setattr(web_server, "_extract_domains_for_source", lambda conn, source: [])
+    monkeypatch.setattr(web_server, "update_source_category",
+                        lambda conn, source, category, label, **kwargs: {"source": source})
+    monkeypatch.setattr(web_server, "AIService", FakeService)
+
+
+def test_a_working_personal_key_cannot_clear_a_system_ai_outage(alerts, monkeypatch):
+    """The reported case: system API suspended, admin's own key still valid.
+
+    Auto summary/translation/title were failing with 401 on the *system* key
+    while source classification kept succeeding on the admin's *personal* key.
+    Counting those successes as system-AI health reset the streak every minute,
+    so the outage never reached the alert threshold.
+    """
+    _classification_stubs(monkeypatch)
+    config = {"api_key": "personal", "endpoint": "e", "model": "m", "user_id": 1}
+
+    web_server._note_system_ai_failure("自动翻译", "AI API HTTP 401: Invalid API key.")
+    web_server._note_system_ai_failure("标题精简", "AI API HTTP 401: Invalid API key.")
+
+    result = web_server._classify_source_batch(config, limit=10)
+    assert result["processed"]           # the personal key worked, as in the log
+    assert alerts == []                  # …and it must not have reset anything
+
+    web_server._note_system_ai_failure("自动摘要", "AI API HTTP 401: Invalid API key.")
+
+    assert [a["type"] for a in alerts] == ["system_ai_failed"] * 2
+    assert "401" in alerts[0]["body"]
+
+
+def test_a_failing_personal_key_does_not_blame_the_system_ai(alerts, monkeypatch):
+    _classification_stubs(monkeypatch, error=RuntimeError("personal key 401"))
+    config = {"api_key": "personal", "endpoint": "e", "model": "m", "user_id": 1}
+
+    for _ in range(3 * web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD):
+        web_server._classify_source_batch(config, limit=10)
+
+    assert alerts == []

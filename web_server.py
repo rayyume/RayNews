@@ -3324,6 +3324,16 @@ def _get_source_classification_users() -> list[dict]:
 
 def _classify_source_batch(config: dict, limit: int = AUTO_SOURCE_CLASSIFY_BATCH_LIMIT,
                            force: bool = False) -> dict:
+    """Classify sources with an admin's *personal* AI config.
+
+    Deliberately outside the system-AI health signal (_note_system_ai_*): the
+    credentials here come from ai_configs, not system_ai_config, so its results
+    say nothing about the system AI. Reporting them made the two keys cancel
+    each other out — with the system key suspended and the admin's own key still
+    working, every successful classification reset the failure streak the auto
+    summary/translation/title jobs were building, and the outage never reached
+    the threshold to alert.
+    """
     conn = _get_news_db()
     if not conn:
         return {"processed": [], "failed": [], "remaining": 0}
@@ -3371,7 +3381,6 @@ def _classify_source_batch(config: dict, limit: int = AUTO_SOURCE_CLASSIFY_BATCH
                 sample_titles=titles,
             )
             processed.append(saved)
-            _note_system_ai_success()
         except Exception as e:
             try:
                 update_source_category(
@@ -3386,7 +3395,6 @@ def _classify_source_batch(config: dict, limit: int = AUTO_SOURCE_CLASSIFY_BATCH
             except Exception:
                 pass
             failed.append({"source": source, "error": str(e)})
-            _note_system_ai_failure("订阅源分类", e)
 
     remaining = [
         row for row in source_rows(conn)
