@@ -77,9 +77,6 @@ AI 结果会写入数据库以减少重复调用。管理员应根据所选服�
 - 服务端 AI 连续 3 次调用失败（自动摘要／翻译／标题精简／订阅源分类／每日摘要合并计数）时，
   给所有管理员发送一次邮件和站内通知（含失败原因和受影响任务）；恢复后再发一次恢复通知。
   阈值可用 `SYSTEM_AI_FAILURE_ALERT_THRESHOLD` 调整
-- 只要开启了任一服务端自动 AI 功能，即使当天没有待处理文章、或服务端 API 配置被清空／关闭，
-  也会每 15 分钟主动探测一次（`SYSTEM_AI_HEARTBEAT_INTERVAL_MINUTES`），确保管理员能收到上述告警；
-  后台任务本身有调用时自动跳过探测，不产生额外请求
 - 每日摘要生成失败后每 10 分钟自动重试一次，重试 3 次仍失败则停止重试，并给所有管理员发送
   邮件和站内通知（含失败原因）；管理员可在首页 ✨ 每日摘要面板看到失败原因并点击「重试生成」手动重试
   （该按钮仅在失败后对管理员显示）
@@ -232,7 +229,6 @@ AI Endpoint、API Key、模型和供应商由用户在网页的“设置 → AI�
 | `AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS` | `120` | 订阅源分类轮询间隔，单位秒 |
 | `AI_SHARE_REVALIDATION_INTERVAL_HOURS` | `1` | 复核开启共享用户的个人 AI 连通性的间隔，支持小数，最短 5 分钟 |
 | `SYSTEM_AI_FAILURE_ALERT_THRESHOLD` | `3` | 服务端 AI 连续失败多少次后给管理员发告警 |
-| `SYSTEM_AI_HEARTBEAT_INTERVAL_MINUTES` | `15` | 开启自动 AI 功能时主动探测服务端 AI 的间隔，最短 5 分钟 |
 | `DAILY_SUMMARY_RETRY_INTERVAL_SECONDS` | `600` | 每日摘要生成失败后的重试间隔，单位秒 |
 | `DAILY_SUMMARY_MAX_RETRIES` | `3` | 每日摘要生成失败后的最大重试次数，用尽后告警管理员 |
 | `TELEGRAM_EMBED_TIMEOUT_SECONDS` | `12` | 读取 Telegram 嵌入页面的超时 |

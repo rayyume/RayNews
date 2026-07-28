@@ -1292,31 +1292,8 @@ SYSTEM_AI_FAILURE_ALERT_THRESHOLD = int(
 SYSTEM_AI_FAILURE_TITLE = "服务端 AI 调用连续失败"
 SYSTEM_AI_RECOVERED_TITLE = "服务端 AI 已恢复"
 
-_system_ai_health = {"failures": 0, "alerted": False, "last_error": "", "jobs": [],
-                     "last_activity_at": 0}
+_system_ai_health = {"failures": 0, "alerted": False, "last_error": "", "jobs": []}
 _system_ai_health_lock = threading.Lock()
-
-# The article jobs only call the AI when they have something to process, and they
-# skip silently when the system AI is cleared or disabled — so "any auto feature
-# is on" must not depend on them making a call for an admin to hear about an
-# outage. This heartbeat probes the config directly whenever nothing else has,
-# which is what makes the guarantee hold on an idle day and for a wiped config.
-def _system_ai_heartbeat_interval_seconds() -> int:
-    try:
-        minutes = float(os.environ.get("SYSTEM_AI_HEARTBEAT_INTERVAL_MINUTES", "15"))
-    except (TypeError, ValueError):
-        minutes = 15.0
-    return max(300, int(minutes * 60))
-
-
-SYSTEM_AI_HEARTBEAT_INTERVAL_SECONDS = _system_ai_heartbeat_interval_seconds()
-# The admin-side flags that make background jobs run on the system AI.
-AUTO_AI_FLAG_COLUMNS = (
-    "auto_summary_enabled",
-    "auto_translate_title",
-    "auto_translate_content",
-    "auto_title_summary_enabled",
-)
 
 
 def _reset_system_ai_health() -> None:
@@ -1324,8 +1301,7 @@ def _reset_system_ai_health() -> None:
     config, so a fresh key starts from zero (and can alert again if it is also
     broken, instead of being muted by the previous key's `alerted` flag)."""
     with _system_ai_health_lock:
-        _system_ai_health.update({"failures": 0, "alerted": False, "last_error": "", "jobs": [],
-                                  "last_activity_at": 0})
+        _system_ai_health.update({"failures": 0, "alerted": False, "last_error": "", "jobs": []})
 
 
 def _note_system_ai_success() -> None:
@@ -1334,11 +1310,9 @@ def _note_system_ai_success() -> None:
     share_restored pair users already get."""
     with _system_ai_health_lock:
         if not _system_ai_health["failures"] and not _system_ai_health["alerted"]:
-            _system_ai_health["last_activity_at"] = _epoch_now()
             return
         recovered = _system_ai_health["alerted"]
-        _system_ai_health.update({"failures": 0, "alerted": False, "last_error": "", "jobs": [],
-                                  "last_activity_at": _epoch_now()})
+        _system_ai_health.update({"failures": 0, "alerted": False, "last_error": "", "jobs": []})
     if recovered:
         _notify_admins(
             "system_ai_recovered",
@@ -1355,7 +1329,6 @@ def _note_system_ai_failure(job: str, error) -> None:
     with _system_ai_health_lock:
         _system_ai_health["failures"] += 1
         _system_ai_health["last_error"] = reason
-        _system_ai_health["last_activity_at"] = _epoch_now()
         if job not in _system_ai_health["jobs"]:
             _system_ai_health["jobs"].append(job)
         if (
@@ -1375,71 +1348,6 @@ def _note_system_ai_failure(job: str, error) -> None:
     )
     print(f"[system-ai] {failures} consecutive failures ({', '.join(jobs)}): {reason}")
     _notify_admins("system_ai_failed", SYSTEM_AI_FAILURE_TITLE, body)
-
-
-def _system_ai_auto_features_enabled() -> bool:
-    """Whether any admin has a background AI job switched on.
-
-    The guarantee this heartbeat exists for is scoped to that: with every auto
-    feature off, nobody expects the system AI to be exercised, and silence is
-    the right behaviour.
-    """
-    try:
-        db = get_db()
-        cond = " OR ".join(f"s.{col} = 1" for col in AUTO_AI_FLAG_COLUMNS)
-        row = db.execute(
-            "SELECT 1 FROM user_settings s JOIN users u ON u.id = s.user_id "
-            f"WHERE u.role = 'admin' AND ({cond}) LIMIT 1"
-        ).fetchone()
-        return row is not None
-    except Exception as exc:
-        print(f"[system-ai] auto-feature lookup failed: {exc}")
-        return False
-
-
-def _run_system_ai_heartbeat_once() -> dict:
-    """Probe the system AI when nothing else has, so an outage can't hide.
-
-    Two holes this closes, both of which leave the article jobs making no calls
-    at all: a cleared/disabled config (they skip before reaching the AI) and an
-    idle day (nothing pending to process). Either way the failure would
-    otherwise surface only via the 21:30 daily-summary alert.
-
-    Skipped whenever a real call already reported in within the interval — on a
-    busy deployment this costs nothing.
-    """
-    if not _system_ai_auto_features_enabled():
-        return {"status": "skipped", "reason": "no auto AI feature enabled"}
-    with _system_ai_health_lock:
-        last_activity = _system_ai_health["last_activity_at"]
-    if last_activity and _epoch_now() - last_activity < SYSTEM_AI_HEARTBEAT_INTERVAL_SECONDS:
-        return {"status": "skipped", "reason": "recent system AI activity"}
-
-    config = get_system_ai_config()
-    if not config or not config.get("enabled") or not config.get("api_key"):
-        _note_system_ai_failure(
-            "服务端 API 配置",
-            "系统 AI 未配置或未启用（管理员设置 → 服务端 API），后台 AI 任务已停止工作",
-        )
-        return {"status": "error", "reason": "system AI not configured"}
-
-    body, status = _run_ai_connection_test(config)
-    if status == 200:
-        _note_system_ai_success()
-        return {"status": "ok"}
-    _note_system_ai_failure("连通性检查", body.get("error") or "connection test failed")
-    return {"status": "error", "reason": body.get("error") or "connection test failed"}
-
-
-def _system_ai_heartbeat_loop():
-    import time as _time
-    _time.sleep(90)  # let the app (and the first job pass) start before probing
-    while True:
-        try:
-            _run_system_ai_heartbeat_once()
-        except Exception as e:
-            print(f"[system-ai] heartbeat error: {e}")
-        _time.sleep(SYSTEM_AI_HEARTBEAT_INTERVAL_SECONDS)
 
 
 def _compact_share_error(value: str) -> str:
@@ -5472,7 +5380,6 @@ if __name__ == "__main__":
     _init_daily_summary_failures_table()
     import threading as _th
     _th.Thread(target=_daily_summary_loop, daemon=True).start()
-    _th.Thread(target=_system_ai_heartbeat_loop, daemon=True).start()
     _th.Thread(target=_auto_summary_loop, daemon=True).start()
     _th.Thread(target=_auto_translation_loop, daemon=True).start()
     _th.Thread(target=_auto_title_process_loop, daemon=True).start()
