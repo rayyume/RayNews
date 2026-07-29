@@ -431,9 +431,12 @@ body.body-scroll-lock{overflow:hidden!important}
 .notif-time{font-size:11px;color:var(--text-3);flex-shrink:0}
 .notif-title{flex:1;min-width:0;font-size:13px;color:var(--text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .notif-item.unread .notif-title{font-weight:700;color:var(--text)}
-.notif-btn{background:none;border:1px solid var(--border);color:var(--text-3);padding:2px 8px;border-radius:6px;font-size:11px;cursor:pointer;font-family:var(--font);transition:all 0.15s;flex-shrink:0}
+.notif-btn,.notif-unread-action{background:none;border:1px solid var(--border);color:var(--text-3);padding:2px 8px;border-radius:6px;font-size:11px;cursor:pointer;font-family:var(--font);transition:all 0.15s;flex-shrink:0}
 .notif-btn:hover{border-color:var(--accent);color:var(--accent)}
-.notif-btn.read-btn:hover{border-color:#22c55e;color:#22c55e}
+.notif-unread-action{background:rgba(251,191,36,0.12);border-color:rgba(251,191,36,0.28);color:#fbbf24}
+.notif-unread-action::before{content:'未读'}
+.notif-unread-action:hover,.notif-unread-action:focus-visible{background:rgba(34,197,94,0.12);border-color:#22c55e;color:#22c55e}
+.notif-unread-action:hover::before,.notif-unread-action:focus-visible::before{content:'已读'}
 .notif-list-actions{display:flex;align-items:center;gap:6px;margin-left:auto;margin-right:8px;flex-shrink:0}
 .notif-delete-btn{background:rgba(239,68,68,0.16);border-color:rgba(239,68,68,0.35);color:#ef4444}
 .notif-delete-btn:hover{background:rgba(239,68,68,0.24);border-color:#ef4444;color:#ef4444}
@@ -561,7 +564,6 @@ body.body-scroll-lock{overflow:hidden!important}
   .admin-stat-detail{white-space:normal;word-break:break-all;font-size:10px}
   .admin-stat-ring{width:64px;height:64px}
   .admin-stat-ring::before{width:52px;height:52px}
-  .notif-time{display:none}
 }
 </style>
 </head>
@@ -5041,6 +5043,19 @@ function formatNotifTime(iso) {
   return (iso || '').slice(0, 16).replace('T', ' ');
 }
 
+function formatNotifListTime(iso, now = new Date()) {
+  const value = new Date(iso);
+  if (Number.isNaN(value.getTime())) return formatNotifTime(iso);
+  const day = new Date(value.getFullYear(), value.getMonth(), value.getDate());
+  const currentDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const diffDays = Math.round((currentDay - day) / 86400000);
+  const hhmm = `${String(value.getHours()).padStart(2, '0')}:${String(value.getMinutes()).padStart(2, '0')}`;
+  if (diffDays === 0) return `今天 ${hhmm}`;
+  if (diffDays === 1) return `昨天 ${hhmm}`;
+  if (diffDays === 2) return `前天 ${hhmm}`;
+  return `${value.getMonth() + 1}-${value.getDate()} ${hhmm}`;
+}
+
 function renderNotifList() {
   const body = document.getElementById('notifBody');
   if (!notifItems.length) {
@@ -5057,10 +5072,9 @@ function renderNotifList() {
   }
   body.innerHTML = notifItems.map(n => `
     <div class="notif-item ${n.read_at ? '' : 'unread'}" onclick="showNotifDetail(${n.id})">
-      <span class="notif-time">${esc(formatNotifTime(n.created_at))}</span>
+      <span class="notif-time">${esc(formatNotifListTime(n.created_at))}</span>
       <span class="notif-title">${esc(n.title)}</span>
-      ${n.read_at ? '' : '<span class="notification-new-tag">new</span>'}
-      ${n.read_at ? '' : `<button class="notif-btn read-btn" onclick="event.stopPropagation();markNotifRead(${n.id})">已读</button>`}
+      ${n.read_at ? '' : `<button class="notif-unread-action" aria-label="标记为已读" onclick="event.stopPropagation();markNotifRead(${n.id})"></button>`}
       <button class="notif-btn notif-delete-btn" onclick="event.stopPropagation();deleteNotif(${n.id})">删除</button>
     </div>
   `).join('');

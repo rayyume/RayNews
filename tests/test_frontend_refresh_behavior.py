@@ -782,46 +782,34 @@ def test_notification_markdown_uses_a_bounded_rendering_container():
     assert '<div class="notif-detail-body notif-markdown">${bodyHtml}</div>' in HTML
 
 
-def test_mobile_notification_list_hides_time_but_detail_keeps_it():
-    mobile_css = HTML[HTML.index('@media(max-width:640px){'):HTML.index('</style>')]
-    assert '.notif-time{display:none}' in mobile_css
-    assert '<span class="notif-time">${esc(formatNotifTime(n.created_at))}</span>' in HTML
-    assert '<div class="notif-detail-time">${esc(formatNotifTime(n.created_at))}</div>' in HTML
-
-
-def test_unread_notifications_use_one_shared_new_tag_in_menu_and_list():
-    notification_source = "function esc(value) { return String(value); }\n" + source_between(
-        "// ═══ In-App Notifications", "// ═══ Admin Panel"
+def test_notification_list_uses_compact_browser_local_dates_and_keeps_time_on_mobile():
+    notification_source = source_between(
+        "function formatNotifTime(",
+        "function renderNotifList()",
     )
-    notification_source += """
-globalThis.__setNotifTestState = (items, unread) => {
-  notifItems = items;
-  notifUnread = unread;
-  notifLoadState = 'ready';
-};
-"""
     run_node(
         notification_source,
         """
-const avatarClasses = new Set();
-const avatar = { classList: { toggle: (name, enabled) => enabled ? avatarClasses.add(name) : avatarClasses.delete(name) } };
-const body = { innerHTML: '' };
-const menuBadge = { style: { display: 'none' }, textContent: '' };
-context.document = {
-  querySelector: () => avatar,
-  getElementById: id => id === 'notifBody' ? body : menuBadge,
-};
-context.__setNotifTestState([{ id: 7, title: '公告', created_at: '2026-07-20T10:00:00', read_at: null }], 1);
-context.updateNotifDot();
-assert.equal(avatarClasses.has('has-unread'), true);
-assert.equal(menuBadge.textContent, 'new');
-assert.notEqual(menuBadge.style.display, 'none');
-
-context.renderNotifList();
-assert.match(body.innerHTML, /notification-new-tag/);
-assert.match(body.innerHTML, />new</);
+const now = new Date(2026, 6, 29, 12, 0);
+assert.equal(context.formatNotifListTime('2026-07-29T09:05:00', now), '今天 09:05');
+assert.equal(context.formatNotifListTime('2026-07-28T09:05:00', now), '昨天 09:05');
+assert.equal(context.formatNotifListTime('2026-07-27T09:05:00', now), '前天 09:05');
+assert.equal(context.formatNotifListTime('2026-07-26T09:05:00', now), '7-26 09:05');
 """,
     )
+    mobile_css = HTML[HTML.index('@media(max-width:640px){'):HTML.index('</style>')]
+    assert '.notif-time{display:none}' not in mobile_css
+
+
+def test_unread_notification_uses_hoverable_status_action_not_new_tag():
+    assert 'class="notif-unread-action"' in HTML
+    assert 'markNotifRead(${n.id})' in HTML
+    assert '<span class="notification-new-tag">new</span>' not in source_between(
+        "function renderNotifList()",
+        "function retryNotifications()",
+    )
+    assert '.notif-unread-action::before{content:\'未读\'' in HTML
+    assert '.notif-unread-action:hover::before,.notif-unread-action:focus-visible::before{content:\'已读\'' in HTML
 
 
 def test_poll_refresh_job_rejects_terminal_status_for_another_job():
