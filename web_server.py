@@ -148,14 +148,16 @@ CORS(app)
 @app.errorhandler(Exception)
 def handle_exception(e):
     """Return JSON for all unhandled exceptions instead of HTML."""
-    import traceback
-    traceback.print_exc()
-    # If it's already a Flask HTTPException with a JSON response, pass through
     from flask import jsonify as _jsonify
     from werkzeug.exceptions import HTTPException
     if isinstance(e, HTTPException):
-        return _jsonify({"error": e.description or str(e)}), e.code or 500
-    return _jsonify({"error": f"server error: {str(e)}"}), 500
+        return _jsonify({"error": e.description}), e.code or 500
+    app.logger.exception(
+        "Unhandled exception during %s %s",
+        request.method,
+        request.path,
+    )
+    return _jsonify({"error": "internal server error"}), 500
 
 DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
 
@@ -1083,7 +1085,13 @@ def _generate_article_summary(article_id: int, config: dict,
         title=article.get("title", ""),
     )
     if save_shared_cache:
-        _save_ai_result(article_id, summary=summary)
+        _save_ai_result(
+            article_id,
+            summary=summary,
+            summary_provider=config.get("provider") or config.get("provider_type"),
+            summary_model=config.get("model"),
+            summary_by_user_id=config.get("user_id"),
+        )
     return summary, False
 
 
@@ -1099,6 +1107,10 @@ def ai_save_result(article_id):
     Body: {"summary": "..."} or {"translation": "..."} (translation is the
     same JSON-string-encoded {"title", "html"} shape used elsewhere).
     """
+    settings = get_user_settings(g.user_id) or {}
+    if not is_share_active(settings):
+        return jsonify({"error": "shared AI result publication is not active"}), 403
+
     article = _fetch_article_body(article_id)
     if not article:
         return jsonify({"error": "article not found"}), 404
@@ -1110,11 +1122,25 @@ def ai_save_result(article_id):
         return jsonify({"error": "summary or translation required"}), 400
 
     kwargs = {}
+    config = get_ai_config(g.user_id) or {}
+    provider = config.get("provider") or config.get("provider_type")
+    model = config.get("model")
     if summary:
-        kwargs["summary"] = summary
+        kwargs.update({
+            "summary": summary,
+            "summary_by_user_id": g.user_id,
+            "summary_provider": provider,
+            "summary_model": model,
+        })
     if translation:
-        kwargs["translation"] = translation
-    _save_ai_result(article_id, **kwargs)
+        kwargs.update({
+            "translation": translation,
+            "translation_by_user_id": g.user_id,
+            "translation_provider": provider,
+            "translation_model": model,
+        })
+    if not _save_ai_result(article_id, **kwargs):
+        return jsonify({"error": "internal server error"}), 500
 
     # Keep the article title in news.db in sync so the home page list shows
     # the translated title too (mirrors the old server-side translate-full behavior).
@@ -3200,7 +3226,13 @@ def _translate_article_background(article: dict, config: dict) -> bool:
     # Publish only after the authenticated shared cache commit. The canonical
     # detail body remains original and is safe for unauthenticated readers.
     if translation_cache_data is not None:
-        _save_ai_result(article_id, translation=translation_cache_data)
+        _save_ai_result(
+            article_id,
+            translation=translation_cache_data,
+            translation_provider=config.get("provider") or config.get("provider_type"),
+            translation_model=config.get("model"),
+            translation_by_user_id=config.get("user_id"),
+        )
         _publish_translation_update(article_id)
     return bool(translated_title or translated_html)
 
@@ -3932,6 +3964,14 @@ def _init_ai_results_table():
                 title_summary_provider TEXT,
                 title_summary_model TEXT,
                 title_summary_by_user_id INTEGER,
+                summary_provider TEXT,
+                summary_model TEXT,
+                summary_by_user_id INTEGER,
+                summary_generated_at TEXT,
+                translation_provider TEXT,
+                translation_model TEXT,
+                translation_by_user_id INTEGER,
+                translation_generated_at TEXT,
                 summary_error TEXT,
                 summary_error_at TEXT,
                 updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
@@ -3963,6 +4003,22 @@ def _init_ai_results_table():
             conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_model TEXT")
         if "title_summary_by_user_id" not in cols:
             conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_by_user_id INTEGER")
+        if "summary_provider" not in cols:
+            conn.execute("ALTER TABLE ai_results ADD COLUMN summary_provider TEXT")
+        if "summary_model" not in cols:
+            conn.execute("ALTER TABLE ai_results ADD COLUMN summary_model TEXT")
+        if "summary_by_user_id" not in cols:
+            conn.execute("ALTER TABLE ai_results ADD COLUMN summary_by_user_id INTEGER")
+        if "summary_generated_at" not in cols:
+            conn.execute("ALTER TABLE ai_results ADD COLUMN summary_generated_at TEXT")
+        if "translation_provider" not in cols:
+            conn.execute("ALTER TABLE ai_results ADD COLUMN translation_provider TEXT")
+        if "translation_model" not in cols:
+            conn.execute("ALTER TABLE ai_results ADD COLUMN translation_model TEXT")
+        if "translation_by_user_id" not in cols:
+            conn.execute("ALTER TABLE ai_results ADD COLUMN translation_by_user_id INTEGER")
+        if "translation_generated_at" not in cols:
+            conn.execute("ALTER TABLE ai_results ADD COLUMN translation_generated_at TEXT")
         if "updated_at" not in cols:
             conn.execute("ALTER TABLE ai_results ADD COLUMN updated_at TEXT")
             conn.execute("UPDATE ai_results SET updated_at = datetime('now') WHERE updated_at IS NULL")
@@ -3984,7 +4040,10 @@ def _get_ai_result(article_id: int) -> dict | None:
         row = conn.execute(
             "SELECT summary, translation, summary_error, summary_error_at, "
             "title_summary, title_summary_error, title_summary_error_at, "
-            "title_summary_provider, title_summary_model, title_summary_by_user_id "
+            "title_summary_provider, title_summary_model, title_summary_by_user_id, "
+            "summary_provider, summary_model, summary_by_user_id, summary_generated_at, "
+            "translation_provider, translation_model, translation_by_user_id, "
+            "translation_generated_at "
             "FROM ai_results WHERE article_id = ?",
             (article_id,),
         ).fetchone()
@@ -4089,7 +4148,15 @@ def _save_ai_result(article_id: int, summary: str | None = None,
                     title_summary_model: str | None = None,
                     title_summary_by_user_id: int | None = None,
                     title_translation_error: str | None = None,
-                    clear_title_translation_error: bool = False):
+                    clear_title_translation_error: bool = False,
+                    summary_provider: str | None = None,
+                    summary_model: str | None = None,
+                    summary_by_user_id: int | None = None,
+                    summary_generated_at: str | None = None,
+                    translation_provider: str | None = None,
+                    translation_model: str | None = None,
+                    translation_by_user_id: int | None = None,
+                    translation_generated_at: str | None = None) -> bool:
     """Save or update AI result for an article."""
     import sqlite3
     if summary is not None:
@@ -4097,7 +4164,7 @@ def _save_ai_result(article_id: int, summary: str | None = None,
     if translation is not None:
         translation = _sanitize_translation_payload(translation)
     if not os.path.exists(NEWS_DB):
-        return
+        return False
     conn = None
     try:
         conn = _news_db_connect()
@@ -4170,9 +4237,47 @@ def _save_ai_result(article_id: int, summary: str | None = None,
                 1 if clear_title_translation_error else 0,
             ),
         )
+        if summary is not None:
+            conn.execute(
+                """
+                UPDATE ai_results SET
+                    summary_provider = ?,
+                    summary_model = ?,
+                    summary_by_user_id = ?,
+                    summary_generated_at = COALESCE(?, datetime('now'))
+                WHERE article_id = ?
+                """,
+                (
+                    summary_provider,
+                    summary_model,
+                    summary_by_user_id,
+                    summary_generated_at,
+                    article_id,
+                ),
+            )
+        if translation is not None:
+            conn.execute(
+                """
+                UPDATE ai_results SET
+                    translation_provider = ?,
+                    translation_model = ?,
+                    translation_by_user_id = ?,
+                    translation_generated_at = COALESCE(?, datetime('now'))
+                WHERE article_id = ?
+                """,
+                (
+                    translation_provider,
+                    translation_model,
+                    translation_by_user_id,
+                    translation_generated_at,
+                    article_id,
+                ),
+            )
         conn.commit()
+        return True
     except Exception:
-        pass
+        app.logger.exception("Failed to save shared AI result for article %s", article_id)
+        return False
     finally:
         if conn:
             conn.close()
@@ -4281,6 +4386,17 @@ def ai_get_result(article_id):
     seeing it (Settings → AI → 共享) — see share_view_summary/share_view_translation.
     """
     cached = dict(_get_ai_result(article_id) or {})
+    for private_key in (
+        "summary_provider",
+        "summary_model",
+        "summary_by_user_id",
+        "summary_generated_at",
+        "translation_provider",
+        "translation_model",
+        "translation_by_user_id",
+        "translation_generated_at",
+    ):
+        cached.pop(private_key, None)
     settings = get_user_settings(g.user_id) or {}
     share_active = is_share_active(settings)
     if not share_active or not settings.get("share_view_summary"):

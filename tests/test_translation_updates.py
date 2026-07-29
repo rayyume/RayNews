@@ -50,8 +50,24 @@ def _insert_article(article_id=42):
     conn.close()
 
 
-def test_manual_translation_save_does_not_publish_translation_update(client):
+def test_manual_translation_save_does_not_publish_translation_update(client, monkeypatch):
     _insert_article()
+    monkeypatch.setattr(
+        web_server,
+        "get_user_settings",
+        lambda user_id: {
+            "share_ai_results": 1,
+            "share_suspended": 0,
+            "share_last_check_ok": 1,
+            "share_last_check_revision": 2,
+            "share_current_config_revision": 2,
+        },
+    )
+    monkeypatch.setattr(
+        web_server,
+        "get_ai_config",
+        lambda user_id: {"provider": "openai", "model": "model"},
+    )
 
     response = client.post(
         "/ai/result/42",

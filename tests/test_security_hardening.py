@@ -13,11 +13,15 @@
 """
 
 import datetime as dt
+import json
 import os
 import sqlite3
+import subprocess
 import sys
 import uuid
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -26,6 +30,308 @@ if str(ROOT) not in sys.path:
 import notifier
 import refresh_server
 import web_server
+import models
+
+
+def _active_share_settings():
+    return {
+        "share_ai_results": 1,
+        "share_suspended": 0,
+        "share_last_check_ok": 1,
+        "share_last_check_revision": 4,
+        "share_current_config_revision": 4,
+        "share_view_summary": 1,
+        "share_view_translation": 1,
+    }
+
+
+def _auth_headers(user_id=7, role="user"):
+    return {"Authorization": f"Bearer {web_server.create_token(user_id, role)}"}
+
+
+@pytest.fixture
+def authenticated_request(monkeypatch):
+    monkeypatch.setattr(
+        models,
+        "get_user",
+        lambda user_id: {"id": user_id, "role": "user"},
+    )
+    monkeypatch.setattr(models, "record_access", lambda user_id: None)
+
+
+def test_unhandled_error_is_generic_but_logged_with_detail(
+    monkeypatch, caplog, authenticated_request
+):
+    monkeypatch.setattr(web_server, "get_user_settings", lambda user_id: _active_share_settings())
+    monkeypatch.setattr(
+        web_server,
+        "_fetch_article_body",
+        lambda article_id: (_ for _ in ()).throw(RuntimeError("secret detail /app/data/news.db")),
+    )
+
+    with caplog.at_level("ERROR"):
+        response = web_server.app.test_client().post(
+            "/ai/result/42",
+            headers=_auth_headers(),
+            json={"summary": "local result"},
+        )
+
+    assert response.status_code == 500
+    assert response.get_json() == {"error": "internal server error"}
+    assert "secret detail /app/data/news.db" in caplog.text
+
+
+def test_explicit_client_error_keeps_its_status_and_payload(
+    monkeypatch, authenticated_request
+):
+    monkeypatch.setattr(web_server, "get_user_settings", lambda user_id: _active_share_settings())
+    monkeypatch.setattr(web_server, "_fetch_article_body", lambda article_id: None)
+
+    response = web_server.app.test_client().post(
+        "/ai/result/42",
+        headers=_auth_headers(),
+        json={"summary": "local result"},
+    )
+
+    assert response.status_code == 404
+    assert response.get_json() == {"error": "article not found"}
+
+
+def test_inactive_share_user_cannot_publish_shared_result(
+    monkeypatch, authenticated_request
+):
+    monkeypatch.setattr(web_server, "get_user_settings", lambda user_id: {})
+    monkeypatch.setattr(web_server, "_fetch_article_body", lambda article_id: {"id": article_id})
+
+    response = web_server.app.test_client().post(
+        "/ai/result/42",
+        headers=_auth_headers(),
+        json={"summary": "local result"},
+    )
+
+    assert response.status_code == 403
+    assert response.get_json() == {"error": "shared AI result publication is not active"}
+
+
+def test_active_share_publication_records_private_provenance(
+    tmp_path, monkeypatch, authenticated_request
+):
+    db_path = tmp_path / "news.db"
+    legacy = sqlite3.connect(db_path)
+    legacy.execute(
+        """
+        CREATE TABLE ai_results (
+            article_id INTEGER PRIMARY KEY,
+            summary TEXT,
+            translation TEXT
+        )
+        """
+    )
+    legacy.commit()
+    legacy.close()
+    monkeypatch.setattr(web_server, "NEWS_DB", str(db_path))
+    monkeypatch.setattr(web_server, "get_user_settings", lambda user_id: _active_share_settings())
+    monkeypatch.setattr(
+        web_server,
+        "get_ai_config",
+        lambda user_id: {
+            "provider": "personal-provider",
+            "provider_type": "openai",
+            "model": "personal-model",
+        },
+    )
+    monkeypatch.setattr(web_server, "_fetch_article_body", lambda article_id: {"id": article_id})
+    client = web_server.app.test_client()
+
+    response = client.post(
+        "/ai/result/42",
+        headers=_auth_headers(),
+        json={
+            "summary": "shared summary",
+            "translation": json.dumps(
+                {"title": "共享译名", "html": "<p>共享译文</p>"},
+                ensure_ascii=False,
+            ),
+        },
+    )
+
+    assert response.status_code == 200
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    row = dict(conn.execute(
+        """
+        SELECT summary_by_user_id, summary_provider, summary_model, summary_generated_at,
+               translation_by_user_id, translation_provider, translation_model,
+               translation_generated_at
+        FROM ai_results WHERE article_id = 42
+        """
+    ).fetchone())
+    conn.close()
+    assert row["summary_by_user_id"] == 7
+    assert row["summary_provider"] == "personal-provider"
+    assert row["summary_model"] == "personal-model"
+    assert row["summary_generated_at"]
+    assert row["translation_by_user_id"] == 7
+    assert row["translation_provider"] == "personal-provider"
+    assert row["translation_model"] == "personal-model"
+    assert row["translation_generated_at"]
+
+    public = client.get("/ai/result/42", headers=_auth_headers()).get_json()
+    assert public["summary"] == "shared summary"
+    assert "共享译文" in public["translation"]
+    for private_key in row:
+        assert private_key not in public
+
+
+def test_automatic_summary_records_its_generation_provenance(tmp_path, monkeypatch):
+    db_path = tmp_path / "news.db"
+    sqlite3.connect(db_path).close()
+    monkeypatch.setattr(web_server, "NEWS_DB", str(db_path))
+    monkeypatch.setattr(web_server, "_get_ai_result", lambda article_id: None)
+    monkeypatch.setattr(
+        web_server,
+        "_fetch_article_body",
+        lambda article_id: {"title": "Title", "body_html": "<p>Body</p>"},
+    )
+
+    class SummaryService:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def summarize(self, **kwargs):
+            return "generated summary"
+
+    monkeypatch.setattr(web_server, "_SystemAIService", SummaryService)
+
+    web_server._generate_article_summary(
+        51,
+        {
+            "user_id": 12,
+            "api_key": "system-key",
+            "endpoint": "https://provider.example",
+            "provider_type": "openai",
+            "model": "summary-model",
+        },
+    )
+
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        """
+        SELECT summary_by_user_id, summary_provider, summary_model, summary_generated_at
+        FROM ai_results WHERE article_id = 51
+        """
+    ).fetchone()
+    conn.close()
+    assert row[:3] == (12, "openai", "summary-model")
+    assert row[3]
+
+
+def test_automatic_translation_records_its_generation_provenance(tmp_path, monkeypatch):
+    db_path = tmp_path / "news.db"
+    sqlite3.connect(db_path).close()
+    monkeypatch.setattr(web_server, "NEWS_DB", str(db_path))
+    monkeypatch.setattr(web_server, "_save_article_translation", lambda *args, **kwargs: False)
+    monkeypatch.setattr(web_server, "_publish_translation_update", lambda article_id: None)
+
+    class TranslationService:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def translate_full(self, *args, **kwargs):
+            return {"title": "译名", "html": "<p>译文</p>"}
+
+    monkeypatch.setattr(web_server, "_SystemAIService", TranslationService)
+
+    web_server._translate_article_background(
+        {
+            "id": 52,
+            "title": "Title",
+            "body_html": "<p>Body</p>",
+            "translate_content_needed": True,
+            "translate_title_needed": True,
+        },
+        {
+            "user_id": 13,
+            "api_key": "system-key",
+            "endpoint": "https://provider.example",
+            "provider_type": "claude",
+            "model": "translation-model",
+        },
+    )
+
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        """
+        SELECT translation_by_user_id, translation_provider, translation_model,
+               translation_generated_at
+        FROM ai_results WHERE article_id = 52
+        """
+    ).fetchone()
+    conn.close()
+    assert row[:3] == (13, "claude", "translation-model")
+    assert row[3]
+
+
+def test_shared_result_write_failure_is_generic_and_logged(
+    tmp_path, monkeypatch, caplog, authenticated_request
+):
+    db_path = tmp_path / "news.db"
+    sqlite3.connect(db_path).close()
+    monkeypatch.setattr(web_server, "NEWS_DB", str(db_path))
+    monkeypatch.setattr(web_server, "get_user_settings", lambda user_id: _active_share_settings())
+    monkeypatch.setattr(web_server, "get_ai_config", lambda user_id: {})
+    monkeypatch.setattr(web_server, "_fetch_article_body", lambda article_id: {"id": article_id})
+    monkeypatch.setattr(
+        web_server,
+        "_news_db_connect",
+        lambda: (_ for _ in ()).throw(sqlite3.OperationalError("secret /app/data/news.db")),
+    )
+
+    with caplog.at_level("ERROR"):
+        response = web_server.app.test_client().post(
+            "/ai/result/42",
+            headers=_auth_headers(),
+            json={"summary": "local result"},
+        )
+
+    assert response.status_code == 500
+    assert response.get_json() == {"error": "internal server error"}
+    assert "secret /app/data/news.db" in caplog.text
+
+
+def test_frontend_publishes_local_ai_results_only_while_sharing_is_active():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    start = html.index("function publishSharedAIResult(")
+    end = html.index("\n}", start) + 2
+    helper = html[start:end]
+    script = f"""
+const assert = require('assert');
+const vm = require('vm');
+const calls = [];
+const context = {{
+  authToken: 'token',
+  userAutoSettings: {{ share_active: false }},
+  fetch: (...args) => {{ calls.push(args); return Promise.resolve({{ ok: true }}); }},
+  console,
+}};
+vm.createContext(context);
+vm.runInContext({json.dumps(helper)}, context);
+context.publishSharedAIResult(42, {{ summary: 'local result' }});
+assert.equal(calls.length, 0);
+context.userAutoSettings.share_active = true;
+context.publishSharedAIResult(42, {{ summary: 'local result' }});
+assert.equal(calls.length, 1);
+assert.equal(calls[0][0], '/ai/result/42');
+assert.deepEqual(JSON.parse(calls[0][1].body), {{ summary: 'local result' }});
+"""
+    result = subprocess.run(
+        ["node", "-e", script],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
 
 
 def test_ai_save_result_only_syncs_title_for_admin():

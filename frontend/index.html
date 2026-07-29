@@ -4498,6 +4498,18 @@ async function aiChat(config, messages, maxTokens, temperature) {
   }
 }
 
+function publishSharedAIResult(articleId, payload) {
+  if (!userAutoSettings?.share_active) return Promise.resolve(false);
+  return fetch('/ai/result/' + articleId, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
+    body: JSON.stringify(payload),
+  }).then(() => true).catch(e => {
+    console.warn('failed to share AI result:', e);
+    return false;
+  });
+}
+
 async function aiSummarize(articleId) {
   if (isRestrictedUser()) { showToast('🔒 预览账号待管理员审核，暂不可用此功能'); return; }
   const btn = document.querySelector('.ai-summarize-btn');
@@ -4544,11 +4556,7 @@ async function aiSummarize(articleId) {
     setSummaryHtml(esc(summary));
 
     // 3) Share the result back to the server for other users to reuse.
-    fetch('/ai/result/' + articleId, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
-      body: JSON.stringify({ summary }),
-    }).catch(e => console.warn('failed to share summary result:', e));
+    publishSharedAIResult(articleId, { summary });
   } catch (e) {
     setSummaryHtml('<span style="color:#ef4444">❌ ' + esc(e.message || '生成失败，请检查你的 API 配置和网络（自建 endpoint 需支持浏览器跨域）') + '</span>');
   }
@@ -4653,11 +4661,9 @@ async function aiTranslate(articleId) {
     syncArticleTitle(articleId, translatedTitle);
 
     // 3) Share the result back to the server for other users to reuse.
-    fetch('/ai/result/' + articleId, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
-      body: JSON.stringify({ translation: JSON.stringify({ title: translatedTitle, html: translatedHtml }) }),
-    }).catch(e => console.warn('failed to share translation result:', e));
+    publishSharedAIResult(articleId, {
+      translation: JSON.stringify({ title: translatedTitle, html: translatedHtml }),
+    });
   } catch (e) {
     bodyEl.innerHTML = originalHtml;
     showToast('❌ 生成失败: ' + (e.message || '请检查你的 API 配置和网络（自建 endpoint 需支持浏览器跨域）'));

@@ -543,9 +543,10 @@ def api_meta() -> bytes:
     try:
         conn = get_db()
         count = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
-        return json.dumps({"count": count, "diagnostics": _diagnostics(count)}).encode()
-    except Exception as e:
-        return json.dumps({"error": str(e), "diagnostics": _diagnostics(None)}).encode()
+        return json.dumps({"count": count}).encode()
+    except Exception:
+        log.exception("Failed to read public API metadata")
+        return json.dumps({"error": "internal server error"}).encode()
     finally:
         if conn:
             conn.close()
@@ -709,8 +710,12 @@ def api_news_list(params: dict) -> bytes:
             "size": size,
             "diagnostics": _diagnostics(total) if total == 0 else None,
         }, ensure_ascii=False).encode()
-    except Exception as e:
-        return json.dumps({"error": str(e), "diagnostics": _diagnostics(None)}).encode()
+    except Exception:
+        log.exception("Failed to read public news list")
+        return json.dumps({
+            "error": "internal server error",
+            "diagnostics": _diagnostics(None),
+        }).encode()
     finally:
         if conn:
             conn.close()

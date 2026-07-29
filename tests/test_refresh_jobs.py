@@ -9,6 +9,62 @@ import pytest
 import refresh_server
 
 
+class _CountDb:
+    def __init__(self, count):
+        self.count = count
+        self.closed = False
+
+    def execute(self, sql):
+        assert sql == "SELECT COUNT(*) FROM articles"
+        return self
+
+    def fetchone(self):
+        return (self.count,)
+
+    def close(self):
+        self.closed = True
+
+
+def test_api_meta_public_payload_is_exactly_the_count(monkeypatch):
+    db = _CountDb(3)
+    monkeypatch.setattr(refresh_server, "get_db", lambda: db)
+
+    payload = json.loads(refresh_server.api_meta())
+
+    assert payload == {"count": 3}
+    assert db.closed is True
+
+
+def test_api_meta_failure_is_generic_and_detailed_only_in_logs(monkeypatch, caplog):
+    def fail():
+        raise sqlite3.OperationalError("secret path /app/data/news.db")
+
+    monkeypatch.setattr(refresh_server, "get_db", fail)
+
+    with caplog.at_level("ERROR"):
+        payload = json.loads(refresh_server.api_meta())
+
+    assert payload == {"error": "internal server error"}
+    assert "secret path /app/data/news.db" in caplog.text
+
+
+def test_api_news_failure_keeps_diagnostics_but_hides_exception_detail(
+    monkeypatch, caplog
+):
+    def fail():
+        raise sqlite3.OperationalError("secret path /app/data/news.db")
+
+    monkeypatch.setattr(refresh_server, "get_db", fail)
+
+    with caplog.at_level("ERROR"):
+        payload = json.loads(refresh_server.api_news_list({}))
+
+    assert payload["error"] == "internal server error"
+    assert isinstance(payload["diagnostics"], dict)
+    assert "secret path /app/data/news.db" not in json.dumps(payload)
+    assert "secret path /app/data/news.db" in caplog.text
+
+
 def reset_job(monkeypatch):
     monkeypatch.setattr(refresh_server, "REFRESH_JOB", {
         "job_id": "", "status": "idle", "trigger": "",
