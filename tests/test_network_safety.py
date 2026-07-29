@@ -91,7 +91,7 @@ def test_get_rejects_redirect_from_public_to_private_before_second_request(monke
         calls.append((url, kwargs))
         return first
 
-    monkeypatch.setattr(network_safety.requests, "get", fake_get)
+    monkeypatch.setattr(network_safety, "_send_bound_request", fake_get)
 
     with pytest.raises(UnsafeUrlError):
         safe_get("https://public.example/image.jpg", timeout=15, stream=True)
@@ -110,7 +110,7 @@ def test_post_rejects_redirect_from_public_to_private_before_second_request(monk
         calls.append((url, kwargs))
         return first
 
-    monkeypatch.setattr(network_safety.requests, "post", fake_post)
+    monkeypatch.setattr(network_safety, "_send_bound_request", fake_post)
 
     with pytest.raises(UnsafeUrlError):
         safe_post(
@@ -136,7 +136,7 @@ def test_get_follows_public_redirect_one_checked_hop_at_a_time(monkeypatch):
         calls.append((url, kwargs))
         return next(responses)
 
-    monkeypatch.setattr(network_safety.requests, "get", fake_get)
+    monkeypatch.setattr(network_safety, "_send_bound_request", fake_get)
 
     result = safe_get("https://public.example/start.jpg", timeout=15)
 
@@ -158,13 +158,94 @@ def test_get_stops_after_bounded_redirect_limit(monkeypatch):
         responses.append(response)
         return response
 
-    monkeypatch.setattr(network_safety.requests, "get", fake_get)
+    monkeypatch.setattr(network_safety, "_send_bound_request", fake_get)
 
     with pytest.raises(UnsafeUrlError):
         safe_get("https://public.example/start", max_redirects=2)
 
     assert len(responses) == 3
     assert all(response.closed for response in responses)
+
+
+def test_bound_connection_uses_validated_sockaddr_without_second_dns_lookup(monkeypatch):
+    connected = []
+
+    class FakeSocket:
+        def settimeout(self, value):
+            self.timeout = value
+
+        def setsockopt(self, *args):
+            pass
+
+        def connect(self, sockaddr):
+            connected.append(sockaddr)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(socket, "socket", lambda *args: FakeSocket())
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: pytest.fail("bound transport performed a second DNS lookup"),
+    )
+    address = (
+        socket.AF_INET,
+        socket.SOCK_STREAM,
+        socket.IPPROTO_TCP,
+        "",
+        ("93.184.216.34", 80),
+    )
+
+    connection = network_safety._BoundHTTPConnection(
+        "rebind.example",
+        80,
+        resolved_addresses=(address,),
+    )
+    result = connection._new_conn()
+
+    assert isinstance(result, FakeSocket)
+    assert connected == [("93.184.216.34", 80)]
+    assert connection.host == "rebind.example"
+
+
+def test_https_bound_pool_keeps_origin_hostname_and_certificate_verification():
+    address = (
+        socket.AF_INET,
+        socket.SOCK_STREAM,
+        socket.IPPROTO_TCP,
+        "",
+        ("93.184.216.34", 443),
+    )
+    adapter = network_safety._BoundAddressAdapter((address,))
+    request = network_safety.requests.Request(
+        "GET",
+        "https://model.example/v1",
+    ).prepare()
+
+    pool = adapter.get_connection_with_tls_context(request, verify=True)
+    connection = pool._new_conn()
+
+    assert pool.host == "model.example"
+    assert connection.host == "model.example"
+    assert connection.server_hostname is None
+    assert connection.cert_reqs == "CERT_REQUIRED"
+
+
+def test_malformed_redirect_is_closed_and_raises_fixed_safe_error(monkeypatch):
+    monkeypatch.setattr(socket, "getaddrinfo", _public_dns)
+    first = _Response(302, {"Location": "http://[invalid"})
+
+    def fake_request(self, method, url, **kwargs):
+        return first
+
+    monkeypatch.setattr(network_safety.requests.Session, "request", fake_request)
+
+    with pytest.raises(UnsafeUrlError) as exc_info:
+        safe_get("https://public.example/start")
+
+    assert str(exc_info.value) == "URL target is not allowed"
+    assert first.closed
 
 
 def test_image_fetch_rejects_private_target_before_transport(monkeypatch):
@@ -178,7 +259,7 @@ def test_image_fetch_rejects_private_target_before_transport(monkeypatch):
         response.iter_content = lambda chunk_size: [b"jpeg"]
         return response
 
-    monkeypatch.setattr(image_cache.requests, "get", fake_get)
+    monkeypatch.setattr(network_safety, "_send_bound_request", fake_get)
 
     with pytest.raises(UnsafeUrlError):
         image_cache.fetch_remote_image("http://127.0.0.1/secret.jpg")
@@ -205,7 +286,7 @@ def test_ai_requests_reject_private_endpoint_before_transport(monkeypatch, provi
             }
         return response
 
-    monkeypatch.setattr(ai_service.requests, "post", fake_post)
+    monkeypatch.setattr(network_safety, "_send_bound_request", fake_post)
     service = ai_service.AIService(
         api_key="secret",
         endpoint="http://127.0.0.1:11434/v1",

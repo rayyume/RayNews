@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import socket
+import sys
 from ipaddress import ip_address
 from urllib.parse import urljoin, urlsplit
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.connection import HTTPConnection, HTTPSConnection
+from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
+from urllib3.exceptions import ConnectTimeoutError, NewConnectionError
 
 
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
@@ -21,8 +26,8 @@ def _unsafe(message: str = "URL target is not allowed") -> UnsafeUrlError:
     return UnsafeUrlError(message)
 
 
-def assert_public_http_url(url: str) -> str:
-    """Validate that *url* is HTTP(S) and every resolved address is public."""
+def _resolve_public_http_url(url: str) -> tuple[str, tuple[tuple, ...]]:
+    """Return a safe URL and the exact public socket addresses it resolved to."""
     if not isinstance(url, str):
         raise _unsafe("A valid public HTTP(S) URL is required")
 
@@ -56,13 +61,22 @@ def assert_public_http_url(url: str) -> str:
     if literal_address is not None:
         if not literal_address.is_global or literal_address.is_multicast:
             raise _unsafe()
-        return candidate
+        family = socket.AF_INET6 if literal_address.version == 6 else socket.AF_INET
+        sockaddr = (
+            (str(literal_address), port or (443 if parsed.scheme.lower() == "https" else 80), 0, 0)
+            if family == socket.AF_INET6
+            else (str(literal_address), port or (443 if parsed.scheme.lower() == "https" else 80))
+        )
+        return candidate, (
+            (family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", sockaddr),
+        )
 
     try:
         ascii_hostname = hostname.encode("idna").decode("ascii")
+        target_port = port or (443 if parsed.scheme.lower() == "https" else 80)
         addresses = socket.getaddrinfo(
             ascii_hostname,
-            port or (443 if parsed.scheme.lower() == "https" else 80),
+            target_port,
             type=socket.SOCK_STREAM,
         )
     except (OSError, UnicodeError, ValueError):
@@ -71,14 +85,165 @@ def assert_public_http_url(url: str) -> str:
     if not addresses:
         raise _unsafe("URL target could not be safely resolved")
 
+    normalized_addresses = []
     try:
-        resolved_addresses = [ip_address(address[4][0]) for address in addresses]
+        for family, socktype, proto, canonname, sockaddr in addresses:
+            if family not in {socket.AF_INET, socket.AF_INET6}:
+                raise ValueError
+            resolved = ip_address(sockaddr[0])
+            if not resolved.is_global or resolved.is_multicast:
+                raise UnsafeUrlError
+            normalized_sockaddr = (
+                (str(resolved), target_port, sockaddr[2], sockaddr[3])
+                if family == socket.AF_INET6
+                else (str(resolved), target_port)
+            )
+            normalized_addresses.append(
+                (
+                    family,
+                    socktype or socket.SOCK_STREAM,
+                    proto or socket.IPPROTO_TCP,
+                    canonname,
+                    normalized_sockaddr,
+                )
+            )
+    except UnsafeUrlError:
+        raise _unsafe() from None
     except (IndexError, TypeError, ValueError):
         raise _unsafe("URL target could not be safely resolved") from None
 
-    if any(not address.is_global or address.is_multicast for address in resolved_addresses):
-        raise _unsafe()
+    if not normalized_addresses:
+        raise _unsafe("URL target could not be safely resolved")
+    return candidate, tuple(normalized_addresses)
+
+
+def assert_public_http_url(url: str) -> str:
+    """Validate that *url* is HTTP(S) and every resolved address is public."""
+    candidate, _ = _resolve_public_http_url(url)
     return candidate
+
+
+class _BoundConnectionMixin:
+    """Connect urllib3 to prevalidated sockaddrs without resolving again."""
+
+    def __init__(self, *args, resolved_addresses: tuple[tuple, ...], **kwargs):
+        self._resolved_addresses = resolved_addresses
+        super().__init__(*args, **kwargs)
+
+    def _new_conn(self) -> socket.socket:
+        last_error: OSError | None = None
+        for family, socktype, proto, _canonname, sockaddr in self._resolved_addresses:
+            sock = None
+            try:
+                sock = socket.socket(family, socktype, proto)
+                sock.settimeout(self.timeout)
+                for option in self.socket_options or ():
+                    sock.setsockopt(*option)
+                if self.source_address:
+                    sock.bind(self.source_address)
+                sock.connect(sockaddr)
+                sys.audit("http.client.connect", self, self.host, self.port)
+                return sock
+            except TimeoutError as exc:
+                if sock is not None:
+                    sock.close()
+                raise ConnectTimeoutError(
+                    self,
+                    f"Connection to public target timed out. (connect timeout={self.timeout})",
+                ) from exc
+            except OSError as exc:
+                last_error = exc
+                if sock is not None:
+                    sock.close()
+
+        raise NewConnectionError(
+            self,
+            "Failed to establish a connection to the validated public target",
+        ) from last_error
+
+
+class _BoundHTTPConnection(_BoundConnectionMixin, HTTPConnection):
+    pass
+
+
+class _BoundHTTPSConnection(_BoundConnectionMixin, HTTPSConnection):
+    pass
+
+
+class _BoundHTTPConnectionPool(HTTPConnectionPool):
+    ConnectionCls = _BoundHTTPConnection
+
+
+class _BoundHTTPSConnectionPool(HTTPSConnectionPool):
+    ConnectionCls = _BoundHTTPSConnection
+
+
+class _BoundAddressAdapter(HTTPAdapter):
+    """Requests adapter whose pools retain the origin but dial only validated IPs."""
+
+    def __init__(self, resolved_addresses: tuple[tuple, ...]):
+        self._resolved_addresses = resolved_addresses
+        super().__init__()
+
+    def _pool_for_url(self, url: str, pool_kwargs: dict | None = None):
+        parsed = urlsplit(url)
+        # Keep the original hostname on the pool/connection: urllib3 uses it
+        # for the HTTP Host header and for HTTPS SNI/certificate matching.
+        # Only _new_conn's socket destination is replaced with validated IPs.
+        if parsed.scheme == "https":
+            return _BoundHTTPSConnectionPool(
+                parsed.hostname,
+                parsed.port,
+                resolved_addresses=self._resolved_addresses,
+                **(pool_kwargs or {}),
+            )
+        return _BoundHTTPConnectionPool(
+            parsed.hostname,
+            parsed.port,
+            resolved_addresses=self._resolved_addresses,
+        )
+
+    def get_connection_with_tls_context(
+        self,
+        request,
+        verify,
+        proxies=None,
+        cert=None,
+    ):
+        if proxies:
+            raise _unsafe("Proxy routing is not allowed for safe requests")
+        _host_params, pool_kwargs = self.build_connection_pool_key_attributes(
+            request,
+            verify,
+            cert,
+        )
+        return self._pool_for_url(request.url, pool_kwargs)
+
+    def get_connection(self, url, proxies=None):
+        """Compatibility with Requests versions before get_connection_with_tls_context."""
+        if proxies:
+            raise _unsafe("Proxy routing is not allowed for safe requests")
+        return self._pool_for_url(url)
+
+
+def _send_bound_request(
+    url: str,
+    *,
+    method: str,
+    resolved_addresses: tuple[tuple, ...],
+    **kwargs,
+) -> requests.Response:
+    """Send one hop through an adapter bound to the validated socket addresses."""
+    if kwargs.get("proxies"):
+        raise _unsafe("Proxy routing is not allowed for safe requests")
+    kwargs["allow_redirects"] = False
+    kwargs["proxies"] = {}
+    with requests.Session() as session:
+        session.trust_env = False
+        adapter = _BoundAddressAdapter(resolved_addresses)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        return session.request(method, url, **kwargs)
 
 
 def _origin(url: str) -> tuple[str, str, int | None]:
@@ -120,15 +285,19 @@ def _safe_request(
     if not isinstance(max_redirects, int) or max_redirects < 0:
         raise ValueError("max_redirects must be a non-negative integer")
 
-    current_url = assert_public_http_url(url)
+    current_url, resolved_addresses = _resolve_public_http_url(url)
     current_method = method
     request_kwargs = dict(kwargs)
     request_kwargs["allow_redirects"] = False
 
     redirects_followed = 0
     while True:
-        request_func = requests.get if current_method == "GET" else requests.post
-        response = request_func(current_url, **request_kwargs)
+        response = _send_bound_request(
+            current_url,
+            method=current_method,
+            resolved_addresses=resolved_addresses,
+            **request_kwargs,
+        )
         location = response.headers.get("Location") if response.status_code in _REDIRECT_STATUSES else None
         if not location:
             return response
@@ -138,10 +307,12 @@ def _safe_request(
             raise _unsafe("Too many redirects")
 
         try:
-            next_url = assert_public_http_url(urljoin(current_url, location))
-        except UnsafeUrlError:
+            next_url, next_addresses = _resolve_public_http_url(
+                urljoin(current_url, location)
+            )
+        except (UnsafeUrlError, TypeError, ValueError):
             response.close()
-            raise
+            raise _unsafe() from None
         next_headers = _without_sensitive_cross_origin_headers(
             request_kwargs.get("headers"),
             current_url,
@@ -158,6 +329,7 @@ def _safe_request(
             request_kwargs["headers"] = next_headers
         response.close()
         current_url = next_url
+        resolved_addresses = next_addresses
         redirects_followed += 1
 
 

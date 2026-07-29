@@ -14,8 +14,6 @@ import time
 import urllib.parse
 from pathlib import Path
 
-import requests
-
 from network_safety import UnsafeUrlError, safe_get
 
 
