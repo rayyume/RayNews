@@ -1351,10 +1351,24 @@ EMAIL_DELIVERY_FAILURE_TITLE = "邮件推送服务不可用"
 
 
 def _note_email_delivery_failure(reason: str) -> None:
+    safe_reason = str(reason or "邮件发送失败")
+    configured_api_key = os.environ.get("RESEND_API_KEY", "")
+    if configured_api_key:
+        safe_reason = safe_reason.replace(
+            configured_api_key, "[redacted credential]"
+        )
     safe_reason = re.sub(
-        r"(?i)\bRESEND_API_KEY\b(?:\s*[=:]\s*\S+)?",
+        r"""(?ix)
+        ["']?\bRESEND_API_KEY\b["']?\s*[=:]\s*
+        (?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}\]]+)
+        """,
         "[redacted credential]",
-        str(reason or "邮件发送失败"),
+        safe_reason,
+    )
+    safe_reason = re.sub(
+        r"""(?ix)["']?\bRESEND_API_KEY\b["']?""",
+        "[redacted credential]",
+        safe_reason,
     )
     safe_reason = re.sub(r"\s+", " ", safe_reason).strip()[:300]
     try:
@@ -1362,16 +1376,31 @@ def _note_email_delivery_failure(reason: str) -> None:
             return
     except Exception:
         pass
+
+    delivered = 0
     try:
         admins = [user for user in list_users() if user.get("role") == "admin"]
-        for admin in admins:
+    except Exception as exc:
+        print(f"[notify] email delivery failure admin lookup failed: {exc}")
+        admins = []
+
+    for admin in admins:
+        admin_id = admin.get("id")
+        try:
             add_notification(
-                admin["id"], "email_delivery_failed", EMAIL_DELIVERY_FAILURE_TITLE,
+                admin_id, "email_delivery_failed", EMAIL_DELIVERY_FAILURE_TITLE,
                 f"邮件推送服务不可用。原因：{safe_reason}\n\n"
                 "请检查 RESEND_API_KEY、Resend 账户状态和 RAYNEWS_FROM_EMAIL 配置。",
             )
-    except Exception as exc:
-        print(f"[notify] email delivery failure alert failed: {exc}")
+            delivered += 1
+        except Exception as exc:
+            print(
+                "[notify] email delivery failure alert to admin "
+                f"{admin_id} failed: {exc}"
+            )
+
+    if delivered == 0:
+        _clear_email_delivery_failure_alert()
 
 
 def _clear_email_delivery_failure_alert() -> None:
