@@ -1341,6 +1341,36 @@ def _notify_admins(ntype: str, title: str, body: str) -> int:
     return notified
 
 
+EMAIL_DELIVERY_FAILURE_ALERTED_STATE_KEY = "email_delivery_failure_alerted"
+EMAIL_DELIVERY_FAILURE_TITLE = "邮件推送服务不可用"
+
+
+def _note_email_delivery_failure(reason: str) -> None:
+    safe_reason = re.sub(r"\s+", " ", str(reason or "邮件发送失败")).strip()[:300]
+    try:
+        if not claim_app_state_flag(EMAIL_DELIVERY_FAILURE_ALERTED_STATE_KEY):
+            return
+    except Exception:
+        pass
+    try:
+        admins = [user for user in list_users() if user.get("role") == "admin"]
+        for admin in admins:
+            add_notification(
+                admin["id"], "email_delivery_failed", EMAIL_DELIVERY_FAILURE_TITLE,
+                f"邮件推送服务不可用。原因：{safe_reason}\n\n"
+                "请检查 RESEND_API_KEY、Resend 账户状态和 RAYNEWS_FROM_EMAIL 配置。",
+            )
+    except Exception as exc:
+        print(f"[notify] email delivery failure alert failed: {exc}")
+
+
+def _clear_email_delivery_failure_alert() -> None:
+    try:
+        set_app_state(EMAIL_DELIVERY_FAILURE_ALERTED_STATE_KEY, "0")
+    except Exception as exc:
+        print(f"[notify] email delivery failure alert clear failed: {exc}")
+
+
 # ─── System AI health ──────────────────────────────────────
 #
 # Every background job (auto summary/translation/title/source classification)
