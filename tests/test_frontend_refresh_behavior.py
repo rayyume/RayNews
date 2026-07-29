@@ -782,6 +782,13 @@ def test_notification_markdown_uses_a_bounded_rendering_container():
     assert '<div class="notif-detail-body notif-markdown">${bodyHtml}</div>' in HTML
 
 
+def test_mobile_notification_list_hides_time_but_detail_keeps_it():
+    mobile_css = HTML[HTML.index('@media(max-width:640px){'):HTML.index('</style>')]
+    assert '.notif-time{display:none}' in mobile_css
+    assert '<span class="notif-time">${esc(formatNotifTime(n.created_at))}</span>' in HTML
+    assert '<div class="notif-detail-time">${esc(formatNotifTime(n.created_at))}</div>' in HTML
+
+
 def test_unread_notifications_use_one_shared_new_tag_in_menu_and_list():
     notification_source = "function esc(value) { return String(value); }\n" + source_between(
         "// ═══ In-App Notifications", "// ═══ Admin Panel"
