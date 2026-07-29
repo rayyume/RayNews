@@ -2,6 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 import threading
+import time
 
 import pytest
 
@@ -145,6 +146,41 @@ def test_loopback_proxy_x_real_ip_separates_login_limits(auth_env):
     ).status_code == 429
 
 
+def test_parallel_login_failures_admit_only_five_password_verifications(
+    auth_env,
+    monkeypatch,
+):
+    _create_login_user()
+    start = threading.Barrier(6)
+    verification_calls = 0
+    call_lock = threading.Lock()
+
+    def slow_wrong_password(*args):
+        nonlocal verification_calls
+        with call_lock:
+            verification_calls += 1
+        # Keep every admitted request in password verification long enough for
+        # all contenders to exercise the rate-limit admission boundary.
+        time.sleep(0.15)
+        return False
+
+    monkeypatch.setattr(web_server, "verify_password", slow_wrong_password)
+
+    def attempt(_index):
+        client = web_server.app.test_client()
+        try:
+            start.wait(timeout=5)
+            return _failed_login(client).status_code
+        finally:
+            models.close_db()
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        statuses = list(pool.map(attempt, range(6)))
+
+    assert sorted(statuses) == [401, 401, 401, 401, 401, 429]
+    assert verification_calls == 5
+
+
 def test_successful_invite_request_starts_email_cooldown(auth_env, monkeypatch):
     client = auth_env
     sent = []
@@ -165,7 +201,7 @@ def test_successful_invite_request_starts_email_cooldown(auth_env, monkeypatch):
 
     assert first.status_code == 201
     assert second.status_code == 429
-    assert second.get_json()["retry_after"] > 0
+    assert 0 < second.get_json()["retry_after"] <= 60
     assert second.headers["Retry-After"]
     assert len(sent) == 1
 
@@ -178,7 +214,7 @@ def test_failed_invite_delivery_does_not_consume_allowance(auth_env, monkeypatch
         nonlocal attempts
         attempts += 1
         if attempts == 1:
-            raise RuntimeError("mail provider unavailable")
+            raise notifier.EmailDeliveryRejected("mail provider rejected request")
 
     monkeypatch.setattr(notifier, "send_email", flaky_send)
 
@@ -195,3 +231,164 @@ def test_failed_invite_delivery_does_not_consume_allowance(auth_env, monkeypatch
     assert retried.status_code == 201
     assert attempts == 2
     assert models.count_pending_invitations() == 1
+
+
+def test_ambiguous_invite_delivery_preserves_code_and_idempotency_reservation(
+    auth_env,
+    monkeypatch,
+):
+    client = auth_env
+    idempotency_keys = []
+
+    def ambiguous_send(*args, **kwargs):
+        idempotency_keys.append(kwargs.get("idempotency_key"))
+        raise notifier.EmailDeliveryUncertain("response lost after upload")
+
+    monkeypatch.setattr(notifier, "send_email", ambiguous_send)
+
+    first = client.post(
+        "/auth/request-invite",
+        json={"email": "uncertain-reader@example.com"},
+    )
+    immediate_retry = client.post(
+        "/auth/request-invite",
+        json={"email": "uncertain-reader@example.com"},
+    )
+
+    assert first.status_code == 503
+    assert immediate_retry.status_code == 429
+    assert 0 < immediate_retry.get_json()["retry_after"] <= 60
+    assert len(idempotency_keys) == 1
+    assert idempotency_keys[0]
+    assert models.count_pending_invitations() == 1
+    persisted = models.get_db().execute(
+        "SELECT reservation_token FROM invite_request_limits WHERE email = ?",
+        ("uncertain-reader@example.com",),
+    ).fetchone()
+    assert persisted["reservation_token"] == idempotency_keys[0]
+
+    old_code = models.get_db().execute(
+        "SELECT code FROM invitation_codes "
+        "WHERE email = ? AND used = 0",
+        ("uncertain-reader@example.com",),
+    ).fetchone()["code"]
+    models.get_db().execute(
+        "UPDATE invite_request_limits SET reserved_at = ? WHERE email = ?",
+        (time.time() - 61, "uncertain-reader@example.com"),
+    )
+    models.get_db().commit()
+
+    def delivered_on_new_application(*args, **kwargs):
+        idempotency_keys.append(kwargs.get("idempotency_key"))
+
+    monkeypatch.setattr(notifier, "send_email", delivered_on_new_application)
+    after_one_minute = client.post(
+        "/auth/request-invite",
+        json={"email": "uncertain-reader@example.com"},
+    )
+
+    assert after_one_minute.status_code == 201
+    assert idempotency_keys[1] and idempotency_keys[1] != idempotency_keys[0]
+    codes = models.get_db().execute(
+        "SELECT code, used FROM invitation_codes "
+        "WHERE email = ? ORDER BY id",
+        ("uncertain-reader@example.com",),
+    ).fetchall()
+    assert codes[0]["code"] == old_code and codes[0]["used"] == 1
+    assert codes[1]["code"] != old_code and codes[1]["used"] == 0
+
+
+def test_new_invite_after_one_minute_invalidates_previous_code(
+    auth_env,
+    monkeypatch,
+):
+    client = auth_env
+    monkeypatch.setattr(notifier, "send_email", lambda *args, **kwargs: None)
+
+    first = client.post(
+        "/auth/request-invite",
+        json={"email": "renew-reader@example.com"},
+    )
+    assert first.status_code == 201
+    old_code = models.get_db().execute(
+        "SELECT code FROM invitation_codes "
+        "WHERE email = ? AND used = 0",
+        ("renew-reader@example.com",),
+    ).fetchone()["code"]
+    models.get_db().execute(
+        "UPDATE invite_request_limits SET last_success_at = ? WHERE email = ?",
+        (time.time() - 61, "renew-reader@example.com"),
+    )
+    models.get_db().commit()
+
+    renewed = client.post(
+        "/auth/request-invite",
+        json={"email": "renew-reader@example.com"},
+    )
+
+    assert renewed.status_code == 201
+    rows = models.get_db().execute(
+        "SELECT code, used FROM invitation_codes WHERE email = ? ORDER BY id",
+        ("renew-reader@example.com",),
+    ).fetchall()
+    assert len(rows) == 2
+    assert rows[0]["code"] == old_code
+    assert rows[0]["used"] == 1
+    assert rows[1]["used"] == 0
+    assert rows[1]["code"] != old_code
+
+
+def test_invite_cooldown_expires_after_one_minute(auth_env):
+    token, retry_after = models.claim_invite_request(
+        "minute-reader@example.com",
+        now=1_000,
+    )
+    assert token and retry_after == 0
+    assert models.complete_invite_request(
+        "minute-reader@example.com",
+        token,
+        succeeded=True,
+        now=1_000,
+    )
+
+    blocked_token, retry_after = models.claim_invite_request(
+        "minute-reader@example.com",
+        now=1_059,
+    )
+    assert blocked_token is None
+    assert retry_after == 1
+
+    renewed_token, retry_after = models.claim_invite_request(
+        "minute-reader@example.com",
+        now=1_060,
+    )
+    assert renewed_token and renewed_token != token
+    assert retry_after == 0
+
+
+def test_notifier_marks_provider_rejection_as_definitive(monkeypatch):
+    class RejectedResponse:
+        status_code = 401
+
+        @staticmethod
+        def json():
+            return {"message": "invalid API key"}
+
+    monkeypatch.setattr(
+        notifier.requests,
+        "post",
+        lambda *args, **kwargs: RejectedResponse(),
+    )
+
+    with pytest.raises(notifier.EmailDeliveryRejected):
+        notifier.send_email("bad-key", "admin@example.com", "subject", "body")
+
+
+def test_notifier_marks_lost_response_as_uncertain(monkeypatch):
+    def timeout(*args, **kwargs):
+        raise notifier.requests.Timeout("response timed out")
+
+    monkeypatch.setattr(notifier.requests, "post", timeout)
+
+    with pytest.raises(notifier.EmailDeliveryUncertain):
+        notifier.send_email("key", "admin@example.com", "subject", "body")

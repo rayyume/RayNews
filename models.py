@@ -492,7 +492,8 @@ def count_users() -> int:
 
 AUTH_RATE_LIMIT_SECONDS = 15 * 60
 AUTH_FAILURE_LIMIT = 5
-INVITE_RESERVATION_SECONDS = AUTH_RATE_LIMIT_SECONDS
+INVITE_RATE_LIMIT_SECONDS = 60
+INVITE_RESERVATION_SECONDS = INVITE_RATE_LIMIT_SECONDS
 
 
 def _normalized_rate_limit_login(login: str) -> str:
@@ -517,13 +518,19 @@ def login_retry_after(
     return max(0, math.ceil(float(row["locked_until"]) - current))
 
 
-def record_login_failure(
+def admit_login_attempt(
     client_ip: str,
     login: str,
     *,
     now: float | None = None,
-) -> int:
-    """Persist one failed login and return the resulting lock duration."""
+) -> tuple[bool, int]:
+    """Atomically reserve one of the five permitted password verifications.
+
+    Attempts are counted before password verification so parallel requests
+    cannot all pass an unlocked pre-check. The fifth admission establishes the
+    lock but remains permitted; later admissions receive ``(False, retry)``.
+    A successful admitted login clears the pessimistic count afterward.
+    """
     current = time.time() if now is None else float(now)
     normalized_login = _normalized_rate_limit_login(login)
     db = get_db()
@@ -536,7 +543,7 @@ def record_login_failure(
         ).fetchone()
         if row and float(row["locked_until"]) > current:
             db.commit()
-            return math.ceil(float(row["locked_until"]) - current)
+            return False, math.ceil(float(row["locked_until"]) - current)
 
         if row and current - float(row["updated_at"]) < AUTH_RATE_LIMIT_SECONDS:
             failure_count = int(row["failure_count"]) + 1
@@ -564,7 +571,7 @@ def record_login_failure(
             ),
         )
         db.commit()
-        return max(0, math.ceil(locked_until - current))
+        return True, max(0, math.ceil(locked_until - current))
     except Exception:
         db.rollback()
         raise
@@ -602,8 +609,8 @@ def claim_invite_request(
         ).fetchone()
         if row and row["last_success_at"] is not None:
             elapsed = current - float(row["last_success_at"])
-            if elapsed < AUTH_RATE_LIMIT_SECONDS:
-                retry_after = max(1, math.ceil(AUTH_RATE_LIMIT_SECONDS - elapsed))
+            if elapsed < INVITE_RATE_LIMIT_SECONDS:
+                retry_after = max(1, math.ceil(INVITE_RATE_LIMIT_SECONDS - elapsed))
                 db.commit()
                 return None, retry_after
 
@@ -1331,11 +1338,17 @@ def get_broadcast_publication(broadcast_id: str) -> dict | None:
 
 
 def create_invitation_code(email: str) -> str:
-    """Generate an 8-char alphanumeric code and store it."""
+    """Generate a code, atomically invalidating older codes for the email."""
     db = get_db()
     for attempt in range(10):
         code = secrets.token_hex(4).upper()  # 8 hex chars
         try:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "UPDATE invitation_codes SET used = 1 "
+                "WHERE email = ? AND used = 0",
+                (email,),
+            )
             db.execute(
                 "INSERT INTO invitation_codes (code, email) VALUES (?, ?)",
                 (code, email),
@@ -1343,7 +1356,11 @@ def create_invitation_code(email: str) -> str:
             db.commit()
             return code
         except sqlite3.IntegrityError:
+            db.rollback()
             continue  # code collision, retry
+        except Exception:
+            db.rollback()
+            raise
     raise Exception("failed to generate unique invitation code")
 
 

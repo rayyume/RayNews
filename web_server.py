@@ -27,7 +27,7 @@ from models import (
     get_db, create_registered_user, get_user, get_user_by_email, get_user_by_username,
     update_user, delete_user, list_users, get_first_admin_email, count_users,
     count_active_users_since,
-    verify_password, login_retry_after, record_login_failure, reset_login_failures,
+    verify_password, admit_login_attempt, reset_login_failures,
     claim_invite_request, complete_invite_request,
     add_favorite, remove_favorite, get_favorites, get_all_favorite_article_ids, is_favorited,
     count_article_favorites,
@@ -321,6 +321,7 @@ def request_invite():
     if reservation_token is None:
         return _rate_limited_response(retry_after)
 
+    from notifier import EmailDeliveryRejected
     code = None
     try:
         code = create_invitation_code(email)
@@ -341,8 +342,9 @@ h1{{color:#6e8efb;font-size:18px}}
 </body></html>"""
         send_email(api_key, admin_email,
                    f"RayNews 新用户邀请 — {email}",
-                   html, from_name="RayNews", from_email=from_email)
-    except Exception as e:
+                   html, from_name="RayNews", from_email=from_email,
+                   idempotency_key=reservation_token)
+    except EmailDeliveryRejected as e:
         print(f"[web] Failed to send invite email: {e}")
         if code is not None:
             delete_invitation_code_by_code(code)
@@ -351,7 +353,17 @@ h1{{color:#6e8efb;font-size:18px}}
             reservation_token,
             succeeded=False,
         )
-        return jsonify({"error": f"邮件发送失败，请稍后重试：{e}"}), 500
+        return jsonify({"error": "邮件发送失败，请稍后重试"}), 500
+    except Exception as e:
+        # A timeout, disconnect, malformed success response, or unexpected
+        # transport failure may happen after Resend accepted the message.
+        # Preserve both the code and the one-minute reservation. An immediate
+        # retry is therefore rate-limited; a later application gets a new
+        # idempotency key and atomically invalidates this code.
+        print(f"[web] Invite email delivery status is uncertain: {e}")
+        return jsonify({
+            "error": "邮件发送状态未确认，请稍后重试",
+        }), 503
 
     complete_invite_request(email, reservation_token, succeeded=True)
     return jsonify({"ok": True, "message": "邀请码已发送至管理员邮箱，请等待审核"}), 201
@@ -364,8 +376,8 @@ def login():
     password = data.get("password") or ""
     client_ip = _trusted_client_ip()
 
-    retry_after = login_retry_after(client_ip, login_val)
-    if retry_after:
+    admitted, retry_after = admit_login_attempt(client_ip, login_val)
+    if not admitted:
         return _rate_limited_response(retry_after)
 
     # Try email first (case-insensitive), then username (case-sensitive)
@@ -373,7 +385,6 @@ def login():
     if not user:
         user = get_user_by_username(login_val)
     if not user or not verify_password(password, user["password"]):
-        record_login_failure(client_ip, login_val)
         return jsonify({"error": "invalid email/username or password"}), 401
 
     reset_login_failures(client_ip, login_val)
