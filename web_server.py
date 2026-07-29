@@ -1346,7 +1346,12 @@ EMAIL_DELIVERY_FAILURE_TITLE = "邮件推送服务不可用"
 
 
 def _note_email_delivery_failure(reason: str) -> None:
-    safe_reason = re.sub(r"\s+", " ", str(reason or "邮件发送失败")).strip()[:300]
+    safe_reason = re.sub(
+        r"(?i)\bRESEND_API_KEY\b(?:\s*[=:]\s*\S+)?",
+        "[redacted credential]",
+        str(reason or "邮件发送失败"),
+    )
+    safe_reason = re.sub(r"\s+", " ", safe_reason).strip()[:300]
     try:
         if not claim_app_state_flag(EMAIL_DELIVERY_FAILURE_ALERTED_STATE_KEY):
             return
