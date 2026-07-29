@@ -657,7 +657,8 @@ assert.match(body.innerHTML, /notif-delete-btn/);
     assert 'id="notifListActions"' in HTML
     assert 'onclick="markAllNotifRead()"' in HTML
     assert 'onclick="deleteAllNotifications()"' in HTML
-    assert '.notif-delete-btn{background:#ef4444' in HTML
+    assert '.notif-delete-btn{background:rgba(239,68,68,0.16)' in HTML
+    assert '.notif-delete-btn{background:rgba(239,68,68,0.16);border-color:rgba(239,68,68,0.35);color:#ef4444' in HTML
 
 
 def test_notification_detail_renders_read_and_delete_actions_for_an_unread_item():
