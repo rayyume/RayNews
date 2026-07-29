@@ -1268,7 +1268,10 @@ def _send_notification_email(user_id: int, title: str, body: str,
     own DB-level dedup were ever bypassed."""
     api_key = os.environ.get("RESEND_API_KEY", "")
     to_email = _notification_recipient(user_id)
-    if not api_key or not to_email:
+    if not api_key:
+        _note_email_delivery_failure("RESEND_API_KEY 未配置")
+        return False
+    if not to_email:
         return False
     from_email = os.environ.get("RAYNEWS_FROM_EMAIL") or "onboarding@resend.dev"
 
@@ -1298,8 +1301,10 @@ h1{{color:#6e8efb;font-size:18px}}
             from_email=from_email,
             idempotency_key=idempotency_key,
         )
+        _clear_email_delivery_failure_alert()
         return True
     except Exception as exc:
+        _note_email_delivery_failure(str(exc))
         print(f"[notify] Failed to send notification email to user {user_id}: {exc}")
         return False
 

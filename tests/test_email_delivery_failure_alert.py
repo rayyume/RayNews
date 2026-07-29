@@ -35,3 +35,30 @@ def test_delivery_failure_reason_is_redacted_normalized_and_limited(monkeypatch)
     assert "super-secret" not in safe_reason
     assert "\n" not in safe_reason
     assert len(safe_reason) <= 300
+
+
+def test_missing_resend_key_from_notification_email_alerts_admins(monkeypatch):
+    monkeypatch.delenv("RESEND_API_KEY", raising=False)
+    reasons = []
+    monkeypatch.setattr(web_server, "_note_email_delivery_failure", reasons.append)
+
+    assert web_server._send_notification_email(7, "标题", "正文") is False
+
+    assert reasons == ["RESEND_API_KEY 未配置"]
+
+
+def test_success_clears_suppression_and_later_failure_alerts_again(monkeypatch):
+    monkeypatch.setenv("RESEND_API_KEY", "test-key")
+    monkeypatch.setattr(web_server, "_notification_recipient", lambda user_id: "user@example.com")
+    cleared = []
+    failures = []
+    monkeypatch.setattr(web_server, "_clear_email_delivery_failure_alert", lambda: cleared.append(True))
+    monkeypatch.setattr(web_server, "_note_email_delivery_failure", failures.append)
+    monkeypatch.setattr(web_server, "send_email", lambda *args, **kwargs: {"id": "sent"})
+
+    assert web_server._send_notification_email(7, "标题", "正文") is True
+    monkeypatch.setattr(web_server, "send_email", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("invalid api key")))
+
+    assert web_server._send_notification_email(7, "标题", "正文") is False
+    assert cleared == [True]
+    assert failures == ["invalid api key"]
