@@ -63,6 +63,41 @@ class NotificationsModelTests(unittest.TestCase):
         # Marking an already-read row again is a no-op, not an error.
         self.assertFalse(models.mark_notification_read(self.user_a, nid))
 
+    def test_mark_all_read_only_updates_the_owner_unread_rows(self):
+        a_unread = models.add_notification(self.user_a, "general", "A 未读", "")
+        a_read = models.add_notification(self.user_a, "general", "A 已读", "")
+        b_unread = models.add_notification(self.user_b, "general", "B 未读", "")
+        models.mark_notification_read(self.user_a, a_read)
+
+        self.assertEqual(models.mark_all_notifications_read(self.user_a), 1)
+        self.assertEqual(models.count_unread_notifications(self.user_a), 0)
+        self.assertEqual(models.count_unread_notifications(self.user_b), 1)
+        self.assertEqual(models.list_notifications(self.user_b)[0]["id"], b_unread)
+        self.assertTrue(any(
+            row["id"] == a_unread and row["read_at"]
+            for row in models.list_notifications(self.user_a)
+        ))
+
+    def test_delete_notification_is_scoped_and_idempotent(self):
+        a_id = models.add_notification(self.user_a, "general", "A", "")
+        b_id = models.add_notification(self.user_b, "general", "B", "")
+
+        self.assertFalse(models.delete_notification(self.user_b, a_id))
+        self.assertEqual(models.count_unread_notifications(self.user_a), 1)
+        self.assertTrue(models.delete_notification(self.user_a, a_id))
+        self.assertFalse(models.delete_notification(self.user_a, a_id))
+        self.assertEqual([row["id"] for row in models.list_notifications(self.user_b)], [b_id])
+
+    def test_delete_all_notifications_only_removes_the_owner_rows(self):
+        models.add_notification(self.user_a, "general", "A1", "")
+        models.add_notification(self.user_a, "general", "A2", "")
+        b_id = models.add_notification(self.user_b, "general", "B", "")
+
+        self.assertEqual(models.delete_all_notifications(self.user_a), 2)
+        self.assertEqual(models.delete_all_notifications(self.user_a), 0)
+        self.assertEqual(models.list_notifications(self.user_a), [])
+        self.assertEqual([row["id"] for row in models.list_notifications(self.user_b)], [b_id])
+
     def test_users_only_see_their_own_notifications(self):
         models.add_notification(self.user_a, "share_revoked", "给A的", "")
         models.add_notification(self.user_b, "share_revoked", "给B的", "")
@@ -85,6 +120,19 @@ class NotificationsModelTests(unittest.TestCase):
         items = models.list_notifications(self.user_a, limit=3)
         self.assertIn(old_unread_id, [i["id"] for i in items])
         self.assertEqual(models.count_unread_notifications(self.user_a), 1)
+
+    def test_marking_the_latest_notification_read_does_not_move_it_out_of_view(self):
+        older_unread_ids = [
+            models.add_notification(self.user_a, "share_revoked", f"旧通知{i}", "")
+            for i in range(3)
+        ]
+        latest_id = models.add_notification(self.user_a, "share_revoked", "最新通知", "")
+
+        models.mark_notification_read(self.user_a, latest_id)
+
+        items = models.list_notifications(self.user_a, limit=3)
+        self.assertEqual(items[0]["id"], latest_id)
+        self.assertTrue(set(older_unread_ids).intersection(i["id"] for i in items))
 
     def test_format_defaults_to_plain_and_round_trips(self):
         models.add_notification(self.user_a, "share_revoked", "系统", "正文")

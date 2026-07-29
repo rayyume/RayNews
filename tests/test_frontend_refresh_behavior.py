@@ -514,6 +514,241 @@ assert.equal(context.__notificationLoadState(), 'error');
     )
 
 
+def test_mark_notification_read_updates_the_list_before_the_network_returns():
+    notification_source = "function esc(value) { return String(value); }\n" + source_between(
+        "// ═══ In-App Notifications", "// ═══ Admin Panel"
+    )
+    notification_source += """
+globalThis.__setNotifTestState = (items, unread) => {
+  notifItems = items;
+  notifUnread = unread;
+  notifLoadState = 'ready';
+};
+globalThis.__getNotifTestState = () => ({
+  items: notifItems.map(item => ({ ...item })),
+  unread: notifUnread,
+});
+"""
+    run_node(
+        notification_source,
+        """
+const body = { innerHTML: '' };
+const menuBadge = { style: {}, textContent: '' };
+context.document = {
+  querySelector: () => ({ classList: { toggle: () => {} } }),
+  getElementById: id => id === 'notifBody' ? body : menuBadge,
+};
+context.authToken = 'token';
+let finishPost;
+let postStarted = false;
+context.apiFetch = (url, options) => {
+  assert.equal(url, '/notifications/7/read');
+  assert.equal(options.method, 'POST');
+  postStarted = true;
+  return new Promise(resolve => { finishPost = resolve; });
+};
+context.__setNotifTestState([
+  { id: 7, title: '最新通知', created_at: '2026-07-29T00:00:00', read_at: null },
+], 1);
+
+const request = context.markNotifRead(7);
+assert.equal(postStarted, true);
+assert.notEqual(context.__getNotifTestState().items[0].read_at, null);
+assert.equal(context.__getNotifTestState().unread, 0);
+assert.doesNotMatch(body.innerHTML, /read-btn/);
+
+finishPost({ ok: true, unread: 0 });
+await request;
+""",
+    )
+
+
+def test_pending_notification_read_survives_a_stale_menu_refresh():
+    notification_source = "function esc(value) { return String(value); }\n" + source_between(
+        "// ═══ In-App Notifications", "// ═══ Admin Panel"
+    )
+    notification_source += """
+globalThis.__setNotifTestState = (items, unread) => {
+  notifItems = items;
+  notifUnread = unread;
+  notifLoadState = 'ready';
+};
+globalThis.__getNotifTestState = () => ({
+  items: notifItems.map(item => ({ ...item })),
+  unread: notifUnread,
+});
+"""
+    run_node(
+        notification_source,
+        """
+const body = { innerHTML: '' };
+const menuBadge = { style: {}, textContent: '' };
+context.document = {
+  querySelector: () => ({ classList: { toggle: () => {} } }),
+  getElementById: id => id === 'notifBody' ? body : menuBadge,
+};
+context.authToken = 'token';
+let finishPost;
+context.apiFetch = (url) => {
+  if (url.endsWith('/read')) {
+    return new Promise(resolve => { finishPost = resolve; });
+  }
+  return Promise.resolve({
+    items: [
+      { id: 7, title: '最新通知', created_at: '2026-07-29T00:00:00', read_at: null },
+    ],
+    unread: 1,
+  });
+};
+context.__setNotifTestState([
+  { id: 7, title: '最新通知', created_at: '2026-07-29T00:00:00', read_at: null },
+], 1);
+
+const request = context.markNotifRead(7);
+await context.refreshNotifStatus();
+assert.notEqual(context.__getNotifTestState().items[0].read_at, null);
+assert.equal(context.__getNotifTestState().unread, 0);
+
+finishPost({ ok: true, unread: 0 });
+await request;
+""",
+    )
+
+
+def notification_source_with_action_state_helpers():
+    source = "function esc(value) { return String(value); }\n" + source_between(
+        "// ═══ In-App Notifications", "// ═══ Admin Panel"
+    )
+    return source + """
+globalThis.__setNotifTestState = (items, unread) => {
+  notifItems = items;
+  notifUnread = unread;
+  notifLoadState = 'ready';
+};
+globalThis.__getNotifTestState = () => ({
+  items: notifItems.map(item => ({ ...item })),
+  unread: notifUnread,
+});
+"""
+
+
+def test_notification_list_uses_read_then_red_delete_without_view_button():
+    source = notification_source_with_action_state_helpers()
+    run_node(
+        source,
+        """
+const body = { innerHTML: '' };
+const menuBadge = { style: {}, textContent: '' };
+context.document = {
+  querySelector: () => ({ classList: { toggle: () => {} } }),
+  getElementById: id => id === 'notifBody' ? body : menuBadge,
+};
+context.__setNotifTestState([
+  { id: 7, title: '公告', created_at: '2026-07-29T00:00:00', read_at: null },
+], 1);
+context.renderNotifList();
+assert.match(body.innerHTML, /markNotifRead\(7\)/);
+assert.match(body.innerHTML, /deleteNotif\(7\)/);
+assert.ok(body.innerHTML.indexOf('markNotifRead(7)') < body.innerHTML.indexOf('deleteNotif(7)'));
+assert.doesNotMatch(body.innerHTML, />查看</);
+assert.match(body.innerHTML, /notif-delete-btn/);
+""",
+    )
+    assert 'id="notifListActions"' in HTML
+    assert 'onclick="markAllNotifRead()"' in HTML
+    assert 'onclick="deleteAllNotifications()"' in HTML
+    assert '.notif-delete-btn{background:#ef4444' in HTML
+
+
+def test_notification_detail_renders_read_and_delete_actions_for_an_unread_item():
+    source = notification_source_with_action_state_helpers()
+    run_node(
+        source,
+        """
+const body = { innerHTML: '' };
+const elements = {
+  notifBody: body,
+  notifBackBtn: { style: {} },
+  notifPanelTitle: { textContent: '' },
+  notifListActions: { style: {} },
+  notifMenuBadge: { style: {}, textContent: '' },
+};
+context.document = {
+  querySelector: () => ({ classList: { toggle: () => {} } }),
+  getElementById: id => elements[id],
+};
+context.__setNotifTestState([
+  { id: 7, title: '公告', body: '正文', format: 'plain', created_at: '2026-07-29T00:00:00', read_at: null },
+], 1);
+context.showNotifDetail(7);
+assert.match(body.innerHTML, /markNotifRead\(7, true\)/);
+assert.match(body.innerHTML, /deleteNotif\(7, true\)/);
+assert.match(body.innerHTML, /notif-delete-primary/);
+""",
+    )
+
+
+def test_delete_all_notifications_requires_confirmation_before_requesting():
+    source = notification_source_with_action_state_helpers()
+    run_node(
+        source,
+        """
+const body = { innerHTML: '' };
+const menuBadge = { style: {}, textContent: '' };
+context.document = {
+  querySelector: () => ({ classList: { toggle: () => {} } }),
+  getElementById: id => id === 'notifBody' ? body : menuBadge,
+};
+context.authToken = 'token';
+context.confirm = () => false;
+context.apiFetch = () => { throw new Error('request must not be sent'); };
+context.__setNotifTestState([
+  { id: 7, title: '公告', created_at: '2026-07-29T00:00:00', read_at: null },
+], 1);
+assert.equal(await context.deleteAllNotifications(), false);
+assert.equal(context.__getNotifTestState().items[0].id, 7);
+assert.equal(context.__getNotifTestState().unread, 1);
+""",
+    )
+
+
+def test_optimistic_notification_delete_filters_a_stale_refresh_and_rolls_back_on_error():
+    source = notification_source_with_action_state_helpers()
+    run_node(
+        source,
+        """
+const body = { innerHTML: '' };
+const menuBadge = { style: {}, textContent: '' };
+context.document = {
+  querySelector: () => ({ classList: { toggle: () => {} } }),
+  getElementById: id => id === 'notifBody' ? body : menuBadge,
+};
+context.authToken = 'token';
+context.showToast = () => {};
+let rejectDelete;
+context.apiFetch = url => {
+  if (url === '/notifications/7') return new Promise((resolve, reject) => { rejectDelete = reject; });
+  return Promise.resolve({
+    items: [{ id: 7, title: '公告', created_at: '2026-07-29T00:00:00', read_at: null }],
+    unread: 1,
+  });
+};
+context.__setNotifTestState([
+  { id: 7, title: '公告', created_at: '2026-07-29T00:00:00', read_at: null },
+], 1);
+const request = context.deleteNotif(7);
+assert.deepEqual(context.__getNotifTestState().items, []);
+assert.equal(context.__getNotifTestState().unread, 0);
+await context.refreshNotifStatus();
+assert.deepEqual(context.__getNotifTestState().items, []);
+rejectDelete(new Error('offline'));
+assert.equal(await request, false);
+assert.equal(context.__getNotifTestState().items[0].id, 7);
+assert.equal(context.__getNotifTestState().unread, 1);
+""",
+    )
+
+
 def test_markdown_lists_keep_unordered_bullets_out_of_ordered_lists():
     markdown_source = """
 function esc(value) {

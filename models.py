@@ -947,21 +947,27 @@ def publish_broadcast_atomically(
 
 
 def list_notifications(user_id: int, limit: int = 100) -> list[dict]:
-    """Newest first, but unread rows always sort ahead of read ones.
+    """Newest first, with a second bounded window that keeps old unread rows
+    reachable.
 
-    count_unread_notifications() below counts the whole table, not just this
-    page — without the unread-first ordering, a user who accumulates more
-    than `limit` notifications could have an old unread row pushed off the
-    end by newer *read* ones, leaving it permanently uncounted-but-invisible
-    (the badge would never clear). Unread-first guarantees every unread row
-    is visible as long as the unread count itself stays under `limit`.
+    Sorting unread rows ahead of read rows made the list jump: marking the
+    newest row read moved it below every unread row and could push it outside
+    the LIMIT entirely. The union keeps the latest `limit` rows in stable
+    chronological order and adds up to `limit` unread rows that would otherwise
+    be hidden. As those are marked read, the next unread window becomes visible.
     """
     db = get_db()
     rows = db.execute(
-        "SELECT id, type, title, body, format, created_at, read_at "
-        "FROM notifications WHERE user_id = ? "
-        "ORDER BY (read_at IS NULL) DESC, id DESC LIMIT ?",
-        (user_id, limit),
+        "WITH recent AS ("
+        "  SELECT id, type, title, body, format, created_at, read_at "
+        "  FROM notifications WHERE user_id = ? ORDER BY id DESC LIMIT ?"
+        "), unread AS ("
+        "  SELECT id, type, title, body, format, created_at, read_at "
+        "  FROM notifications WHERE user_id = ? AND read_at IS NULL "
+        "  ORDER BY id DESC LIMIT ?"
+        ") "
+        "SELECT * FROM recent UNION SELECT * FROM unread ORDER BY id DESC",
+        (user_id, limit, user_id, limit),
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -987,6 +993,37 @@ def mark_notification_read(user_id: int, notification_id: int) -> bool:
     )
     db.commit()
     return cur.rowcount > 0
+
+
+def mark_all_notifications_read(user_id: int) -> int:
+    """Mark every unread notification for one user as read."""
+    db = get_db()
+    now = datetime.now().isoformat(timespec="seconds")
+    cur = db.execute(
+        "UPDATE notifications SET read_at = ? WHERE user_id = ? AND read_at IS NULL",
+        (now, user_id),
+    )
+    db.commit()
+    return cur.rowcount
+
+
+def delete_notification(user_id: int, notification_id: int) -> bool:
+    """Delete one user-owned notification; unknown rows are a no-op."""
+    db = get_db()
+    cur = db.execute(
+        "DELETE FROM notifications WHERE id = ? AND user_id = ?",
+        (notification_id, user_id),
+    )
+    db.commit()
+    return cur.rowcount > 0
+
+
+def delete_all_notifications(user_id: int) -> int:
+    """Delete all notifications owned by one user."""
+    db = get_db()
+    cur = db.execute("DELETE FROM notifications WHERE user_id = ?", (user_id,))
+    db.commit()
+    return cur.rowcount
 
 
 def get_broadcast_publication(broadcast_id: str) -> dict | None:

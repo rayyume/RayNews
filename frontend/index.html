@@ -434,6 +434,9 @@ body.body-scroll-lock{overflow:hidden!important}
 .notif-btn{background:none;border:1px solid var(--border);color:var(--text-3);padding:2px 8px;border-radius:6px;font-size:11px;cursor:pointer;font-family:var(--font);transition:all 0.15s;flex-shrink:0}
 .notif-btn:hover{border-color:var(--accent);color:var(--accent)}
 .notif-btn.read-btn:hover{border-color:#22c55e;color:#22c55e}
+.notif-list-actions{display:flex;align-items:center;gap:6px;margin-left:auto;margin-right:8px;flex-shrink:0}
+.notif-delete-btn{background:#ef4444;border-color:#ef4444;color:#fff}
+.notif-delete-btn:hover{background:#dc2626;border-color:#dc2626;color:#fff}
 .notif-detail{padding:20px 24px}
 .notif-detail-time{font-size:11px;color:var(--text-3);margin-bottom:6px}
 .notif-detail-title{font-size:15px;font-weight:700;color:var(--text);margin-bottom:12px;line-height:1.5}
@@ -446,9 +449,11 @@ body.body-scroll-lock{overflow:hidden!important}
 .notif-markdown th,.notif-markdown td{overflow-wrap:anywhere;word-break:break-word}
 .notif-markdown ul,.notif-markdown ol{padding-left:1.5em;margin:0 0 1em}
 .notif-markdown li{margin-bottom:0.4em}
-.notif-detail-footer{display:flex;justify-content:center;padding:20px 0 4px}
+.notif-detail-footer{display:flex;justify-content:center;gap:10px;padding:20px 0 4px}
 .notif-read-primary{background:var(--accent);border:1px solid var(--accent);color:#fff;padding:9px 32px;border-radius:10px;font:inherit;font-size:13px;font-weight:700;cursor:pointer;transition:opacity .15s}
 .notif-read-primary:hover{opacity:.85}
+.notif-delete-primary{background:#ef4444;border:1px solid #ef4444;color:#fff;padding:9px 32px;border-radius:10px;font:inherit;font-size:13px;font-weight:700;cursor:pointer;transition:opacity .15s}
+.notif-delete-primary:hover{opacity:.85}
 
 /* ═══ AI Settings Panel ═══════════════════════════════════ */
 .ai-overlay{position:fixed;inset:0;z-index:400;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity 0.2s}
@@ -885,6 +890,10 @@ body.body-scroll-lock{overflow:hidden!important}
       <div style="display:flex;align-items:center;gap:8px;min-width:0">
         <button class="fav-close" id="notifBackBtn" onclick="showNotifList()" style="display:none;padding:4px 6px">←</button>
         <h2 id="notifPanelTitle">🔔 我的通知</h2>
+      </div>
+      <div class="notif-list-actions" id="notifListActions">
+        <button class="notif-btn" onclick="markAllNotifRead()">全部已读</button>
+        <button class="notif-btn notif-delete-btn" onclick="deleteAllNotifications()">全部删除</button>
       </div>
       <button class="fav-close" onclick="closeNotifications()">✕</button>
     </div>
@@ -4872,7 +4881,10 @@ let notifUnread = 0;
 let notifDetailId = null;
 let notifRequestSeq = 0;
 let lastShareTransitionNotificationId = 0;
-let notifReadChain = Promise.resolve();  // serializes 已读 writes (see markNotifRead)
+let notifPendingReads = new Map();
+let notifPendingDeletes = new Map();
+let notifReadAllPending = false;
+let notifDeleteAllPending = false;
 let notifLoadState = 'idle';  // 'idle' | 'loading' | 'ready' | 'error'
 
 function updateNotifDot() {
@@ -4891,7 +4903,51 @@ function resetNotifState() {
   notifDetailId = null;
   notifLoadState = 'idle';
   lastShareTransitionNotificationId = 0;
+  notifPendingReads.clear();
+  notifPendingDeletes.clear();
+  notifReadAllPending = false;
+  notifDeleteAllPending = false;
   updateNotifDot();
+}
+
+function reconcilePendingNotifDeletes(items, unread, requestToken) {
+  if (notifDeleteAllPending) return { items: [], unread: 0 };
+  let nextItems = Array.isArray(items) ? items : [];
+  let nextUnread = typeof unread === 'number'
+    ? unread
+    : nextItems.filter(item => !item.read_at).length;
+  for (const [id, pending] of notifPendingDeletes) {
+    if (pending.requestToken !== requestToken) continue;
+    const item = nextItems.find(candidate => candidate.id === id);
+    if (item && !item.read_at) nextUnread = Math.max(0, nextUnread - 1);
+    nextItems = nextItems.filter(candidate => candidate.id !== id);
+  }
+  return { items: nextItems, unread: nextUnread };
+}
+
+function reconcilePendingNotifReads(items, unread, requestToken) {
+  const nextItems = Array.isArray(items) ? items : [];
+  let nextUnread = typeof unread === 'number'
+    ? unread
+    : nextItems.filter(item => !item.read_at).length;
+  for (const [id, pending] of notifPendingReads) {
+    if (pending.requestToken !== requestToken) continue;
+    let item = nextItems.find(candidate => candidate.id === id);
+    if (!item) {
+      const existing = notifItems.find(candidate => candidate.id === id);
+      if (existing) {
+        item = { ...existing, read_at: pending.optimisticReadAt };
+        nextItems.push(item);
+      }
+      continue;
+    }
+    if (!item.read_at) {
+      item.read_at = pending.optimisticReadAt;
+      nextUnread = Math.max(0, nextUnread - 1);
+    }
+  }
+  nextItems.sort((a, b) => (Number(b.id) || 0) - (Number(a.id) || 0));
+  return { items: nextItems, unread: nextUnread };
 }
 
 async function refreshNotifStatus() {
@@ -4912,8 +4968,14 @@ async function refreshNotifStatus() {
       return false;
     }
     if (authToken !== requestToken || seq !== notifRequestSeq) return false;
-    notifItems = data.items || [];
-    notifUnread = data.unread || 0;
+    const withoutPendingDeletes = reconcilePendingNotifDeletes(data.items, data.unread, requestToken);
+    const reconciled = reconcilePendingNotifReads(
+      withoutPendingDeletes.items,
+      withoutPendingDeletes.unread,
+      requestToken,
+    );
+    notifItems = reconciled.items;
+    notifUnread = reconciled.unread;
     notifLoadState = 'ready';
     updateNotifDot();
     const newestShareTransitionId = notifItems.reduce((latest, item) => {
@@ -4951,6 +5013,8 @@ function openNotifications() {
   lockBodyScroll();
   notifDetailId = null;
   document.getElementById('notifBackBtn').style.display = 'none';
+  const actions = document.getElementById('notifListActions');
+  if (actions) actions.style.display = '';
   document.getElementById('notifPanelTitle').textContent = '🔔 我的通知';
   if (notifItems.length || notifLoadState === 'error') renderNotifList();
   else document.getElementById('notifBody').innerHTML = '<div class="fav-empty">加载中...</div>';
@@ -4989,8 +5053,8 @@ function renderNotifList() {
       <span class="notif-time">${esc(formatNotifTime(n.created_at))}</span>
       <span class="notif-title">${esc(n.title)}</span>
       ${n.read_at ? '' : '<span class="notification-new-tag">new</span>'}
-      <button class="notif-btn" onclick="event.stopPropagation();showNotifDetail(${n.id})">查看</button>
       ${n.read_at ? '' : `<button class="notif-btn read-btn" onclick="event.stopPropagation();markNotifRead(${n.id})">已读</button>`}
+      <button class="notif-btn notif-delete-btn" onclick="event.stopPropagation();deleteNotif(${n.id})">删除</button>
     </div>
   `).join('');
 }
@@ -5008,6 +5072,8 @@ function retryNotifications() {
 function showNotifList() {
   notifDetailId = null;
   document.getElementById('notifBackBtn').style.display = 'none';
+  const actions = document.getElementById('notifListActions');
+  if (actions) actions.style.display = '';
   document.getElementById('notifPanelTitle').textContent = '🔔 我的通知';
   renderNotifList();
 }
@@ -5027,6 +5093,8 @@ function showNotifDetail(id) {
   if (!n) return;
   notifDetailId = id;
   document.getElementById('notifBackBtn').style.display = '';
+  const actions = document.getElementById('notifListActions');
+  if (actions) actions.style.display = 'none';
   document.getElementById('notifPanelTitle').textContent = '通知详情';
   const bodyHtml = renderNotifBodyHtml(n.body, n.format);
   document.getElementById('notifBody').innerHTML = `
@@ -5034,43 +5102,214 @@ function showNotifDetail(id) {
       <div class="notif-detail-time">${esc(formatNotifTime(n.created_at))}</div>
       <div class="notif-detail-title">${esc(n.title)}</div>
       <div class="notif-detail-body notif-markdown">${bodyHtml}</div>
-      ${n.read_at ? '' : `<div class="notif-detail-footer"><button class="notif-read-primary" onclick="markNotifRead(${n.id}, true)">已读</button></div>`}
+      <div class="notif-detail-footer">
+        ${n.read_at ? '' : `<button class="notif-read-primary" onclick="markNotifRead(${n.id}, true)">已读</button>`}
+        <button class="notif-delete-primary" onclick="deleteNotif(${n.id}, true)">删除</button>
+      </div>
     </div>
   `;
 }
 
 function markNotifRead(id, fromDetail = false) {
-  // Serialize the read-writes: two concurrent POSTs can resolve out of order
-  // (and the server may even process them out of click order), so an older
-  // response's data.unread could clobber a newer one's, leaving a wrong badge
-  // count. Chaining guarantees each POST fires only after the previous one has
-  // fully settled, so the last response always reflects the latest server
-  // state. Capture the token at enqueue time so a queued op that runs after an
-  // account switch is skipped rather than acting under the wrong identity.
   const requestToken = authToken;
-  notifReadChain = notifReadChain.then(() => _applyNotifRead(id, fromDetail, requestToken));
-  return notifReadChain;
+  const n = notifItems.find(item => item.id === id);
+  if (!requestToken || !n || n.read_at || notifPendingReads.has(id)) {
+    return Promise.resolve(false);
+  }
+
+  // Reflect the click immediately instead of making the button wait for a
+  // network round trip. Keep enough state to roll back a failed write.
+  const optimisticReadAt = new Date().toISOString();
+  notifPendingReads.set(id, {
+    requestToken,
+    previousReadAt: n.read_at,
+    optimisticReadAt,
+  });
+  n.read_at = optimisticReadAt;
+  notifUnread = Math.max(0, notifUnread - 1);
+  // A GET already in flight predates this optimistic write and must not replace
+  // it with an unread snapshot.
+  notifRequestSeq++;
+  updateNotifDot();
+  if (fromDetail || notifDetailId === id) showNotifList();
+  else renderNotifList();
+
+  return _applyNotifRead(id, requestToken);
 }
 
-async function _applyNotifRead(id, fromDetail, requestToken) {
-  if (!authToken || authToken !== requestToken) return;  // logged out / switched
-  // Invalidate any GET refresh in flight so it can't land after this write and
-  // revert the row back to unread with stale data.
-  notifRequestSeq++;
+async function _applyNotifRead(id, requestToken) {
   try {
     const data = await apiFetch('/notifications/' + id + '/read', { method: 'POST' });
-    if (!data || data.error) { showToast('❌ 操作失败'); return; }
-    if (authToken !== requestToken) return;
-    const n = notifItems.find(x => x.id === id);
-    if (n && !n.read_at) n.read_at = new Date().toISOString();
-    notifUnread = typeof data.unread === 'number'
-      ? data.unread
-      : notifItems.filter(x => !x.read_at).length;
-    updateNotifDot();
-    if (fromDetail || notifDetailId === id) showNotifList();
-    else renderNotifList();
+    if (!data || data.error) throw new Error('mark read failed');
+    if (authToken !== requestToken) return false;
+    const pending = notifPendingReads.get(id);
+    if (!pending || pending.requestToken !== requestToken) return false;
+    notifPendingReads.delete(id);
+    // Invalidate a GET that began while the POST was pending. Once the last
+    // parallel write settles, fetch one authoritative count instead of trusting
+    // POST responses that can arrive out of order.
+    notifRequestSeq++;
+    if (![...notifPendingReads.values()].some(item => item.requestToken === requestToken)) {
+      refreshNotifStatus();
+    }
+    return true;
   } catch (e) {
+    if (authToken !== requestToken) return false;
+    const pending = notifPendingReads.get(id);
+    if (!pending || pending.requestToken !== requestToken) return false;
+    notifPendingReads.delete(id);
+    notifRequestSeq++;
+    const n = notifItems.find(item => item.id === id);
+    if (n && n.read_at === pending.optimisticReadAt) {
+      n.read_at = pending.previousReadAt;
+      notifUnread++;
+    }
+    updateNotifDot();
+    if (notifDetailId === id) showNotifDetail(id);
+    else renderNotifList();
     showToast('❌ 操作失败');
+    return false;
+  }
+}
+
+function markAllNotifRead() {
+  const requestToken = authToken;
+  if (!requestToken || notifReadAllPending) return Promise.resolve(false);
+  const pending = notifItems
+    .filter(item => !item.read_at && !notifPendingReads.has(item.id))
+    .map(item => {
+      const optimisticReadAt = new Date().toISOString();
+      const operation = { requestToken, previousReadAt: item.read_at, optimisticReadAt };
+      notifPendingReads.set(item.id, operation);
+      item.read_at = optimisticReadAt;
+      return { id: item.id, operation };
+    });
+  if (!pending.length) return Promise.resolve(false);
+
+  notifReadAllPending = true;
+  notifUnread = Math.max(0, notifUnread - pending.length);
+  notifRequestSeq++;
+  updateNotifDot();
+  if (notifDetailId === null) renderNotifList();
+
+  return _applyAllNotifRead(pending, requestToken);
+}
+
+async function _applyAllNotifRead(pending, requestToken) {
+  try {
+    const data = await apiFetch('/notifications/read-all', { method: 'POST' });
+    if (!data || data.error) throw new Error('mark all read failed');
+    if (authToken !== requestToken) return false;
+    for (const entry of pending) {
+      if (notifPendingReads.get(entry.id) === entry.operation) {
+        notifPendingReads.delete(entry.id);
+      }
+    }
+    notifReadAllPending = false;
+    notifRequestSeq++;
+    if (![...notifPendingReads.values()].some(item => item.requestToken === requestToken)) {
+      refreshNotifStatus();
+    }
+    return true;
+  } catch (e) {
+    if (authToken !== requestToken) return false;
+    let restored = 0;
+    for (const entry of pending) {
+      if (notifPendingReads.get(entry.id) !== entry.operation) continue;
+      notifPendingReads.delete(entry.id);
+      const item = notifItems.find(candidate => candidate.id === entry.id);
+      if (item && item.read_at === entry.operation.optimisticReadAt) {
+        item.read_at = entry.operation.previousReadAt;
+        if (!item.read_at) restored++;
+      }
+    }
+    notifReadAllPending = false;
+    notifUnread += restored;
+    notifRequestSeq++;
+    updateNotifDot();
+    if (notifDetailId === null) renderNotifList();
+    showToast('❌ 操作失败');
+    return false;
+  }
+}
+
+function deleteNotif(id, fromDetail = false) {
+  const requestToken = authToken;
+  const index = notifItems.findIndex(item => item.id === id);
+  if (!requestToken || index < 0 || notifPendingDeletes.has(id) || notifDeleteAllPending) {
+    return Promise.resolve(false);
+  }
+  const item = notifItems[index];
+  const pending = { requestToken, item, index, wasUnread: !item.read_at };
+  notifPendingDeletes.set(id, pending);
+  notifItems.splice(index, 1);
+  if (pending.wasUnread) notifUnread = Math.max(0, notifUnread - 1);
+  notifRequestSeq++;
+  updateNotifDot();
+  if (fromDetail || notifDetailId === id) showNotifList();
+  else renderNotifList();
+
+  return _applyNotifDelete(id, pending, requestToken);
+}
+
+async function _applyNotifDelete(id, pending, requestToken) {
+  try {
+    const data = await apiFetch('/notifications/' + id, { method: 'DELETE' });
+    if (!data || data.error) throw new Error('delete notification failed');
+    if (authToken !== requestToken || notifPendingDeletes.get(id) !== pending) return false;
+    notifPendingDeletes.delete(id);
+    notifRequestSeq++;
+    if (!notifPendingDeletes.size && !notifDeleteAllPending) refreshNotifStatus();
+    return true;
+  } catch (e) {
+    if (authToken !== requestToken || notifPendingDeletes.get(id) !== pending) return false;
+    notifPendingDeletes.delete(id);
+    const restoreIndex = Math.min(pending.index, notifItems.length);
+    notifItems.splice(restoreIndex, 0, pending.item);
+    if (pending.wasUnread) notifUnread++;
+    notifRequestSeq++;
+    updateNotifDot();
+    if (notifDetailId === null) renderNotifList();
+    showToast('❌ 删除失败');
+    return false;
+  }
+}
+
+function deleteAllNotifications() {
+  const requestToken = authToken;
+  if (!requestToken || notifDeleteAllPending || !notifItems.length) return Promise.resolve(false);
+  if (!confirm('确定删除全部通知吗？')) return Promise.resolve(false);
+
+  const pending = { requestToken, items: notifItems.slice(), unread: notifUnread };
+  notifDeleteAllPending = true;
+  notifItems = [];
+  notifUnread = 0;
+  notifRequestSeq++;
+  updateNotifDot();
+  if (notifDetailId === null) renderNotifList();
+  return _applyDeleteAllNotifications(pending, requestToken);
+}
+
+async function _applyDeleteAllNotifications(pending, requestToken) {
+  try {
+    const data = await apiFetch('/notifications', { method: 'DELETE' });
+    if (!data || data.error) throw new Error('delete all notifications failed');
+    if (authToken !== requestToken || !notifDeleteAllPending) return false;
+    notifDeleteAllPending = false;
+    notifPendingDeletes.clear();
+    notifRequestSeq++;
+    refreshNotifStatus();
+    return true;
+  } catch (e) {
+    if (authToken !== requestToken || !notifDeleteAllPending) return false;
+    notifDeleteAllPending = false;
+    notifItems = pending.items;
+    notifUnread = pending.unread;
+    notifRequestSeq++;
+    updateNotifDot();
+    if (notifDetailId === null) renderNotifList();
+    showToast('❌ 删除失败');
+    return false;
   }
 }
 

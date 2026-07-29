@@ -40,7 +40,8 @@ from models import (
     create_invitation_code, validate_invitation_code, use_invitation_code,
     list_pending_invitations, delete_invitation_code, delete_invitation_code_by_code,
     add_notification, list_notifications,
-    count_unread_notifications, mark_notification_read,
+    count_unread_notifications, mark_notification_read, mark_all_notifications_read,
+    delete_notification, delete_all_notifications,
     publish_broadcast_atomically,
 )
 from auth import init_auth, create_token, require_auth, require_role
@@ -783,6 +784,27 @@ def mark_notification_read_route(nid):
     # the client only cares about the resulting unread count.
     mark_notification_read(g.user_id, nid)
     return jsonify({"ok": True, "unread": count_unread_notifications(g.user_id)})
+
+
+@app.route("/notifications/read-all", methods=["POST"])
+@require_role("user", "admin")
+def mark_all_notifications_read_route():
+    mark_all_notifications_read(g.user_id)
+    return jsonify({"ok": True, "unread": count_unread_notifications(g.user_id)})
+
+
+@app.route("/notifications/<int:nid>", methods=["DELETE"])
+@require_role("user", "admin")
+def delete_notification_route(nid):
+    delete_notification(g.user_id, nid)
+    return jsonify({"ok": True, "unread": count_unread_notifications(g.user_id)})
+
+
+@app.route("/notifications", methods=["DELETE"])
+@require_role("user", "admin")
+def delete_all_notifications_route():
+    delete_all_notifications(g.user_id)
+    return jsonify({"ok": True, "unread": 0})
 
 
 NOTIF_BROADCAST_BODY_MAX = 20000
