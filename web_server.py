@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify, g
 from flask_cors import CORS
-from notifier import send_email
+from notifier import render_notification_email_body, send_email
 
 # Ensure the project root is on the path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -870,7 +870,9 @@ def delete_all_notifications_route():
 NOTIF_BROADCAST_BODY_MAX = 20000
 
 
-def _broadcast_notification_emails(broadcast_id, user_ids, title, body):
+def _broadcast_notification_emails(
+    broadcast_id, user_ids, title, body, fmt="plain",
+):
     """Fan out an email copy of a broadcast to each user (best-effort, in a
     background thread — mass send must not block the publish request).
 
@@ -883,6 +885,7 @@ def _broadcast_notification_emails(broadcast_id, user_ids, title, body):
             _send_notification_email(
                 uid, title, body,
                 idempotency_key=f"broadcast-{broadcast_id}-{uid}",
+                fmt=fmt,
             )
         except Exception as exc:
             print(f"[broadcast] email to user {uid} failed: {exc}")
@@ -939,7 +942,7 @@ def admin_broadcast_notification():
     if is_new and do_email and user_ids:
         threading.Thread(
             target=_broadcast_notification_emails,
-            args=(broadcast_id, user_ids, title, body),
+            args=(broadcast_id, user_ids, title, body, fmt),
             daemon=True,
         ).start()
     response = {"ok": True, **result}
@@ -1352,13 +1355,12 @@ def _notification_recipient(user_id: int) -> str:
 
 
 def _send_notification_email(user_id: int, title: str, body: str,
-                             idempotency_key: str | None = None) -> bool:
+                             idempotency_key: str | None = None,
+                             fmt: str = "plain") -> bool:
     """Email a user a copy of an in-app notification. Best-effort; never
-    raises. Always renders body as plain text (escaped, newline->br) — for a
-    'markdown'-format notification this means the raw markdown source shows
-    up verbatim (no server-side markdown renderer), by design: see the "邮件
-    正文始终为纯文本" hint in the admin broadcast tab. Do not silently start
-    treating body as HTML here without sanitizing it first.
+    raises. Markdown bodies use the notification email sanitizer; the default
+    remains literal plain text so ordinary system notifications retain their
+    existing rendering.
 
     idempotency_key, when given, is passed to Resend so a caller that retries
     after a lost response (see admin_broadcast_notification's broadcast_id
@@ -1377,16 +1379,23 @@ def _send_notification_email(user_id: int, title: str, body: str,
         return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
     safe_title = _esc(title)
-    safe_body = _esc(body).replace("\n", "<br>")
+    safe_body = render_notification_email_body(body, fmt)
     try:
         html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>
 body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#0a0a0c;color:#e8e8ed;padding:20px;max-width:560px;margin:0 auto}}
-h1{{color:#6e8efb;font-size:18px}}
+.email-title{{color:#6e8efb;font-size:18px}}
 .box{{background:#111114;border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:16px;margin:16px 0;color:#c9c9d4;line-height:1.8;word-break:break-word}}
+.box h1,.box h2,.box h3,.box h4,.box h5,.box h6{{color:#e8e8ed;line-height:1.35;margin:18px 0 8px}}
+.box h1{{font-size:22px}}.box h2{{font-size:20px}}.box h3{{font-size:18px}}.box h4{{font-size:16px}}.box h5{{font-size:15px}}.box h6{{font-size:14px}}
+.box p{{margin:8px 0}}.box ul,.box ol{{margin:8px 0;padding-left:24px}}.box li{{margin:4px 0}}
+.box a{{color:#8aa4ff;text-decoration:underline}}.box blockquote{{border-left:3px solid #6e8efb;margin:12px 0;padding:4px 14px;color:#a7a7b5}}
+.box code{{background:rgba(255,255,255,.08);border-radius:4px;padding:2px 5px;font-size:13px}}.box pre{{background:#08080a;border-radius:8px;overflow-x:auto;padding:12px}}.box pre code{{background:none;padding:0}}
+.box table{{border-collapse:collapse;display:block;max-width:100%;overflow-x:auto;margin:12px 0}}.box th,.box td{{border:1px solid rgba(255,255,255,.14);padding:6px 9px;text-align:left}}.box th{{background:rgba(255,255,255,.06)}}
+.box img{{display:block;max-width:100%;height:auto;margin:12px auto;border-radius:8px}}
 .footer{{font-size:12px;color:#55556a;margin-top:20px}}
 </style></head><body>
-<h1>🔔 {safe_title}</h1>
+<h1 class="email-title">🔔 {safe_title}</h1>
 <div class="box">{safe_body}</div>
 <p class="footer">此邮件由 RayNews 自动发送；同样内容可在 头像菜单 → 我的通知 中查看。不包含密码、验证码或令牌。</p>
 </body></html>"""

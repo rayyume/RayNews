@@ -820,7 +820,7 @@ body.body-scroll-lock{overflow:hidden!important}
           <input type="checkbox" id="notifPubEmail" onclick="event.stopPropagation()">
           <span>同时邮件推送给所有用户</span>
         </div>
-        <p class="ai-hint" style="margin-top:6px">勾选后除站内通知外，会给每个设置了邮箱的用户各发一封邮件（后台发送，未配置发信服务时自动跳过）。<strong>邮件正文始终为纯文本</strong>——Markdown 格式下会原样显示 <code>#</code>/<code>**</code> 等标记且不含图片，完整排版和图片请提醒用户在站内「我的通知」查看。</p>
+        <p class="ai-hint" style="margin-top:6px">勾选后除站内通知外，会给每个设置了邮箱的用户各发一封邮件（后台发送，未配置发信服务时自动跳过）。Markdown 模式会在邮件中同步保留文字排版和图片（图片经服务器缓存代理）；纯文本模式仍按输入内容原样显示。</p>
 
         <label class="ai-label" style="margin-top:14px">预览</label>
         <div id="notifPubPreview" class="notif-detail-body notif-markdown" style="border:1px solid var(--border);border-radius:10px;padding:12px;min-height:48px;background:var(--bg-surface)"></div>
