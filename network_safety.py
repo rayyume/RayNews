@@ -23,7 +23,7 @@ _DEFAULT_MAX_REDIRECTS = 5
 
 @dataclass(frozen=True)
 class _TrustedProxy:
-    """A public, environment-configured proxy trusted to reach public targets."""
+    """An administrator-configured egress proxy trusted to reach public targets."""
 
     url: str
     resolved_addresses: tuple[tuple, ...]
@@ -134,8 +134,64 @@ def assert_public_http_url(url: str) -> str:
     return candidate
 
 
+def _resolve_trusted_proxy_url(url: str) -> tuple[str, tuple[tuple, ...]]:
+    """Validate and bind an administrator-configured HTTP(S) proxy endpoint.
+
+    Unlike requested destinations, this fixed deployment egress endpoint may
+    be loopback/private so Docker and host proxy deployments remain usable.
+    """
+    if not isinstance(url, str):
+        raise _unsafe("Configured proxy URL is invalid")
+    candidate = url.strip()
+    if not candidate or any(ord(char) < 32 or ord(char) == 127 for char in candidate):
+        raise _unsafe("Configured proxy URL is invalid")
+    try:
+        parsed = urlsplit(candidate)
+        port = parsed.port
+    except (TypeError, ValueError):
+        raise _unsafe("Configured proxy URL is invalid") from None
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or "%" in parsed.hostname
+    ):
+        raise _unsafe("Configured proxy URL is invalid")
+
+    try:
+        hostname = parsed.hostname.encode("idna").decode("ascii")
+        target_port = port or (443 if parsed.scheme.lower() == "https" else 80)
+        addresses = socket.getaddrinfo(hostname, target_port, type=socket.SOCK_STREAM)
+        normalized_addresses = []
+        for family, socktype, proto, canonname, sockaddr in addresses:
+            if family not in {socket.AF_INET, socket.AF_INET6}:
+                raise ValueError
+            resolved = ip_address(sockaddr[0])
+            normalized_sockaddr = (
+                (str(resolved), target_port, sockaddr[2], sockaddr[3])
+                if family == socket.AF_INET6
+                else (str(resolved), target_port)
+            )
+            normalized_addresses.append(
+                (
+                    family,
+                    socktype or socket.SOCK_STREAM,
+                    proto or socket.IPPROTO_TCP,
+                    canonname,
+                    normalized_sockaddr,
+                )
+            )
+    except (IndexError, OSError, TypeError, UnicodeError, ValueError):
+        raise _unsafe("Configured proxy URL is invalid") from None
+    if not normalized_addresses:
+        raise _unsafe("Configured proxy URL is invalid")
+    return candidate, tuple(normalized_addresses)
+
+
 def _trusted_environment_proxy(url: str) -> _TrustedProxy | None:
-    """Return a public proxy explicitly configured for this URL's scheme.
+    """Return an administrator-trusted proxy explicitly configured per scheme.
 
     The proxy is an intentional trust boundary: HTTP forwarding/CONNECT makes
     the proxy, not this process, perform the final destination connection.
@@ -146,7 +202,7 @@ def _trusted_environment_proxy(url: str) -> _TrustedProxy | None:
     configured_proxy = os.environ.get(environment_name, "").strip()
     if not configured_proxy:
         return None
-    proxy_url, proxy_addresses = _resolve_public_http_url(configured_proxy)
+    proxy_url, proxy_addresses = _resolve_trusted_proxy_url(configured_proxy)
     return _TrustedProxy(proxy_url, proxy_addresses)
 
 

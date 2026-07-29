@@ -279,10 +279,40 @@ def test_safe_request_uses_validated_documented_environment_proxy(
     }
 
 
-def test_private_environment_proxy_is_rejected_before_transport(monkeypatch):
+@pytest.mark.parametrize(
+    ("url", "proxy_environment"),
+    [
+        ("http://public.example/image.jpg", "HTTP_PROXY"),
+        ("https://public.example/v1/messages", "HTTPS_PROXY"),
+    ],
+)
+def test_private_environment_proxy_is_routed_as_trusted_egress(
+    monkeypatch, url, proxy_environment
+):
+    monkeypatch.delenv("HTTP_PROXY", raising=False)
     monkeypatch.delenv("HTTPS_PROXY", raising=False)
-    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:8080")
+    monkeypatch.setenv(proxy_environment, "http://127.0.0.1:7890")
     monkeypatch.setattr(socket, "getaddrinfo", _public_dns)
+    captured = {}
+
+    def fake_request(self, method, request_url, **kwargs):
+        captured["proxies"] = kwargs["proxies"]
+        return _Response(200)
+
+    monkeypatch.setattr(network_safety.requests.Session, "request", fake_request)
+
+    result = safe_get(url)
+
+    assert result.status_code == 200
+    assert captured["proxies"] == {
+        "http": "http://127.0.0.1:7890",
+        "https": "http://127.0.0.1:7890",
+    }
+
+
+def test_malformed_environment_proxy_is_rejected_safely(monkeypatch):
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    monkeypatch.setenv("HTTP_PROXY", "http://[invalid")
     transport_called = False
 
     def fake_request(self, method, request_url, **kwargs):
@@ -292,9 +322,10 @@ def test_private_environment_proxy_is_rejected_before_transport(monkeypatch):
 
     monkeypatch.setattr(network_safety.requests.Session, "request", fake_request)
 
-    with pytest.raises(UnsafeUrlError):
-        safe_get("http://public.example/image.jpg")
+    with pytest.raises(UnsafeUrlError) as exc_info:
+        safe_get("http://8.8.8.8/image.jpg")
 
+    assert str(exc_info.value) == "Configured proxy URL is invalid"
     assert transport_called is False
 
 
@@ -370,6 +401,27 @@ def test_proxy_adapter_dials_validated_proxy_but_keeps_https_origin_identity():
     assert connection.host == "proxy.example"
     assert connection._tunnel_host == "model.example"
     assert connection._resolved_addresses == (proxy,)
+
+
+def test_image_fetch_uses_private_environment_proxy_for_public_image(monkeypatch):
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:7890")
+    monkeypatch.setattr(socket, "getaddrinfo", _public_dns)
+    captured = {}
+    response = _Response(200, {"Content-Type": "image/jpeg"})
+    response.raise_for_status = lambda: None
+    response.iter_content = lambda chunk_size: [b"jpeg"]
+
+    def fake_request(self, method, request_url, **kwargs):
+        captured["proxies"] = kwargs["proxies"]
+        return response
+
+    monkeypatch.setattr(network_safety.requests.Session, "request", fake_request)
+
+    body, content_type = image_cache.fetch_remote_image("http://public.example/image.jpg")
+
+    assert (body, content_type) == (b"jpeg", "image/jpeg")
+    assert captured["proxies"]["http"] == "http://127.0.0.1:7890"
 
 
 def test_image_fetch_rejects_private_target_before_transport(monkeypatch):
