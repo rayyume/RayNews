@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import socket
 import sys
+import os
+from dataclasses import dataclass
 from ipaddress import ip_address
 from urllib.parse import urljoin, urlsplit
 
 import requests
 from requests.adapters import HTTPAdapter
+from urllib3 import ProxyManager
 from urllib3.connection import HTTPConnection, HTTPSConnection
 from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
 from urllib3.exceptions import ConnectTimeoutError, NewConnectionError
@@ -16,6 +19,14 @@ from urllib3.exceptions import ConnectTimeoutError, NewConnectionError
 
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 _DEFAULT_MAX_REDIRECTS = 5
+
+
+@dataclass(frozen=True)
+class _TrustedProxy:
+    """A public, environment-configured proxy trusted to reach public targets."""
+
+    url: str
+    resolved_addresses: tuple[tuple, ...]
 
 
 class UnsafeUrlError(ValueError):
@@ -123,6 +134,22 @@ def assert_public_http_url(url: str) -> str:
     return candidate
 
 
+def _trusted_environment_proxy(url: str) -> _TrustedProxy | None:
+    """Return a public proxy explicitly configured for this URL's scheme.
+
+    The proxy is an intentional trust boundary: HTTP forwarding/CONNECT makes
+    the proxy, not this process, perform the final destination connection.
+    Destination URLs are still validated before this boundary is crossed.
+    """
+    scheme = urlsplit(url).scheme.lower()
+    environment_name = "HTTPS_PROXY" if scheme == "https" else "HTTP_PROXY"
+    configured_proxy = os.environ.get(environment_name, "").strip()
+    if not configured_proxy:
+        return None
+    proxy_url, proxy_addresses = _resolve_public_http_url(configured_proxy)
+    return _TrustedProxy(proxy_url, proxy_addresses)
+
+
 class _BoundConnectionMixin:
     """Connect urllib3 to prevalidated sockaddrs without resolving again."""
 
@@ -181,8 +208,17 @@ class _BoundHTTPSConnectionPool(HTTPSConnectionPool):
 class _BoundAddressAdapter(HTTPAdapter):
     """Requests adapter whose pools retain the origin but dial only validated IPs."""
 
-    def __init__(self, resolved_addresses: tuple[tuple, ...]):
+    def __init__(
+        self,
+        resolved_addresses: tuple[tuple, ...],
+        *,
+        trusted_proxy: _TrustedProxy | None = None,
+    ):
         self._resolved_addresses = resolved_addresses
+        self._trusted_proxy = trusted_proxy
+        self._proxy_manager = (
+            ProxyManager(trusted_proxy.url) if trusted_proxy is not None else None
+        )
         super().__init__()
 
     def _pool_for_url(self, url: str, pool_kwargs: dict | None = None):
@@ -190,11 +226,28 @@ class _BoundAddressAdapter(HTTPAdapter):
         # Keep the original hostname on the pool/connection: urllib3 uses it
         # for the HTTP Host header and for HTTPS SNI/certificate matching.
         # Only _new_conn's socket destination is replaced with validated IPs.
+        if self._trusted_proxy is not None and parsed.scheme == "http":
+            proxy = self._proxy_manager.proxy
+            return _BoundHTTPConnectionPool(
+                proxy.host,
+                proxy.port,
+                resolved_addresses=self._trusted_proxy.resolved_addresses,
+            )
         if parsed.scheme == "https":
+            proxy_kwargs = {}
+            connection_addresses = self._resolved_addresses
+            if self._trusted_proxy is not None:
+                proxy_kwargs = {
+                    "_proxy": self._proxy_manager.proxy,
+                    "_proxy_headers": self._proxy_manager.proxy_headers,
+                    "_proxy_config": self._proxy_manager.proxy_config,
+                }
+                connection_addresses = self._trusted_proxy.resolved_addresses
             return _BoundHTTPSConnectionPool(
                 parsed.hostname,
                 parsed.port,
-                resolved_addresses=self._resolved_addresses,
+                resolved_addresses=connection_addresses,
+                **proxy_kwargs,
                 **(pool_kwargs or {}),
             )
         return _BoundHTTPConnectionPool(
@@ -210,7 +263,7 @@ class _BoundAddressAdapter(HTTPAdapter):
         proxies=None,
         cert=None,
     ):
-        if proxies:
+        if bool(proxies) != bool(self._trusted_proxy):
             raise _unsafe("Proxy routing is not allowed for safe requests")
         _host_params, pool_kwargs = self.build_connection_pool_key_attributes(
             request,
@@ -221,7 +274,7 @@ class _BoundAddressAdapter(HTTPAdapter):
 
     def get_connection(self, url, proxies=None):
         """Compatibility with Requests versions before get_connection_with_tls_context."""
-        if proxies:
+        if bool(proxies) != bool(self._trusted_proxy):
             raise _unsafe("Proxy routing is not allowed for safe requests")
         return self._pool_for_url(url)
 
@@ -231,19 +284,24 @@ def _send_bound_request(
     *,
     method: str,
     resolved_addresses: tuple[tuple, ...],
+    trusted_proxy: _TrustedProxy | None = None,
     **kwargs,
 ) -> requests.Response:
     """Send one hop through an adapter bound to the validated socket addresses."""
-    if kwargs.get("proxies"):
-        raise _unsafe("Proxy routing is not allowed for safe requests")
+    if "proxies" in kwargs:
+        raise _unsafe("Explicit proxy routing is not allowed for safe requests")
     kwargs["allow_redirects"] = False
-    kwargs["proxies"] = {}
+    proxies = (
+        {"http": trusted_proxy.url, "https": trusted_proxy.url}
+        if trusted_proxy is not None
+        else {}
+    )
     with requests.Session() as session:
         session.trust_env = False
-        adapter = _BoundAddressAdapter(resolved_addresses)
+        adapter = _BoundAddressAdapter(resolved_addresses, trusted_proxy=trusted_proxy)
         session.mount("http://", adapter)
         session.mount("https://", adapter)
-        return session.request(method, url, **kwargs)
+        return session.request(method, url, proxies=proxies, **kwargs)
 
 
 def _origin(url: str) -> tuple[str, str, int | None]:
@@ -284,6 +342,8 @@ def _safe_request(
         raise ValueError("safe requests support GET and POST only")
     if not isinstance(max_redirects, int) or max_redirects < 0:
         raise ValueError("max_redirects must be a non-negative integer")
+    if "proxies" in kwargs:
+        raise _unsafe("Explicit proxy routing is not allowed for safe requests")
 
     current_url, resolved_addresses = _resolve_public_http_url(url)
     current_method = method
@@ -292,10 +352,12 @@ def _safe_request(
 
     redirects_followed = 0
     while True:
+        trusted_proxy = _trusted_environment_proxy(current_url)
         response = _send_bound_request(
             current_url,
             method=current_method,
             resolved_addresses=resolved_addresses,
+            trusted_proxy=trusted_proxy,
             **request_kwargs,
         )
         location = response.headers.get("Location") if response.status_code in _REDIRECT_STATUSES else None

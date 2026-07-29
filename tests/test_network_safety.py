@@ -248,6 +248,130 @@ def test_malformed_redirect_is_closed_and_raises_fixed_safe_error(monkeypatch):
     assert first.closed
 
 
+@pytest.mark.parametrize(
+    ("url", "proxy_environment"),
+    [
+        ("http://public.example/image.jpg", "HTTP_PROXY"),
+        ("https://public.example/v1/messages", "HTTPS_PROXY"),
+    ],
+)
+def test_safe_request_uses_validated_documented_environment_proxy(
+    monkeypatch, url, proxy_environment
+):
+    monkeypatch.delenv("HTTP_PROXY", raising=False)
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    monkeypatch.setenv(proxy_environment, "http://proxy.example:8080")
+    monkeypatch.setattr(socket, "getaddrinfo", _public_dns)
+    captured = {}
+
+    def fake_request(self, method, request_url, **kwargs):
+        captured["proxies"] = kwargs["proxies"]
+        return _Response(200)
+
+    monkeypatch.setattr(network_safety.requests.Session, "request", fake_request)
+
+    result = safe_get(url)
+
+    assert result.status_code == 200
+    assert captured["proxies"] == {
+        "http": "http://proxy.example:8080",
+        "https": "http://proxy.example:8080",
+    }
+
+
+def test_private_environment_proxy_is_rejected_before_transport(monkeypatch):
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:8080")
+    monkeypatch.setattr(socket, "getaddrinfo", _public_dns)
+    transport_called = False
+
+    def fake_request(self, method, request_url, **kwargs):
+        nonlocal transport_called
+        transport_called = True
+        return _Response(200)
+
+    monkeypatch.setattr(network_safety.requests.Session, "request", fake_request)
+
+    with pytest.raises(UnsafeUrlError):
+        safe_get("http://public.example/image.jpg")
+
+    assert transport_called is False
+
+
+def test_trusted_proxy_cannot_bypass_private_destination_rejection(monkeypatch):
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example:8080")
+    transport_called = False
+
+    def fake_request(self, method, request_url, **kwargs):
+        nonlocal transport_called
+        transport_called = True
+        return _Response(200)
+
+    monkeypatch.setattr(network_safety.requests.Session, "request", fake_request)
+
+    with pytest.raises(UnsafeUrlError):
+        safe_get("http://127.0.0.1/private")
+
+    assert transport_called is False
+
+
+def test_explicit_request_proxy_is_rejected(monkeypatch):
+    monkeypatch.delenv("HTTP_PROXY", raising=False)
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    transport_called = False
+
+    def fake_request(self, method, request_url, **kwargs):
+        nonlocal transport_called
+        transport_called = True
+        return _Response(200)
+
+    monkeypatch.setattr(network_safety.requests.Session, "request", fake_request)
+
+    with pytest.raises(UnsafeUrlError):
+        safe_get("http://8.8.8.8/image.jpg", proxies={"http": "http://proxy.example"})
+
+    assert transport_called is False
+
+
+def test_proxy_adapter_dials_validated_proxy_but_keeps_https_origin_identity():
+    destination = (
+        socket.AF_INET,
+        socket.SOCK_STREAM,
+        socket.IPPROTO_TCP,
+        "",
+        ("93.184.216.34", 443),
+    )
+    proxy = (
+        socket.AF_INET,
+        socket.SOCK_STREAM,
+        socket.IPPROTO_TCP,
+        "",
+        ("93.184.216.35", 8080),
+    )
+    trusted_proxy = network_safety._TrustedProxy(
+        "http://proxy.example:8080",
+        (proxy,),
+    )
+    adapter = network_safety._BoundAddressAdapter((destination,), trusted_proxy=trusted_proxy)
+    request = network_safety.requests.Request("GET", "https://model.example/v1").prepare()
+
+    pool = adapter.get_connection_with_tls_context(
+        request,
+        verify=True,
+        proxies={"https": trusted_proxy.url},
+    )
+    connection = pool._new_conn()
+
+    assert pool.host == "model.example"
+    assert pool.proxy.host == "proxy.example"
+    # urllib3 dials the proxy first, then switches TLS SNI/certificate
+    # verification to this CONNECT tunnel host.
+    connection.set_tunnel(scheme="http", host="model.example", port=443)
+    assert connection.host == "proxy.example"
+    assert connection._tunnel_host == "model.example"
+    assert connection._resolved_addresses == (proxy,)
+
+
 def test_image_fetch_rejects_private_target_before_transport(monkeypatch):
     transport_called = False
 

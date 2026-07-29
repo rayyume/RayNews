@@ -49,6 +49,7 @@ from models import (
 from auth import init_auth, create_token, require_auth, require_role
 from auth_validation import is_valid_email
 from ai_service import AIService
+from network_safety import UnsafeUrlError, assert_public_http_url
 from image_cache import (
     enqueue_article_image_prefetch, unpin_article_images,
     cache_stats, evict_article_images, evict_unreferenced_images, collect_image_urls, open_cache_connection, _url_hash,
@@ -552,13 +553,19 @@ def admin_get_system_ai_config():
 def admin_set_system_ai_config():
     try:
         data = request.get_json(silent=True) or {}
+        existing = get_system_ai_config()
         api_key = data.get("api_key", "")
         if "****" in api_key:
-            existing = get_system_ai_config()
             if existing.get("api_key"):
                 data["api_key"] = existing["api_key"]
             else:
                 data.pop("api_key", None)
+        try:
+            assert_public_http_url(
+                data.get("endpoint", existing.get("endpoint", "https://api.openai.com/v1"))
+            )
+        except UnsafeUrlError:
+            return jsonify({"error": "AI endpoint must be a public HTTP(S) URL"}), 400
         config = set_system_ai_config(**data)
         # A new key/endpoint deserves a clean slate: without this, the previous
         # config's `alerted` flag would mute the alert for an equally broken one.
@@ -969,14 +976,22 @@ def get_ai_config_route():
 def set_ai_config_route():
     try:
         data = request.get_json(silent=True) or {}
+        existing = get_ai_config(g.user_id)
         # If api_key contains "****", it's the masked placeholder — preserve existing
         api_key = data.get("api_key", "")
         if "****" in api_key:
-            existing = get_ai_config(g.user_id)
             if existing and existing.get("api_key"):
                 data["api_key"] = existing["api_key"]
             else:
                 data.pop("api_key", None)
+        effective_endpoint = data.get(
+            "endpoint",
+            (existing or {}).get("endpoint", "https://api.openai.com/v1"),
+        )
+        try:
+            assert_public_http_url(effective_endpoint)
+        except UnsafeUrlError:
+            return jsonify({"error": "AI endpoint must be a public HTTP(S) URL"}), 400
         config = set_ai_config(g.user_id, **data)
         settings = get_user_settings(g.user_id) or {}
         share_check = None
