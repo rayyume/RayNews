@@ -1,5 +1,7 @@
 """Safe rendering contracts for notification email bodies."""
 
+import pytest
+
 import notifier
 
 
@@ -75,11 +77,78 @@ def test_markdown_renderer_removes_dangerous_html_protocols_and_attributes(monke
     assert "bad link" in rendered
 
 
+def test_markdown_renderer_removes_comments_containing_forbidden_markup(monkeypatch):
+    monkeypatch.setenv("RAYNEWS_PUBLIC_URL", "https://news.example")
+
+    rendered = notifier.render_notification_email_body(
+        '<!-- <img src="https://img.example/raw.png" onerror="steal()"> -->',
+        "markdown",
+    )
+
+    assert "<!--" not in rendered
+    assert "img.example" not in rendered
+    assert "onerror" not in rendered
+
+
+def test_markdown_renderer_removes_mso_conditional_comments(monkeypatch):
+    monkeypatch.setenv("RAYNEWS_PUBLIC_URL", "https://news.example")
+
+    rendered = notifier.render_notification_email_body(
+        '<!--[if mso]><img src="https://img.example/mso.png" '
+        'onerror="steal()"><![endif]-->',
+        "markdown",
+    )
+
+    assert "<!--" not in rendered
+    assert "[if mso]" not in rendered.lower()
+    assert "img.example" not in rendered
+    assert "onerror" not in rendered
+
+
+def test_markdown_renderer_removes_declarations_and_processing_instructions(
+    monkeypatch,
+):
+    monkeypatch.setenv("RAYNEWS_PUBLIC_URL", "https://news.example")
+
+    rendered = notifier.render_notification_email_body(
+        "<!DOCTYPE html>\n<?raynews unsafe?>\n正文",
+        "markdown",
+    )
+
+    assert "<!DOCTYPE" not in rendered.upper()
+    assert "<?" not in rendered
+    assert "unsafe" not in rendered
+    assert "<p>正文</p>" in rendered
+
+
 def test_markdown_renderer_drops_images_without_safe_absolute_public_url(monkeypatch):
     monkeypatch.delenv("RAYNEWS_PUBLIC_URL", raising=False)
 
     rendered = notifier.render_notification_email_body(
         "before ![private](https://img.example/a.png) after",
+        "markdown",
+    )
+
+    assert "<img" not in rendered
+    assert "img.example" not in rendered
+
+
+@pytest.mark.parametrize(
+    "public_url",
+    [
+        "https://news.example/?next=x",
+        "https://news.example/#fragment",
+        "https://news.example/raynews",
+    ],
+)
+def test_markdown_renderer_rejects_ambiguous_public_base_urls(
+    monkeypatch,
+    public_url,
+):
+    monkeypatch.setenv("RAYNEWS_PUBLIC_URL", public_url)
+
+    rendered = notifier.render_notification_email_body(
+        "before ![image](https://img.example/a.png) after",
         "markdown",
     )
 

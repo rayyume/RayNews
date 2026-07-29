@@ -7,7 +7,7 @@ import markdown
 import requests
 from urllib.parse import quote, urlsplit
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Comment, Declaration, Doctype, ProcessingInstruction
 
 RESEND_API = "https://api.resend.com/emails"
 
@@ -51,6 +51,17 @@ def _safe_absolute_http_url(value: str) -> str | None:
     return value
 
 
+def _safe_public_base_url(value: str) -> str | None:
+    """Return a normalized public origin suitable for absolute proxy URLs."""
+    value = _safe_absolute_http_url(value)
+    if not value:
+        return None
+    parsed = urlsplit(value)
+    if parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
+        return None
+    return f"{parsed.scheme.lower()}://{parsed.netloc}"
+
+
 def render_notification_email_body(body: str, fmt: str = "plain") -> str:
     """Render a notification body for email, sanitizing Markdown as HTML."""
     body = body or ""
@@ -63,11 +74,17 @@ def render_notification_email_body(body: str, fmt: str = "plain") -> str:
     )
     soup = BeautifulSoup(rendered, "html.parser")
 
+    for node in list(soup.find_all(string=lambda value: isinstance(
+        value,
+        (Comment, Declaration, Doctype, ProcessingInstruction),
+    ))):
+        node.extract()
+
     for tag in list(soup.find_all(_NOTIFICATION_EMAIL_DANGEROUS_TAGS)):
         tag.decompose()
 
-    public_url = _safe_absolute_http_url(
-        os.environ.get("RAYNEWS_PUBLIC_URL", "").rstrip("/")
+    public_url = _safe_public_base_url(
+        os.environ.get("RAYNEWS_PUBLIC_URL", "")
     )
     for tag in list(soup.find_all(True)):
         if tag.name not in _NOTIFICATION_EMAIL_TAGS:

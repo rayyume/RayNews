@@ -113,3 +113,64 @@ Result: exit 0, no output.
 ## Concerns
 
 No task blocker. The only verification noise is the repository's existing `datetime.utcnow()` deprecation warnings.
+
+---
+
+## Review correction: non-tag nodes and public base validation
+
+The initial implementation review identified two sanitizer gaps. Both were fixed in a focused TDD cycle.
+
+### RED
+
+Added explicit renderer regressions for:
+
+- ordinary HTML comments containing an unproxied image and event handler;
+- Outlook/MSO conditional comments containing an unproxied image and event handler;
+- doctype/declaration and processing-instruction nodes;
+- `RAYNEWS_PUBLIC_URL` values containing a query, fragment, or ambiguous non-root path.
+
+Command:
+
+```bash
+python3 -m pytest -q tests/test_notification_email_markdown.py
+```
+
+Result before the correction: **6 failed, 5 passed**. The three non-tag payload tests showed the forbidden nodes serialized unchanged, and all three malformed public-base cases emitted an image with an incorrectly concatenated proxy URL.
+
+### GREEN
+
+Command:
+
+```bash
+python3 -m pytest -q tests/test_notification_email_markdown.py
+```
+
+Result after the correction: **11 passed**.
+
+Implementation decisions:
+
+- Remove BeautifulSoup `Comment`, `Declaration`, `Doctype`, and `ProcessingInstruction` nodes before tag allowlisting and serialization. This removes both ordinary and MSO conditional comments as whole inert/dangerous payload containers rather than exposing or attempting to sanitize their embedded text.
+- Validate `RAYNEWS_PUBLIC_URL` separately from ordinary link/image URLs. It must be an absolute credential-free HTTP(S) origin with no query, fragment, or non-root path. A valid value is reconstructed from parsed scheme and authority before `/img-cache` is appended, eliminating arbitrary-string concatenation ambiguity.
+
+### Review-correction regression verification
+
+Command:
+
+```bash
+python3 -m pytest -q tests/test_notification_email_markdown.py tests/test_notification_broadcast.py tests/test_email_delivery_failure_alert.py
+```
+
+Result: **37 passed**, with 23 pre-existing `datetime.utcnow()` deprecation warnings.
+
+Command:
+
+```bash
+python3 -m pytest -q tests/test_notification_email_markdown.py tests/test_notification_broadcast.py tests/test_email_delivery_failure_alert.py tests/test_daily_summary_delivery.py tests/test_daily_summary_retry.py tests/test_share_suspension_notice_delivery.py
+python3 -m py_compile notifier.py web_server.py tests/test_notification_email_markdown.py
+python3 -m compileall -q .
+git diff --check
+```
+
+Result: **78 passed** with 23 pre-existing deprecation warnings; compilation and diff checks exited 0 with no output.
+
+Review correction changed only `notifier.py`, `tests/test_notification_email_markdown.py`, and this task report.
