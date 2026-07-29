@@ -7,6 +7,7 @@ import re
 from collections import defaultdict
 from typing import Optional
 
+from network_safety import safe_post
 from source_categories import CATEGORY_NAMES, CATEGORY_ORDER, clamp_weighted, local_short_source_name
 
 
@@ -219,7 +220,7 @@ class AIService:
             body["thinking"] = {"type": "disabled"}
 
         try:
-            resp = requests.post(
+            resp = safe_post(
                 url,
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
@@ -280,7 +281,7 @@ class AIService:
             body["system"] = system
 
         try:
-            resp = requests.post(
+            resp = safe_post(
                 url,
                 headers={
                     "x-api-key": self.api_key,
