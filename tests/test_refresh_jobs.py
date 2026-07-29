@@ -9,11 +9,103 @@ import pytest
 import refresh_server
 
 
+class _CountDb:
+    def __init__(self, count):
+        self.count = count
+        self.closed = False
+
+    def execute(self, sql):
+        assert sql == "SELECT COUNT(*) FROM articles"
+        return self
+
+    def fetchone(self):
+        return (self.count,)
+
+    def close(self):
+        self.closed = True
+
+
+class _EmptyNewsDb:
+    def execute(self, sql, args=()):
+        self.sql = sql
+        return self
+
+    def fetchall(self):
+        return []
+
+    def fetchone(self):
+        return (0,)
+
+    def close(self):
+        pass
+
+
+def test_api_meta_public_payload_is_exactly_the_count(monkeypatch):
+    db = _CountDb(3)
+    monkeypatch.setattr(refresh_server, "get_db", lambda: db)
+
+    payload = json.loads(refresh_server.api_meta())
+
+    assert payload == {"count": 3}
+    assert db.closed is True
+
+
+def test_api_meta_failure_is_generic_and_detailed_only_in_logs(monkeypatch, caplog):
+    def fail():
+        raise sqlite3.OperationalError("secret path /app/data/news.db")
+
+    monkeypatch.setattr(refresh_server, "get_db", fail)
+
+    with caplog.at_level("ERROR"):
+        payload = json.loads(refresh_server.api_meta())
+
+    assert payload == {"error": "internal server error"}
+    assert "secret path /app/data/news.db" in caplog.text
+
+
+def test_api_news_failure_keeps_diagnostics_but_hides_exception_detail(
+    monkeypatch, caplog
+):
+    def fail():
+        raise sqlite3.OperationalError("secret path /app/data/news.db")
+
+    monkeypatch.setattr(refresh_server, "get_db", fail)
+
+    with caplog.at_level("ERROR"):
+        payload = json.loads(refresh_server.api_news_list({}))
+
+    assert payload["error"] == "internal server error"
+    assert set(payload["diagnostics"]) == {"refresh_job", "global_article_count"}
+    assert "secret path /app/data/news.db" not in json.dumps(payload)
+    assert "secret path /app/data/news.db" in caplog.text
+
+
+def test_empty_api_news_exposes_only_minimal_cold_start_diagnostics(monkeypatch):
+    monkeypatch.setattr(refresh_server, "get_db", lambda: _EmptyNewsDb())
+
+    payload = json.loads(refresh_server.api_news_list({}))
+
+    assert payload["items"] == []
+    assert payload["total"] == 0
+    assert set(payload["diagnostics"]) == {"refresh_job", "global_article_count"}
+    for private_key in (
+        "data_dir",
+        "db_path",
+        "db_exists",
+        "db_size",
+        "news_json",
+        "fetcher_state",
+        "telegram_channel",
+        "last_fetch",
+    ):
+        assert private_key not in payload["diagnostics"]
+
+
 def reset_job(monkeypatch):
     monkeypatch.setattr(refresh_server, "REFRESH_JOB", {
         "job_id": "", "status": "idle", "trigger": "",
         "started_at": None, "finished_at": None,
-        "new_count": 0, "error": "",
+        "new_count": 0, "new_ids": [], "error": "",
     })
     monkeypatch.setattr(refresh_server, "REFRESH_JOB_HISTORY", OrderedDict())
 
@@ -197,7 +289,7 @@ def test_thread_launch_failure_transitions_job_to_failed(monkeypatch, failure_po
     assert "/app/data" not in json.dumps(payload)
 
 
-def test_refresh_job_reports_new_count(monkeypatch):
+def test_refresh_job_reports_new_count_and_ids(monkeypatch):
     reset_job(monkeypatch)
     snapshots = iter(({1, 2}, {1, 2, 3, 4}))
     monkeypatch.setattr(refresh_server, "article_id_snapshot", lambda: next(snapshots))
@@ -210,6 +302,7 @@ def test_refresh_job_reports_new_count(monkeypatch):
     payload = wait_terminal()
     assert payload["status"] == "completed"
     assert payload["new_count"] == 2
+    assert payload["new_ids"] == [3, 4]
     assert payload["finished_at"] is not None
 
 

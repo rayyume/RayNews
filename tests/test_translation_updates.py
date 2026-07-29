@@ -50,8 +50,24 @@ def _insert_article(article_id=42):
     conn.close()
 
 
-def test_manual_translation_save_does_not_publish_translation_update(client):
+def test_manual_translation_save_does_not_publish_translation_update(client, monkeypatch):
     _insert_article()
+    monkeypatch.setattr(
+        web_server,
+        "get_user_settings",
+        lambda user_id: {
+            "share_ai_results": 1,
+            "share_suspended": 0,
+            "share_last_check_ok": 1,
+            "share_last_check_revision": 2,
+            "share_current_config_revision": 2,
+        },
+    )
+    monkeypatch.setattr(
+        web_server,
+        "get_ai_config",
+        lambda user_id: {"provider": "openai", "model": "model"},
+    )
 
     response = client.post(
         "/ai/result/42",
@@ -69,7 +85,9 @@ def test_manual_translation_save_does_not_publish_translation_update(client):
     assert translation_updated_at is None
 
 
-def test_automatic_full_body_translation_publishes_translation_update(client, monkeypatch):
+def test_automatic_full_body_translation_keeps_canonical_body_and_publishes_cache_update(
+    client, monkeypatch
+):
     _insert_article()
     monkeypatch.setattr(web_server, "_invalidate_refresh_server_cache", lambda article_id: None)
 
@@ -94,12 +112,13 @@ def test_automatic_full_body_translation_publishes_translation_update(client, mo
     )
 
     conn = sqlite3.connect(web_server.NEWS_DB)
-    body_html, translation_updated_at = conn.execute(
-        "SELECT a.body_html, r.translation_updated_at FROM articles a "
+    body_html, translation, translation_updated_at = conn.execute(
+        "SELECT a.body_html, r.translation, r.translation_updated_at FROM articles a "
         "JOIN ai_results r ON r.article_id = a.id WHERE a.id = 42"
     ).fetchone()
     conn.close()
-    assert body_html == "<p>中文正文</p>"
+    assert body_html == "<p>English body</p>"
+    assert json.loads(translation)["html"] == "<p>中文正文</p>"
     assert translation_updated_at
 
 

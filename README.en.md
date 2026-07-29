@@ -52,7 +52,7 @@ RayNews has two independent AI paths: **user AI** and **server AI**. They use di
 | Main uses | Manual summary, manual translation, on-demand daily digest | Automatic summaries, title/body translation, title shortening, global daily digest, and AI source classification |
 | Result scope | The user can opt in to sharing summary, translation, and title results after a connectivity check | Results are stored in the shared cache for every user to reuse |
 
-**User AI:** Configure and enable your own endpoint, model, protocol, and key under **Settings → AI**. You can manually summarize or translate an article and request an on-demand daily digest. The browser uses the key to call your selected provider directly, so configure it only on trusted devices. Generated results are saved in RayNews; enabling **Share AI results** requires a live connectivity check and is periodically revalidated.
+**User AI:** Configure and enable your own endpoint, model, protocol, and key under **Settings → AI**. You can manually summarize or translate an article and request an on-demand daily digest. The browser uses the key to call your selected provider directly, so configure it only on trusted devices. Generated results are saved in RayNews; enabling **Share AI results** requires a live connectivity check and is revalidated hourly (`AI_SHARE_REVALIDATION_INTERVAL_HOURS`, fractions allowed, floored at 5 minutes): a failed check suspends sharing and notifies that user in-app and by email; recovery restores it and notifies again.
 
 **Server AI:** An administrator configures the system endpoint, model, protocol, and key under **Admin Settings → Server API**, then enables the needed background jobs under the summary and translation settings. The server processes new articles in small batches for automatic summaries, English title/body translation, and long-title shortening. The same system AI generates the global daily digest once before it is emailed to subscribed users. The server AI key is never sent to regular-user browsers.
 
@@ -72,6 +72,18 @@ AI results are stored in the database to avoid duplicate calls. Administrators s
 - Later registrations require an invitation code and start with the User role
 - Administrators manage user roles, global sources, and global article deletion
 - Resend can deliver invitation codes, registration notices, test messages, scheduled daily digests, and historical-purge result emails
+- The daily digest is generated server-side exactly once per day at 21:00 Beijing time using the admin-configured server API; it cannot be triggered manually.
+  Every user gets an in-app copy by default (avatar menu -> My Notifications); the email copy is opted into separately under Settings -> Notifications
+- After 3 consecutive system-AI call failures (counted across auto summary/translation/title/source classification and the
+  daily digest), every admin gets one email + in-app alert naming the affected jobs and the reason; recovery sends one more.
+  Tune with `SYSTEM_AI_FAILURE_ALERT_THRESHOLD`
+- If an auto AI job is enabled while the server API config is cleared or disabled, nothing calls the provider at all, so
+  that state is itself counted toward the same streak — the alert lands within about a minute, with no probe requests
+- Both the server-side and user-side AI alerts are edge-triggered: one alert per outage, one notice on recovery, nothing
+  in between. The server-side "already alerted" flag is persisted, so a container restart mid-outage does not re-send it
+- A failed generation is retried every 10 minutes; after 3 failed retries the scheduler stops for the day and alerts every admin
+  by email and in-app notification with the reason. Admins then see the reason and a "retry" button on the home page ✨ daily
+  digest panel (the button appears only after a failure, and only for admins)
 
 ## Architecture
 

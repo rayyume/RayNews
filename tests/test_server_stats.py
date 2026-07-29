@@ -239,3 +239,68 @@ def test_purge_date_parser_rejects_invalid_and_future_dates(monkeypatch):
 
 def test_container_stats_does_not_sleep_while_serving_request():
     assert "time.sleep" not in inspect.getsource(web_server._container_resource_stats)
+
+
+def test_delete_article_ids_honours_cleanup_sources_when_nothing_matched(tmp_path, monkeypatch):
+    # The batched purge passes cleanup_sources=False to skip the full-table stale
+    # source scan per batch. A batch whose ids were all already deleted must not
+    # sneak that scan back in through the early-return path.
+    db_path = tmp_path / f"news-{uuid.uuid4().hex}.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(ARTICLES_DDL)
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(web_server, "NEWS_DB", str(db_path))
+    monkeypatch.setattr(web_server, "_news_conn_local", web_server.threading.local())
+    monkeypatch.setattr(web_server, "_news_schema_ready_paths", set())
+
+    calls = []
+    monkeypatch.setattr(
+        web_server, "cleanup_stale_source_categories",
+        lambda conn: (calls.append(1), 0)[1],
+    )
+
+    skipped = web_server._delete_article_ids([999], cleanup_sources=False)
+    assert skipped == {"deleted": 0, "deleted_sources": 0}
+    assert calls == []
+
+    swept = web_server._delete_article_ids([999], cleanup_sources=True)
+    assert swept["deleted"] == 0
+    assert calls == [1]
+
+
+def test_purge_task_history_is_bounded_and_keeps_running_tasks(monkeypatch):
+    # _purge_tasks used to grow for the life of the process.
+    monkeypatch.setattr(web_server, "_purge_tasks", {})
+    monkeypatch.setattr(web_server, "PURGE_TASK_HISTORY_LIMIT", 3)
+
+    with web_server._purge_tasks_lock:
+        web_server._purge_tasks["running"] = {"status": "running"}
+        for i in range(6):
+            web_server._purge_tasks[f"done-{i}"] = {
+                "status": "completed", "finished_at": i,
+            }
+        web_server._trim_purge_tasks_locked()
+
+    assert len(web_server._purge_tasks) == 3
+    # A still-running purge must stay pollable no matter how many finished after it.
+    assert "running" in web_server._purge_tasks
+    # Oldest finished tasks are the ones evicted.
+    assert "done-0" not in web_server._purge_tasks
+    assert "done-5" in web_server._purge_tasks
+
+
+def test_purge_worker_does_not_reuse_the_request_threads_connection(tmp_path, monkeypatch):
+    # _get_news_db() hands out a thread-local connection. The purge worker runs in
+    # its own thread, so it must ask for its own rather than closing over the
+    # requesting thread's — driving one sqlite3 connection from two threads is the
+    # exact hazard the per-thread design exists to remove.
+    import inspect
+
+    source = inspect.getsource(web_server._purge_articles_before)
+    worker = source[source.index("def _run_purge()"):]
+    assert "cleanup_stale_source_categories(purge_conn)" in worker
+    assert "purge_conn = _get_news_db()" in worker
+    # No use of the enclosing request-thread connection inside the worker.
+    assert "cleanup_stale_source_categories(conn)" not in worker

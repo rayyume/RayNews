@@ -24,7 +24,11 @@ from image_cache import (
     fetch_remote_image,
     get_cached_image,
 )
-from news_schema import ensure_deleted_articles_table
+from news_schema import (
+    enable_wal_mode,
+    ensure_article_schema,
+    ensure_article_title_columns as _ensure_article_title_columns_shared,
+)
 from source_categories import (
     CATEGORY_NAMES, CATEGORY_ORDER, ensure_article_source_columns,
     maintain_source_categories, source_rows,
@@ -52,6 +56,7 @@ REFRESH_JOB = {
     "started_at": None,
     "finished_at": None,
     "new_count": 0,
+    "new_ids": [],
     "error": "",
 }
 REFRESH_JOB_HISTORY_LIMIT = 16
@@ -77,30 +82,23 @@ def ensure_schema_once(conn: sqlite3.Connection) -> None:
     with _schema_lock:
         if _schema_ready_event.is_set() and _schema_ready:
             return
-        ensure_article_source_columns(conn)
-        ensure_article_title_columns(conn)
-        ensure_deleted_articles_table(conn)
-        conn.commit()
+        ensure_article_schema(conn)
         globals()["_schema_ready"] = True
         _schema_ready_event.set()
 
 
 def ensure_article_title_columns(conn: sqlite3.Connection) -> None:
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(articles)").fetchall()}
-    if "original_title" not in cols:
-        conn.execute("ALTER TABLE articles ADD COLUMN original_title TEXT")
-    if "title_updated_at" not in cols:
-        conn.execute("ALTER TABLE articles ADD COLUMN title_updated_at TEXT")
-    if "title_source" not in cols:
-        conn.execute("ALTER TABLE articles ADD COLUMN title_source TEXT")
+    """Backward-compatible title helper backed by the shared migrator."""
+    _ensure_article_title_columns_shared(conn)
 
 
 def get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(str(DB_FILE), timeout=30)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=30000")
     ensure_schema_once(conn)
+    enable_wal_mode(conn)
+    conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 
@@ -175,13 +173,16 @@ def run_fetcher():
                 # are still caught within that window by whichever refresh (this
                 # one, the next manual click, or the 15-minute periodic cycle)
                 # lands after the throttle expires.
-                result = maintain_source_categories(conn, force=False)
+                # Deliberately not named `result`: that name holds the fetcher
+                # subprocess's CompletedProcess, which the return value below
+                # still depends on.
+                maintenance = maintain_source_categories(conn, force=False)
                 conn.commit()
                 conn.close()
-                if result.get("discovered") or result.get("deleted"):
+                if maintenance.get("discovered") or maintenance.get("deleted"):
                     log.info(
-                        f"Source maintenance: discovered {result.get('discovered', 0)}, "
-                        f"cleaned up {result.get('deleted', 0)} stale source(s)"
+                        f"Source maintenance: discovered {maintenance.get('discovered', 0)}, "
+                        f"cleaned up {maintenance.get('deleted', 0)} stale source(s)"
                     )
             except Exception as e:
                 log.warning(f"Source cleanup failed: {e}")
@@ -243,8 +244,25 @@ def _read_fetch_progress() -> dict | None:
         return None
 
 
+def _positive_article_ids(values) -> list[int]:
+    result = set()
+    try:
+        values = iter(values or [])
+    except TypeError:
+        return []
+    for value in values:
+        try:
+            article_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if article_id > 0:
+            result.add(article_id)
+    return sorted(result)
+
+
 def _refresh_job_json_locked() -> bytes:
     payload = dict(REFRESH_JOB)
+    baseline_ids = set(payload.pop("_baseline_ids", set()) or set())
     if payload.get("status") == "running":
         progress = _read_fetch_progress()
         # Match by exact job_id (fetcher.py stamps it from FETCH_JOB_ID) rather than a
@@ -252,7 +270,18 @@ def _refresh_job_json_locked() -> bytes:
         # the same wall-clock second could otherwise let a previous cycle's progress
         # file be mistaken for this job's progress.
         if progress and progress.get("job_id") and progress.get("job_id") == payload.get("job_id"):
-            payload["new_count_so_far"] = progress.get("inserted", 0)
+            if "inserted_ids" in progress:
+                new_ids_so_far = [
+                    article_id
+                    for article_id in _positive_article_ids(progress.get("inserted_ids"))
+                    if article_id not in baseline_ids
+                ]
+                payload["new_count_so_far"] = len(new_ids_so_far)
+                payload["new_ids_so_far"] = new_ids_so_far
+            else:
+                # Older fetchers did not publish IDs. Preserve their diagnostic
+                # progress count, but never invent IDs from that arithmetic value.
+                payload["new_count_so_far"] = progress.get("inserted", 0)
     return json.dumps(payload).encode()
 
 
@@ -265,7 +294,9 @@ def _remember_terminal_job_locked() -> None:
     job_id = REFRESH_JOB.get("job_id") or ""
     if not job_id or REFRESH_JOB.get("status") not in ("completed", "failed"):
         return
-    REFRESH_JOB_HISTORY[job_id] = dict(REFRESH_JOB)
+    terminal = dict(REFRESH_JOB)
+    terminal.pop("_baseline_ids", None)
+    REFRESH_JOB_HISTORY[job_id] = terminal
     REFRESH_JOB_HISTORY.move_to_end(job_id)
     while len(REFRESH_JOB_HISTORY) > REFRESH_JOB_HISTORY_LIMIT:
         REFRESH_JOB_HISTORY.popitem(last=False)
@@ -290,15 +321,25 @@ def get_refresh_job_status_response(job_id: str | None = None) -> tuple[bytes, i
 def _run_refresh_job(job_id: str) -> None:
     global CURRENT_FETCH_JOB_ID
     new_count = 0
+    new_ids = []
     error = ""
     try:
         before_ids = article_id_snapshot()
+        with REFRESH_JOB_LOCK:
+            if REFRESH_JOB["job_id"] != job_id:
+                return
+            # The pre-job snapshot already exists for the terminal difference.
+            # Reuse it to filter running progress instead of adding a status-time
+            # database scan for every poll.
+            REFRESH_JOB["_baseline_ids"] = before_ids
         CURRENT_FETCH_JOB_ID = job_id
         body, status = run_fetcher()
         payload = json.loads(body)
         completed = 200 <= status < 300 and payload.get("status") == "ok"
         if completed:
-            new_count = len(article_id_snapshot() - before_ids)
+            after_ids = article_id_snapshot()
+            new_ids = sorted(after_ids - before_ids)
+            new_count = len(new_ids)
         else:
             payload_error = payload.get("error")
             error = (
@@ -317,6 +358,7 @@ def _run_refresh_job(job_id: str) -> None:
             "status": "completed" if completed else "failed",
             "finished_at": int(time.time()),
             "new_count": new_count,
+            "new_ids": new_ids if completed else [],
             "error": error,
         })
         _remember_terminal_job_locked()
@@ -334,6 +376,8 @@ def start_refresh_job(trigger: str = "manual") -> tuple[bytes, int]:
             "started_at": int(time.time()),
             "finished_at": None,
             "new_count": 0,
+            "new_ids": [],
+            "_baseline_ids": set(),
             "error": "",
         })
         body = _refresh_job_json_locked()
@@ -493,15 +537,25 @@ def _diagnostics(count: int | None = None) -> dict:
     }
 
 
+def _public_cold_start_diagnostics(count: int | None = None) -> dict:
+    """Bounded diagnostics required by the homepage during a cold start."""
+    diagnostics = _diagnostics(count)
+    return {
+        "refresh_job": diagnostics["refresh_job"],
+        "global_article_count": diagnostics["global_article_count"],
+    }
+
+
 def api_meta() -> bytes:
     """GET /api/meta — total article count."""
     conn = None
     try:
         conn = get_db()
         count = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
-        return json.dumps({"count": count, "diagnostics": _diagnostics(count)}).encode()
-    except Exception as e:
-        return json.dumps({"error": str(e), "diagnostics": _diagnostics(None)}).encode()
+        return json.dumps({"count": count}).encode()
+    except Exception:
+        log.exception("Failed to read public API metadata")
+        return json.dumps({"error": "internal server error"}).encode()
     finally:
         if conn:
             conn.close()
@@ -663,10 +717,14 @@ def api_news_list(params: dict) -> bytes:
             "total": total,
             "page": page,
             "size": size,
-            "diagnostics": _diagnostics(total) if total == 0 else None,
+            "diagnostics": _public_cold_start_diagnostics(total) if total == 0 else None,
         }, ensure_ascii=False).encode()
-    except Exception as e:
-        return json.dumps({"error": str(e), "diagnostics": _diagnostics(None)}).encode()
+    except Exception:
+        log.exception("Failed to read public news list")
+        return json.dumps({
+            "error": "internal server error",
+            "diagnostics": _public_cold_start_diagnostics(None),
+        }).encode()
     finally:
         if conn:
             conn.close()
@@ -710,8 +768,9 @@ def api_title_updates(params: dict) -> bytes:
             "items": items,
             "cursor": cursor,
         }, ensure_ascii=False).encode()
-    except Exception as e:
-        return json.dumps({"error": str(e)}).encode()
+    except Exception:
+        log.exception("Failed to read public title updates")
+        return json.dumps({"error": "internal server error"}).encode()
     finally:
         if conn:
             conn.close()
@@ -753,11 +812,18 @@ def _build_news_detail_response(article_id: int) -> bytes:
         item["feed_source"] = item.get("feed_source") or item.get("source") or ""
         item["origin_source"] = item.get("origin_source") or ""
         item["source"] = item["feed_source"]
+        # /api/news/<id> is intentionally unauthenticated. Shared translated
+        # HTML is delivered only by the authenticated /ai/result endpoint.
+        item["body_html"] = (
+            item.get("original_body_html") or item.get("body_html") or ""
+        )
+        item.pop("original_body_html", None)
         item = _clean_article_display_fields(item)
         result = json.dumps(item, ensure_ascii=False).encode()
         return result
-    except Exception as e:
-        return json.dumps({"error": str(e)}).encode()
+    except Exception:
+        log.exception("Failed to read public article detail")
+        return json.dumps({"error": "internal server error"}).encode()
     finally:
         if conn:
             conn.close()
@@ -817,8 +883,9 @@ def api_sources() -> bytes:
             "category_names": CATEGORY_NAMES,
             "sources": rows,
         }, ensure_ascii=False).encode()
-    except Exception as e:
-        return json.dumps({"error": str(e)}).encode()
+    except Exception:
+        log.exception("Failed to read public source metadata")
+        return json.dumps({"error": "internal server error"}).encode()
     finally:
         if conn:
             conn.close()
@@ -951,8 +1018,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body)
                 return
-            log.warning(f"img-cache failed for {img_url[:80]}: {e}")
-            send_text(self, f"Image cache error: {e}", 502)
+            log.exception("Image cache failed")
+            send_text(self, "Image cache unavailable", 502)
 
     def log_message(self, fmt, *args):
         log.info(fmt % args)

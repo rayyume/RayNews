@@ -10,11 +10,14 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import ai_service
+import network_safety
 from ai_service import AIService
 
 
 class FakeResp:
     ok = True
+    status_code = 200
+    headers = {}
 
     def __init__(self, payload):
         self._payload = payload
@@ -30,11 +33,11 @@ def _svc(provider="openai"):
 def _patch_post(monkeypatch, payload):
     captured = {}
 
-    def fake_post(url, headers=None, json=None, timeout=None):
+    def fake_post(url, headers=None, json=None, timeout=None, **kwargs):
         captured["body"] = json
         return FakeResp(payload)
 
-    monkeypatch.setattr(ai_service.requests, "post", fake_post)
+    monkeypatch.setattr(network_safety, "_send_bound_request", fake_post)
     return captured
 
 

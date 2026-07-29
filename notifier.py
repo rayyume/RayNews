@@ -8,6 +8,18 @@ import requests
 RESEND_API = "https://api.resend.com/emails"
 
 
+class EmailDeliveryError(Exception):
+    """Base class for delivery errors with a known certainty category."""
+
+
+class EmailDeliveryRejected(EmailDeliveryError):
+    """The provider definitively rejected the request before accepting it."""
+
+
+class EmailDeliveryUncertain(EmailDeliveryError):
+    """The request may have been accepted but its final response was lost."""
+
+
 def send_email(api_key: str, to_email: str, subject: str,
                html_body: str, from_name: str = "RayNews",
                from_email: str | None = None,
@@ -26,21 +38,41 @@ def send_email(api_key: str, to_email: str, subject: str,
     }
     if idempotency_key:
         headers["Idempotency-Key"] = idempotency_key
-    resp = requests.post(
-        RESEND_API,
-        headers=headers,
-        json={
-            "from": f"{from_name} <{from_email}>",
-            "to": [to_email],
-            "subject": subject,
-            "html": html_body,
-        },
-        timeout=15,
-    )
-    data = resp.json()
+    try:
+        resp = requests.post(
+            RESEND_API,
+            headers=headers,
+            json={
+                "from": f"{from_name} <{from_email}>",
+                "to": [to_email],
+                "subject": subject,
+                "html": html_body,
+            },
+            timeout=15,
+        )
+    except requests.RequestException as exc:
+        raise EmailDeliveryUncertain(
+            "email delivery status is uncertain"
+        ) from exc
+
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        if 400 <= resp.status_code < 500:
+            raise EmailDeliveryRejected(
+                f"Resend error: {resp.status_code}"
+            ) from exc
+        raise EmailDeliveryUncertain(
+            "email delivery status is uncertain"
+        ) from exc
     if resp.status_code not in (200, 201):
         error_msg = data.get("message") or data.get("error", str(resp.status_code))
-        raise Exception(f"Resend error: {error_msg}")
+        error_type = (
+            EmailDeliveryRejected
+            if 400 <= resp.status_code < 500
+            else EmailDeliveryUncertain
+        )
+        raise error_type(f"Resend error: {error_msg}")
     return data
 
 

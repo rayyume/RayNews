@@ -1,0 +1,306 @@
+"""Retry chain and admin alerting when the daily summary fails to generate.
+
+A failed generation is retried every DAILY_SUMMARY_RETRY_INTERVAL_SECONDS; after
+DAILY_SUMMARY_MAX_RETRIES further failures the day is given up on and every admin
+is alerted (email + in-app) with the reason. The ✨ panel then shows admins — and
+only admins — the reason and a manual retry button.
+"""
+
+import datetime as dt
+import sqlite3
+import sys
+import uuid
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import web_server
+
+BEIJING = dt.timezone(dt.timedelta(hours=8))
+TODAY = "2026-07-10"
+
+
+@pytest.fixture
+def news_db(tmp_path, monkeypatch):
+    db_path = tmp_path / f"news-{uuid.uuid4().hex}.db"
+    sqlite3.connect(str(db_path)).close()  # the helpers no-op unless NEWS_DB exists
+    monkeypatch.setattr(web_server, "NEWS_DB", str(db_path))
+    monkeypatch.setattr(web_server, "_beijing_now",
+                        lambda: dt.datetime(2026, 7, 10, 21, 3, tzinfo=BEIJING))
+    return db_path
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    """Drivable epoch clock — retry pacing is 10 real minutes wide."""
+    state = {"now": 1_000_000}
+    monkeypatch.setattr(web_server, "_epoch_now", lambda: state["now"])
+    return state
+
+
+def _fail_generation(monkeypatch, reason="AI 生成失败：401 invalid api key"):
+    def failing(date_str):
+        web_server._set_daily_summary_error(reason)
+        return None
+    monkeypatch.setattr(web_server, "_generate_daily_summary_global", failing)
+
+
+def _stub_delivery(monkeypatch):
+    monkeypatch.setattr(web_server, "_deliver_daily_summary_inapp",
+                        lambda date_str, result: {"status": "ok", "recipients": 1})
+    monkeypatch.setattr(web_server, "_deliver_daily_summary_email",
+                        lambda date_str, result, force=False: {"status": "ok", "sent": 1})
+
+
+@pytest.fixture
+def alerts(monkeypatch):
+    """Capture admin alerts instead of touching the user DB / Resend."""
+    sent = []
+    monkeypatch.setattr(web_server, "list_users", lambda: [
+        {"id": 1, "role": "admin"}, {"id": 2, "role": "user"}, {"id": 3, "role": "admin"},
+    ])
+    monkeypatch.setattr(web_server, "_notify_user",
+                        lambda user_id, ntype, title, body: sent.append(
+                            {"user_id": user_id, "type": ntype, "title": title, "body": body}))
+    return sent
+
+
+def test_failure_is_recorded_with_its_reason_and_a_retry_ten_minutes_out(
+        news_db, clock, alerts, monkeypatch):
+    _fail_generation(monkeypatch)
+
+    outcome = web_server._broadcast_daily_summary(force=False)
+
+    assert outcome["status"] == "error"
+    assert "401 invalid api key" in outcome["reason"]
+    state = web_server._get_daily_summary_failure(TODAY)
+    assert state["attempts"] == 1
+    assert state["given_up"] == 0
+    assert state["next_retry_at"] == clock["now"] + web_server.DAILY_SUMMARY_RETRY_INTERVAL_SECONDS
+    assert alerts == []  # nothing bothers the admin until the retries are spent
+
+
+def test_scheduler_retries_only_when_the_interval_has_elapsed(news_db, clock, alerts, monkeypatch):
+    _fail_generation(monkeypatch)
+    attempts = []
+    real_generate = web_server._generate_daily_summary_global
+
+    def counting(date_str):
+        attempts.append(clock["now"])
+        return real_generate(date_str)
+    monkeypatch.setattr(web_server, "_generate_daily_summary_global", counting)
+
+    web_server._send_daily_summaries()          # scheduled run, attempt 1
+    assert len(attempts) == 1
+
+    clock["now"] += 60                          # a minute later: nothing owed yet
+    web_server._send_daily_summaries()
+    assert len(attempts) == 1
+
+    clock["now"] += web_server.DAILY_SUMMARY_RETRY_INTERVAL_SECONDS
+    web_server._send_daily_summaries()          # retry 1
+    assert len(attempts) == 2
+    assert web_server._get_daily_summary_failure(TODAY)["attempts"] == 2
+
+
+def test_gives_up_after_three_retries_and_alerts_every_admin_once(
+        news_db, clock, alerts, monkeypatch):
+    _fail_generation(monkeypatch, "系统 AI 未配置或未启用（管理员设置 → 服务端 API）")
+
+    web_server._send_daily_summaries()
+    for _ in range(web_server.DAILY_SUMMARY_MAX_RETRIES):
+        clock["now"] += web_server.DAILY_SUMMARY_RETRY_INTERVAL_SECONDS
+        web_server._send_daily_summaries()
+
+    state = web_server._get_daily_summary_failure(TODAY)
+    assert state["attempts"] == 1 + web_server.DAILY_SUMMARY_MAX_RETRIES
+    assert state["given_up"] == 1
+    assert state["next_retry_at"] is None
+
+    assert [a["user_id"] for a in alerts] == [1, 3]  # both admins, not the user
+    assert all(a["type"] == "daily_summary_failed" for a in alerts)
+    assert all("系统 AI 未配置" in a["body"] for a in alerts)
+
+    # Later ticks neither retry nor alert a second time.
+    clock["now"] += 10 * web_server.DAILY_SUMMARY_RETRY_INTERVAL_SECONDS
+    assert web_server._send_daily_summaries()["reason"] == "gave up for today"
+    assert len(alerts) == 2
+
+
+def test_undelivered_daily_summary_alert_releases_the_claim(
+        news_db, clock, alerts, monkeypatch):
+    _fail_generation(monkeypatch)
+    monkeypatch.setattr(web_server, "_notify_admins", lambda *args, **kwargs: 0)
+
+    web_server._send_daily_summaries()
+    for _ in range(web_server.DAILY_SUMMARY_MAX_RETRIES):
+        clock["now"] += web_server.DAILY_SUMMARY_RETRY_INTERVAL_SECONDS
+        web_server._send_daily_summaries()
+
+    state = web_server._get_daily_summary_failure(TODAY)
+    assert state["given_up"] == 1
+    assert state["alerted"] == 0
+    assert web_server._claim_daily_summary_alert(TODAY) is True
+
+
+def test_an_admin_ad_hoc_resend_does_not_seed_the_retry_chain(news_db, clock, alerts, monkeypatch):
+    # 管理员设置 → 立即发送 at an arbitrary hour must not turn a one-off failure
+    # into half an hour of retries plus a failure alert to every admin.
+    _fail_generation(monkeypatch)
+
+    outcome = web_server._broadcast_daily_summary(force=True)
+
+    assert outcome["status"] == "error"
+    assert web_server._get_daily_summary_failure(TODAY) is None
+    assert alerts == []
+
+
+def test_a_later_success_clears_the_failure_record(news_db, clock, alerts, monkeypatch):
+    _fail_generation(monkeypatch)
+    web_server._send_daily_summaries()
+    assert web_server._get_daily_summary_failure(TODAY)["attempts"] == 1
+
+    monkeypatch.setattr(web_server, "_generate_daily_summary_global",
+                        lambda date_str: {"summary": "s", "article_count": 3, "stats": {}})
+    _stub_delivery(monkeypatch)
+    clock["now"] += web_server.DAILY_SUMMARY_RETRY_INTERVAL_SECONDS
+    web_server._send_daily_summaries()
+
+    assert web_server._get_daily_summary_failure(TODAY) is None
+    assert alerts == []
+
+
+def test_generation_reason_is_captured_for_a_missing_system_ai(news_db, monkeypatch):
+    monkeypatch.setattr(web_server, "get_system_ai_config", lambda: None)
+    assert web_server._generate_daily_summary_global(TODAY) is None
+    assert "系统 AI" in web_server._daily_summary_last_error
+
+
+def test_generation_reason_is_captured_when_the_day_has_no_articles(news_db, monkeypatch):
+    monkeypatch.setattr(web_server, "get_system_ai_config",
+                        lambda: {"enabled": True, "api_key": "k", "endpoint": "e", "model": "m"})
+    monkeypatch.setattr(web_server, "_fetch_articles_by_date",
+                        lambda date_str, include_shared_summary=False: [])
+    assert web_server._generate_daily_summary_global(TODAY) is None
+    assert "没有可用于生成摘要的文章" in web_server._daily_summary_last_error
+
+
+# ─── /ai/daily-summary/today ────────────────────────────────────────────
+
+
+def _today_payload(role):
+    from flask import g
+    with web_server.app.test_request_context("/ai/daily-summary/today"):
+        g.user_id = 1
+        g.user_role = role
+        return web_server.ai_daily_summary_today.__wrapped__().get_json()
+
+
+def test_admin_sees_the_reason_and_the_retry_button_after_giving_up(
+        news_db, clock, alerts, monkeypatch):
+    monkeypatch.setattr(web_server, "_get_daily_summary_global_cache", lambda date_str: None)
+    _fail_generation(monkeypatch)
+    web_server._send_daily_summaries()
+    for _ in range(web_server.DAILY_SUMMARY_MAX_RETRIES):
+        clock["now"] += web_server.DAILY_SUMMARY_RETRY_INTERVAL_SECONDS
+        web_server._send_daily_summaries()
+
+    admin = _today_payload("admin")
+    assert admin["status"] == "failed"
+    assert admin["can_retry"] is True
+    assert "401 invalid api key" in admin["error"]
+    assert admin["attempts"] == 1 + web_server.DAILY_SUMMARY_MAX_RETRIES
+
+
+def test_ordinary_users_never_see_the_failure_reason(news_db, clock, alerts, monkeypatch):
+    monkeypatch.setattr(web_server, "_get_daily_summary_global_cache", lambda date_str: None)
+    _fail_generation(monkeypatch)
+    web_server._send_daily_summaries()
+
+    user = _today_payload("user")
+    assert user["status"] == "generating"  # a retry is still pending
+    assert "error" not in user
+    assert "can_retry" not in user
+
+    admin = _today_payload("admin")
+    assert admin["status"] == "retrying"
+    assert admin["can_retry"] is True
+
+
+# ─── /ai/daily-summary/retry ────────────────────────────────────────────
+
+
+def _retry_response(monkeypatch):
+    from flask import g
+    with web_server.app.test_request_context("/ai/daily-summary/retry", method="POST"):
+        g.user_id = 1
+        g.user_role = "admin"
+        return web_server.ai_daily_summary_retry.__wrapped__()
+
+
+def test_manual_retry_is_refused_when_nothing_failed(news_db, clock, monkeypatch):
+    body, status = _retry_response(monkeypatch)
+    assert status == 409
+    assert body.get_json()["status"] == "not_failed"
+
+
+def test_manual_retry_regenerates_and_clears_the_failure(news_db, clock, alerts, monkeypatch):
+    _fail_generation(monkeypatch)
+    web_server._send_daily_summaries()
+
+    monkeypatch.setattr(web_server, "_generate_daily_summary_global",
+                        lambda date_str: {"summary": "s", "article_count": 3, "stats": {}})
+    _stub_delivery(monkeypatch)
+    payload = _retry_response(monkeypatch).get_json()
+
+    assert payload["status"] == "completed"
+    assert web_server._get_daily_summary_failure(TODAY) is None
+
+
+def test_manual_retry_that_fails_again_restarts_the_automatic_chain(
+        news_db, clock, alerts, monkeypatch):
+    _fail_generation(monkeypatch)
+    web_server._send_daily_summaries()
+    for _ in range(web_server.DAILY_SUMMARY_MAX_RETRIES):
+        clock["now"] += web_server.DAILY_SUMMARY_RETRY_INTERVAL_SECONDS
+        web_server._send_daily_summaries()
+    assert web_server._get_daily_summary_failure(TODAY)["given_up"] == 1
+
+    body, status = _retry_response(monkeypatch)
+    assert status == 502
+    payload = body.get_json()
+    assert payload["status"] == "retrying"
+    # Counter restarted, so the scheduler owes three more automatic retries.
+    state = web_server._get_daily_summary_failure(TODAY)
+    assert state["attempts"] == 1
+    assert state["given_up"] == 0
+    assert state["alerted"] == 0
+
+
+def test_retry_route_requires_an_admin():
+    resp = web_server.app.test_client().post("/ai/daily-summary/retry")
+    assert resp.status_code in (401, 403)
+
+
+# ─── Frontend contract ──────────────────────────────────────────────────
+
+
+def test_panel_shows_a_retry_button_only_in_the_failure_states():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert "function retryDailySummary()" in html
+    assert "'/ai/daily-summary/retry'" in html
+    assert 'id="dailySummaryRetryBtn"' in html
+    # The button is rendered inside the failure branch, which is itself gated on
+    # the caller being an admin.
+    assert "isDailySummaryFailureState() && isDailySummaryAdmin()" in html
+    assert "失败原因：" in html
+
+
+def test_inline_pinch_zoom_is_suppressed_so_only_fullscreen_zooms():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert "['gesturestart', 'gesturechange', 'gestureend']" in html
+    assert "touch-action:manipulation}" in html.split(".article-body img{")[1][:400]

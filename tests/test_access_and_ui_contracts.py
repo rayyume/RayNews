@@ -253,8 +253,8 @@ def test_idle_refresh_only_returns_to_latest_after_five_minutes_and_new_articles
     assert "const IDLE_LATEST_DELAY_MS = 5 * 60 * 1000;" in html
     assert "function markUserActivity(event)" in html
     assert "function hasBlockingOverlayOpen()" in html
-    assert "async function showLatestAfterIdle()" in html
-    idle_start = html.index("async function showLatestAfterIdle()")
+    assert "async function showLatestAfterIdle({" in html
+    idle_start = html.index("async function showLatestAfterIdle({")
     idle_end = html.index("function scheduleAdjacentPagePrefetch", idle_start)
     idle_block = html[idle_start:idle_end]
     # Idle auto-apply is scoped to whichever category is currently active, not
@@ -263,8 +263,14 @@ def test_idle_refresh_only_returns_to_latest_after_five_minutes_and_new_articles
     assert "const activeFilter = filter;" in idle_block
     assert "pendingRelevantCount(activeFilter)" in idle_block
     assert "hasBlockingOverlayOpen()" in idle_block
-    assert "scrollPageToTop({ onNearTop: applyLatest, auto: true })" in idle_block
-    assert "if (!completed) return;" in idle_block
+    # The auto-scroll belongs to the refresh flow too, so a cancelled/replaced
+    # flow cannot keep moving the viewport after its guarded page apply stops.
+    assert "const completed = await scrollPageToTop({" in idle_block
+    assert "onNearTop: applyLatest," in idle_block
+    assert "auto: true," in idle_block
+    assert "externalSignal," in idle_block
+    assert "applicationGuard," in idle_block
+    assert "if (!mayApply() || !completed) return;" in idle_block
     assert "currentPage = 1;" in idle_block
     # Only the just-consumed category's pending items are dropped, not every
     # category's — an unseen article in another category must survive.
@@ -446,8 +452,10 @@ def test_manual_refresh_feeds_new_articles_into_pending_prompt_when_not_on_page_
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     trigger = html[html.index("async function triggerRefresh("):html.index("function setRefreshRunning")]
     new_count_check = trigger.index("Number(status.new_count || 0) > 0")
-    load_since_call = trigger.index("await loadSince(latestKnownTimestamp || sinceCursor);")
+    load_since_call = trigger.index("await loadSince(latestKnownTimestamp || sinceCursor, {")
     assert load_since_call > new_count_check
+    assert "externalSignal: flowController.signal" in trigger[load_since_call:]
+    assert "applicationGuard: flowIsCurrent" in trigger[load_since_call:]
     assert "let page1BranchRan = false;" in trigger
     assert "page1BranchRan = true;" in trigger
     assert "!page1BranchRan" in trigger
@@ -483,10 +491,15 @@ def test_manual_refresh_new_article_prompt_is_not_suppressed_while_running():
 def test_manual_refresh_checks_for_already_fetched_articles_immediately():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     trigger = html[html.index("async function triggerRefresh("):html.index("function setRefreshRunning")]
-    immediate_check = "const immediateCheck = loadSince(sinceCursor, { manual: true });"
-    assert immediate_check in trigger
-    assert trigger.index(immediate_check) < trigger.index("await requestRefreshOnce(")
-    assert "async function loadSince(timestamp, { forceApply = false, manual = false } = {})" in html
+    immediate_start = "const immediateCheck = loadSince(sinceCursor,"
+    immediate_end = trigger.index("await requestRefreshOnce(")
+    immediate_block = trigger[trigger.index(immediate_start):immediate_end]
+    # The immediate database check starts before the manual job, and its accepted
+    # article IDs feed the unified flow-scoped discovery Set rather than a separate
+    # numeric counter. Keep this contract independent of formatting/layout.
+    assert "manual: true" in immediate_block
+    assert "onDiscovered: mergeDiscovered" in immediate_block
+    assert "async function loadSince(" in html
     since_block = html[html.index("async function loadSince("):html.index("function rebuildSourceFilterGroups")]
     assert "if (!manual && (deferForRefresh || refreshInProgress)) return added;" in since_block
 
@@ -680,7 +693,7 @@ def test_cached_source_metadata_is_rendered_before_network_fetch():
     start = html.index("async function loadSourceCategories(")
     block = html[start:html.index("async function scheduleSourceMetadataRetry", start)]
     # The network fetch now lives in a helper; the cache must still be applied first.
-    source_fetch = "await fetchSourceMetadata(networkTimeoutMs)"
+    source_fetch = "await fetchSourceMetadata(networkTimeoutMs, externalSignal)"
     assert block.index("rebuildCategoryMap(cached.data.sources);") < block.index(source_fetch)
     assert block.index("renderFilters();") < block.index(source_fetch)
 
@@ -699,7 +712,8 @@ def test_source_metadata_retry_is_scheduled_on_failure():
     """A failed/aborted bootstrap fetch must queue a backoff retry so the drawer
     repopulates without the user opening the admin Sources tab."""
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
-    assert "if (!succeeded) scheduleSourceMetadataRetry();" in html
+    assert "if (!succeeded && mayApply()) {" in html
+    assert "scheduleSourceMetadataRetry({ externalSignal, applicationGuard });" in html
     assert "async function scheduleSourceMetadataRetry(" in html
     # The admin Sources tab must also warm the cold-start cache.
     tab = html[html.index("async function loadSourcesTab("):
@@ -817,7 +831,7 @@ def test_new_article_prompt_and_idle_motion_are_cancellable():
     assert "hideNewArticlesPrompt();" in prompt_block
     assert "function cancelActiveAutoMotion()" in html
     assert "if (!activeScrollMotion || !activeScrollMotion.auto) return;" in html
-    assert "if (!completed) return;" in html
+    assert "if (!mayApply() || !completed) return;" in html
     assert "const atLatestTop = currentPage === 1" in html
 
 
@@ -1161,3 +1175,13 @@ def test_footer_supports_runtime_html_injection_before_fixed_suffix():
     assert "FOOTER_INJECT" not in entrypoint
     assert "`CUSTOM_FOOTER_HTML`" in readme
     assert "`CUSTOM_FOOTER_HTML`" in readme_en
+
+
+def test_article_cover_body_and_translation_images_share_one_fullscreen_viewer():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert 'id="articleWrap"' in html
+    assert 'id="lbStage"' in html
+    assert "function openImageViewer(image)" in html
+    assert "articleWrap.addEventListener('click'" in html
+    assert html.count("img.addEventListener('click'") == 0
+    assert ".lb-stage{" in html and "touch-action:none" in html

@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import image_cache
+import network_safety
 import refresh_server
 
 
@@ -55,8 +56,8 @@ class RemoteImageCandidateTests(unittest.TestCase):
         succeeded.iter_content.return_value = [b"jpeg"]
 
         with mock.patch.object(
-            image_cache.requests,
-            "get",
+            network_safety,
+            "_send_bound_request",
             side_effect=[failed, succeeded],
         ) as request_get:
             body, content_type = image_cache.fetch_remote_image(SSPAI_WSRV)
@@ -79,8 +80,8 @@ class RemoteImageCandidateTests(unittest.TestCase):
         succeeded.iter_content.return_value = [b"jpeg"]
 
         with mock.patch.object(
-            image_cache.requests,
-            "get",
+            network_safety,
+            "_send_bound_request",
             side_effect=[failed_wsrv, failed_rss, succeeded],
         ) as request_get:
             body, content_type = image_cache.fetch_remote_image(SSPAI_WSRV)

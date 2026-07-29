@@ -24,7 +24,7 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
-from news_schema import ensure_deleted_articles_table
+from news_schema import enable_wal_mode, ensure_article_schema
 from source_categories import (
     ensure_article_sources, init_source_categories,
     ensure_article_source_columns,
@@ -103,10 +103,9 @@ log = logging.getLogger("fetcher")
 def init_db() -> sqlite3.Connection:
     """Initialize SQLite DB and return connection."""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_FILE))
+    conn = sqlite3.connect(str(DB_FILE), timeout=30)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS articles (
             id INTEGER PRIMARY KEY,
@@ -121,11 +120,14 @@ def init_db() -> sqlite3.Connection:
             has_full_content INTEGER DEFAULT 0,
             telegraph_url TEXT DEFAULT '',
             body_html TEXT DEFAULT '',
+            original_body_html TEXT DEFAULT '',
             summary TEXT DEFAULT ''
         )
     """)
-    ensure_deleted_articles_table(conn)
-    ensure_article_source_columns(conn)
+    conn.commit()
+    ensure_article_schema(conn)
+    enable_wal_mode(conn)
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON articles(timestamp DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_source ON articles(source)")
     init_source_categories(conn)
@@ -133,8 +135,12 @@ def init_db() -> sqlite3.Connection:
     return conn
 
 
-def upsert_articles(conn: sqlite3.Connection, entries: list[dict], sync_sources: bool = True):
-    """Batch insert or update articles into SQLite.
+def upsert_articles(
+    conn: sqlite3.Connection,
+    entries: list[dict],
+    sync_sources: bool = True,
+) -> list[int]:
+    """Batch insert or update articles into SQLite and return persisted positive IDs.
 
     ensure_article_sources() does a full-table alias UPDATE plus a DISTINCT scan over
     every article, so it's expensive relative to a handful of row upserts. The
@@ -144,8 +150,8 @@ def upsert_articles(conn: sqlite3.Connection, entries: list[dict], sync_sources:
     """
     sql = """INSERT OR REPLACE INTO articles
         (id, title, source, feed_source, origin_source, time, date, timestamp, thumb,
-         has_full_content, telegraph_url, body_html, summary)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+         has_full_content, telegraph_url, body_html, original_body_html, summary)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
     rows = []
     deleted_ids = {
         int(row[0])
@@ -168,6 +174,7 @@ def upsert_articles(conn: sqlite3.Connection, entries: list[dict], sync_sources:
             1 if e.get("has_full_content") else 0,
             e.get("telegraph_url", ""),
             e.get("body_html", ""),
+            e.get("body_html", ""),
             e.get("summary", ""),
         ))
     conn.executemany(sql, rows)
@@ -176,6 +183,7 @@ def upsert_articles(conn: sqlite3.Connection, entries: list[dict], sync_sources:
     conn.commit()
     log.info(f"SQLite: upserted {len(rows)} articles"
              f" (total: {conn.execute('SELECT COUNT(*) FROM articles').fetchone()[0]})")
+    return sorted({int(row[0]) for row in rows if int(row[0]) > 0})
 
 
 # A Telegraph full-text fetch that fails on the cycle an article first arrives (e.g.
@@ -232,11 +240,18 @@ def backfill_missing_fulltext(conn: sqlite3.Connection) -> int:
                 """UPDATE articles
                       SET has_full_content = 1,
                           body_html = ?,
+                          original_body_html = ?,
                           thumb = ?,
                           origin_source = ?,
                           summary = ''
                     WHERE id = ?""",
-                (result["body_html"], new_thumb, origin, row["id"]),
+                (
+                    result["body_html"],
+                    result["body_html"],
+                    new_thumb,
+                    origin,
+                    row["id"],
+                ),
             )
             updated += 1
     if updated:
@@ -245,15 +260,28 @@ def backfill_missing_fulltext(conn: sqlite3.Connection) -> int:
     return updated
 
 
-def write_fetch_progress(inserted: int, total: int) -> None:
+def write_fetch_progress(
+    inserted: int,
+    total: int,
+    inserted_ids: list[int] | None = None,
+) -> None:
     """Record streaming-ingest progress for the current fetch cycle so
     /refresh/status can report how many articles have already landed in SQLite
     while the cycle is still running. Written atomically (temp + rename), same
     pattern as news.json, so a concurrent reader never sees a half-written file."""
+    normalized_ids = []
+    for value in inserted_ids or []:
+        try:
+            article_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if article_id > 0:
+            normalized_ids.append(article_id)
     payload = {
         "pid": os.getpid(),
         "job_id": FETCH_JOB_ID,
         "inserted": inserted,
+        "inserted_ids": sorted(set(normalized_ids)),
         "total_messages": total,
         "updated_at": int(time.time()),
     }
@@ -1149,7 +1177,7 @@ def run():
     # Reset progress for this cycle before streaming starts, so a stale value from a
     # previous run/crash is never mistaken for current progress (see
     # write_fetch_progress() / refresh_server.py's started_at guard).
-    write_fetch_progress(0, len(messages))
+    write_fetch_progress(0, len(messages), [])
 
     # Process new messages with thread pool, streaming completed articles into SQLite
     # in small batches as they finish (rather than one big upsert at the end) so
@@ -1160,6 +1188,7 @@ def run():
     stream_conn = None
     stream_batch = []
     inserted_total = 0
+    inserted_ids: list[int] = []
     last_commit_at = time.monotonic()
     fulltext_started_at = time.monotonic()
     try:
@@ -1180,15 +1209,25 @@ def run():
                     len(stream_batch) >= STREAM_BATCH_SIZE
                     or time.monotonic() - last_commit_at >= STREAM_BATCH_SECONDS
                 ):
-                    upsert_articles(stream_conn, stream_batch, sync_sources=False)
+                    committed_ids = upsert_articles(
+                        stream_conn,
+                        stream_batch,
+                        sync_sources=False,
+                    )
                     inserted_total += len(stream_batch)
+                    inserted_ids.extend(committed_ids)
                     stream_batch = []
                     last_commit_at = time.monotonic()
-                    write_fetch_progress(inserted_total, len(messages))
+                    write_fetch_progress(len(set(inserted_ids)), len(messages), inserted_ids)
         if stream_batch:
-            upsert_articles(stream_conn, stream_batch, sync_sources=False)
+            committed_ids = upsert_articles(
+                stream_conn,
+                stream_batch,
+                sync_sources=False,
+            )
             inserted_total += len(stream_batch)
-            write_fetch_progress(inserted_total, len(messages))
+            inserted_ids.extend(committed_ids)
+            write_fetch_progress(len(set(inserted_ids)), len(messages), inserted_ids)
     except Exception as e:
         log.error(f"Streaming SQLite ingest failed: {e}")
     finally:

@@ -14,7 +14,7 @@ import time
 import urllib.parse
 from pathlib import Path
 
-import requests
+from network_safety import UnsafeUrlError, safe_get
 
 
 log = logging.getLogger("image_cache")
@@ -143,7 +143,7 @@ def fetch_remote_image(url: str) -> tuple[bytes, str]:
             "Referer": f"{parsed.scheme}://{parsed.netloc}/",
         }
         try:
-            resp = requests.get(candidate, headers=headers, timeout=15, stream=True)
+            resp = safe_get(candidate, headers=headers, timeout=15, stream=True)
             resp.raise_for_status()
 
             content_type = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
@@ -163,6 +163,8 @@ def fetch_remote_image(url: str) -> tuple[bytes, str]:
             if not body:
                 raise ValueError("empty image")
             return body, content_type
+        except UnsafeUrlError:
+            raise
         except Exception as exc:
             last_error = exc
             continue

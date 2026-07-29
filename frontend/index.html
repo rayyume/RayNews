@@ -101,6 +101,9 @@ a:hover{text-decoration:underline}
 .daily-summary-btn{position:relative;width:32px;height:32px;font-size:16px}
 .daily-summary-btn.running{color:var(--accent)!important;animation:summaryPulse 1.6s infinite}
 .daily-summary-btn.ready{color:#fbbf24!important;text-shadow:0 0 12px rgba(251,191,36,0.45)}
+/* Admin-only: today's generation failed. Same dot slot as .ready, red instead of amber. */
+.daily-summary-btn.failed{color:#f87171!important}
+.daily-summary-btn.failed::after{content:'';position:absolute;right:0;top:1px;width:7px;height:7px;border-radius:50%;background:#f87171;box-shadow:0 0 0 3px rgba(248,113,113,0.18)}
 .daily-summary-btn.ready::after,.daily-summary-btn.running::after{content:'';position:absolute;right:0;top:1px;width:7px;height:7px;border-radius:50%;background:#fbbf24;box-shadow:0 0 0 3px rgba(251,191,36,0.18)}
 .daily-summary-btn.running::after{background:var(--accent);box-shadow:0 0 0 3px rgba(110,142,251,0.18)}
 @keyframes summaryPulse{0%,100%{opacity:1}50%{opacity:0.55}}
@@ -202,7 +205,9 @@ a:hover{text-decoration:underline}
 .article-body{width:100%;min-width:0;max-width:100%;overflow-x:hidden;font-size:15.5px;line-height:1.85;overflow-wrap:anywhere;word-break:break-word}
 .article-body *{min-width:0;max-width:100%;overflow-wrap:anywhere;word-break:break-word}
 .article-body p{margin-bottom:1.2em}
-.article-body img{width:auto;height:auto;max-width:100%!important;border-radius:var(--radius);margin:1.2em 0;background:var(--bg-surface);cursor:zoom-in}
+/* touch-action:manipulation kills the double-tap-to-zoom on the image itself:
+   enlarging happens in the fullscreen lightbox (one tap), never in place. */
+.article-body img{width:auto;height:auto;max-width:100%!important;border-radius:var(--radius);margin:1.2em 0;background:var(--bg-surface);cursor:zoom-in;touch-action:manipulation}
 .article-body figure{margin:1.2em 0}
 .article-body figcaption{font-size:12px;color:var(--text-3);margin-top:4px;text-align:center}
 .article-body h2{display:block;font-size:18px;font-weight:700;margin:1.6em 0 0.6em}
@@ -225,9 +230,11 @@ a:hover{text-decoration:underline}
 .source-footer a{color:var(--text-2)}
 
 /* ═══ Lightbox ════════════════════════════════════ */
-.lb{position:fixed;inset:0;z-index:600;background:rgba(0,0,0,0.92);backdrop-filter:blur(10px);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity 0.25s;cursor:zoom-out}
+.lb{position:fixed;inset:0;z-index:600;background:rgba(0,0,0,.92);backdrop-filter:blur(10px);opacity:0;pointer-events:none;transition:opacity .25s;overflow:hidden}
 .lb.open{opacity:1;pointer-events:auto}
-.lb img{max-width:92vw;max-height:92vh;border-radius:8px;object-fit:contain}
+.lb-stage{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;overflow:hidden;touch-action:none;cursor:zoom-out}
+.lb img{max-width:92vw;max-height:92vh;border-radius:8px;object-fit:contain;transform-origin:center;will-change:transform;user-select:none;-webkit-user-drag:none}
+.lb-close{position:absolute;z-index:2;top:calc(12px + env(safe-area-inset-top,0px));right:14px;width:44px;height:44px;border:0;border-radius:50%;background:rgba(0,0,0,.55);color:#fff;font:600 20px/1 var(--font);cursor:pointer;touch-action:manipulation}
 
 /* ═══ Toast ═══════════════════════════════════════ */
 .toast{position:fixed;bottom:40px;left:50%;transform:translateX(-50%) translateY(20px);z-index:999;background:var(--toast-bg);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);color:var(--text);padding:10px 24px;border-radius:100px;font-size:13px;font-weight:600;opacity:0;pointer-events:none;transition:all 0.3s cubic-bezier(0.4,0,0.2,1);border:1px solid var(--border);box-shadow:var(--toast-shadow)}
@@ -424,9 +431,15 @@ body.body-scroll-lock{overflow:hidden!important}
 .notif-time{font-size:11px;color:var(--text-3);flex-shrink:0}
 .notif-title{flex:1;min-width:0;font-size:13px;color:var(--text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .notif-item.unread .notif-title{font-weight:700;color:var(--text)}
-.notif-btn{background:none;border:1px solid var(--border);color:var(--text-3);padding:2px 8px;border-radius:6px;font-size:11px;cursor:pointer;font-family:var(--font);transition:all 0.15s;flex-shrink:0}
+.notif-btn,.notif-unread-action{background:none;border:1px solid var(--border);color:var(--text-3);padding:2px 8px;border-radius:6px;font-size:11px;cursor:pointer;font-family:var(--font);transition:all 0.15s;flex-shrink:0}
 .notif-btn:hover{border-color:var(--accent);color:var(--accent)}
-.notif-btn.read-btn:hover{border-color:#22c55e;color:#22c55e}
+.notif-unread-action{background:rgba(251,191,36,0.12);border-color:rgba(251,191,36,0.28);color:#fbbf24}
+.notif-unread-action::before{content:'未读'}
+.notif-unread-action:hover,.notif-unread-action:focus-visible{background:rgba(34,197,94,0.12);border-color:#22c55e;color:#22c55e}
+.notif-unread-action:hover::before,.notif-unread-action:focus-visible::before{content:'已读'}
+.notif-list-actions{display:flex;align-items:center;gap:6px;margin-left:auto;margin-right:8px;flex-shrink:0}
+.notif-delete-btn{background:rgba(239,68,68,0.16);border-color:rgba(239,68,68,0.35);color:#ef4444}
+.notif-delete-btn:hover{background:rgba(239,68,68,0.24);border-color:#ef4444;color:#ef4444}
 .notif-detail{padding:20px 24px}
 .notif-detail-time{font-size:11px;color:var(--text-3);margin-bottom:6px}
 .notif-detail-title{font-size:15px;font-weight:700;color:var(--text);margin-bottom:12px;line-height:1.5}
@@ -439,9 +452,11 @@ body.body-scroll-lock{overflow:hidden!important}
 .notif-markdown th,.notif-markdown td{overflow-wrap:anywhere;word-break:break-word}
 .notif-markdown ul,.notif-markdown ol{padding-left:1.5em;margin:0 0 1em}
 .notif-markdown li{margin-bottom:0.4em}
-.notif-detail-footer{display:flex;justify-content:center;padding:20px 0 4px}
+.notif-detail-footer{display:flex;justify-content:center;gap:10px;padding:20px 0 4px}
 .notif-read-primary{background:var(--accent);border:1px solid var(--accent);color:#fff;padding:9px 32px;border-radius:10px;font:inherit;font-size:13px;font-weight:700;cursor:pointer;transition:opacity .15s}
 .notif-read-primary:hover{opacity:.85}
+.notif-delete-primary{background:#ef4444;border:1px solid #ef4444;color:#fff;padding:9px 32px;border-radius:10px;font:inherit;font-size:13px;font-weight:700;cursor:pointer;transition:opacity .15s}
+.notif-delete-primary:hover{opacity:.85}
 
 /* ═══ AI Settings Panel ═══════════════════════════════════ */
 .ai-overlay{position:fixed;inset:0;z-index:400;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity 0.2s}
@@ -633,7 +648,13 @@ body.body-scroll-lock{overflow:hidden!important}
   <div class="article-wrap" id="articleWrap"></div>
 </div>
 
-<div class="lb" id="lb"><img src="" id="lbImg"></div>
+<div class="lb" id="lb" role="dialog" aria-modal="true"
+     aria-label="图片全屏查看" aria-hidden="true" inert>
+  <button class="lb-close" id="lbCloseBtn" type="button" aria-label="关闭图片">✕</button>
+  <div class="lb-stage" id="lbStage">
+    <img src="" id="lbImg" alt="" draggable="false">
+  </div>
+</div>
 
 <!-- ═══ Auth Modal ═══════════════════════════════════════ -->
 <div class="auth-modal" id="authModal">
@@ -873,6 +894,10 @@ body.body-scroll-lock{overflow:hidden!important}
         <button class="fav-close" id="notifBackBtn" onclick="showNotifList()" style="display:none;padding:4px 6px">←</button>
         <h2 id="notifPanelTitle">🔔 我的通知</h2>
       </div>
+      <div class="notif-list-actions" id="notifListActions">
+        <button class="notif-btn" onclick="markAllNotifRead()">全部已读</button>
+        <button class="notif-btn notif-delete-btn" onclick="deleteAllNotifications()">全部删除</button>
+      </div>
       <button class="fav-close" onclick="closeNotifications()">✕</button>
     </div>
     <div class="fav-body" id="notifBody">
@@ -964,15 +989,25 @@ body.body-scroll-lock{overflow:hidden!important}
 
       <!-- Notification Tab -->
       <div id="settingsTabNotify" style="display:none">
-        <label class="ai-label">接收邮箱</label>
+        <div id="dailySummaryPushSection">
+          <label class="ai-label">每日摘要推送</label>
+          <div class="ai-toggle" onclick="document.getElementById('dailySummaryInappToggle').click()">
+            <input type="checkbox" id="dailySummaryInappToggle" onclick="event.stopPropagation()">
+            <span>🔔 站内通知</span>
+          </div>
+          <p class="ai-hint" style="margin-top:4px">默认开启。摘要生成后会出现在 头像菜单 → 我的通知 中。</p>
+
+          <div class="ai-toggle" onclick="document.getElementById('dailySummaryToggle').click()">
+            <input type="checkbox" id="dailySummaryToggle" onclick="event.stopPropagation()">
+            <span>📅 邮件推送</span>
+          </div>
+          <p class="ai-hint" style="margin-top:4px">需填写下方接收邮箱。两个通道相互独立，可只留其一。</p>
+          <p class="ai-hint" style="margin-top:4px">摘要在北京时间每天晚 9 点（21:00）由系统统一生成，生成时间不支持自定义。</p>
+        </div>
+
+        <label class="ai-label" style="margin-top:14px">接收邮箱</label>
         <input class="ai-input" id="notifyToEmail" type="email" placeholder="you@example.com">
         <p class="ai-hint">用于接收每日摘要和测试通知。发件人由服务端 RAYNEWS_FROM_EMAIL 配置。</p>
-
-        <div class="ai-toggle" onclick="document.getElementById('dailySummaryToggle').click()">
-          <input type="checkbox" id="dailySummaryToggle" onclick="event.stopPropagation()">
-          <span>📅 每日摘要推送</span>
-        </div>
-        <p class="ai-hint" style="margin-top:4px">开启后将在北京时间每天晚 9 点（21:00）推送当日新闻摘要，推送时间由系统统一安排，暂不支持自定义。</p>
 
         <button class="ai-save-btn" onclick="saveNotifyConfig()" style="margin-top:14px">保存通知配置</button>
         <button class="ai-save-btn" onclick="testNotification()" style="margin-top:8px;background:var(--bg-card);color:var(--text);border:1px solid var(--border)">📧 发送测试邮件</button>
@@ -1013,10 +1048,12 @@ body.body-scroll-lock{overflow:hidden!important}
       <h2>📊 每日摘要</h2>
       <button class="ai-close" onclick="closeDailySummary()">✕</button>
     </div>
+    <!-- Placeholder only: renderDailySummaryBody() replaces this as soon as the
+         panel opens, once the real schedule state is known. -->
     <div class="ai-body" id="dailySummaryBody">
-      <div style="text-align:center;padding:20px;color:var(--text-3)">
-        <button class="ai-save-btn" onclick="generateDailySummary()">📊 生成每日摘要</button>
-        <p class="ai-hint" style="margin-top:8px">基于最近文章由 AI 生成摘要</p>
+      <div style="text-align:center;padding:36px;color:var(--text-3)">
+        <div style="font-size:20px;margin-bottom:10px">🕘</div>
+        <p>每日摘要将在北京时间每天晚 9 点（21:00）生成显示</p>
       </div>
     </div>
   </div>
@@ -1873,8 +1910,13 @@ function persistSourceMetadata(data) {
 // Fetch /sources with an abortable timeout. Logged-in users hit the authenticated
 // endpoint; if the token has expired mid-session, fall back to the public /api/sources
 // so the drawer still populates instead of silently staying empty.
-async function fetchSourceMetadata(networkTimeoutMs) {
+async function fetchSourceMetadata(networkTimeoutMs, externalSignal = null) {
   const controller = new AbortController();
+  const abortFromExternal = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort();
+    else externalSignal.addEventListener('abort', abortFromExternal, { once: true });
+  }
   const timeout = setTimeout(() => controller.abort(), networkTimeoutMs);
   try {
     if (!isRestrictedUser()) {
@@ -1889,6 +1931,7 @@ async function fetchSourceMetadata(networkTimeoutMs) {
     return await resp.json();
   } finally {
     clearTimeout(timeout);
+    if (externalSignal) externalSignal.removeEventListener('abort', abortFromExternal);
   }
 }
 
@@ -1912,10 +1955,16 @@ async function loadSourceCategories({
   networkTimeoutMs = 8000,
   quietNetworkError = false,
   cacheTimeoutMs = 5000,
+  externalSignal = null,
+  applicationGuard = null,
 } = {}) {
+  const mayApply = () => (
+    !(externalSignal && externalSignal.aborted)
+    && (!applicationGuard || applicationGuard())
+  );
   let metadataNotified = false;
   const notifyMetadataReady = () => {
-    if (metadataNotified) return;
+    if (metadataNotified || !mayApply()) return;
     metadataNotified = true;
     if (onMetadataReady) onMetadataReady();
   };
@@ -1926,23 +1975,29 @@ async function loadSourceCategories({
   const cached = useCache
     ? await withCacheTimeout(readNewsCacheEntry('source-metadata'), null, cacheTimeoutMs)
     : null;
+  if (!mayApply()) return;
   if (cached && cached.data && Array.isArray(cached.data.sources)) {
     rebuildCategoryMap(cached.data.sources);
   }
+  if (!mayApply()) return;
   renderFilters();
   if (cached && cached.data && Array.isArray(cached.data.sources)) notifyMetadataReady();
   let succeeded = false;
   try {
-    const data = await fetchSourceMetadata(networkTimeoutMs);
+    const data = await fetchSourceMetadata(networkTimeoutMs, externalSignal);
+    if (!mayApply()) return;
     if (data && Array.isArray(data.sources)) {
       rebuildCategoryMap(data.sources);
+      if (!mayApply()) return;
       renderFilters();
       notifyMetadataReady();
+      if (!mayApply()) return;
       persistSourceMetadata(data);
       succeeded = true;
       sourceMetadataNetworkOk = true;
     }
   } catch (e) {
+    if (!mayApply()) return;
     // Keep the built-in fallback CATEGORY_MAP.
     if (
       cached
@@ -1958,10 +2013,21 @@ async function loadSourceCategories({
   }
   // On failure, quietly retry with backoff so a deploy-time slow/aborted request
   // eventually repopulates the drawer without the user having to open the admin page.
-  if (!succeeded) scheduleSourceMetadataRetry();
+  if (!succeeded && mayApply()) {
+    scheduleSourceMetadataRetry({ externalSignal, applicationGuard });
+  }
 }
 
-async function scheduleSourceMetadataRetry({ immediate = false } = {}) {
+async function scheduleSourceMetadataRetry({
+  immediate = false,
+  externalSignal = null,
+  applicationGuard = null,
+} = {}) {
+  const mayApply = () => (
+    !(externalSignal && externalSignal.aborted)
+    && (!applicationGuard || applicationGuard())
+  );
+  if (!mayApply()) return;
   if (sourceMetadataRetryScheduled) return;
   sourceMetadataRetryScheduled = true;
   try {
@@ -1970,14 +2036,21 @@ async function scheduleSourceMetadataRetry({ immediate = false } = {}) {
     const delays = immediate ? [0, ...SOURCE_METADATA_RETRY_DELAYS] : SOURCE_METADATA_RETRY_DELAYS;
     for (const delayMs of delays) {
       if (delayMs) await delay(delayMs);
+      if (!mayApply()) return;
       // Don't burn an attempt while backgrounded — bail and let onReturnToForeground
       // re-arm the chain on resume instead of silently consuming the retry budget.
       if (document.hidden) return;
       try {
-        const data = await fetchSourceMetadata(SOURCE_METADATA_RETRY_TIMEOUT_MS);
+        const data = await fetchSourceMetadata(
+          SOURCE_METADATA_RETRY_TIMEOUT_MS,
+          externalSignal,
+        );
+        if (!mayApply()) return;
         if (data && Array.isArray(data.sources)) {
           rebuildCategoryMap(data.sources);
+          if (!mayApply()) return;
           renderFilters();
+          if (!mayApply()) return;
           persistSourceMetadata(data);
           sourceMetadataNetworkOk = true;
           // If a source deep link is still stuck on its error state, re-drive it now
@@ -2787,7 +2860,7 @@ function renderSourceArticles(items) {
       ${canDelete ? `<input type="checkbox" class="source-article-check" data-article-id="${item.id}" onclick="event.stopPropagation();updateSourceArticleSelectedCount()">` : ''}
       ${item.thumb ? `<div class="fav-item-thumb"><img src="${proxyImgSrc(item.thumb)}" alt="" loading="lazy" decoding="async"></div>` : ''}
       <div class="fav-item-body">
-        <div class="fav-item-title">${esc(item.title)}</div>
+        <div class="fav-item-title">${esc(displayTitle(item))}</div>
         <div class="fav-item-meta">
           <span class="badge" style="${badgeStyle(displaySourceForArticle(feedSourceOf(item)))}" title="${esc(sourceBadgeTitle(feedSourceOf(item)))}">${esc(sourceLabel(displaySourceForArticle(feedSourceOf(item))))}</span>
           <span>${formatTime(item.date, item.time)}</span>
@@ -2992,6 +3065,9 @@ async function classifySources(force) {
       body: JSON.stringify({ limit: 50, force: !!force }),
     });
     const data = await parseJsonResponse(resp);
+    // e.g. the server API isn't configured yet — without this the refusal read
+    // as "分类完成：已处理 0 个来源".
+    if (data.error) throw new Error(data.error);
     const okCount = (data.processed || []).length;
     const failCount = (data.failed || []).length;
     showSettingsStatus(`分类完成：已处理 ${okCount} 个来源，失败 ${failCount} 个，剩余 ${data.remaining || 0} 个`, failCount ? 'warn' : 'ok');
@@ -3169,8 +3245,22 @@ async function saveAIConfig() {
       showSettingsStatus('❌ 服务器返回异常: ' + text.substring(0, 200), 'err');
       return;
     }
-    if (data.error) { showSettingsStatus('❌ ' + data.error, 'err'); return; }
-    showSettingsStatus('✅ AI 配置已保存');
+    await refreshShareStateAfterCheck(data.share_check);
+    if (data.error) {
+      showSettingsStatus('❌ ' + data.error, 'err');
+      return;
+    }
+    if (data.share_check?.restored) {
+      showSettingsStatus('✅ AI 配置已保存，共享状态已自动恢复', 'ok');
+    } else if (data.share_check?.error) {
+      showSettingsStatus(
+        '⚠️ AI 配置已保存，但连接校验失败，共享仍处于暂停状态：'
+          + data.share_check.error,
+        'err',
+      );
+    } else {
+      showSettingsStatus('✅ AI 配置已保存');
+    }
     loadAIConfig();
   } catch (e) { showSettingsStatus('❌ 保存失败: ' + e.message, 'err'); }
 }
@@ -3200,21 +3290,42 @@ async function testAIConnection() {
       }
       return;
     }
-    if (testData.error) { showSettingsStatus('❌ ' + testData.error, 'err'); return; }
-    showSettingsStatus('✅ 连接成功！模型响应：' + (testData.response || 'ok'), 'ok');
+    await refreshShareStateAfterCheck(testData.share_check);
+    if (testData.error) {
+      showSettingsStatus('❌ ' + testData.error, 'err');
+      return;
+    }
+    if (testData.share_check?.restored) {
+      showSettingsStatus('✅ 连接成功，共享状态已自动恢复！模型响应：' + (testData.response || 'ok'), 'ok');
+    } else {
+      showSettingsStatus('✅ 连接成功！模型响应：' + (testData.response || 'ok'), 'ok');
+    }
   } catch (e) { showSettingsStatus('❌ 测试失败: ' + e.message, 'err'); }
+}
+
+// Every share_check is authoritative, including stale/unchanged/error results.
+// Reloading settings centralizes all visible access revocation/recovery.
+async function refreshShareStateAfterCheck(shareCheck) {
+  if (shareCheck) await loadUserSettings();
 }
 
 // ─── Share Tab (opt-in access to shared server-side AI results) ──
 
 function updateShareSubToggleState() {
   const masterOn = document.getElementById('shareAiResults').checked;
+  const suspended = !!userAutoSettings?.share_suspended;
   ['shareViewTitle', 'shareViewTranslation', 'shareViewSummary'].forEach(id => {
     const el = document.getElementById(id);
-    el.disabled = !masterOn;
+    el.disabled = !masterOn || suspended;
     if (!masterOn) el.checked = false;
   });
-  document.getElementById('shareSubHint').style.display = masterOn ? 'none' : '';
+  const hint = document.getElementById('shareSubHint');
+  hint.textContent = !masterOn
+    ? '需先开启共享 AI 结果'
+    : (suspended
+      ? 'API 校验失败，共享已暂停。更新 API 并校验成功后会自动恢复，无需重新开启。'
+      : '');
+  hint.style.display = hint.textContent ? '' : 'none';
 }
 
 async function loadShareTab() {
@@ -3226,13 +3337,18 @@ async function loadShareTab() {
   document.getElementById('shareViewSummary').checked = !!s.share_view_summary;
   updateShareSubToggleState();
   const statusEl = document.getElementById('shareCheckStatus');
-  if (!s.share_last_check_at) {
+  if (s.share_suspended) {
+    statusEl.textContent =
+      '⏸ API 校验失败，共享已暂停。原有选项已保留，API 恢复后会自动重新生效。'
+      + (s.share_last_check_error ? ' 原因：' + s.share_last_check_error : '');
+    statusEl.style.color = '#e5a84d';
+  } else if (!s.share_last_check_at) {
     statusEl.textContent = '';
   } else if (s.share_last_check_ok) {
     statusEl.textContent = '✅ 上次校验成功：' + s.share_last_check_at;
     statusEl.style.color = '';
   } else {
-    statusEl.textContent = '❌ 上次校验失败（' + s.share_last_check_at + '）：' + (s.share_last_check_error || '未知错误') + '，共享资格已被取消';
+    statusEl.textContent = '❌ 上次校验失败（' + s.share_last_check_at + '）：' + (s.share_last_check_error || '未知错误');
     statusEl.style.color = '#e5484d';
   }
 }
@@ -3542,15 +3658,31 @@ async function loadNotifyConfig() {
     const resend = nc.resend || {};
     document.getElementById('notifyToEmail').value = resend.to_email || '';
     document.getElementById('dailySummaryToggle').checked = !!data.daily_summary_enabled;
+    // On by default: an account whose settings row predates this toggle (or has
+    // no row at all) reports 1 from the server, and a missing field must not
+    // read as "off" — that would silently disagree with who actually receives
+    // the notification.
+    document.getElementById('dailySummaryInappToggle').checked =
+      data.daily_summary_inapp_enabled === undefined
+        ? true
+        : !!data.daily_summary_inapp_enabled;
   } catch (e) {}
 }
 
 async function saveNotifyConfig() {
+  const toEmail = document.getElementById('notifyToEmail').value.trim();
+  // The server rejects this too (see update_settings); checking here as well
+  // keeps the message instant and points at the field that needs filling.
+  if (document.getElementById('dailySummaryToggle').checked && !toEmail) {
+    showSettingsStatus('❌ 开启邮件推送前请先填写接收邮箱', 'err');
+    document.getElementById('notifyToEmail').focus();
+    return;
+  }
   // First get existing settings
   const existing = await apiFetch('/settings') || {};
   const nc = (existing.notification_config || {});
   nc.resend = {
-    to_email: document.getElementById('notifyToEmail').value,
+    to_email: toEmail,
   };
   try {
     const resp = await fetch('/settings', {
@@ -3559,6 +3691,7 @@ async function saveNotifyConfig() {
       body: JSON.stringify({
         notification_config: nc,
         daily_summary_enabled: document.getElementById('dailySummaryToggle').checked ? 1 : 0,
+        daily_summary_inapp_enabled: document.getElementById('dailySummaryInappToggle').checked ? 1 : 0,
       }),
     });
     const data = await resp.json();
@@ -3582,7 +3715,7 @@ async function loadUserSettings() {
   try {
     const data = await apiFetch('/settings');
     if (!data) return;
-    userAutoSettings = {
+    const nextSettings = {
       auto_translate_title: !!data.auto_translate_title,
       auto_translate_content: !!data.auto_translate_content,
       auto_summary_enabled: !!data.auto_summary_enabled,
@@ -3591,13 +3724,108 @@ async function loadUserSettings() {
       share_view_title: !!data.share_view_title,
       share_view_translation: !!data.share_view_translation,
       share_view_summary: !!data.share_view_summary,
+      share_suspended: !!data.share_suspended,
+      share_active: !!data.share_active,
       share_last_check_at: data.share_last_check_at || null,
       share_last_check_ok: data.share_last_check_ok,
       share_last_check_error: data.share_last_check_error || null,
     };
-    applyThemePreference(userAutoSettings.theme_preference);
-    renderList();
+    applyThemePreference(nextSettings.theme_preference);
+    await synchronizeShareAccessState(nextSettings);
   } catch (e) {}
+}
+
+function findOpenArticleShareData(articleId) {
+  const numericId = Number(articleId);
+  return articleBodyCache[numericId]
+    || news.find(item => Number(item.id) === numericId)
+    || searchItems.find(item => Number(item.id) === numericId)
+    || (sourceArticlesState.items || []).find(item => Number(item.id) === numericId)
+    || null;
+}
+
+function synchronizeOpenArticleShareView(previousSettings, nextSettings) {
+  const overlay = document.getElementById('overlay');
+  if (!overlay || !overlay.classList.contains('open')) return 0;
+  const articleId = Number(overlay.dataset.articleId);
+  if (!articleId) return 0;
+
+  const bodyEl = document.getElementById('articleBody');
+  const wrap = document.getElementById('articleWrap');
+  const h1 = wrap ? wrap.querySelector('h1') : null;
+  const article = findOpenArticleShareData(articleId);
+  const canViewTranslation = !!(
+    nextSettings.share_active && nextSettings.share_view_translation
+  );
+  const canViewSummary = !!(
+    nextSettings.share_active && nextSettings.share_view_summary
+  );
+  const canViewTitle = !!(
+    nextSettings.share_active && nextSettings.share_view_title
+  );
+
+  if (!canViewSummary) {
+    const summary = document.getElementById('aiSummaryTop');
+    if (summary) summary.remove();
+  }
+  if (bodyEl && !canViewTranslation && bodyEl.dataset.originalHtml) {
+    bodyEl.innerHTML = bodyEl.dataset.originalHtml;
+    const button = document.querySelector
+      ? document.querySelector('.ai-translate-btn')
+      : null;
+    if (button) button.textContent = '翻译';
+    delete bodyEl.dataset.translatedHtml;
+    delete bodyEl.dataset.translatedTitle;
+    delete bodyEl.dataset.showingTranslation;
+    delete bodyEl.dataset.sharedTranslation;
+  } else if (bodyEl && !canViewTitle && bodyEl.dataset.translatedTitle) {
+    bodyEl.dataset.translatedTitle = '';
+  }
+
+  if (h1) {
+    const displayed = article ? displayTitle(article) : (
+      (!canViewTitle && bodyEl && bodyEl.dataset.originalTitle)
+        ? bodyEl.dataset.originalTitle
+        : ''
+    );
+    if (displayed) h1.textContent = displayed;
+  }
+
+  return (
+    previousSettings
+    && !previousSettings.share_active
+    && nextSettings.share_active
+  ) ? articleId : 0;
+}
+
+async function synchronizeShareAccessState(nextSettings) {
+  const previousSettings = userAutoSettings || {};
+  userAutoSettings = nextSettings || {};
+  renderList();
+
+  const searchOverlay = document.getElementById('searchOverlay');
+  if (searchOverlay && searchOverlay.classList.contains('open')) {
+    renderSearchResults();
+  }
+  const favoriteOverlay = document.getElementById('favOverlay');
+  const favoritesPromise = (
+    favoriteOverlay && favoriteOverlay.classList.contains('open')
+  ) ? loadFavorites() : Promise.resolve();
+  const sourceOverlay = document.getElementById('sourceArticlesOverlay');
+  if (sourceOverlay && sourceOverlay.classList.contains('open')) {
+    renderSourceArticles(sourceArticlesState.items || []);
+  }
+
+  const recoveredArticleId = synchronizeOpenArticleShareView(
+    previousSettings,
+    userAutoSettings,
+  );
+  await favoritesPromise;
+  if (recoveredArticleId) {
+    // Fetch again through the authenticated, current settings gate. Never
+    // resurrect translated HTML from the pre-revocation dataset/cache.
+    await autoDisplaySummary(recoveredArticleId);
+  }
 }
 
 // ─── General Settings ────────────────────────────────────
@@ -3697,33 +3925,58 @@ function countTodayArticles() {
   return news.filter(n => n.date === todayStr).length;
 }
 
-async function refreshTodayArticleCount(timeoutMs = 8000) {
+async function refreshTodayArticleCount(
+  timeoutMs = 8000,
+  { externalSignal = null, applicationGuard = null } = {},
+) {
   const date = beijingDateString();
   const controller = new AbortController();
+  const abortFromExternal = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort();
+    else externalSignal.addEventListener('abort', abortFromExternal, { once: true });
+  }
+  const mayApply = () => (
+    !(externalSignal && externalSignal.aborted)
+    && (!applicationGuard || applicationGuard())
+  );
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const params = new URLSearchParams({ page: '1', size: '1', date });
     const resp = await fetch('/api/news?' + params.toString(), { signal: controller.signal });
+    if (!mayApply()) return countTodayArticles();
     if (resp.ok) {
       const data = await resp.json();
-      if (!data.error) todayArticleCount = Number(data.total || 0);
+      if (!mayApply()) return countTodayArticles();
+      if (!data.error && mayApply()) todayArticleCount = Number(data.total || 0);
     }
   } catch (e) {
   } finally {
     clearTimeout(timeout);
+    if (externalSignal) externalSignal.removeEventListener('abort', abortFromExternal);
   }
   return countTodayArticles();
 }
 
 let dailySummaryState = {
-  jobId: '',
-  status: 'idle',
+  status: 'scheduled',
   result: null,
   error: '',
   unread: false,
-  startedAt: 0,
-  pollTimer: null,
+  generateAt: '21:00',
+  // Failure detail, only ever populated for admins — the server keeps the
+  // reason (bad system AI key, no articles…) out of ordinary users' responses.
+  attempts: 0,
+  maxRetries: 3,
+  nextRetryAt: null,
+  retryIntervalMinutes: 10,
+  canRetry: false,
 };
+let dailySummaryRetryInFlight = false;
+
+function isDailySummaryFailureState() {
+  return dailySummaryState.status === 'failed' || dailySummaryState.status === 'retrying';
+}
 
 function isDailySummaryOpen() {
   const overlay = document.getElementById('dailySummaryOverlay');
@@ -3733,9 +3986,12 @@ function isDailySummaryOpen() {
 function updateDailySummaryButton() {
   const btn = document.getElementById('dailySummaryBtn');
   if (!btn) return;
-  btn.classList.toggle('running', dailySummaryState.status === 'running');
+  btn.classList.toggle('running', dailySummaryState.status === 'generating');
   btn.classList.toggle('ready', dailySummaryState.status === 'completed' && dailySummaryState.unread);
-  if (dailySummaryState.status === 'running') {
+  btn.classList.toggle('failed', isDailySummaryFailureState());
+  if (isDailySummaryFailureState()) {
+    btn.title = dailySummaryState.status === 'failed' ? '每日摘要生成失败' : '每日摘要生成失败，重试中';
+  } else if (dailySummaryState.status === 'generating') {
     btn.title = '每日摘要生成中';
   } else if (dailySummaryState.status === 'completed' && dailySummaryState.unread) {
     btn.title = '每日摘要已生成';
@@ -3744,20 +4000,74 @@ function updateDailySummaryButton() {
   }
 }
 
+// Opens 用户设置 → 通知, where both daily-summary delivery toggles live. The
+// digest panel closes first: the settings overlay would otherwise stack behind
+// it, leaving the user looking at an unchanged screen.
+function openDailySummaryPushSettings() {
+  closeDailySummary();
+  openSettings();
+  switchSettingsTab('notify');
+  const section = document.getElementById('dailySummaryPushSection');
+  if (section && typeof section.scrollIntoView === 'function') {
+    section.scrollIntoView({ block: 'start' });
+  }
+}
+
+function dailySummaryPushSettingsButton(marginTop) {
+  return '<button class="ai-save-btn" onclick="openDailySummaryPushSettings()" style="width:auto;margin:' +
+    (marginTop || '14px') + ' auto 0;padding:8px 16px;font-size:12px">🔔 每日摘要推送设置</button>';
+}
+
+function isDailySummaryAdmin() {
+  return !!(typeof authUser !== 'undefined' && authUser && authUser.role === 'admin');
+}
+
+function dailySummaryRetryCountdownText(intervalMinutes) {
+  const at = dailySummaryState.nextRetryAt;
+  if (!at) return '约 ' + intervalMinutes + ' 分钟后';
+  const minutes = Math.ceil((Number(at) * 1000 - Date.now()) / 60000);
+  if (!Number.isFinite(minutes) || minutes <= 0) return '即将';
+  return '约 ' + minutes + ' 分钟后';
+}
+
+// Admin-only: re-run today's failed generation. The button that calls this is
+// rendered only in the failure states, and the server refuses the route unless
+// today actually has a failure record — manual generation stays retired.
+async function retryDailySummary() {
+  if (dailySummaryRetryInFlight) return;
+  dailySummaryRetryInFlight = true;
+  renderDailySummaryBody();
+  try {
+    const resp = await fetch('/ai/daily-summary/retry', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + authToken },
+    });
+    if (resp.status === 401) {
+      logout();
+      return;
+    }
+    const data = await parseJsonResponse(resp);
+    if (resp.ok && data && data.status === 'completed') {
+      showToast('✅ 每日摘要生成成功');
+    } else if (resp.status === 202) {
+      showToast('⏳ 正在生成，请稍候');
+    } else {
+      showToast('❌ 重试失败：' + ((data && (data.error || data.message)) || resp.status));
+    }
+  } catch (e) {
+    showToast('❌ 重试失败，请稍后再试');
+  } finally {
+    dailySummaryRetryInFlight = false;
+    await syncDailySummaryToday();
+    renderDailySummaryBody();
+  }
+}
+
 function renderDailySummaryBody() {
   const body = document.getElementById('dailySummaryBody');
   if (!body) return;
-  const count = countTodayArticles();
-  if (dailySummaryState.status === 'running') {
-    const elapsed = dailySummaryState.startedAt ? Math.max(1, Math.floor((Date.now() - dailySummaryState.startedAt) / 1000)) : 1;
-    body.innerHTML =
-      '<div style="text-align:center;padding:36px;color:var(--text-3)">' +
-      '<div style="font-size:20px;margin-bottom:10px">⏳</div>' +
-      '<p>每日摘要正在后台生成，已等待 ' + elapsed + ' 秒。</p>' +
-      '<p class="ai-hint" style="margin-top:8px">你可以关闭此窗口，生成完成后首页 ✨ 会高亮提示。</p>' +
-      '</div>';
-    return;
-  }
+  const generateAt = dailySummaryState.generateAt || '21:00';
+
   if (dailySummaryState.status === 'completed' && dailySummaryState.result) {
     const data = dailySummaryState.result;
     const generatedTime = formatDailySummaryTime(data.updated_at);
@@ -3766,21 +4076,69 @@ function renderDailySummaryBody() {
       renderMarkdown(normalizeDailySummaryMarkdown(data.summary)) +
       '</div><div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:10px">' +
       '<p style="font-size:11px;color:var(--text-3);margin:0">于 ' + generatedTime + ' 基于 ' + data.article_count + ' 篇文章生成</p>' +
-      '<button class="ai-save-btn" onclick="generateDailySummary()" style="width:auto;margin:0;padding:7px 12px;font-size:12px">重新生成</button>' +
       '</div>';
     return;
   }
-  if (dailySummaryState.status === 'failed') {
+
+  // Failure states reach the client only for admins (see ai_daily_summary_today),
+  // which is what keeps the retry control off every other reader's panel.
+  if (isDailySummaryFailureState() && isDailySummaryAdmin()) {
+    const gaveUp = dailySummaryState.status === 'failed';
+    const attempts = dailySummaryState.attempts || 1;
+    const retried = Math.max(attempts - 1, 0);
+    const interval = dailySummaryState.retryIntervalMinutes || 10;
+    const nextLine = gaveUp
+      ? '已重试 ' + retried + ' 次仍失败，今日不再自动重试。已给管理员发送邮件和站内通知。'
+      : '已尝试 ' + attempts + ' 次，' + dailySummaryRetryCountdownText(interval) + '自动重试（最多重试 '
+        + (dailySummaryState.maxRetries || 3) + ' 次）。';
     body.innerHTML =
-      '<div style="text-align:center;padding:36px;color:var(--text-3)">❌ 生成失败: ' +
-      esc(dailySummaryState.error || '未知错误') +
-      '<br><button class="ai-save-btn" onclick="generateDailySummary()" style="margin-top:14px">重新生成</button></div>';
+      '<div style="text-align:center;padding:32px 20px;color:var(--text-3)">' +
+      '<div style="font-size:20px;margin-bottom:10px">' + (gaveUp ? '❌' : '🔁') + '</div>' +
+      '<p style="color:var(--text-2);font-weight:600">今日摘要生成失败</p>' +
+      '<p class="ai-hint" style="margin-top:10px;text-align:left;word-break:break-word;' +
+      'background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:10px 12px">' +
+      '失败原因：' + esc(dailySummaryState.error || '未知原因') + '</p>' +
+      '<p class="ai-hint" style="margin-top:8px">' + esc(nextLine) + '</p>' +
+      '<button class="ai-save-btn" id="dailySummaryRetryBtn" onclick="retryDailySummary()" ' +
+      'style="width:auto;margin:14px auto 0;padding:8px 16px;font-size:12px"' +
+      (dailySummaryRetryInFlight ? ' disabled' : '') + '>' +
+      (dailySummaryRetryInFlight ? '⏳ 重试中…' : '🔄 重试生成') + '</button>' +
+      dailySummaryPushSettingsButton('10px') +
+      '</div>';
     return;
   }
+
+  if (dailySummaryState.status === 'generating' || dailySummaryState.status === 'retrying') {
+    body.innerHTML =
+      '<div style="text-align:center;padding:36px;color:var(--text-3)">' +
+      '<div style="font-size:20px;margin-bottom:10px">⏳</div>' +
+      '<p>今日摘要正在生成，稍后回来查看。</p>' +
+      '<p class="ai-hint" style="margin-top:8px">生成完成后首页 ✨ 会高亮提示。</p>' +
+      dailySummaryPushSettingsButton() +
+      '</div>';
+    return;
+  }
+
+  if (dailySummaryState.status === 'unavailable' || dailySummaryState.status === 'failed') {
+    body.innerHTML =
+      '<div style="text-align:center;padding:36px;color:var(--text-3)">' +
+      '<div style="font-size:20px;margin-bottom:10px">🌙</div>' +
+      '<p>今日暂无可用摘要。</p>' +
+      '<p class="ai-hint" style="margin-top:8px">明天 ' + esc(generateAt) + ' 会生成新的每日摘要。</p>' +
+      dailySummaryPushSettingsButton() +
+      '</div>';
+    return;
+  }
+
+  // 'scheduled' — today's generation time hasn't arrived yet. This is the state
+  // a user sees for most of the day, so it explains the schedule rather than
+  // offering a button that no longer exists: generation is server-owned and
+  // runs once per day (see ai_daily_summary() in web_server.py).
   body.innerHTML =
-    '<div style="text-align:center;padding:20px;color:var(--text-3)">' +
-    '<button class="ai-save-btn" onclick="generateDailySummary()">📊 生成每日摘要</button>' +
-    '<p class="ai-hint" style="margin-top:8px">基于今日 ' + count + ' 条新闻由 AI 生成摘要</p>' +
+    '<div style="text-align:center;padding:36px;color:var(--text-3)">' +
+    '<div style="font-size:20px;margin-bottom:10px">🕘</div>' +
+    '<p>每日摘要将在北京时间每天晚 9 点（' + esc(generateAt) + '）生成显示</p>' +
+    dailySummaryPushSettingsButton() +
     '</div>';
 }
 
@@ -3837,112 +4195,64 @@ function formatDailySummaryTime(value) {
   return '--:--';
 }
 
-async function pollDailySummaryJob(jobId) {
-  if (!jobId || dailySummaryState.jobId !== jobId) return;
-  try {
-    const resp = await fetch('/ai/daily-summary/' + encodeURIComponent(jobId), {
-      headers: { 'Authorization': 'Bearer ' + authToken },
-    });
-    if (resp.status === 401) {
-      logout();
-      setDailySummaryState({ status: 'failed', error: '登录已过期，请重新登录', pollTimer: null });
-      return;
-    }
-    const data = await parseJsonResponse(resp);
-    if (data.status === 'completed') {
-      setDailySummaryState({
-        status: 'completed',
-        result: data,
-        error: '',
-        unread: !isDailySummaryOpen(),
-        pollTimer: null,
-      });
-      showToast('✅ 每日摘要已生成');
-      return;
-    }
-    if (data.status === 'failed') {
-      setDailySummaryState({ status: 'failed', error: data.error || '生成失败', pollTimer: null });
-      showToast('❌ 每日摘要生成失败');
-      return;
-    }
-    if (isDailySummaryOpen()) renderDailySummaryBody();
-    dailySummaryState.pollTimer = setTimeout(() => pollDailySummaryJob(jobId), 2000);
-  } catch (e) {
-    setDailySummaryState({ status: 'failed', error: e.message || '生成失败', pollTimer: null });
-  }
-}
-
-function startDailySummaryPolling(jobId, startedAt) {
-  if (dailySummaryState.pollTimer) clearTimeout(dailySummaryState.pollTimer);
-  setDailySummaryState({
-    jobId,
-    status: 'running',
-    result: null,
-    error: '',
-    unread: false,
-    startedAt: startedAt ? startedAt * 1000 : Date.now(),
-    pollTimer: null,
-  });
-  dailySummaryState.pollTimer = setTimeout(() => pollDailySummaryJob(jobId), 800);
-}
-
 async function syncDailySummaryToday() {
   if (!authToken) return;
   try {
     const resp = await fetch('/ai/daily-summary/today', {
       headers: { 'Authorization': 'Bearer ' + authToken },
+      cache: 'no-store',
     });
     if (resp.status === 401) {
       logout();
       return;
     }
     const data = await parseJsonResponse(resp);
+    if (!data || !data.status) return;
     if (data.status === 'completed') {
+      // Only flag it unread the first time this session sees it, so reopening
+      // the panel (which re-syncs) doesn't relight the ✨ dot after the user
+      // has already read today's digest.
+      const isNew = !(dailySummaryState.status === 'completed'
+        && dailySummaryState.result
+        && dailySummaryState.result.updated_at === data.updated_at);
       setDailySummaryState({
-        jobId: '',
         status: 'completed',
         result: data,
         error: '',
-        unread: true,
-        startedAt: 0,
+        generateAt: data.generate_at || dailySummaryState.generateAt,
+        unread: isNew ? !isDailySummaryOpen() : dailySummaryState.unread,
+        attempts: 0,
+        nextRetryAt: null,
+        canRetry: false,
       });
       return;
     }
-    if ((data.status === 'queued' || data.status === 'running') && data.job_id) {
-      startDailySummaryPolling(data.job_id, data.created_at);
+    if (data.status === 'failed' || data.status === 'retrying') {
+      setDailySummaryState({
+        status: data.status,
+        result: null,
+        error: data.error || '',
+        unread: false,
+        generateAt: data.generate_at || dailySummaryState.generateAt,
+        attempts: data.attempts || 0,
+        maxRetries: data.max_retries === undefined ? dailySummaryState.maxRetries : data.max_retries,
+        nextRetryAt: data.next_retry_at || null,
+        retryIntervalMinutes: data.retry_interval_minutes || dailySummaryState.retryIntervalMinutes,
+        canRetry: !!data.can_retry,
+      });
       return;
     }
     setDailySummaryState({
-      jobId: '',
-      status: 'idle',
+      status: data.status,
       result: null,
       error: '',
       unread: false,
-      startedAt: 0,
+      generateAt: data.generate_at || dailySummaryState.generateAt,
+      attempts: 0,
+      nextRetryAt: null,
+      canRetry: false,
     });
   } catch (e) {}
-}
-
-// ─── Daily Summary ───────────────────────────────────────
-
-async function triggerDailySummary() {
-  await refreshTodayArticleCount();
-  const count = countTodayArticles();
-  showSettingsStatus(`📊 正在汇集今日共 ${count} 条新闻生成摘要，请耐心等待。`);
-  try {
-    const resp = await fetch('/ai/daily-summary', { method: 'POST', headers: { 'Authorization': 'Bearer ' + authToken } });
-    if (resp.status === 401) { logout(); showSettingsStatus('❌ 登录已过期，请重新登录', 'err'); return; }
-    let data = await parseJsonResponse(resp);
-    if (data.job_id) {
-      startDailySummaryPolling(data.job_id);
-      showSettingsStatus('📊 每日摘要已在后台生成，完成后首页 ✨ 会高亮提示。');
-      return;
-    }
-    if (!data) { showSettingsStatus('❌ 请求失败', 'err'); return; }
-    if (data.error) { showSettingsStatus('❌ ' + data.error, 'err'); return; }
-    // Show result in a scrollable area
-    showSettingsStatus('✅ 每日摘要已生成，可在首页摘要弹窗查看');
-  } catch (e) { showSettingsStatus('❌ 生成失败: ' + (e.message || ''), 'err'); }
 }
 
 // ═══ Daily Summary (Sidebar) ════════════════════════════
@@ -3973,7 +4283,9 @@ async function showDailySummary() {
   closeSidebar();
   renderDailySummaryBody();
   await syncDailySummaryToday();
-  if (dailySummaryState.status === 'completed') {
+  // Opening the panel *is* reading it: drop the ✨ highlight regardless of which
+  // state the sync landed on.
+  if (dailySummaryState.unread) {
     dailySummaryState.unread = false;
     updateDailySummaryButton();
   }
@@ -3983,33 +4295,6 @@ async function showDailySummary() {
 function closeDailySummary() {
   document.getElementById('dailySummaryOverlay').classList.remove('open');
   unlockBodyScroll();
-}
-
-async function generateDailySummary() {
-  const body = document.getElementById('dailySummaryBody');
-  await refreshTodayArticleCount();
-  const count = countTodayArticles();
-  if (dailySummaryState.status === 'running') {
-    renderDailySummaryBody();
-    return;
-  }
-  body.innerHTML = `<div style="text-align:center;padding:40px;color:var(--text-3)">⏳ 已提交生成任务，系统将在后台处理今日 ${count} 条新闻。</div>`;
-  try {
-    const resp = await fetch('/ai/daily-summary', { method: 'POST', headers: { 'Authorization': 'Bearer ' + authToken } });
-    if (resp.status === 401) { logout(); body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)">❌ 登录已过期，请重新登录</div>'; return; }
-    let data = await parseJsonResponse(resp);
-    if (data.job_id) {
-      startDailySummaryPolling(data.job_id);
-      showToast('📊 每日摘要正在后台生成');
-      renderDailySummaryBody();
-      return;
-    }
-    if (!data) { body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)">❌ 请求失败</div>'; return; }
-    if (data.error) { body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)">❌ ' + esc(data.error) + '</div>'; return; }
-    setDailySummaryState({ status: 'completed', result: data, unread: false, error: '' });
-  } catch (e) {
-    setDailySummaryState({ status: 'failed', error: e.message || '生成失败' });
-  }
 }
 
 function closeSidebar() {
@@ -4215,6 +4500,18 @@ async function aiChat(config, messages, maxTokens, temperature) {
   }
 }
 
+function publishSharedAIResult(articleId, payload) {
+  if (!userAutoSettings?.share_active) return Promise.resolve(false);
+  return fetch('/ai/result/' + articleId, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
+    body: JSON.stringify(payload),
+  }).then(() => true).catch(e => {
+    console.warn('failed to share AI result:', e);
+    return false;
+  });
+}
+
 async function aiSummarize(articleId) {
   if (isRestrictedUser()) { showToast('🔒 预览账号待管理员审核，暂不可用此功能'); return; }
   const btn = document.querySelector('.ai-summarize-btn');
@@ -4261,11 +4558,7 @@ async function aiSummarize(articleId) {
     setSummaryHtml(esc(summary));
 
     // 3) Share the result back to the server for other users to reuse.
-    fetch('/ai/result/' + articleId, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
-      body: JSON.stringify({ summary }),
-    }).catch(e => console.warn('failed to share summary result:', e));
+    publishSharedAIResult(articleId, { summary });
   } catch (e) {
     setSummaryHtml('<span style="color:#ef4444">❌ ' + esc(e.message || '生成失败，请检查你的 API 配置和网络（自建 endpoint 需支持浏览器跨域）') + '</span>');
   }
@@ -4288,14 +4581,6 @@ async function aiTranslate(articleId) {
       bodyEl.innerHTML = bodyEl.dataset.originalHtml;
       if (h1 && bodyEl.dataset.originalTitle) h1.textContent = bodyEl.dataset.originalTitle;
       bodyEl.dataset.showingTranslation = 'false';
-      // Re-attach lightbox
-      bodyEl.querySelectorAll('img').forEach(img => {
-        img.addEventListener('click', e => {
-          e.stopPropagation();
-          document.getElementById('lbImg').src = img.src;
-          document.getElementById('lb').classList.add('open'); lockBodyScroll();
-        });
-      });
       if (btn) btn.textContent = '翻译';
     } else {
       // Show translation
@@ -4324,13 +4609,6 @@ async function aiTranslate(articleId) {
     bodyEl.dataset.showingTranslation = 'true';
     bodyEl.innerHTML = translatedHtml;
     if (h1 && translatedTitle) h1.textContent = translatedTitle;
-    bodyEl.querySelectorAll('img').forEach(img => {
-      img.addEventListener('click', e => {
-        e.stopPropagation();
-        document.getElementById('lbImg').src = img.src;
-        document.getElementById('lb').classList.add('open');
-      });
-    });
     if (btn) { btn.textContent = '原文'; btn.disabled = false; }
   };
 
@@ -4338,15 +4616,23 @@ async function aiTranslate(articleId) {
     // 1) Server already has a shared result — just show it, no LLM call.
     const cachedResp = await fetch('/ai/result/' + articleId, { headers: { 'Authorization': 'Bearer ' + authToken } });
     const cached = cachedResp.ok ? await cachedResp.json().catch(() => null) : null;
-    if (cached && cached.translation) {
+    if (
+      cached
+      && cached.translation
+      && userAutoSettings?.share_active
+      && userAutoSettings?.share_view_translation
+    ) {
       const t = cached.translation.trim();
       if (t.startsWith('{')) {
         let cachedData = null;
         try { cachedData = JSON.parse(t); } catch (e) { cachedData = null; }
         if (cachedData && cachedData.html) {
-          applyTranslation(cachedData.html, cachedData.title || '');
+          const cachedTitle = userAutoSettings?.share_view_title
+            ? (cachedData.title || '')
+            : '';
+          applyTranslation(cachedData.html, cachedTitle);
           showToast('✅ 翻译完成');
-          syncArticleTitle(articleId, cachedData.title || '');
+          if (cachedTitle) syncArticleTitle(articleId, cachedTitle);
           return;
         }
       } else if (t.startsWith('<')) {
@@ -4377,11 +4663,9 @@ async function aiTranslate(articleId) {
     syncArticleTitle(articleId, translatedTitle);
 
     // 3) Share the result back to the server for other users to reuse.
-    fetch('/ai/result/' + articleId, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
-      body: JSON.stringify({ translation: JSON.stringify({ title: translatedTitle, html: translatedHtml }) }),
-    }).catch(e => console.warn('failed to share translation result:', e));
+    publishSharedAIResult(articleId, {
+      translation: JSON.stringify({ title: translatedTitle, html: translatedHtml }),
+    });
   } catch (e) {
     bodyEl.innerHTML = originalHtml;
     showToast('❌ 生成失败: ' + (e.message || '请检查你的 API 配置和网络（自建 endpoint 需支持浏览器跨域）'));
@@ -4401,11 +4685,12 @@ async function autoDisplaySummary(articleId) {
     });
     const data = await resp.json();
     if (!data) return;
+    const shareActive = !!userAutoSettings?.share_active;
     const articleWrap = document.getElementById('articleWrap');
     if (!articleWrap) return;
     
     // Auto-display cached summary
-    if (data.summary) {
+    if (data.summary && shareActive && userAutoSettings?.share_view_summary) {
       const existingSummary = document.getElementById('aiSummaryTop');
       if (existingSummary) existingSummary.remove();
       const summaryDiv = document.createElement('div');
@@ -4424,7 +4709,7 @@ async function autoDisplaySummary(articleId) {
     }
 
     // Auto-display cached translations
-    if (data.translation) {
+    if (data.translation && shareActive && userAutoSettings?.share_view_translation) {
       const bodyEl = document.getElementById('articleBody');
       if (!bodyEl) return;
       const t = data.translation.trim();
@@ -4439,19 +4724,15 @@ async function autoDisplaySummary(articleId) {
         bodyEl.dataset.originalHtml = bodyEl.innerHTML;
         bodyEl.dataset.originalTitle = h1El ? h1El.textContent : '';
         bodyEl.dataset.translatedHtml = proxyImages(sanitizeTranslatedHtml(cachedData.html));
-        bodyEl.dataset.translatedTitle = cachedData.title || '';
+        const cachedTitle = userAutoSettings?.share_view_title
+          ? (cachedData.title || '')
+          : '';
+        bodyEl.dataset.translatedTitle = cachedTitle;
+        bodyEl.dataset.sharedTranslation = 'true';
         bodyEl.dataset.showingTranslation = 'true';
         bodyEl.innerHTML = bodyEl.dataset.translatedHtml;
-        if (h1El && cachedData.title) h1El.textContent = cachedData.title;
-        syncArticleTitle(articleId, cachedData.title);
-        // Re-attach lightbox
-        bodyEl.querySelectorAll('img').forEach(img => {
-          img.addEventListener('click', e => {
-            e.stopPropagation();
-            document.getElementById('lbImg').src = img.src;
-            document.getElementById('lb').classList.add('open');
-          });
-        });
+        if (h1El && cachedTitle) h1El.textContent = cachedTitle;
+        if (cachedTitle) syncArticleTitle(articleId, cachedTitle);
         const btn = document.querySelector('.ai-translate-btn');
         if (btn) btn.textContent = '原文';
         return;
@@ -4463,14 +4744,6 @@ async function autoDisplaySummary(articleId) {
         bodyEl.dataset.translatedHtml = proxyImages(sanitizeTranslatedHtml(t));
         bodyEl.dataset.showingTranslation = 'true';
         bodyEl.innerHTML = bodyEl.dataset.translatedHtml;
-        // Re-attach lightbox
-        bodyEl.querySelectorAll('img').forEach(img => {
-          img.addEventListener('click', e => {
-            e.stopPropagation();
-            document.getElementById('lbImg').src = img.src;
-            document.getElementById('lb').classList.add('open');
-          });
-        });
         const btn = document.querySelector('.ai-translate-btn');
         if (btn) btn.textContent = '原文';
         return;
@@ -4527,7 +4800,7 @@ function renderFavorites(data) {
     <div class="fav-item" onclick="openFavArticle(${item.article_id})">
       ${item.thumb ? `<div class="fav-item-thumb"><img src="${proxyImgSrc(item.thumb)}" alt="" loading="lazy" decoding="async"></div>` : ''}
       <div class="fav-item-body">
-        <div class="fav-item-title">${esc(item.title)}</div>
+        <div class="fav-item-title">${esc(displayTitle(item))}</div>
         <div class="fav-item-meta">
           <span class="badge" style="${badgeStyle(displaySourceForArticle(feedSourceOf(item)))}" title="${esc(sourceBadgeTitle(feedSourceOf(item)))}">${esc(sourceLabel(displaySourceForArticle(feedSourceOf(item))))}</span>
           <span>${formatTime(item.date, item.time)}</span>
@@ -4616,7 +4889,11 @@ let notifItems = [];
 let notifUnread = 0;
 let notifDetailId = null;
 let notifRequestSeq = 0;
-let notifReadChain = Promise.resolve();  // serializes 已读 writes (see markNotifRead)
+let lastShareTransitionNotificationId = 0;
+let notifPendingReads = new Map();
+let notifPendingDeletes = new Map();
+let notifReadAllPending = false;
+let notifDeleteAllPending = false;
 let notifLoadState = 'idle';  // 'idle' | 'loading' | 'ready' | 'error'
 
 function updateNotifDot() {
@@ -4634,7 +4911,52 @@ function resetNotifState() {
   notifUnread = 0;
   notifDetailId = null;
   notifLoadState = 'idle';
+  lastShareTransitionNotificationId = 0;
+  notifPendingReads.clear();
+  notifPendingDeletes.clear();
+  notifReadAllPending = false;
+  notifDeleteAllPending = false;
   updateNotifDot();
+}
+
+function reconcilePendingNotifDeletes(items, unread, requestToken) {
+  if (notifDeleteAllPending) return { items: [], unread: 0 };
+  let nextItems = Array.isArray(items) ? items : [];
+  let nextUnread = typeof unread === 'number'
+    ? unread
+    : nextItems.filter(item => !item.read_at).length;
+  for (const [id, pending] of notifPendingDeletes) {
+    if (pending.requestToken !== requestToken) continue;
+    const item = nextItems.find(candidate => candidate.id === id);
+    if (item && !item.read_at) nextUnread = Math.max(0, nextUnread - 1);
+    nextItems = nextItems.filter(candidate => candidate.id !== id);
+  }
+  return { items: nextItems, unread: nextUnread };
+}
+
+function reconcilePendingNotifReads(items, unread, requestToken) {
+  const nextItems = Array.isArray(items) ? items : [];
+  let nextUnread = typeof unread === 'number'
+    ? unread
+    : nextItems.filter(item => !item.read_at).length;
+  for (const [id, pending] of notifPendingReads) {
+    if (pending.requestToken !== requestToken) continue;
+    let item = nextItems.find(candidate => candidate.id === id);
+    if (!item) {
+      const existing = notifItems.find(candidate => candidate.id === id);
+      if (existing) {
+        item = { ...existing, read_at: pending.optimisticReadAt };
+        nextItems.push(item);
+      }
+      continue;
+    }
+    if (!item.read_at) {
+      item.read_at = pending.optimisticReadAt;
+      nextUnread = Math.max(0, nextUnread - 1);
+    }
+  }
+  nextItems.sort((a, b) => (Number(b.id) || 0) - (Number(a.id) || 0));
+  return { items: nextItems, unread: nextUnread };
 }
 
 async function refreshNotifStatus() {
@@ -4655,10 +4977,27 @@ async function refreshNotifStatus() {
       return false;
     }
     if (authToken !== requestToken || seq !== notifRequestSeq) return false;
-    notifItems = data.items || [];
-    notifUnread = data.unread || 0;
+    const withoutPendingDeletes = reconcilePendingNotifDeletes(data.items, data.unread, requestToken);
+    const reconciled = reconcilePendingNotifReads(
+      withoutPendingDeletes.items,
+      withoutPendingDeletes.unread,
+      requestToken,
+    );
+    notifItems = reconciled.items;
+    notifUnread = reconciled.unread;
     notifLoadState = 'ready';
     updateNotifDot();
+    const newestShareTransitionId = notifItems.reduce((latest, item) => {
+      if (!item || !['share_suspended', 'share_restored'].includes(item.type)) {
+        return latest;
+      }
+      const id = Number(item.id) || 0;
+      return Math.max(latest, id);
+    }, 0);
+    if (newestShareTransitionId > lastShareTransitionNotificationId) {
+      lastShareTransitionNotificationId = newestShareTransitionId;
+      await loadUserSettings();
+    }
     return true;
   } catch (e) {
     if (authToken === requestToken && seq === notifRequestSeq) notifLoadState = 'error';
@@ -4670,10 +5009,21 @@ function openNotifications() {
   closeUserMenu();
   if (!authToken) { showToast('🔒 登录后才能查看通知'); showAuth(); return; }
   const overlay = document.getElementById('notifOverlay');
+  // The daily-summary notification body is the digest Markdown, whose article
+  // links are absolute (https://…/#/article/…) and are sanitized with
+  // target="_blank". Intercept them the same way the digest panel does so a tap
+  // opens the in-app article overlay instead of a new browser tab.
+  const notifBody = document.getElementById('notifBody');
+  if (notifBody && !notifBody.dataset.linkHandlerBound) {
+    notifBody.addEventListener('click', handleDailySummaryLinkClick);
+    notifBody.dataset.linkHandlerBound = '1';
+  }
   overlay.classList.add('open');
   lockBodyScroll();
   notifDetailId = null;
   document.getElementById('notifBackBtn').style.display = 'none';
+  const actions = document.getElementById('notifListActions');
+  if (actions) actions.style.display = '';
   document.getElementById('notifPanelTitle').textContent = '🔔 我的通知';
   if (notifItems.length || notifLoadState === 'error') renderNotifList();
   else document.getElementById('notifBody').innerHTML = '<div class="fav-empty">加载中...</div>';
@@ -4693,6 +5043,19 @@ function formatNotifTime(iso) {
   return (iso || '').slice(0, 16).replace('T', ' ');
 }
 
+function formatNotifListTime(iso, now = new Date()) {
+  const value = new Date(iso);
+  if (Number.isNaN(value.getTime())) return formatNotifTime(iso);
+  const day = new Date(value.getFullYear(), value.getMonth(), value.getDate());
+  const currentDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const diffDays = Math.round((currentDay - day) / 86400000);
+  const hhmm = `${String(value.getHours()).padStart(2, '0')}:${String(value.getMinutes()).padStart(2, '0')}`;
+  if (diffDays === 0) return `今天 ${hhmm}`;
+  if (diffDays === 1) return `昨天 ${hhmm}`;
+  if (diffDays === 2) return `前天 ${hhmm}`;
+  return `${value.getMonth() + 1}-${value.getDate()} ${hhmm}`;
+}
+
 function renderNotifList() {
   const body = document.getElementById('notifBody');
   if (!notifItems.length) {
@@ -4709,11 +5072,10 @@ function renderNotifList() {
   }
   body.innerHTML = notifItems.map(n => `
     <div class="notif-item ${n.read_at ? '' : 'unread'}" onclick="showNotifDetail(${n.id})">
-      <span class="notif-time">${esc(formatNotifTime(n.created_at))}</span>
+      <span class="notif-time">${esc(formatNotifListTime(n.created_at))}</span>
       <span class="notif-title">${esc(n.title)}</span>
-      ${n.read_at ? '' : '<span class="notification-new-tag">new</span>'}
-      <button class="notif-btn" onclick="event.stopPropagation();showNotifDetail(${n.id})">查看</button>
-      ${n.read_at ? '' : `<button class="notif-btn read-btn" onclick="event.stopPropagation();markNotifRead(${n.id})">已读</button>`}
+      ${n.read_at ? '' : `<button class="notif-unread-action" aria-label="标记为已读" onclick="event.stopPropagation();markNotifRead(${n.id})"></button>`}
+      <button class="notif-btn notif-delete-btn" onclick="event.stopPropagation();deleteNotif(${n.id})">删除</button>
     </div>
   `).join('');
 }
@@ -4731,6 +5093,8 @@ function retryNotifications() {
 function showNotifList() {
   notifDetailId = null;
   document.getElementById('notifBackBtn').style.display = 'none';
+  const actions = document.getElementById('notifListActions');
+  if (actions) actions.style.display = '';
   document.getElementById('notifPanelTitle').textContent = '🔔 我的通知';
   renderNotifList();
 }
@@ -4750,6 +5114,8 @@ function showNotifDetail(id) {
   if (!n) return;
   notifDetailId = id;
   document.getElementById('notifBackBtn').style.display = '';
+  const actions = document.getElementById('notifListActions');
+  if (actions) actions.style.display = 'none';
   document.getElementById('notifPanelTitle').textContent = '通知详情';
   const bodyHtml = renderNotifBodyHtml(n.body, n.format);
   document.getElementById('notifBody').innerHTML = `
@@ -4757,43 +5123,214 @@ function showNotifDetail(id) {
       <div class="notif-detail-time">${esc(formatNotifTime(n.created_at))}</div>
       <div class="notif-detail-title">${esc(n.title)}</div>
       <div class="notif-detail-body notif-markdown">${bodyHtml}</div>
-      ${n.read_at ? '' : `<div class="notif-detail-footer"><button class="notif-read-primary" onclick="markNotifRead(${n.id}, true)">已读</button></div>`}
+      <div class="notif-detail-footer">
+        ${n.read_at ? '' : `<button class="notif-read-primary" onclick="markNotifRead(${n.id}, true)">已读</button>`}
+        <button class="notif-delete-primary" onclick="deleteNotif(${n.id}, true)">删除</button>
+      </div>
     </div>
   `;
 }
 
 function markNotifRead(id, fromDetail = false) {
-  // Serialize the read-writes: two concurrent POSTs can resolve out of order
-  // (and the server may even process them out of click order), so an older
-  // response's data.unread could clobber a newer one's, leaving a wrong badge
-  // count. Chaining guarantees each POST fires only after the previous one has
-  // fully settled, so the last response always reflects the latest server
-  // state. Capture the token at enqueue time so a queued op that runs after an
-  // account switch is skipped rather than acting under the wrong identity.
   const requestToken = authToken;
-  notifReadChain = notifReadChain.then(() => _applyNotifRead(id, fromDetail, requestToken));
-  return notifReadChain;
+  const n = notifItems.find(item => item.id === id);
+  if (!requestToken || !n || n.read_at || notifPendingReads.has(id)) {
+    return Promise.resolve(false);
+  }
+
+  // Reflect the click immediately instead of making the button wait for a
+  // network round trip. Keep enough state to roll back a failed write.
+  const optimisticReadAt = new Date().toISOString();
+  notifPendingReads.set(id, {
+    requestToken,
+    previousReadAt: n.read_at,
+    optimisticReadAt,
+  });
+  n.read_at = optimisticReadAt;
+  notifUnread = Math.max(0, notifUnread - 1);
+  // A GET already in flight predates this optimistic write and must not replace
+  // it with an unread snapshot.
+  notifRequestSeq++;
+  updateNotifDot();
+  if (fromDetail || notifDetailId === id) showNotifList();
+  else renderNotifList();
+
+  return _applyNotifRead(id, requestToken);
 }
 
-async function _applyNotifRead(id, fromDetail, requestToken) {
-  if (!authToken || authToken !== requestToken) return;  // logged out / switched
-  // Invalidate any GET refresh in flight so it can't land after this write and
-  // revert the row back to unread with stale data.
-  notifRequestSeq++;
+async function _applyNotifRead(id, requestToken) {
   try {
     const data = await apiFetch('/notifications/' + id + '/read', { method: 'POST' });
-    if (!data || data.error) { showToast('❌ 操作失败'); return; }
-    if (authToken !== requestToken) return;
-    const n = notifItems.find(x => x.id === id);
-    if (n && !n.read_at) n.read_at = new Date().toISOString();
-    notifUnread = typeof data.unread === 'number'
-      ? data.unread
-      : notifItems.filter(x => !x.read_at).length;
-    updateNotifDot();
-    if (fromDetail || notifDetailId === id) showNotifList();
-    else renderNotifList();
+    if (!data || data.error) throw new Error('mark read failed');
+    if (authToken !== requestToken) return false;
+    const pending = notifPendingReads.get(id);
+    if (!pending || pending.requestToken !== requestToken) return false;
+    notifPendingReads.delete(id);
+    // Invalidate a GET that began while the POST was pending. Once the last
+    // parallel write settles, fetch one authoritative count instead of trusting
+    // POST responses that can arrive out of order.
+    notifRequestSeq++;
+    if (![...notifPendingReads.values()].some(item => item.requestToken === requestToken)) {
+      refreshNotifStatus();
+    }
+    return true;
   } catch (e) {
+    if (authToken !== requestToken) return false;
+    const pending = notifPendingReads.get(id);
+    if (!pending || pending.requestToken !== requestToken) return false;
+    notifPendingReads.delete(id);
+    notifRequestSeq++;
+    const n = notifItems.find(item => item.id === id);
+    if (n && n.read_at === pending.optimisticReadAt) {
+      n.read_at = pending.previousReadAt;
+      notifUnread++;
+    }
+    updateNotifDot();
+    if (notifDetailId === id) showNotifDetail(id);
+    else renderNotifList();
     showToast('❌ 操作失败');
+    return false;
+  }
+}
+
+function markAllNotifRead() {
+  const requestToken = authToken;
+  if (!requestToken || notifReadAllPending) return Promise.resolve(false);
+  const pending = notifItems
+    .filter(item => !item.read_at && !notifPendingReads.has(item.id))
+    .map(item => {
+      const optimisticReadAt = new Date().toISOString();
+      const operation = { requestToken, previousReadAt: item.read_at, optimisticReadAt };
+      notifPendingReads.set(item.id, operation);
+      item.read_at = optimisticReadAt;
+      return { id: item.id, operation };
+    });
+  if (!pending.length) return Promise.resolve(false);
+
+  notifReadAllPending = true;
+  notifUnread = Math.max(0, notifUnread - pending.length);
+  notifRequestSeq++;
+  updateNotifDot();
+  if (notifDetailId === null) renderNotifList();
+
+  return _applyAllNotifRead(pending, requestToken);
+}
+
+async function _applyAllNotifRead(pending, requestToken) {
+  try {
+    const data = await apiFetch('/notifications/read-all', { method: 'POST' });
+    if (!data || data.error) throw new Error('mark all read failed');
+    if (authToken !== requestToken) return false;
+    for (const entry of pending) {
+      if (notifPendingReads.get(entry.id) === entry.operation) {
+        notifPendingReads.delete(entry.id);
+      }
+    }
+    notifReadAllPending = false;
+    notifRequestSeq++;
+    if (![...notifPendingReads.values()].some(item => item.requestToken === requestToken)) {
+      refreshNotifStatus();
+    }
+    return true;
+  } catch (e) {
+    if (authToken !== requestToken) return false;
+    let restored = 0;
+    for (const entry of pending) {
+      if (notifPendingReads.get(entry.id) !== entry.operation) continue;
+      notifPendingReads.delete(entry.id);
+      const item = notifItems.find(candidate => candidate.id === entry.id);
+      if (item && item.read_at === entry.operation.optimisticReadAt) {
+        item.read_at = entry.operation.previousReadAt;
+        if (!item.read_at) restored++;
+      }
+    }
+    notifReadAllPending = false;
+    notifUnread += restored;
+    notifRequestSeq++;
+    updateNotifDot();
+    if (notifDetailId === null) renderNotifList();
+    showToast('❌ 操作失败');
+    return false;
+  }
+}
+
+function deleteNotif(id, fromDetail = false) {
+  const requestToken = authToken;
+  const index = notifItems.findIndex(item => item.id === id);
+  if (!requestToken || index < 0 || notifPendingDeletes.has(id) || notifDeleteAllPending) {
+    return Promise.resolve(false);
+  }
+  const item = notifItems[index];
+  const pending = { requestToken, item, index, wasUnread: !item.read_at };
+  notifPendingDeletes.set(id, pending);
+  notifItems.splice(index, 1);
+  if (pending.wasUnread) notifUnread = Math.max(0, notifUnread - 1);
+  notifRequestSeq++;
+  updateNotifDot();
+  if (fromDetail || notifDetailId === id) showNotifList();
+  else renderNotifList();
+
+  return _applyNotifDelete(id, pending, requestToken);
+}
+
+async function _applyNotifDelete(id, pending, requestToken) {
+  try {
+    const data = await apiFetch('/notifications/' + id, { method: 'DELETE' });
+    if (!data || data.error) throw new Error('delete notification failed');
+    if (authToken !== requestToken || notifPendingDeletes.get(id) !== pending) return false;
+    notifPendingDeletes.delete(id);
+    notifRequestSeq++;
+    if (!notifPendingDeletes.size && !notifDeleteAllPending) refreshNotifStatus();
+    return true;
+  } catch (e) {
+    if (authToken !== requestToken || notifPendingDeletes.get(id) !== pending) return false;
+    notifPendingDeletes.delete(id);
+    const restoreIndex = Math.min(pending.index, notifItems.length);
+    notifItems.splice(restoreIndex, 0, pending.item);
+    if (pending.wasUnread) notifUnread++;
+    notifRequestSeq++;
+    updateNotifDot();
+    if (notifDetailId === null) renderNotifList();
+    showToast('❌ 删除失败');
+    return false;
+  }
+}
+
+function deleteAllNotifications() {
+  const requestToken = authToken;
+  if (!requestToken || notifDeleteAllPending || !notifItems.length) return Promise.resolve(false);
+  if (!confirm('确定删除全部通知吗？')) return Promise.resolve(false);
+
+  const pending = { requestToken, items: notifItems.slice(), unread: notifUnread };
+  notifDeleteAllPending = true;
+  notifItems = [];
+  notifUnread = 0;
+  notifRequestSeq++;
+  updateNotifDot();
+  if (notifDetailId === null) renderNotifList();
+  return _applyDeleteAllNotifications(pending, requestToken);
+}
+
+async function _applyDeleteAllNotifications(pending, requestToken) {
+  try {
+    const data = await apiFetch('/notifications', { method: 'DELETE' });
+    if (!data || data.error) throw new Error('delete all notifications failed');
+    if (authToken !== requestToken || !notifDeleteAllPending) return false;
+    notifDeleteAllPending = false;
+    notifPendingDeletes.clear();
+    notifRequestSeq++;
+    refreshNotifStatus();
+    return true;
+  } catch (e) {
+    if (authToken !== requestToken || !notifDeleteAllPending) return false;
+    notifDeleteAllPending = false;
+    notifItems = pending.items;
+    notifUnread = pending.unread;
+    notifRequestSeq++;
+    updateNotifDot();
+    if (notifDetailId === null) renderNotifList();
+    showToast('❌ 删除失败');
+    return false;
   }
 }
 
@@ -5081,6 +5618,28 @@ function reconcileVisibleArticles({ animate = false } = {}) {
   if (animate) animateArticleLayout(list, previousRects, newIds);
 }
 
+function mergeRefreshArticleIds(target, values) {
+  if (!(target instanceof Set) || !Array.isArray(values)) return target instanceof Set ? target.size : 0;
+  values.forEach(value => {
+    const raw = value && typeof value === 'object' ? value.id : value;
+    const id = Number(raw);
+    if (Number.isInteger(id) && id > 0) target.add(id);
+  });
+  return target.size;
+}
+
+function renderRefreshDiscoveredCount(ids) {
+  setRefreshProgressLabel(ids instanceof Set ? ids.size : 0);
+}
+
+// Set while a manual refresh is running. Any loadSince() that discovers articles
+// during that window — the periodic 60s poll and the foreground-resume check as
+// much as the flow's own checks — queues them into the same pendingNewItems the
+// "有 N 篇新文章" bubble counts, so all of them must reach the refresh's counter
+// too. Otherwise the bubble can outnumber the button label (see
+// triggerRefresh()'s fallback check).
+let activeRefreshDiscoverySink = null;
+
 async function triggerRefresh() {
   if (refreshInProgress || (typeof logoRefreshInProgress !== 'undefined' && logoRefreshInProgress)) return;
   // Unauthenticated users cannot refresh
@@ -5099,6 +5658,14 @@ async function triggerRefresh() {
     && !flowController.signal.aborted
     && !document.hidden
   );
+  const discoveredArticleIds = new Set();
+  const mergeDiscovered = values => {
+    if (!flowIsCurrent()) return discoveredArticleIds.size;
+    const before = discoveredArticleIds.size;
+    const size = mergeRefreshArticleIds(discoveredArticleIds, values);
+    if (size !== before) renderRefreshDiscoveredCount(discoveredArticleIds);
+    return size;
+  };
   const refreshView = {
     activeFilter: filter,
     page: currentPage,
@@ -5116,6 +5683,7 @@ async function triggerRefresh() {
     && !hasBlockingOverlayOpen()
   );
   setRefreshRunning(true);
+  activeRefreshDiscoverySink = mergeDiscovered;
   hideNewArticlesPrompt();
   showToast('🔄 正在后台抓取...');
 
@@ -5129,9 +5697,10 @@ async function triggerRefresh() {
   let lastStreamedApplyAt = 0;
   let streamApplyInFlight = false;
   const handleRefreshProgress = status => {
+    if (!flowIsCurrent()) return;
+    mergeDiscovered(status.new_ids_so_far || []);
     const soFar = Number(status.new_count_so_far || 0);
     if (soFar <= lastStreamedCount) return;
-    setRefreshProgressLabel(soFar);
     const now = Date.now();
     const canApply = !streamApplyInFlight
       && now - lastStreamedApplyAt >= 3000
@@ -5164,7 +5733,12 @@ async function triggerRefresh() {
   // surface the usual bubble (elsewhere) despite refreshInProgress being true —
   // it stays true for the job's full duration (see setRefreshRunning() below),
   // deliberately not shortened just because this check landed.
-  const immediateCheck = loadSince(sinceCursor, { manual: true });
+  const immediateCheck = loadSince(sinceCursor, {
+    manual: true,
+    onDiscovered: mergeDiscovered,
+    externalSignal: flowController.signal,
+    applicationGuard: flowIsCurrent,
+  });
 
   try {
     const data = await requestRefreshOnce(flowController.signal);
@@ -5175,6 +5749,9 @@ async function triggerRefresh() {
     if (status.status === 'failed') {
       throw new Error(refreshErrorMessage(status));
     }
+    mergeDiscovered(status.new_ids || []);
+    await immediateCheck;
+    if (!flowIsCurrent()) return;
     let page1BranchRan = false;
     if (
       refreshView.page === 1
@@ -5212,10 +5789,20 @@ async function triggerRefresh() {
     // already advanced it, and re-querying from an older cursor would just mean
     // more (harmlessly deduped via seenArticleIds) redundant results.
     if (!page1BranchRan && flowIsCurrent() && status.status === 'completed' && Number(status.new_count || 0) > 0) {
-      await loadSince(latestKnownTimestamp || sinceCursor);
+      await loadSince(latestKnownTimestamp || sinceCursor, {
+        externalSignal: flowController.signal,
+        applicationGuard: flowIsCurrent,
+        // Same counter the button label and completion toast read from. What
+        // this call queues is exactly what the "有 N 篇新文章" bubble counts, so
+        // omitting it let the two disagree on screen: after a cold start with a
+        // long gap the job itself ingests only the tail (+10 on the button)
+        // while this check picks up the whole backlog the startup fetch had
+        // already landed (65 in the bubble).
+        onDiscovered: mergeDiscovered,
+      });
     }
     if (!flowIsCurrent()) return;
-    const count = Number(status.new_count || 0);
+    const count = discoveredArticleIds.size;
     showToast(count > 0 ? `✅ 更新完成，新增 ${count} 篇文章` : '✅ 已是最新');
   } catch (e) {
     if (flowIsCurrent() && (!e || e.name !== 'AbortError')) {
@@ -5224,6 +5811,7 @@ async function triggerRefresh() {
   } finally {
     if (refreshFlowGeneration === flowGeneration && refreshFlowController === flowController) {
       refreshFlowController = null;
+      activeRefreshDiscoverySink = null;
       setRefreshRunning(false);
       showNewArticlesPrompt();
     }
@@ -5512,10 +6100,90 @@ function startStartupEmptyRevalidation(initialData, {
   return true;
 }
 
+// ── Recovery after an iOS PWA resume ────────────────────────────────────
+//
+// When the app is opened after a long time in the background, the first
+// requests routinely fail: iOS hasn't brought the network stack back, so the
+// fetch either hangs until our own AbortController fires or the Service Worker
+// answers it from its cache (X-SW-Fallback). Both land in loadNewsPage()'s
+// failure path. Without this, the user was left on the "内容可能不是最新" /
+// "连接超时" card until they hit the manual refresh button by hand — by which
+// time the network was back and the very same request succeeded.
+//
+// So: never leave the list in a failed state waiting for a tap. Retry on a
+// backoff for as long as the page is visible, and retry immediately when the
+// OS tells us connectivity returned ('online') or when the app is brought
+// forward again.
+let listLoadDegraded = false;
+let networkRecoveryTimer = null;
+let networkRecoveryAttempt = 0;
+let networkRecoveryTarget = null;
+const NETWORK_RECOVERY_DELAYS_MS = [1500, 4000, 8000, 15000, 30000];
+const NETWORK_RECOVERY_MAX_ATTEMPTS = 8;
+
+function cancelNetworkRecoveryRetry() {
+  if (networkRecoveryTimer) clearTimeout(networkRecoveryTimer);
+  networkRecoveryTimer = null;
+  networkRecoveryAttempt = 0;
+  networkRecoveryTarget = null;
+  listLoadDegraded = false;
+}
+
+function scheduleNetworkRecoveryRetry({ page = currentPage, activeFilter = filter, immediate = false } = {}) {
+  listLoadDegraded = true;
+  networkRecoveryTarget = { page, activeFilter };
+  if (networkRecoveryTimer) {
+    if (!immediate) return;
+    clearTimeout(networkRecoveryTimer);
+    networkRecoveryTimer = null;
+  }
+  if (networkRecoveryAttempt >= NETWORK_RECOVERY_MAX_ATTEMPTS) return;
+  const delayMs = immediate
+    ? 0
+    : NETWORK_RECOVERY_DELAYS_MS[Math.min(networkRecoveryAttempt, NETWORK_RECOVERY_DELAYS_MS.length - 1)];
+  networkRecoveryAttempt++;
+  networkRecoveryTimer = setTimeout(() => {
+    networkRecoveryTimer = null;
+    // Hidden again: the retry would race the freeze. onReturnToForeground()
+    // re-arms this the moment the app comes back.
+    if (document.hidden) return;
+    const target = networkRecoveryTarget || { page, activeFilter };
+    loadNewsPage(target.page, {
+      activeFilter: target.activeFilter,
+      useCache: false,
+      forceNetwork: true,
+      networkRetries: 1,
+      suppressFailureToast: true,
+    });
+    // Success cancels the chain from inside loadNewsPage(); a further failure
+    // schedules the next (longer) step from its failure path.
+  }, delayMs);
+}
+
+// The 重试 button on the cold-start error card. Distinct from loadData(): it
+// retries the *list* several times without waiting on source metadata first —
+// on a just-resumed connection the first attempt is the one most likely to hang,
+// and blocking the list behind loadSourceCategories() only added to the wait.
+function retryColdStartLoad() {
+  if (networkRecoveryTimer) {
+    clearTimeout(networkRecoveryTimer);
+    networkRecoveryTimer = null;
+  }
+  networkRecoveryAttempt = 0;
+  loadSourceCategories();
+  return loadNewsPage(currentPage, {
+    activeFilter: filter,
+    useCache: false,
+    forceNetwork: true,
+    userInitiated: true,
+    networkRetries: 2,
+  });
+}
+
 function renderColdStartError(message) {
   const list = document.getElementById('list');
   if (!list || news.length || list.querySelector('.item[data-id]')) return;
-  list.innerHTML = '<div class="empty"><div class="empty-icon">📡</div><p>' + esc(message) + '</p><button class="refresh-btn" onclick="loadData()" style="margin-top:12px">重试</button></div>';
+  list.innerHTML = '<div class="empty"><div class="empty-icon">📡</div><p>' + esc(message) + '</p><button class="refresh-btn" onclick="retryColdStartLoad()" style="margin-top:12px">重试</button></div>';
 }
 
 function renderSourceDeepLinkError(message) {
@@ -5578,11 +6246,27 @@ function swFallbackError() {
   return error;
 }
 
-async function fetchNewsPage(page, activeFilter, signal, sourceSnapshot = null) {
+async function fetchNewsPage(page, activeFilter, signal, sourceSnapshot = null, { cacheBust = false } = {}) {
   const params = buildNewsPageParams(page, activeFilter, sourceSnapshot);
+  // A retry after a hung request must not be answered by the connection that
+  // hung (or by an intermediate cache): on iOS PWA resume the original socket
+  // can stay stuck until the OS tears it down, so vary the URL. sw.js's
+  // normalizedApiRequest() strips `t` again before touching its cache key, so
+  // this costs nothing on the cache side.
+  if (cacheBust) params.set('t', String(Date.now()));
   const resp = await fetch('/api/news?' + params.toString(), { signal });
   if (!resp.ok) throw new Error('HTTP ' + resp.status);
-  if (isSwFallbackResponse(resp)) throw swFallbackError();
+  if (isSwFallbackResponse(resp)) {
+    // Still a failure — the caller must not mistake it for a fresh 200 — but
+    // carry the stale body along. When the app has nothing else to show (cold
+    // start right after a resume), rendering this beats an error card, and the
+    // caller says so explicitly by reading `staleData`.
+    const error = swFallbackError();
+    try {
+      error.staleData = await resp.json();
+    } catch (e) {}
+    throw error;
+  }
   const data = await resp.json();
   if (data.error) throw new Error(data.error);
   return data;
@@ -5803,7 +6487,15 @@ async function revealPendingLatest() {
   stabilizePageTop();
 }
 
-async function showLatestAfterIdle() {
+async function showLatestAfterIdle({
+  externalSignal = null,
+  applicationGuard = null,
+} = {}) {
+  const mayApply = () => (
+    !(externalSignal && externalSignal.aborted)
+    && (!applicationGuard || applicationGuard())
+  );
+  if (!mayApply()) return;
   const activeFilter = filter;
   if (!pendingRelevantCount(activeFilter)) return;
   if (document.hidden || hasBlockingOverlayOpen()) return;
@@ -5811,25 +6503,39 @@ async function showLatestAfterIdle() {
   const epochAtStart = contentEpoch;
   let latestPage;
   try {
-    latestPage = await fetchNewsPage(1, activeFilter);
+    latestPage = await fetchNewsPage(1, activeFilter, externalSignal);
+    if (!mayApply()) return;
     await writeCachedNewsPage(1, activeFilter, latestPage, epochAtStart);
+    if (!mayApply()) return;
   } catch (e) {
     return;
   }
   let pageApplied = false;
   const applyLatest = () => {
-    if (pageApplied || hasBlockingOverlayOpen() || filter !== activeFilter) return;
+    if (
+      !mayApply()
+      || pageApplied
+      || hasBlockingOverlayOpen()
+      || filter !== activeFilter
+    ) return;
     pageApplied = true;
     currentPage = 1;
     applyNewsPage(latestPage, 1, activeFilter, { animate: true, preserveDom: true });
     syncListUrl({ replace: true });
   };
+  if (!mayApply()) return;
   programmaticScrollUntil = Date.now() + 800;
-  const completed = await scrollPageToTop({ onNearTop: applyLatest, auto: true });
-  if (!completed) return;
+  const completed = await scrollPageToTop({
+    onNearTop: applyLatest,
+    auto: true,
+    externalSignal,
+    applicationGuard,
+  });
+  if (!mayApply() || !completed) return;
   applyLatest();
-  if (!pageApplied) return;
+  if (!mayApply() || !pageApplied) return;
   consumePendingNewArticles(activeFilter);
+  if (!mayApply()) return;
   lastUserActivityAt = Date.now();
 }
 
@@ -5880,6 +6586,10 @@ async function loadNewsPageRequest(requestSeq, page = 1, {
   sourceSnapshot = null,
   coldStartErrorHandler = null,
   externalSignal = null,
+  // Automatic resume-recovery retries (scheduleNetworkRecoveryRetry) already
+  // told the user once; repeating the toast on every backoff step would turn a
+  // recovering app into a stream of failure notices.
+  suppressFailureToast = false,
 } = {}) {
   let cacheApplied = false;
   // Captured once, up front, so every write below stamps the epoch that was live when
@@ -5915,11 +6625,18 @@ async function loadNewsPageRequest(requestSeq, page = 1, {
       if (pageRequestController) pageRequestController.abort();
       pageRequestController = new AbortController();
       const controller = pageRequestController;
-      const timeout = setTimeout(() => controller.abort(), 12000);
+      // A socket that survived an iOS background freeze can hang until the OS
+      // reaps it, so an attempt that still has a retry behind it gives up early
+      // and reissues on a fresh (cache-busted) URL rather than burning the full
+      // budget on a connection that will never answer.
+      const attemptTimeoutMs = attempt < networkRetries ? 6000 : 12000;
+      const timeout = setTimeout(() => controller.abort(), attemptTimeoutMs);
       const abortFromExternal = () => controller.abort();
       if (externalSignal) externalSignal.addEventListener('abort', abortFromExternal, { once: true });
       try {
-        const data = await fetchNewsPage(page, activeFilter, controller.signal, sourceSnapshot);
+        const data = await fetchNewsPage(page, activeFilter, controller.signal, sourceSnapshot,
+                                         { cacheBust: attempt > 0 });
+        cancelNetworkRecoveryRetry();
         if (externalSignal && externalSignal.aborted) return false;
         const startupInitializing = typeof isStartupInitializationResponse === 'function'
           && isStartupInitializationResponse(data);
@@ -5980,16 +6697,33 @@ async function loadNewsPageRequest(requestSeq, page = 1, {
       : isSwFallbackFailure
       ? '内容可能不是最新，下拉或点击刷新重试'
       : '加载失败，请检查网络';
-    if (cacheApplied) showToast(message);
+    // Nothing on screen, but the Service Worker handed us its cached copy on the
+    // way past (see fetchNewsPage): show that rather than an error card the user
+    // has to tap through. This is the common iOS-PWA-resume case — the content
+    // was there all along, it just wasn't fresh.
+    const staleItems = lastError && lastError.staleData && Array.isArray(lastError.staleData.items)
+      ? lastError.staleData.items
+      : null;
+    const notify = text => { if (!suppressFailureToast) showToast(text); };
+    if (!cacheApplied && !news.length && staleItems && staleItems.length) {
+      if (!applicationGuard || applicationGuard()) {
+        applyNewsPage(lastError.staleData, page, activeFilter, { animate });
+        notify(message);
+        scheduleNetworkRecoveryRetry({ page, activeFilter });
+        return true;
+      }
+    }
+    if (cacheApplied) notify(message);
     else if (!cacheApplied && !news.length) {
       (coldStartErrorHandler || renderColdStartError)(message);
+      scheduleNetworkRecoveryRetry({ page, activeFilter });
     }
     // Otherwise (cache missed, but the page already has news rendered from an
     // earlier load, and this wasn't a user-initiated fetch): ordinarily silent —
     // background prefetch failures shouldn't nag the user — except a SW-fallback
     // failure specifically, which per isSwFallbackResponse()'s doc must never be
     // silently mistaken for "up to date".
-    else if (userInitiated || isSwFallbackFailure) showToast(message);
+    else if (userInitiated || isSwFallbackFailure) notify(message);
     return cacheApplied;
   } finally {
     if (requestSeq === pageRequestSequence && showPageProgress) setPageLoading(false);
@@ -6125,32 +6859,59 @@ async function loadData() {
 // deliberately runs while refreshInProgress is still true for the job's whole
 // duration. Every other caller (periodic timer, foreground resume, etc.) leaves this
 // false and keeps deferring while a refresh job is in flight, same as before.
-async function loadSince(timestamp, { forceApply = false, manual = false } = {}) {
+async function loadSince(
+  timestamp,
+  {
+    forceApply = false,
+    manual = false,
+    onDiscovered = null,
+    externalSignal = null,
+    applicationGuard = null,
+  } = {},
+) {
   const deferForRefresh = refreshInProgress;
+  const flowIsActive = () => (
+    !(externalSignal && externalSignal.aborted)
+    && (!applicationGuard || applicationGuard())
+  );
+  const controller = new AbortController();
+  const abortFromExternal = () => controller.abort();
+  let timeout = null;
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
+    if (!flowIsActive()) return -1;
+    if (externalSignal) {
+      if (externalSignal.aborted) controller.abort();
+      else externalSignal.addEventListener('abort', abortFromExternal, { once: true });
+    }
+    timeout = setTimeout(() => controller.abort(), 8000);
     const params = new URLSearchParams({
       since: String(timestamp || 0),
       size: String(INCREMENTAL_FETCH_LIMIT),
     });
     const resp = await fetch('/api/news?' + params.toString(), { signal: controller.signal });
     clearTimeout(timeout);
+    timeout = null;
+    if (!flowIsActive()) return -1;
     if (isSwFallbackResponse(resp)) throw swFallbackError();
     const data = await resp.json();
+    if (!flowIsActive()) return -1;
     if (data.error) throw new Error(data.error);
     const newItems = (data.items || []).filter(item => {
       const id = Number(item.id);
       if (!id || seenArticleIds.has(id)) return false;
       const itemTs = Number(item.timestamp || 0);
-      if (itemTs > Number(timestamp || 0)) {
-        seenArticleIds.add(id);
-        return true;
-      }
-      return false;
+      return itemTs > Number(timestamp || 0);
     });
     const added = newItems.length;
     if (!added) return 0;
+    if (!flowIsActive()) return -1;
+    newItems.forEach(item => seenArticleIds.add(Number(item.id)));
+    if (!flowIsActive()) return -1;
+    const discoverySink = typeof onDiscovered === 'function'
+      ? onDiscovered
+      : activeRefreshDiscoverySink;
+    if (typeof discoverySink === 'function') discoverySink(newItems.slice());
+    if (!flowIsActive()) return -1;
     latestKnownTimestamp = Math.max(latestKnownTimestamp, ...newItems.map(item => Number(item.timestamp) || 0));
     pendingNewArticleCount += added;
     pendingNewItems = pendingNewItems.concat(newItems);
@@ -6158,14 +6919,25 @@ async function loadSince(timestamp, { forceApply = false, manual = false } = {})
     // invalidate them so pagination doesn't hand out stale pages (see bumpContentEpoch()).
     bumpContentEpoch();
     const epochAtStart = contentEpoch;
-    refreshTodayArticleCount();
+    refreshTodayArticleCount(8000, {
+      externalSignal,
+      applicationGuard: flowIsActive,
+    });
     if (!manual && (deferForRefresh || refreshInProgress)) return added;
-    await loadSourceCategories();
+    if (!flowIsActive()) return -1;
+    await loadSourceCategories({
+      externalSignal,
+      applicationGuard: flowIsActive,
+    });
+    if (!flowIsActive()) return -1;
     // Keep an "all"-scoped snapshot warm — the lightweight Logo/home flow
     // intentionally jumps to "all" and can reuse it without starting a scrape.
-    const latestAllData = await fetchNewsPage(1, 'all');
+    const latestAllData = await fetchNewsPage(1, 'all', controller.signal);
+    if (!flowIsActive()) return -1;
     pendingLatestPage = latestAllData;
+    if (!flowIsActive()) return -1;
     await writeCachedNewsPage(1, 'all', latestAllData, epochAtStart);
+    if (!flowIsActive()) return -1;
 
     const activeFilter = filter;
     const relevantCount = pendingRelevantCount(activeFilter);
@@ -6173,14 +6945,25 @@ async function loadSince(timestamp, { forceApply = false, manual = false } = {})
       && window.scrollY <= 4
       && !hasBlockingOverlayOpen();
     if ((forceApply || atLatestTop) && currentPage === 1 && !hasBlockingOverlayOpen() && relevantCount > 0) {
-      const latestData = activeFilter === 'all' ? latestAllData : await fetchNewsPage(1, activeFilter);
-      if (filter === activeFilter) {
+      const latestData = activeFilter === 'all'
+        ? latestAllData
+        : await fetchNewsPage(1, activeFilter, controller.signal);
+      if (!flowIsActive()) return -1;
+      if (filter === activeFilter && flowIsActive()) {
         applyNewsPage(latestData, 1, activeFilter, { animate: true, preserveDom: true });
+        if (!flowIsActive()) return -1;
         consumePendingNewArticles(activeFilter);
       }
-    } else if (relevantCount > 0 && Date.now() - lastUserActivityAt >= IDLE_LATEST_DELAY_MS) {
-      showLatestAfterIdle();
-    } else if (!forceApply && relevantCount > 0) {
+    } else if (
+      flowIsActive()
+      && relevantCount > 0
+      && Date.now() - lastUserActivityAt >= IDLE_LATEST_DELAY_MS
+    ) {
+      showLatestAfterIdle({
+        externalSignal,
+        applicationGuard: flowIsActive,
+      });
+    } else if (flowIsActive() && !forceApply && relevantCount > 0) {
       showNewArticlesPrompt();
     }
     return added;
@@ -6190,6 +6973,9 @@ async function loadSince(timestamp, { forceApply = false, manual = false } = {})
     // nothing new" — see checkForNewArticlesAfterForegroundResume(), which
     // retries only on the former.
     return -1;
+  } finally {
+    if (timeout !== null) clearTimeout(timeout);
+    if (externalSignal) externalSignal.removeEventListener('abort', abortFromExternal);
   }
 }
 
@@ -6851,24 +7637,33 @@ function waitForScrollTop(timeout = 700) {
   });
 }
 
-function scrollPageToTop({ onNearTop, auto = false } = {}) {
+function scrollPageToTop({
+  onNearTop,
+  auto = false,
+  externalSignal = null,
+  applicationGuard = null,
+} = {}) {
+  const mayContinue = () => (
+    !(externalSignal && externalSignal.aborted)
+    && (!applicationGuard || applicationGuard())
+  );
   const startY = window.scrollY || document.documentElement.scrollTop || 0;
   let nearTopApplied = false;
   const applyNearTop = () => {
-    if (nearTopApplied) return;
+    if (nearTopApplied || !mayContinue()) return false;
     nearTopApplied = true;
     if (typeof onNearTop === 'function') onNearTop();
+    return mayContinue();
   };
+  if (!mayContinue()) return Promise.resolve(false);
   if (startY <= 4) {
-    applyNearTop();
-    return Promise.resolve(true);
+    return Promise.resolve(applyNearTop());
   }
   const reduceMotion = window.matchMedia
     && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   if (reduceMotion) {
     window.scrollTo(0, 0);
-    applyNearTop();
-    return Promise.resolve(true);
+    return Promise.resolve(applyNearTop());
   }
   if (activeScrollMotion) activeScrollMotion.cancelled = true;
   const motion = { auto, cancelled: false };
@@ -6876,24 +7671,26 @@ function scrollPageToTop({ onNearTop, auto = false } = {}) {
   const duration = Math.min(640, Math.max(340, 300 + startY * 0.055));
   return new Promise(resolve => {
     const startedAt = performance.now();
+    const finish = completed => {
+      if (activeScrollMotion === motion) activeScrollMotion = null;
+      resolve(completed);
+    };
     const step = now => {
-      if (motion.cancelled) {
-        if (activeScrollMotion === motion) activeScrollMotion = null;
-        resolve(false);
-        return;
-      }
+      if (motion.cancelled || !mayContinue()) return finish(false);
       const progress = Math.min(1, (now - startedAt) / duration);
       const eased = 1 - Math.pow(1 - progress, 4);
       const remaining = Math.round(startY * (1 - eased));
       window.scrollTo(0, remaining);
+      if (!mayContinue()) return finish(false);
       if (progress >= 0.75 || remaining <= PAGE_SWITCH_TOP_THRESHOLD) applyNearTop();
+      if (!mayContinue()) return finish(false);
       if (progress < 1) {
         requestAnimationFrame(step);
       } else {
         applyNearTop();
+        if (!mayContinue()) return finish(false);
         window.scrollTo(0, 0);
-        if (activeScrollMotion === motion) activeScrollMotion = null;
-        resolve(true);
+        finish(true);
       }
     };
     requestAnimationFrame(step);
@@ -7109,7 +7906,15 @@ function openArticle(id) {
   cancelViewBoundRefreshWork();
   const n = news.find(x => x.id === id);
   const wrap = document.getElementById('articleWrap');
-  if (!document.getElementById('overlay').classList.contains('open')) {
+  const overlay = document.getElementById('overlay');
+  const articleWasOpen = overlay.classList.contains('open');
+  const switchingArticle = articleWasOpen
+    && overlay.dataset.articleId
+    && overlay.dataset.articleId !== String(id);
+  if (switchingArticle && document.getElementById('lb').classList.contains('open')) {
+    closeLightbox(document.getElementById('backBtn'));
+  }
+  if (!articleWasOpen) {
     rememberArticleReturnState(id);
   }
 
@@ -7123,10 +7928,10 @@ function openArticle(id) {
 
   // If article not in memory, fetch metadata from API
   if (!n) {
-    document.getElementById('overlay').classList.add('open');
-    document.getElementById('overlay').scrollTop = 0;
-    lockArticleBackground();
-    document.getElementById('overlay').dataset.articleId = id;
+    overlay.classList.add('open');
+    overlay.scrollTop = 0;
+    if (!articleWasOpen) lockArticleBackground();
+    overlay.dataset.articleId = id;
     // Check favorite status
     if (!isRestrictedUser()) checkFavoriteStatus(id);
     wrap.innerHTML = '<p style="color:var(--text-2);text-align:center;padding:60px 0">加载中...</p>';
@@ -7170,7 +7975,7 @@ function openArticle(id) {
   }
 
   // Already open with loaded content — skip. If it is still loading, retry below.
-  const sameArticleOpen = document.getElementById('overlay').classList.contains('open') && document.getElementById('overlay').dataset.articleId == id;
+  const sameArticleOpen = articleWasOpen && overlay.dataset.articleId == id;
   if (sameArticleOpen && articleBodyCache[id]) return;
 
   // Show placeholder immediately while body loads
@@ -7195,10 +8000,10 @@ function openArticle(id) {
     </div>
   `;
 
-  document.getElementById('overlay').classList.add('open');
-  document.getElementById('overlay').scrollTop = 0;
-  lockArticleBackground();
-  document.getElementById('overlay').dataset.articleId = id;
+  overlay.classList.add('open');
+  overlay.scrollTop = 0;
+  if (!articleWasOpen) lockArticleBackground();
+  overlay.dataset.articleId = id;
   // Check favorite status
   if (!isRestrictedUser()) checkFavoriteStatus(id);
   syncArticleHistory(n.id, n.date);
@@ -7309,19 +8114,10 @@ function renderArticleBody(wrap, data, id) {
       }
     }
   }
-  // Attach lightbox
-  bodyEl.querySelectorAll('img').forEach(img => {
+  for (const img of bodyEl.querySelectorAll('img')) {
     img.loading = img.loading || 'lazy';
     img.decoding = 'async';
-    img.addEventListener('click', e => {
-      e.stopPropagation();
-      document.getElementById('lbImg').src = img.src;
-      document.getElementById('lb').classList.add('open'); lockBodyScroll();
-      // Allow zoom on lightbox
-      const vp = document.querySelector('meta[name=viewport]');
-      if (vp) vp.content = 'width=device-width, initial-scale=1.0, viewport-fit=cover';
-    });
-  });
+  }
 }
 
 function formatTime(date, time) {
@@ -7344,15 +8140,330 @@ function showToast(msg) {
   el._t = setTimeout(() => el.classList.remove('show'), 2000);
 }
 
-function closeLightbox() {
-  document.getElementById('lb').classList.remove('open');
+const lightboxGesture = {
+  pointers: new Map(),
+  scale: 1,
+  x: 0,
+  y: 0,
+  startScale: 1,
+  startDistance: 0,
+  startCenter: null,
+  startOffset: null,
+  dragStart: null,
+  moved: false,
+};
+
+function clampLightboxScale(value) {
+  return Math.min(4, Math.max(1, Number(value) || 1));
+}
+
+function lightboxDistance(a, b) {
+  return Math.hypot(b.x - a.x, b.y - a.y);
+}
+
+function clampLightboxOffset(x, y, scale) {
+  const stage = document.getElementById('lbStage');
+  const image = document.getElementById('lbImg');
+  if (!stage || !image || scale <= 1) return { x: 0, y: 0 };
+  const width = image.offsetWidth * scale;
+  const height = image.offsetHeight * scale;
+  const maxX = Math.max(0, (width - stage.clientWidth) / 2);
+  const maxY = Math.max(0, (height - stage.clientHeight) / 2);
+  return {
+    x: Math.min(maxX, Math.max(-maxX, x)),
+    y: Math.min(maxY, Math.max(-maxY, y)),
+  };
+}
+
+function applyLightboxTransform() {
+  const image = document.getElementById('lbImg');
+  const offset = clampLightboxOffset(
+    lightboxGesture.x,
+    lightboxGesture.y,
+    lightboxGesture.scale,
+  );
+  lightboxGesture.x = offset.x;
+  lightboxGesture.y = offset.y;
+  image.style.transform =
+    `translate3d(${offset.x}px,${offset.y}px,0) scale(${lightboxGesture.scale})`;
+}
+
+function isLightboxFocusTarget(element) {
+  return !!(
+    element
+    && element.isConnected
+    && !element.disabled
+    && element.tabIndex >= 0
+    && typeof element.focus === 'function'
+    && (typeof element.getClientRects !== 'function' || element.getClientRects().length > 0)
+  );
+}
+
+function focusLightboxTarget(element) {
+  if (!isLightboxFocusTarget(element)) return false;
+  element.focus({ preventScroll: true });
+  return document.activeElement === element;
+}
+
+function closeLightbox(focusTarget = null) {
+  const lb = document.getElementById('lb');
+  lb.classList.remove('open');
+  lb.setAttribute('aria-hidden', 'true');
+  lb.setAttribute('inert', '');
+  resetLightboxGesture();
+  document.getElementById('lbImg').removeAttribute('src');
   unlockBodyScroll();
-  // Lock zoom back when lightbox closes
-  const vp = document.querySelector('meta[name=viewport]');
-  if (vp) {
-    vp.content = 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no';
+  const trigger = lightboxTrigger;
+  lightboxTrigger = null;
+  if (!focusLightboxTarget(focusTarget || trigger)) {
+    focusLightboxTarget(document.getElementById('backBtn'));
   }
 }
+
+let lightboxTrigger = null;
+
+function resetLightboxGesture() {
+  lightboxGesture.pointers.clear();
+  lightboxGesture.scale = 1;
+  lightboxGesture.x = 0;
+  lightboxGesture.y = 0;
+  lightboxGesture.startScale = 1;
+  lightboxGesture.startDistance = 0;
+  lightboxGesture.startCenter = null;
+  lightboxGesture.startOffset = null;
+  lightboxGesture.dragStart = null;
+  lightboxGesture.moved = false;
+  const image = document.getElementById('lbImg');
+  if (image) image.style.transform = '';
+}
+
+function lightboxFocusableElements() {
+  const lb = document.getElementById('lb');
+  if (!lb) return [];
+  return Array.from(lb.querySelectorAll(
+    'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+  )).filter(element => (
+    !element.disabled
+    && (typeof element.getClientRects !== 'function' || element.getClientRects().length > 0)
+  ));
+}
+
+function focusLightboxCloseButton() {
+  const closeButton = document.getElementById('lbCloseBtn');
+  if (closeButton && typeof closeButton.focus === 'function') {
+    closeButton.focus({ preventScroll: true });
+  }
+}
+
+function trapLightboxFocus(event) {
+  const lb = document.getElementById('lb');
+  if (!lb || !lb.classList.contains('open') || event.key !== 'Tab') return;
+  const focusable = lightboxFocusableElements();
+  if (!focusable.length) {
+    event.preventDefault();
+    focusLightboxCloseButton();
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && (document.activeElement === first || !lb.contains(document.activeElement))) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && (document.activeElement === last || !lb.contains(document.activeElement))) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+function openImageViewer(image) {
+  if (!(image instanceof HTMLImageElement)) return;
+  if (!image.currentSrc && !image.src) return;
+  if (!image.complete || image.naturalWidth === 0) {
+    recoverImageLoad(image);
+    return;
+  }
+  prepareArticleImage(image);
+  lightboxTrigger = image;
+  resetLightboxGesture();
+  const lb = document.getElementById('lb');
+  const lbImg = document.getElementById('lbImg');
+  lbImg.src = image.currentSrc || image.src;
+  lbImg.alt = image.alt || '';
+  lb.removeAttribute('inert');
+  lb.classList.add('open');
+  lb.setAttribute('aria-hidden', 'false');
+  lockBodyScroll();
+  focusLightboxCloseButton();
+}
+
+document.addEventListener('keydown', trapLightboxFocus);
+
+function lightboxPoint(event) {
+  return { x: event.clientX, y: event.clientY };
+}
+
+function lightboxPointerPair() {
+  return Array.from(lightboxGesture.pointers.values()).slice(0, 2);
+}
+
+function lightboxStageCenter() {
+  const stage = document.getElementById('lbStage');
+  const rect = stage.getBoundingClientRect();
+  return {
+    x: rect.left + rect.width / 2,
+    y: rect.top + rect.height / 2,
+  };
+}
+
+function onLightboxPointerDown(event) {
+  if (!document.getElementById('lb').classList.contains('open') || lightboxGesture.pointers.size >= 2) return;
+  event.currentTarget.setPointerCapture(event.pointerId);
+  lightboxGesture.pointers.set(event.pointerId, lightboxPoint(event));
+  const pair = lightboxPointerPair();
+  if (pair.length === 2) {
+    lightboxGesture.startDistance = lightboxDistance(pair[0], pair[1]);
+    lightboxGesture.startScale = lightboxGesture.scale;
+    lightboxGesture.startCenter = {
+      x: (pair[0].x + pair[1].x) / 2,
+      y: (pair[0].y + pair[1].y) / 2,
+    };
+    lightboxGesture.startOffset = {
+      x: lightboxGesture.x,
+      y: lightboxGesture.y,
+    };
+    lightboxGesture.dragStart = null;
+  } else if (pair.length === 1 && lightboxGesture.scale > 1) {
+    lightboxGesture.dragStart = {
+      pointer: pair[0],
+      x: lightboxGesture.x,
+      y: lightboxGesture.y,
+    };
+  }
+}
+
+function onLightboxPointerMove(event) {
+  if (!lightboxGesture.pointers.has(event.pointerId)) return;
+  lightboxGesture.pointers.set(event.pointerId, lightboxPoint(event));
+  const pair = lightboxPointerPair();
+  if (pair.length === 2 && lightboxGesture.startDistance > 0) {
+    lightboxGesture.scale = clampLightboxScale(
+      lightboxGesture.startScale
+        * lightboxDistance(pair[0], pair[1])
+        / lightboxGesture.startDistance,
+    );
+    const center = {
+      x: (pair[0].x + pair[1].x) / 2,
+      y: (pair[0].y + pair[1].y) / 2,
+    };
+    const stageCenter = lightboxStageCenter();
+    const scaleRatio = lightboxGesture.scale / lightboxGesture.startScale;
+    lightboxGesture.x = lightboxGesture.startOffset.x
+      + center.x - lightboxGesture.startCenter.x
+      + (1 - scaleRatio) * (
+        lightboxGesture.startCenter.x - stageCenter.x - lightboxGesture.startOffset.x
+      );
+    lightboxGesture.y = lightboxGesture.startOffset.y
+      + center.y - lightboxGesture.startCenter.y
+      + (1 - scaleRatio) * (
+        lightboxGesture.startCenter.y - stageCenter.y - lightboxGesture.startOffset.y
+      );
+    lightboxGesture.moved = true;
+    applyLightboxTransform();
+    return;
+  }
+  if (pair.length === 1 && lightboxGesture.dragStart && lightboxGesture.scale > 1) {
+    lightboxGesture.x =
+      lightboxGesture.dragStart.x + pair[0].x - lightboxGesture.dragStart.pointer.x;
+    lightboxGesture.y =
+      lightboxGesture.dragStart.y + pair[0].y - lightboxGesture.dragStart.pointer.y;
+    lightboxGesture.moved = true;
+    applyLightboxTransform();
+  }
+}
+
+function onLightboxPointerEnd(event) {
+  if (!lightboxGesture.pointers.has(event.pointerId)) return;
+  lightboxGesture.pointers.delete(event.pointerId);
+  if (lightboxGesture.scale <= 1) {
+    lightboxGesture.scale = 1;
+    lightboxGesture.x = 0;
+    lightboxGesture.y = 0;
+    applyLightboxTransform();
+  }
+  const pair = lightboxPointerPair();
+  lightboxGesture.startDistance = 0;
+  lightboxGesture.startCenter = null;
+  lightboxGesture.startOffset = null;
+  lightboxGesture.dragStart = pair.length === 1 && lightboxGesture.scale > 1
+    ? { pointer: pair[0], x: lightboxGesture.x, y: lightboxGesture.y }
+    : null;
+}
+
+const lbStage = document.getElementById('lbStage');
+lbStage.addEventListener('pointerdown', onLightboxPointerDown);
+lbStage.addEventListener('pointermove', onLightboxPointerMove);
+lbStage.addEventListener('pointerup', onLightboxPointerEnd);
+lbStage.addEventListener('pointercancel', onLightboxPointerEnd);
+
+document.getElementById('lbCloseBtn').addEventListener('click', event => {
+  event.stopPropagation();
+  closeLightbox();
+});
+lbStage.addEventListener('click', event => {
+  if (event.target !== event.currentTarget || lightboxGesture.moved) {
+    lightboxGesture.moved = false;
+    return;
+  }
+  closeLightbox();
+});
+
+// Pinch-zoom belongs to the fullscreen viewer, not the article body. iOS Safari
+// ignores `user-scalable=no` in the viewport meta, so a pinch on an inline image
+// used to magnify the whole page — leaving the reader zoomed into a blurry
+// upscale of a layout-sized <img> with everything else shifted. Swallowing the
+// gesture events makes tapping an image (→ lightbox) the only way to enlarge it;
+// the lightbox runs its own pinch on .lb-stage through pointer events
+// (touch-action:none), which these listeners do not touch.
+['gesturestart', 'gesturechange', 'gestureend'].forEach(type => {
+  document.addEventListener(type, event => event.preventDefault(), { passive: false });
+});
+
+const articleWrap = document.getElementById('articleWrap');
+
+function prepareArticleImage(image) {
+  if (!(image instanceof HTMLImageElement)) return;
+  image.setAttribute('tabindex', '0');
+  image.setAttribute('role', 'button');
+  if (!image.hasAttribute('aria-label')) {
+    image.setAttribute('aria-label', image.alt ? `查看大图：${image.alt}` : '查看大图');
+  }
+}
+
+function prepareArticleImages(root) {
+  root.querySelectorAll('img').forEach(prepareArticleImage);
+}
+
+prepareArticleImages(articleWrap);
+if (typeof MutationObserver !== 'undefined') {
+  const articleImageObserver = new MutationObserver(() => prepareArticleImages(articleWrap));
+  articleImageObserver.observe(articleWrap, { childList: true, subtree: true });
+}
+
+articleWrap.addEventListener('click', event => {
+  const image = event.target.closest('img');
+  if (!image || !articleWrap.contains(image)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  openImageViewer(image);
+});
+articleWrap.addEventListener('keydown', event => {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  const image = event.target.closest('img');
+  if (!image || !articleWrap.contains(image)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  openImageViewer(image);
+});
 
 function shareArticle() {
   const url = location.href;
@@ -7362,6 +8473,9 @@ function shareArticle() {
 let _closingOverlay = false;
 
 function finishArticleClose(mobileNavigation) {
+  if (document.getElementById('lb').classList.contains('open')) {
+    closeLightbox();
+  }
   _closingOverlay = true;
   articleReturnInProgress = true;
   activeArticleRequestId++;
@@ -7475,7 +8589,7 @@ articleTopScrollZone.addEventListener('touchend', e => {
   }
   articleTopScrollLastTap = now;
 }, { passive: false });
-document.getElementById('lb').addEventListener('click', closeLightbox);
+// document.getElementById('lb').addEventListener is superseded by lbStage click handling.
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     if (document.getElementById('lb').classList.contains('open')) {
@@ -7499,7 +8613,7 @@ function esc(str) {
 // here on the client rather than by the (unauthenticated) news API.
 function displayTitle(item) {
   if (!item) return '';
-  if (userAutoSettings?.share_view_title) return item.title || item.original_title || '';
+  if (userAutoSettings?.share_active && userAutoSettings?.share_view_title) return item.title || item.original_title || '';
   return item.original_title || item.title || '';
 }
 
@@ -7719,6 +8833,11 @@ document.addEventListener('error', event => {
 }, true);
 document.addEventListener('visibilitychange', retryBrokenVisibleImages);
 window.addEventListener('online', retryBrokenVisibleImages);
+// Connectivity came back: if the list is sitting on an error card or on stale
+// cached content, reload it right away rather than waiting out the backoff.
+window.addEventListener('online', () => {
+  if (listLoadDegraded && !document.hidden) scheduleNetworkRecoveryRetry({ immediate: true });
+});
 
 // Dynamic badge color from source name hash
 const BADGE_COLORS = [
@@ -7897,6 +9016,9 @@ setInterval(function() {
   // of only surfacing when the user opens the menu. Self-guards on authToken
   // and carries the same token/seq protection against out-of-order overwrites.
   if (authToken && !document.hidden) refreshNotifStatus();
+  // Same poll keeps the ✨ badge honest: 'completed' lights it amber, and a
+  // failed generation lights it red for admins without needing a reload.
+  if (authToken && !document.hidden) syncDailySummaryToday();
 }, 60000);
 setInterval(showLatestAfterIdle, 15000);
 setInterval(function() {
@@ -7948,6 +9070,11 @@ function onReturnToForeground() {
   lastUserActivityAt = now;
   const cursor = latestKnownTimestamp || latestNewsTimestamp();
   if (cursor > 0) checkForNewArticlesAfterForegroundResume(cursor);
+  // A load that failed while the app was going away (or during the last resume,
+  // before the network was back) left the list on an error card or on stale
+  // Service-Worker content. Retry it now instead of waiting for the user to
+  // find the refresh button.
+  if (listLoadDegraded) scheduleNetworkRecoveryRetry({ immediate: true });
   // If source metadata never loaded (e.g. backgrounded through the whole retry
   // window), recover now so the drawer/labels — and any stuck source deep link —
   // don't stay broken until a manual refresh.

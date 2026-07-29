@@ -438,6 +438,13 @@ def run_node(source, body):
 const assert = require('assert');
 const vm = require('vm');
 const context = {{ console, URLSearchParams, AbortController }};
+// Resume-recovery collaborators (index.html, next to renderColdStartError) sit
+// outside most extracted ranges. Default them to no-ops here; a test that
+// asserts on the recovery chain overrides them in its own body.
+context.cancelNetworkRecoveryRetry = () => {{}};
+context.scheduleNetworkRecoveryRetry = () => {{}};
+context.listLoadDegraded = false;
+context.activeRefreshDiscoverySink = null;
 vm.createContext(context);
 vm.runInContext({json.dumps(source)}, context);
 (async () => {{
@@ -507,6 +514,242 @@ assert.equal(context.__notificationLoadState(), 'error');
     )
 
 
+def test_mark_notification_read_updates_the_list_before_the_network_returns():
+    notification_source = "function esc(value) { return String(value); }\n" + source_between(
+        "// ═══ In-App Notifications", "// ═══ Admin Panel"
+    )
+    notification_source += """
+globalThis.__setNotifTestState = (items, unread) => {
+  notifItems = items;
+  notifUnread = unread;
+  notifLoadState = 'ready';
+};
+globalThis.__getNotifTestState = () => ({
+  items: notifItems.map(item => ({ ...item })),
+  unread: notifUnread,
+});
+"""
+    run_node(
+        notification_source,
+        """
+const body = { innerHTML: '' };
+const menuBadge = { style: {}, textContent: '' };
+context.document = {
+  querySelector: () => ({ classList: { toggle: () => {} } }),
+  getElementById: id => id === 'notifBody' ? body : menuBadge,
+};
+context.authToken = 'token';
+let finishPost;
+let postStarted = false;
+context.apiFetch = (url, options) => {
+  assert.equal(url, '/notifications/7/read');
+  assert.equal(options.method, 'POST');
+  postStarted = true;
+  return new Promise(resolve => { finishPost = resolve; });
+};
+context.__setNotifTestState([
+  { id: 7, title: '最新通知', created_at: '2026-07-29T00:00:00', read_at: null },
+], 1);
+
+const request = context.markNotifRead(7);
+assert.equal(postStarted, true);
+assert.notEqual(context.__getNotifTestState().items[0].read_at, null);
+assert.equal(context.__getNotifTestState().unread, 0);
+assert.doesNotMatch(body.innerHTML, /read-btn/);
+
+finishPost({ ok: true, unread: 0 });
+await request;
+""",
+    )
+
+
+def test_pending_notification_read_survives_a_stale_menu_refresh():
+    notification_source = "function esc(value) { return String(value); }\n" + source_between(
+        "// ═══ In-App Notifications", "// ═══ Admin Panel"
+    )
+    notification_source += """
+globalThis.__setNotifTestState = (items, unread) => {
+  notifItems = items;
+  notifUnread = unread;
+  notifLoadState = 'ready';
+};
+globalThis.__getNotifTestState = () => ({
+  items: notifItems.map(item => ({ ...item })),
+  unread: notifUnread,
+});
+"""
+    run_node(
+        notification_source,
+        """
+const body = { innerHTML: '' };
+const menuBadge = { style: {}, textContent: '' };
+context.document = {
+  querySelector: () => ({ classList: { toggle: () => {} } }),
+  getElementById: id => id === 'notifBody' ? body : menuBadge,
+};
+context.authToken = 'token';
+let finishPost;
+context.apiFetch = (url) => {
+  if (url.endsWith('/read')) {
+    return new Promise(resolve => { finishPost = resolve; });
+  }
+  return Promise.resolve({
+    items: [
+      { id: 7, title: '最新通知', created_at: '2026-07-29T00:00:00', read_at: null },
+    ],
+    unread: 1,
+  });
+};
+context.__setNotifTestState([
+  { id: 7, title: '最新通知', created_at: '2026-07-29T00:00:00', read_at: null },
+], 1);
+
+const request = context.markNotifRead(7);
+await context.refreshNotifStatus();
+assert.notEqual(context.__getNotifTestState().items[0].read_at, null);
+assert.equal(context.__getNotifTestState().unread, 0);
+
+finishPost({ ok: true, unread: 0 });
+await request;
+""",
+    )
+
+
+def notification_source_with_action_state_helpers():
+    source = "function esc(value) { return String(value); }\n" + source_between(
+        "// ═══ In-App Notifications", "// ═══ Admin Panel"
+    )
+    return source + """
+globalThis.__setNotifTestState = (items, unread) => {
+  notifItems = items;
+  notifUnread = unread;
+  notifLoadState = 'ready';
+};
+globalThis.__getNotifTestState = () => ({
+  items: notifItems.map(item => ({ ...item })),
+  unread: notifUnread,
+});
+"""
+
+
+def test_notification_list_uses_read_then_red_delete_without_view_button():
+    source = notification_source_with_action_state_helpers()
+    run_node(
+        source,
+        """
+const body = { innerHTML: '' };
+const menuBadge = { style: {}, textContent: '' };
+context.document = {
+  querySelector: () => ({ classList: { toggle: () => {} } }),
+  getElementById: id => id === 'notifBody' ? body : menuBadge,
+};
+context.__setNotifTestState([
+  { id: 7, title: '公告', created_at: '2026-07-29T00:00:00', read_at: null },
+], 1);
+context.renderNotifList();
+assert.match(body.innerHTML, /markNotifRead\(7\)/);
+assert.match(body.innerHTML, /deleteNotif\(7\)/);
+assert.ok(body.innerHTML.indexOf('markNotifRead(7)') < body.innerHTML.indexOf('deleteNotif(7)'));
+assert.doesNotMatch(body.innerHTML, />查看</);
+assert.match(body.innerHTML, /notif-delete-btn/);
+""",
+    )
+    assert 'id="notifListActions"' in HTML
+    assert 'onclick="markAllNotifRead()"' in HTML
+    assert 'onclick="deleteAllNotifications()"' in HTML
+    assert '.notif-delete-btn{background:rgba(239,68,68,0.16)' in HTML
+    assert '.notif-delete-btn{background:rgba(239,68,68,0.16);border-color:rgba(239,68,68,0.35);color:#ef4444' in HTML
+
+
+def test_notification_detail_renders_read_and_delete_actions_for_an_unread_item():
+    source = notification_source_with_action_state_helpers()
+    run_node(
+        source,
+        """
+const body = { innerHTML: '' };
+const elements = {
+  notifBody: body,
+  notifBackBtn: { style: {} },
+  notifPanelTitle: { textContent: '' },
+  notifListActions: { style: {} },
+  notifMenuBadge: { style: {}, textContent: '' },
+};
+context.document = {
+  querySelector: () => ({ classList: { toggle: () => {} } }),
+  getElementById: id => elements[id],
+};
+context.__setNotifTestState([
+  { id: 7, title: '公告', body: '正文', format: 'plain', created_at: '2026-07-29T00:00:00', read_at: null },
+], 1);
+context.showNotifDetail(7);
+assert.match(body.innerHTML, /markNotifRead\(7, true\)/);
+assert.match(body.innerHTML, /deleteNotif\(7, true\)/);
+assert.match(body.innerHTML, /notif-delete-primary/);
+""",
+    )
+
+
+def test_delete_all_notifications_requires_confirmation_before_requesting():
+    source = notification_source_with_action_state_helpers()
+    run_node(
+        source,
+        """
+const body = { innerHTML: '' };
+const menuBadge = { style: {}, textContent: '' };
+context.document = {
+  querySelector: () => ({ classList: { toggle: () => {} } }),
+  getElementById: id => id === 'notifBody' ? body : menuBadge,
+};
+context.authToken = 'token';
+context.confirm = () => false;
+context.apiFetch = () => { throw new Error('request must not be sent'); };
+context.__setNotifTestState([
+  { id: 7, title: '公告', created_at: '2026-07-29T00:00:00', read_at: null },
+], 1);
+assert.equal(await context.deleteAllNotifications(), false);
+assert.equal(context.__getNotifTestState().items[0].id, 7);
+assert.equal(context.__getNotifTestState().unread, 1);
+""",
+    )
+
+
+def test_optimistic_notification_delete_filters_a_stale_refresh_and_rolls_back_on_error():
+    source = notification_source_with_action_state_helpers()
+    run_node(
+        source,
+        """
+const body = { innerHTML: '' };
+const menuBadge = { style: {}, textContent: '' };
+context.document = {
+  querySelector: () => ({ classList: { toggle: () => {} } }),
+  getElementById: id => id === 'notifBody' ? body : menuBadge,
+};
+context.authToken = 'token';
+context.showToast = () => {};
+let rejectDelete;
+context.apiFetch = url => {
+  if (url === '/notifications/7') return new Promise((resolve, reject) => { rejectDelete = reject; });
+  return Promise.resolve({
+    items: [{ id: 7, title: '公告', created_at: '2026-07-29T00:00:00', read_at: null }],
+    unread: 1,
+  });
+};
+context.__setNotifTestState([
+  { id: 7, title: '公告', created_at: '2026-07-29T00:00:00', read_at: null },
+], 1);
+const request = context.deleteNotif(7);
+assert.deepEqual(context.__getNotifTestState().items, []);
+assert.equal(context.__getNotifTestState().unread, 0);
+await context.refreshNotifStatus();
+assert.deepEqual(context.__getNotifTestState().items, []);
+rejectDelete(new Error('offline'));
+assert.equal(await request, false);
+assert.equal(context.__getNotifTestState().items[0].id, 7);
+assert.equal(context.__getNotifTestState().unread, 1);
+""",
+    )
+
+
 def test_markdown_lists_keep_unordered_bullets_out_of_ordered_lists():
     markdown_source = """
 function esc(value) {
@@ -539,39 +782,34 @@ def test_notification_markdown_uses_a_bounded_rendering_container():
     assert '<div class="notif-detail-body notif-markdown">${bodyHtml}</div>' in HTML
 
 
-def test_unread_notifications_use_one_shared_new_tag_in_menu_and_list():
-    notification_source = "function esc(value) { return String(value); }\n" + source_between(
-        "// ═══ In-App Notifications", "// ═══ Admin Panel"
+def test_notification_list_uses_compact_browser_local_dates_and_keeps_time_on_mobile():
+    notification_source = source_between(
+        "function formatNotifTime(",
+        "function renderNotifList()",
     )
-    notification_source += """
-globalThis.__setNotifTestState = (items, unread) => {
-  notifItems = items;
-  notifUnread = unread;
-  notifLoadState = 'ready';
-};
-"""
     run_node(
         notification_source,
         """
-const avatarClasses = new Set();
-const avatar = { classList: { toggle: (name, enabled) => enabled ? avatarClasses.add(name) : avatarClasses.delete(name) } };
-const body = { innerHTML: '' };
-const menuBadge = { style: { display: 'none' }, textContent: '' };
-context.document = {
-  querySelector: () => avatar,
-  getElementById: id => id === 'notifBody' ? body : menuBadge,
-};
-context.__setNotifTestState([{ id: 7, title: '公告', created_at: '2026-07-20T10:00:00', read_at: null }], 1);
-context.updateNotifDot();
-assert.equal(avatarClasses.has('has-unread'), true);
-assert.equal(menuBadge.textContent, 'new');
-assert.notEqual(menuBadge.style.display, 'none');
-
-context.renderNotifList();
-assert.match(body.innerHTML, /notification-new-tag/);
-assert.match(body.innerHTML, />new</);
+const now = new Date(2026, 6, 29, 12, 0);
+assert.equal(context.formatNotifListTime('2026-07-29T09:05:00', now), '今天 09:05');
+assert.equal(context.formatNotifListTime('2026-07-28T09:05:00', now), '昨天 09:05');
+assert.equal(context.formatNotifListTime('2026-07-27T09:05:00', now), '前天 09:05');
+assert.equal(context.formatNotifListTime('2026-07-26T09:05:00', now), '7-26 09:05');
 """,
     )
+    mobile_css = HTML[HTML.index('@media(max-width:640px){'):HTML.index('</style>')]
+    assert '.notif-time{display:none}' not in mobile_css
+
+
+def test_unread_notification_uses_hoverable_status_action_not_new_tag():
+    assert 'class="notif-unread-action"' in HTML
+    assert 'markNotifRead(${n.id})' in HTML
+    assert '<span class="notification-new-tag">new</span>' not in source_between(
+        "function renderNotifList()",
+        "function retryNotifications()",
+    )
+    assert '.notif-unread-action::before{content:\'未读\'' in HTML
+    assert '.notif-unread-action:hover::before,.notif-unread-action:focus-visible::before{content:\'已读\'' in HTML
 
 
 def test_poll_refresh_job_rejects_terminal_status_for_another_job():
@@ -831,6 +1069,7 @@ context.pageRequestPendingSequence = 0;
 context.pageNavigationPending = false;
 context.cancelStartupEmptyRevalidation = () => {{}};
 context.hideNewArticlesPrompt = () => {{}};
+context.setRefreshProgressLabel = () => {{}};
 context.showToast = message => context.toasts.push(message);
 context.toasts = [];
 context.requestRefreshOnce = async () => ({{ job_id: 'job-1', status: 'running' }});
@@ -858,10 +1097,166 @@ context.loadSince = async (timestamp, options) => {{
 """
 
 
-def test_manual_refresh_feeds_new_articles_into_pending_queue_when_not_on_page_one():
-    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+def refresh_trigger_source():
+    return source_between(
+        "function mergeRefreshArticleIds(",
+        "async function triggerRefresh()",
+    ) + source_between("async function triggerRefresh()", "function setRefreshRunning")
+
+
+def test_refresh_id_merge_normalizes_and_deduplicates():
+    helpers = source_between(
+        "function mergeRefreshArticleIds(",
+        "async function triggerRefresh()",
+    )
+    run_node(
+        helpers,
+        """
+const ids = vm.runInContext('new Set()', context);
+assert.equal(context.mergeRefreshArticleIds(ids, [2, '3', 2, 0, null, 'bad']), 2);
+assert.deepEqual(Array.from(ids).sort((a, b) => a - b), [2, 3]);
+assert.equal(context.mergeRefreshArticleIds(ids, [{id: 3}, {id: 4}]), 3);
+assert.deepEqual(Array.from(ids).sort((a, b) => a - b), [2, 3, 4]);
+""",
+    )
+
+
+def test_manual_refresh_unifies_immediate_progress_and_terminal_ids_without_double_counting():
+    trigger = refresh_trigger_source()
     setup = trigger_context_setup(
-        "return { job_id: 'job-1', status: 'completed', new_count: 3 };"
+        "return { job_id: 'job-1', status: 'completed', new_count: 2, new_ids: [2, 3] };"
+    )
+    run_node(
+        trigger,
+        setup
+        + """
+context.window = { scrollY: 0 };
+context.labels = [];
+context.setRefreshProgressLabel = count => context.labels.push(count);
+context.applyStreamedRefreshBatch = async () => true;
+context.loadNewsPage = async () => true;
+context.loadSince = async (timestamp, options) => {
+  options.onDiscovered([{ id: 1 }, { id: 2 }]);
+  return 2;
+};
+context.pollRefreshJob = async (jobId, timeout, signal, onProgress) => {
+  onProgress({ new_count_so_far: 2, new_ids_so_far: [2, 3] });
+  return { job_id: 'job-1', status: 'completed', new_count: 2, new_ids: [2, 3] };
+};
+await context.triggerRefresh();
+assert.equal(context.labels.at(-1), 3);
+assert.ok(context.toasts.includes('✅ 更新完成，新增 3 篇文章'));
+""",
+    )
+
+
+def test_refresh_discovery_count_is_global_not_filter_scoped():
+    trigger = refresh_trigger_source()
+    setup = trigger_context_setup(
+        "return { job_id: 'job-1', status: 'completed', new_count: 1, new_ids: [12] };"
+    )
+    run_node(
+        trigger,
+        setup
+        + """
+context.filter = 'cat:Tech';
+context.window = { scrollY: 0 };
+context.setRefreshProgressLabel = count => context.lastLabel = count;
+context.loadNewsPage = async () => true;
+context.loadSince = async (timestamp, options) => {
+  options.onDiscovered([{ id: 10, source: 'Tech' }, { id: 11, source: 'News' }]);
+  return 2;
+};
+await context.triggerRefresh();
+assert.equal(context.lastLabel, 3);
+assert.ok(context.toasts.includes('✅ 更新完成，新增 3 篇文章'));
+""",
+    )
+
+
+def test_manual_refresh_does_not_guess_ids_from_terminal_count_when_ids_are_missing():
+    trigger = refresh_trigger_source()
+    setup = trigger_context_setup(
+        "return { job_id: 'job-1', status: 'completed', new_count: 5 };"
+    )
+    run_node(
+        trigger,
+        setup
+        + """
+context.currentPage = 2;
+await context.triggerRefresh();
+assert.ok(context.toasts.includes('✅ 已是最新'));
+assert.ok(!context.toasts.includes('✅ 更新完成，新增 5 篇文章'));
+""",
+    )
+
+
+def test_retry_and_deleted_attempt_counts_do_not_inflate_final_set_or_toast():
+    trigger = refresh_trigger_source()
+    setup = trigger_context_setup(
+        "return { job_id: 'job-1', status: 'completed', new_count: 1, new_ids: [4] };"
+    )
+    run_node(
+        trigger,
+        setup
+        + """
+context.window = { scrollY: 200 };
+context.labels = [];
+context.setRefreshProgressLabel = count => context.labels.push(count);
+context.loadNewsPage = async () => true;
+context.pollRefreshJob = async (jobId, timeout, signal, onProgress) => {
+  // The diagnostic attempted count can be larger for an old/mixed producer.
+  // Only the filtered actual-new ID stream is authoritative for the Set/Toast.
+  onProgress({ new_count_so_far: 3, new_ids_so_far: [4] });
+  return {
+    job_id: 'job-1',
+    status: 'completed',
+    new_count: 1,
+    new_ids: [4],
+  };
+};
+await context.triggerRefresh();
+assert.deepEqual(context.labels, [1]);
+assert.ok(context.toasts.includes('✅ 更新完成，新增 1 篇文章'));
+assert.ok(!context.toasts.includes('✅ 更新完成，新增 3 篇文章'));
+""",
+    )
+
+
+def test_unified_refresh_count_adds_no_fetch_or_status_poll():
+    trigger = refresh_trigger_source()
+    setup = trigger_context_setup(
+        "return { job_id: 'job-1', status: 'completed', new_count: 0, new_ids: [] };"
+    )
+    run_node(
+        trigger,
+        setup
+        + """
+context.startCalls = 0;
+context.pollCalls = 0;
+context.sinceCalls = 0;
+context.requestRefreshOnce = async () => {
+  context.startCalls++;
+  return { job_id: 'job-1', status: 'running' };
+};
+context.pollRefreshJob = async () => {
+  context.pollCalls++;
+  return { job_id: 'job-1', status: 'completed', new_count: 0, new_ids: [] };
+};
+context.loadSince = async () => { context.sinceCalls++; return 0; };
+await context.triggerRefresh();
+assert.deepEqual(
+  [context.startCalls, context.pollCalls, context.sinceCalls],
+  [1, 1, 1],
+);
+""",
+    )
+
+
+def test_manual_refresh_feeds_new_articles_into_pending_queue_when_not_on_page_one():
+    trigger = refresh_trigger_source()
+    setup = trigger_context_setup(
+        "return { job_id: 'job-1', status: 'completed', new_count: 3, new_ids: [101, 102, 103] };"
     )
     run_node(
         trigger,
@@ -882,7 +1277,7 @@ assert.ok(context.toasts.includes('✅ 更新完成，新增 3 篇文章'));
 
 
 def test_manual_refresh_immediate_check_fires_even_when_job_finds_nothing_new():
-    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    trigger = refresh_trigger_source()
     setup = trigger_context_setup(
         "return { job_id: 'job-1', status: 'completed', new_count: 0 };"
     )
@@ -902,7 +1297,7 @@ assert.ok(context.toasts.includes('✅ 已是最新'));
 
 
 def test_manual_refresh_skips_completion_time_check_when_page_one_branch_already_applied():
-    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    trigger = refresh_trigger_source()
     setup = trigger_context_setup(
         "return { job_id: 'job-1', status: 'completed', new_count: 4 };"
     )
@@ -926,7 +1321,7 @@ assert.equal(context.consumed, 1);
 
 
 def test_manual_refresh_pending_queue_feed_prefers_latest_known_timestamp_over_page_snapshot():
-    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    trigger = refresh_trigger_source()
     setup = trigger_context_setup(
         "return { job_id: 'job-1', status: 'completed', new_count: 1 };"
     )
@@ -947,7 +1342,7 @@ assert.deepEqual(context.loadSinceCalls, [
 
 
 def test_manual_refresh_skips_apply_after_navigation_changed_then_returned():
-    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    trigger = refresh_trigger_source()
     setup = trigger_context_setup(
         "context.pageNavigationSequence += 2; "
         "return { job_id: 'job-1', status: 'completed', new_count: 1 };"
@@ -967,7 +1362,7 @@ assert.deepEqual(context.promptStates, [false]);
 
 
 def test_manual_refresh_skips_apply_while_page_navigation_is_pending():
-    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    trigger = refresh_trigger_source()
     setup = trigger_context_setup(
         "context.pageNavigationPending = true; "
         "return { job_id: 'job-1', status: 'completed', new_count: 1 };"
@@ -986,7 +1381,7 @@ assert.deepEqual(context.promptStates, [false]);
 
 
 def test_manual_refresh_does_not_replace_a_list_request_already_in_flight():
-    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    trigger = refresh_trigger_source()
     setup = trigger_context_setup(
         "return { job_id: 'job-1', status: 'completed', new_count: 1 };"
     )
@@ -1017,7 +1412,7 @@ assert.deepEqual(context.promptStates, [false]);
 
 
 def test_manual_refresh_application_guard_blocks_overlay_opened_mid_load():
-    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    trigger = refresh_trigger_source()
     setup = trigger_context_setup(
         "return { job_id: 'job-1', status: 'completed', new_count: 1 };"
     )
@@ -1044,7 +1439,7 @@ assert.deepEqual(context.promptStates, [false]);
 
 
 def test_manual_refresh_consumes_pending_only_after_confirmed_application():
-    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    trigger = refresh_trigger_source()
     setup = trigger_context_setup(
         "return { job_id: 'job-1', status: 'completed', new_count: 1 };"
     )
@@ -1077,9 +1472,9 @@ assert.deepEqual(context.promptStates, [false]);
 
 
 def test_manual_refresh_reports_streaming_progress_on_button_label():
-    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    trigger = refresh_trigger_source()
     setup = trigger_context_setup(
-        "return { job_id: 'job-1', status: 'completed', new_count: 3 };"
+        "return { job_id: 'job-1', status: 'completed', new_count: 3, new_ids: [101, 102, 103] };"
     )
     run_node(
         trigger,
@@ -1091,19 +1486,19 @@ context.setRefreshProgressLabel = count => context.labels.push(count);
 context.applyStreamedRefreshBatch = async () => { context.applyCalls++; };
 context.applyCalls = 0;
 context.pollRefreshJob = async (jobId, timeout, signal, onProgress) => {
-  onProgress({ new_count_so_far: 2 });
-  onProgress({ new_count_so_far: 2 }); // no increase — must not relabel or reapply
-  return { job_id: 'job-1', status: 'completed', new_count: 3 };
+  onProgress({ new_count_so_far: 2, new_ids_so_far: [101, 102] });
+  onProgress({ new_count_so_far: 2, new_ids_so_far: [101, 102] }); // no increase — must not relabel or reapply
+  return { job_id: 'job-1', status: 'completed', new_count: 3, new_ids: [101, 102, 103] };
 };
 await context.triggerRefresh();
-assert.deepEqual(context.labels, [2]);
+assert.deepEqual(context.labels, [2, 3]);
 assert.equal(context.applyCalls, 1);
 """,
     )
 
 
 def test_manual_refresh_skips_streamed_apply_when_scrolled_away_from_top():
-    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    trigger = refresh_trigger_source()
     setup = trigger_context_setup(
         "return { job_id: 'job-1', status: 'completed', new_count: 1 };"
     )
@@ -1117,8 +1512,8 @@ context.setRefreshProgressLabel = count => context.labels.push(count);
 context.applyStreamedRefreshBatch = async () => { context.applyCalls++; };
 context.applyCalls = 0;
 context.pollRefreshJob = async (jobId, timeout, signal, onProgress) => {
-  onProgress({ new_count_so_far: 4 });
-  return { job_id: 'job-1', status: 'completed', new_count: 4 };
+  onProgress({ new_count_so_far: 4, new_ids_so_far: [201, 202, 203, 204] });
+  return { job_id: 'job-1', status: 'completed', new_count: 4, new_ids: [201, 202, 203, 204] };
 };
 await context.triggerRefresh();
 assert.deepEqual(context.labels, [4]);
@@ -1128,7 +1523,7 @@ assert.equal(context.applyCalls, 0);
 
 
 def test_manual_refresh_skips_streamed_apply_after_page_navigation_changed_view():
-    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    trigger = refresh_trigger_source()
     setup = trigger_context_setup(
         "return { job_id: 'job-1', status: 'completed', new_count: 1 };"
     )
@@ -1152,7 +1547,7 @@ assert.equal(context.applyCalls, 0);
 
 
 def test_manual_refresh_streamed_apply_is_throttled_to_one_per_three_seconds():
-    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    trigger = refresh_trigger_source()
     setup = trigger_context_setup(
         "return { job_id: 'job-1', status: 'completed', new_count: 1 };"
     )
@@ -1189,7 +1584,7 @@ assert.equal(context.applyCalls, 2);
 
 def test_manual_refresh_flow_cancellation_aborts_poller_and_suppresses_stale_toast():
     helpers = source_between("function cancelRefreshFlow(", "function rebuildCategoryMap")
-    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    trigger = refresh_trigger_source()
     run_node(
         helpers + trigger,
         """
@@ -1218,6 +1613,8 @@ context.loadNewsPage = async () => true;
 context.latestKnownTimestamp = 0;
 context.latestNewsTimestamp = () => 0;
 context.loadSince = async () => 0;
+context.labels = [];
+context.setRefreshProgressLabel = count => context.labels.push(count);
 context.runningStates = [];
 context.setRefreshRunning = running => {
   context.refreshInProgress = running;
@@ -1229,9 +1626,11 @@ context.requestRefreshOnce = async signal => {
 };
 let markPollStarted;
 const pollStarted = new Promise(resolve => { markPollStarted = resolve; });
-context.pollRefreshJob = (jobId, timeout, signal) => new Promise((resolve, reject) => {
+let lateProgress;
+context.pollRefreshJob = (jobId, timeout, signal, onProgress) => new Promise((resolve, reject) => {
   assert.equal(jobId, 'job-a');
   assert.equal(signal, context.refreshFlowController.signal);
+  lateProgress = onProgress;
   markPollStarted();
   signal.addEventListener('abort', () => reject(
     Object.assign(new Error('cancelled'), { name: 'AbortError' })
@@ -1240,12 +1639,153 @@ context.pollRefreshJob = (jobId, timeout, signal) => new Promise((resolve, rejec
 const pending = context.triggerRefresh();
 await pollStarted;
 context.cancelRefreshFlow();
+lateProgress({ new_count_so_far: 1, new_ids_so_far: [999] });
 await pending;
+assert.deepEqual(context.labels, []);
 assert.deepEqual(context.runningStates, [true, false]);
 assert.deepEqual(context.toasts, ['🔄 正在后台抓取...']);
 assert.equal(context.promptCalls, 0);
 assert.equal(context.refreshInProgress, false);
 assert.equal(context.refreshFlowController, null);
+""",
+    )
+
+
+def test_cancelled_delayed_immediate_check_cannot_pollute_replacement_refresh_count():
+    cancel_helpers = source_between("function cancelRefreshFlow(", "function rebuildCategoryMap")
+    trigger = refresh_trigger_source()
+    incremental = source_between("async function loadSince(", "function rebuildSourceFilterGroups")
+    run_node(
+        cancel_helpers + trigger + incremental,
+        """
+context.refreshInProgress = false;
+context.refreshFlowGeneration = 0;
+context.refreshFlowController = null;
+context.authToken = 'token';
+context.filter = 'all';
+context.currentPage = 1;
+context.pageNavigationSequence = 0;
+context.pageRequestSequence = 0;
+context.pageRequestPendingSequence = 0;
+context.pageNavigationPending = false;
+context.document = { hidden: false };
+context.window = { scrollY: 0 };
+context.cancelStartupEmptyRevalidation = () => {};
+context.hideNewArticlesPrompt = () => {};
+context.showNewArticlesPrompt = () => {};
+context.refreshErrorMessage = error => error.message || 'failed';
+context.hasBlockingOverlayOpen = () => false;
+context.latestNewsTimestamp = () => 100;
+context.loadNewsPage = async () => true;
+context.consumePendingNewArticles = () => {};
+context.runningStates = [];
+context.setRefreshRunning = running => {
+  context.refreshInProgress = running;
+  context.runningStates.push(running);
+};
+context.labels = [];
+context.setRefreshProgressLabel = count => context.labels.push(count);
+context.toasts = [];
+context.showToast = message => context.toasts.push(message);
+
+context.INCREMENTAL_FETCH_LIMIT = 200;
+context.seenArticleIds = new Set();
+context.latestKnownTimestamp = 100;
+context.pendingNewArticleCount = 0;
+context.pendingNewItems = [];
+context.contentEpoch = 0;
+context.bumpContentEpoch = () => { context.contentEpoch++; };
+context.isSwFallbackResponse = () => false;
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
+context.countRefreshes = 0;
+context.refreshTodayArticleCount = () => { context.countRefreshes++; };
+context.sourceLoads = 0;
+context.loadSourceCategories = async () => { context.sourceLoads++; };
+context.pageFetches = 0;
+context.fetchNewsPage = async () => {
+  context.pageFetches++;
+  return { items: [{ id: 42, timestamp: 101, source: 's' }] };
+};
+context.writeCachedNewsPage = async () => {};
+context.pendingRelevantCount = () => 1;
+context.showLatestAfterIdle = () => {};
+context.showNewArticlesPrompt = () => {};
+context.applyCalls = 0;
+context.applyNewsPage = () => { context.applyCalls++; };
+context.lastUserActivityAt = 0;
+context.IDLE_LATEST_DELAY_MS = 1;
+
+let resolveImmediateA;
+let resolveImmediateB;
+let sinceFetchCalls = 0;
+context.fetch = () => new Promise(resolve => {
+  sinceFetchCalls++;
+  if (sinceFetchCalls === 1) resolveImmediateA = resolve;
+  else if (sinceFetchCalls === 2) resolveImmediateB = resolve;
+  else throw new Error('unexpected incremental request');
+});
+const responseFor42 = () => ({
+  json: async () => ({ items: [{ id: 42, timestamp: 101, source: 's' }] }),
+});
+
+let nextJob = 0;
+context.requestRefreshOnce = async () => ({
+  job_id: ++nextJob === 1 ? 'job-a' : 'job-b',
+  status: 'running',
+});
+let markAPollStarted;
+const aPollStarted = new Promise(resolve => { markAPollStarted = resolve; });
+context.pollRefreshJob = (jobId, timeout, signal) => {
+  if (jobId === 'job-a') {
+    markAPollStarted();
+    return new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(
+      Object.assign(new Error('cancelled'), { name: 'AbortError' })
+    )));
+  }
+  return Promise.resolve({
+    job_id: 'job-b',
+    status: 'completed',
+    new_count: 0,
+    new_ids: [],
+  });
+};
+
+const flowA = context.triggerRefresh();
+await aPollStarted;
+context.cancelRefreshFlow();
+
+// Flow B is active before A's ignored-abort fetch resolves. If A mutates
+// seenArticleIds here, B will wrongly filter out ID 42 and finish with a zero Toast.
+const flowB = context.triggerRefresh();
+await Promise.resolve();
+assert.equal(typeof resolveImmediateB, 'function');
+resolveImmediateA(responseFor42());
+await Promise.resolve();
+await Promise.resolve();
+assert.deepEqual(Array.from(context.seenArticleIds), []);
+assert.equal(context.latestKnownTimestamp, 100);
+assert.equal(context.pendingNewArticleCount, 0);
+assert.equal(context.contentEpoch, 0);
+assert.equal(context.sourceLoads, 0);
+assert.equal(context.pageFetches, 0);
+assert.equal(context.applyCalls, 0);
+
+resolveImmediateB(responseFor42());
+await flowB;
+await flowA;
+
+assert.deepEqual(Array.from(context.seenArticleIds), [42]);
+assert.equal(context.latestKnownTimestamp, 101);
+assert.equal(context.pendingNewArticleCount, 1);
+assert.deepEqual(Array.from(context.pendingNewItems, item => item.id), [42]);
+assert.equal(context.contentEpoch, 1);
+assert.deepEqual(context.labels, [1]);
+assert.deepEqual(context.toasts, [
+  '🔄 正在后台抓取...',
+  '🔄 正在后台抓取...',
+  '✅ 更新完成，新增 1 篇文章',
+]);
 """,
     )
 
@@ -1344,12 +1884,31 @@ context.lastUserActivityAt = 0;
 context.IDLE_LATEST_DELAY_MS = 1;
 // { manual: true } bypasses the defer-while-refreshing early return that the
 // sibling test above (without `manual`) relies on.
-const added = await context.loadSince(100, { manual: true });
+context.discovered = [];
+context.discoveryCalls = 0;
+const recordDiscovery = items => {
+  context.discoveryCalls++;
+  context.discovered.push(...items.map(item => item.id));
+};
+const added = await context.loadSince(100, {
+  manual: true,
+  onDiscovered: recordDiscovery,
+});
 assert.equal(added, 1);
+assert.deepEqual(context.discovered, [2]);
+assert.equal(context.discoveryCalls, 1);
 assert.equal(context.sourceLoads, 1);
 assert.equal(context.pageFetches, 1);
 assert.equal(context.applies, 1); // atLatestTop on page 1 -> applyNewsPage()
 assert.equal(context.consumes, 1);
+// The same response is filtered out by seenArticleIds on a later check, so the
+// discovery callback must not run when there are no accepted new items.
+assert.equal(await context.loadSince(100, {
+  manual: true,
+  onDiscovered: recordDiscovery,
+}), 0);
+assert.deepEqual(context.discovered, [2]);
+assert.equal(context.discoveryCalls, 1);
 """,
     )
 
@@ -2040,6 +2599,226 @@ assert.deepEqual(context.toasts, []);
 context.apiFetch = async () => { throw Object.assign(new Error('cancelled'), { name: 'AbortError' }); };
 await context.loadSourceCategories();
 assert.deepEqual(context.toasts, []);
+""",
+    )
+
+
+def test_source_metadata_load_exits_after_refresh_flow_is_cancelled_during_cache_await():
+    load_sources = source_between("function persistSourceMetadata(", "function sourceLabel")
+    run_node(
+        load_sources,
+        """
+let resolveCache;
+context.readNewsCacheEntry = () => new Promise(resolve => { resolveCache = resolve; });
+context.withCacheTimeout = async value => value;
+context.events = [];
+context.rebuildCategoryMap = sources => context.events.push(`rebuild:${sources[0]}`);
+context.renderFilters = () => context.events.push('render');
+context.isRestrictedUser = () => false;
+context.apiFetch = async () => {
+  context.events.push('network');
+  return { sources: ['fresh'] };
+};
+context.writeNewsCacheEntry = () => context.events.push('cache-write');
+context.delay = () => new Promise(() => {});
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
+const controller = new AbortController();
+let current = true;
+const loading = context.loadSourceCategories({
+  externalSignal: controller.signal,
+  applicationGuard: () => current,
+});
+current = false;
+controller.abort();
+resolveCache({ data: { sources: ['stale'] } });
+await loading;
+assert.deepEqual(context.events, []);
+""",
+    )
+
+
+def test_today_count_ignores_response_after_refresh_flow_cancellation():
+    today_count = source_between("async function refreshTodayArticleCount(", "let dailySummaryState")
+    run_node(
+        today_count,
+        """
+context.beijingDateString = () => '2026-07-27';
+context.countTodayArticles = () => context.todayArticleCount == null ? 0 : context.todayArticleCount;
+context.todayArticleCount = null;
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
+let resolveJson;
+let requestSignal;
+context.fetch = async (url, options) => {
+  requestSignal = options.signal;
+  return {
+    ok: true,
+    json: () => new Promise(resolve => { resolveJson = resolve; }),
+  };
+};
+const controller = new AbortController();
+let current = true;
+const loading = context.refreshTodayArticleCount(8000, {
+  externalSignal: controller.signal,
+  applicationGuard: () => current,
+});
+while (typeof resolveJson !== 'function') await Promise.resolve();
+current = false;
+controller.abort();
+resolveJson({ total: 9 });
+await loading;
+assert.equal(requestSignal.aborted, true);
+assert.equal(context.todayArticleCount, null);
+""",
+    )
+
+
+def test_source_metadata_retry_exits_when_owning_refresh_flow_is_cancelled():
+    load_sources = source_between("function persistSourceMetadata(", "function sourceLabel")
+    run_node(
+        load_sources,
+        """
+context.sourceMetadataRetryScheduled = false;
+context.SOURCE_METADATA_RETRY_DELAYS = [1];
+context.SOURCE_METADATA_RETRY_TIMEOUT_MS = 25000;
+let resumeDelay;
+context.delay = () => new Promise(resolve => { resumeDelay = resolve; });
+context.document = { hidden: false };
+context.events = [];
+context.fetchSourceMetadata = async () => {
+  context.events.push('network');
+  return { sources: ['late'] };
+};
+context.rebuildCategoryMap = () => context.events.push('rebuild');
+context.renderFilters = () => context.events.push('render');
+context.persistSourceMetadata = () => context.events.push('persist');
+context.retrySourceDeepLink = () => context.events.push('deep-link');
+const controller = new AbortController();
+let current = true;
+const retrying = context.scheduleSourceMetadataRetry({
+  externalSignal: controller.signal,
+  applicationGuard: () => current,
+});
+while (typeof resumeDelay !== 'function') await Promise.resolve();
+current = false;
+controller.abort();
+resumeDelay();
+await retrying;
+assert.deepEqual(context.events, []);
+assert.equal(context.sourceMetadataRetryScheduled, false);
+""",
+    )
+
+
+def test_idle_latest_apply_exits_after_refresh_flow_cancellation_during_cache_write():
+    show_latest = source_between("async function showLatestAfterIdle(", "function scheduleAdjacentPagePrefetch")
+    run_node(
+        show_latest,
+        """
+context.filter = 'all';
+context.currentPage = 2;
+context.contentEpoch = 5;
+context.pendingRelevantCount = () => 1;
+context.document = { hidden: false };
+context.hasBlockingOverlayOpen = () => false;
+context.lastUserActivityAt = 0;
+context.IDLE_LATEST_DELAY_MS = 1;
+context.Date = { now: () => 100 };
+context.fetchNewsPage = async () => ({ items: [{ id: 7 }] });
+let finishCacheWrite;
+context.writeCachedNewsPage = () => new Promise(resolve => { finishCacheWrite = resolve; });
+context.scrollCalls = 0;
+context.scrollPageToTop = async () => { context.scrollCalls++; return true; };
+context.applyCalls = 0;
+context.applyNewsPage = () => { context.applyCalls++; };
+context.consumePendingNewArticles = () => {};
+context.syncListUrl = () => {};
+const controller = new AbortController();
+let current = true;
+const applying = context.showLatestAfterIdle({
+  externalSignal: controller.signal,
+  applicationGuard: () => current,
+});
+while (typeof finishCacheWrite !== 'function') await Promise.resolve();
+current = false;
+controller.abort();
+finishCacheWrite();
+await applying;
+assert.equal(context.currentPage, 2);
+assert.equal(context.scrollCalls, 0);
+assert.equal(context.applyCalls, 0);
+""",
+    )
+
+
+def test_idle_latest_scroll_stops_after_owning_refresh_flow_is_cancelled():
+    cancel_flow = source_between("function cancelRefreshFlow()", "function cancelViewBoundRefreshWork()")
+    show_latest = source_between("async function showLatestAfterIdle(", "function scheduleAdjacentPagePrefetch")
+    scroll_to_top = source_between("function scrollPageToTop(", "function stabilizePageTop")
+    run_node(
+        cancel_flow + show_latest + scroll_to_top,
+        """
+const frames = [];
+context.requestAnimationFrame = callback => { frames.push(callback); return frames.length; };
+context.performance = { now: () => 0 };
+context.window = {
+  scrollY: 100,
+  scrollTo: () => { context.scrollCalls++; },
+};
+context.document = { hidden: false, documentElement: { scrollTop: 0 } };
+context.activeScrollMotion = null;
+context.PAGE_SWITCH_TOP_THRESHOLD = 4;
+context.filter = 'all';
+context.currentPage = 2;
+context.contentEpoch = 5;
+context.pendingNewArticleCount = 1;
+context.pendingRelevantCount = () => context.pendingNewArticleCount;
+context.hasBlockingOverlayOpen = () => false;
+context.lastUserActivityAt = 0;
+context.IDLE_LATEST_DELAY_MS = 1;
+context.Date = { now: () => 100 };
+context.fetchNewsPage = async () => ({ items: [{ id: 7 }] });
+context.writeCachedNewsPage = async () => {};
+context.applyCalls = 0;
+context.applyNewsPage = () => { context.applyCalls++; };
+context.consumeCalls = 0;
+context.consumePendingNewArticles = () => { context.consumeCalls++; };
+context.syncCalls = 0;
+context.syncListUrl = () => { context.syncCalls++; };
+context.scrollCalls = 0;
+context.programmaticScrollUntil = 0;
+context.refreshInProgress = true;
+context.refreshFlowGeneration = 1;
+const controller = new AbortController();
+context.refreshFlowController = controller;
+context.setRefreshRunning = running => { context.refreshInProgress = running; };
+const applying = context.showLatestAfterIdle({
+  externalSignal: controller.signal,
+  applicationGuard: () => context.refreshFlowController === controller && !controller.signal.aborted,
+});
+while (frames.length === 0) await Promise.resolve();
+// Let the motion begin, then invalidate its owning refresh flow before its next frame.
+frames.shift()(0);
+await Promise.resolve();
+assert.equal(context.scrollCalls, 1);
+assert.ok(frames.length > 0);
+context.cancelRefreshFlow();
+const scrollCallsAtCancel = context.scrollCalls;
+const programmaticScrollAtCancel = context.programmaticScrollUntil;
+while (frames.length) {
+  frames.shift()(400);
+  await Promise.resolve();
+}
+await applying;
+assert.equal(context.scrollCalls, scrollCallsAtCancel);
+assert.equal(context.applyCalls, 0);
+assert.equal(context.consumeCalls, 0);
+assert.equal(context.syncCalls, 0);
+assert.equal(context.currentPage, 2);
+assert.equal(context.pendingNewArticleCount, 1);
+assert.equal(context.contentEpoch, 5);
+assert.equal(context.programmaticScrollUntil, programmaticScrollAtCancel);
 """,
     )
 
@@ -3075,7 +3854,7 @@ assert.deepEqual(context.toasts, ['连接超时，请稍后重试']);
 
 
 def test_manual_refresh_failure_restores_prompt_only_after_running_state_clears():
-    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    trigger = refresh_trigger_source()
     setup = trigger_context_setup("throw Object.assign(new Error('timeout'), { name: 'AbortError' });")
     run_node(
         trigger,
@@ -3151,7 +3930,7 @@ assert.equal(prevented, 2);
 
 
 def test_manual_refresh_cancels_pending_startup_calibration_before_updating():
-    trigger = source_between("async function triggerRefresh()", "function setRefreshRunning")
+    trigger = refresh_trigger_source()
     run_node(
         trigger,
         """
@@ -3470,5 +4249,89 @@ context.applyPurgeDatePicker();
 assert.equal(elements.purgeBeforeDate.value, '2026/01/01');
 assert.equal(elements.purgeConfirmBtn.disabled, false);
 assert.equal(elements.purgeStatus.textContent, 'old status');
+""",
+    )
+
+
+def test_refresh_counts_articles_the_fallback_check_discovers():
+    """Cold start after a long gap: the button said +10 while the bubble said 65.
+
+    When the page-1 completion branch can't run (a background page request was
+    still in flight when the user clicked — routine right after a cold start),
+    the flow falls back to loadSince() to queue what the job found. That call is
+    what fills the "有 N 篇新文章" bubble, so its discoveries have to reach the
+    same counter the button label and completion toast read from, or the two
+    numbers disagree on screen.
+    """
+    trigger = refresh_trigger_source()
+    setup = trigger_context_setup(
+        "return { job_id: 'job-1', status: 'completed', new_count: 10, "
+        "new_ids: [1,2,3,4,5,6,7,8,9,10] };"
+    )
+    run_node(
+        trigger,
+        setup
+        + """
+// A page request was still in flight at click time, so the completion branch
+// is skipped and the fallback loadSince() is the one that finds the backlog.
+context.pageRequestPendingSequence = 4;
+context.window = { scrollY: 0 };
+context.labels = [];
+context.setRefreshProgressLabel = count => context.labels.push(count);
+context.loadNewsPage = async () => { throw new Error('page-1 branch must not run here'); };
+context.loadSince = async (timestamp, options) => {
+  if (options && options.manual) return 0;          // immediate check: DB not filled yet
+  const backlog = Array.from({ length: 65 }, (_, i) => ({ id: 100 + i }));
+  if (options && typeof options.onDiscovered === 'function') options.onDiscovered(backlog);
+  return backlog.length;                            // these are what the bubble counts
+};
+
+await context.triggerRefresh();
+
+// 65 backlog articles + the 10 this job ingested, deduped into one set.
+assert.equal(context.labels.at(-1), 75);
+assert.ok(context.toasts.includes('✅ 更新完成，新增 75 篇文章'));
+""",
+    )
+
+
+def test_a_background_check_during_a_manual_refresh_feeds_the_same_counter():
+    """The 60s poll and the resume check queue into the bubble too.
+
+    They know nothing about the running refresh, so without the sink their
+    discoveries would show up in "有 N 篇新文章" while the button label ignored
+    them — the same mismatch the fallback check caused.
+    """
+    incremental = source_between("async function loadSince(", "function rebuildSourceFilterGroups")
+    run_node(
+        incremental,
+        """
+context.refreshInProgress = true;
+context.INCREMENTAL_FETCH_LIMIT = 200;
+context.seenArticleIds = new Set();
+context.latestKnownTimestamp = 100;
+context.pendingNewArticleCount = 0;
+context.pendingNewItems = [];
+context.contentEpoch = 0;
+context.bumpContentEpoch = () => {};
+context.fetch = async () => ({
+  json: async () => ({ items: [
+    { id: 2, timestamp: 101, source: 's' },
+    { id: 3, timestamp: 102, source: 's' },
+  ] }),
+});
+context.isSwFallbackResponse = () => false;
+context.setTimeout = () => 1;
+context.clearTimeout = () => {};
+context.refreshTodayArticleCount = () => {};
+context.discovered = [];
+context.activeRefreshDiscoverySink = items => context.discovered.push(...items.map(i => i.id));
+
+// No onDiscovered passed — this is the plain periodic poll.
+const added = await context.loadSince(100);
+
+assert.equal(added, 2);
+assert.deepEqual(Array.from(context.pendingNewItems, item => item.id), [2, 3]);
+assert.deepEqual(context.discovered, [2, 3]);   // the bubble's items reached the counter
 """,
     )

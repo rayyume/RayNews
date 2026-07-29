@@ -9,6 +9,8 @@ import threading
 import time
 from datetime import datetime
 
+from news_schema import ensure_article_source_columns as _ensure_article_source_columns
+
 
 CATEGORY_ORDER = ["News", "Tech", "Biz", "Info"]
 CATEGORY_NAMES = {
@@ -42,23 +44,8 @@ INITIAL_SOURCES = {
 
 
 def ensure_article_source_columns(conn: sqlite3.Connection) -> None:
-    """Add split source fields to existing article tables when available."""
-    table = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'articles'"
-    ).fetchone()
-    if not table:
-        return
-    existing = {
-        row["name"] if isinstance(row, sqlite3.Row) else row[1]
-        for row in conn.execute("PRAGMA table_info(articles)").fetchall()
-    }
-    if "feed_source" not in existing:
-        conn.execute("ALTER TABLE articles ADD COLUMN feed_source TEXT NOT NULL DEFAULT ''")
-        conn.execute("UPDATE articles SET feed_source = source WHERE TRIM(feed_source) = ''")
-    if "origin_source" not in existing:
-        conn.execute("ALTER TABLE articles ADD COLUMN origin_source TEXT NOT NULL DEFAULT ''")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_feed_source ON articles(feed_source)")
-    conn.commit()
+    """Upgrade split source fields through the shared migration protocol."""
+    _ensure_article_source_columns(conn)
 
 # ─── Domain → Source mapping (used by fetcher + AI classification) ──
 # Format: "domain" → ("source_display_name", "default_category")

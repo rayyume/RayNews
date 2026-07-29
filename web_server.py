@@ -9,9 +9,10 @@ import sqlite3
 import threading
 import time
 import calendar
+import ipaddress
 import uuid
 import requests
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from urllib.parse import urlsplit
 
 from bs4 import BeautifulSoup
@@ -23,29 +24,37 @@ from notifier import send_email
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from models import (
-    get_db, create_user, get_user, get_user_by_email, get_user_by_username,
+    get_db, create_registered_user, get_user, get_user_by_email, get_user_by_username,
     update_user, delete_user, list_users, get_first_admin_email, count_users,
     count_active_users_since,
-    verify_password,
+    verify_password, admit_login_attempt, reset_login_failures,
+    claim_invite_request, complete_invite_request,
     add_favorite, remove_favorite, get_favorites, get_all_favorite_article_ids, is_favorited,
     count_article_favorites,
     get_ai_config, set_ai_config, get_user_settings, set_user_settings,
+    set_user_settings_for_ai_config_revision,
+    set_share_health,
+    apply_share_connectivity_transition,
     get_users_with_share_enabled,
+    get_daily_summary_inapp_user_ids,
+    get_app_state, set_app_state, claim_app_state_flag,
     get_system_ai_config, set_system_ai_config,
-    create_invitation_code, validate_invitation_code, use_invitation_code,
+    create_invitation_code,
     list_pending_invitations, delete_invitation_code, delete_invitation_code_by_code,
     add_notification, list_notifications,
-    count_unread_notifications, mark_notification_read,
+    count_unread_notifications, mark_notification_read, mark_all_notifications_read,
+    delete_notification, delete_all_notifications,
     publish_broadcast_atomically,
 )
 from auth import init_auth, create_token, require_auth, require_role
 from auth_validation import is_valid_email
 from ai_service import AIService
+from network_safety import UnsafeUrlError, assert_public_http_url
 from image_cache import (
     enqueue_article_image_prefetch, unpin_article_images,
     cache_stats, evict_article_images, evict_unreferenced_images, collect_image_urls, open_cache_connection, _url_hash,
 )
-from news_schema import ensure_deleted_articles_table
+from news_schema import ensure_article_schema, ensure_article_title_columns
 from source_categories import (
     CATEGORY_NAMES, CATEGORY_ORDER, cleanup_stale_source_categories,
     clamp_weighted, ensure_article_source_columns, ensure_article_sources,
@@ -65,15 +74,40 @@ AUTO_TITLE_PROCESS_INTERVAL_SECONDS = int(os.environ.get("AUTO_TITLE_PROCESS_INT
 AUTO_TITLE_PROCESS_SCAN_LIMIT = int(os.environ.get("AUTO_TITLE_PROCESS_SCAN_LIMIT", "1000"))
 AUTO_SOURCE_CLASSIFY_BATCH_LIMIT = int(os.environ.get("AUTO_SOURCE_CLASSIFY_BATCH_LIMIT", "50"))
 AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS = int(os.environ.get("AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS", "60"))
-AI_SHARE_REVALIDATION_INTERVAL_SECONDS = int(
-    os.environ.get("AI_SHARE_REVALIDATION_INTERVAL_HOURS", "6")
-) * 3600
+def _share_revalidation_interval_seconds() -> int:
+    """How often each sharing user's own AI key is re-tested.
+
+    This loop is the only thing that notices a personal key going bad: the
+    background AI jobs all run on the *system* config, and a deployment with
+    those jobs on gives users almost no reason to make an on-demand call that
+    would surface the failure themselves. So the interval is the detection
+    delay for "共享 API 失效" — hourly rather than the original six hours, which
+    could leave shared results served off a dead key most of a day.
+
+    The probe is one max_tokens=50 ping per sharing user (see
+    AIService.test_connection), spread 0.5s apart, so hourly stays cheap.
+    Accepts fractions of an hour, and floors at five minutes so a typo like 0
+    can't turn the loop into a hot loop against everyone's provider.
+    """
+    try:
+        hours = float(os.environ.get("AI_SHARE_REVALIDATION_INTERVAL_HOURS", "1"))
+    except (TypeError, ValueError):
+        hours = 1.0
+    return max(300, int(hours * 3600))
+
+
+AI_SHARE_REVALIDATION_INTERVAL_SECONDS = _share_revalidation_interval_seconds()
 TELEGRAM_EMBED_TIMEOUT_SECONDS = int(os.environ.get("TELEGRAM_EMBED_TIMEOUT_SECONDS", "12"))
 # Daily summary is now server-generated once and broadcast to every subscribed
 # user — the send time is a fixed ops-level setting, not user-configurable.
 DAILY_SUMMARY_HOUR = int(os.environ.get("DAILY_SUMMARY_HOUR", "21"))
 DAILY_SUMMARY_MINUTE = int(os.environ.get("DAILY_SUMMARY_MINUTE", "0"))
 DAILY_SUMMARY_WINDOW_MINUTES = int(os.environ.get("DAILY_SUMMARY_WINDOW_MINUTES", "10"))
+# A failed generation is retried on a fixed cadence outside the send window; after
+# DAILY_SUMMARY_MAX_RETRIES further failures the scheduler stops trying for the day
+# and alerts every admin (email + in-app) with the reason.
+DAILY_SUMMARY_RETRY_INTERVAL_SECONDS = int(os.environ.get("DAILY_SUMMARY_RETRY_INTERVAL_SECONDS", "600"))
+DAILY_SUMMARY_MAX_RETRIES = int(os.environ.get("DAILY_SUMMARY_MAX_RETRIES", "3"))
 TITLE_SUMMARY_MAX_CHARS = int(os.environ.get("TITLE_SUMMARY_MAX_CHARS", "30"))
 TITLE_SUMMARY_MAX_WEIGHT = TITLE_SUMMARY_MAX_CHARS * 2
 # The list UI already CSS-clamps titles to 2 lines with an ellipsis
@@ -115,14 +149,16 @@ CORS(app)
 @app.errorhandler(Exception)
 def handle_exception(e):
     """Return JSON for all unhandled exceptions instead of HTML."""
-    import traceback
-    traceback.print_exc()
-    # If it's already a Flask HTTPException with a JSON response, pass through
     from flask import jsonify as _jsonify
     from werkzeug.exceptions import HTTPException
     if isinstance(e, HTTPException):
-        return _jsonify({"error": e.description or str(e)}), e.code or 500
-    return _jsonify({"error": f"server error: {str(e)}"}), 500
+        return _jsonify({"error": e.description}), e.code or 500
+    app.logger.exception(
+        "Unhandled exception during %s %s",
+        request.method,
+        request.path,
+    )
+    return _jsonify({"error": "internal server error"}), 500
 
 DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
 
@@ -149,6 +185,34 @@ init_auth(SECRET_KEY)
 
 def _admin_email_address() -> str:
     return (os.environ.get("RAYNEWS_ADMIN_EMAIL") or get_first_admin_email() or "").strip()
+
+
+def _trusted_client_ip() -> str:
+    """Use proxy-provided client IP only when the direct peer is loopback."""
+    remote = (request.remote_addr or "").strip()
+    try:
+        remote_ip = ipaddress.ip_address(remote)
+    except ValueError:
+        remote_ip = None
+
+    if remote_ip is not None and remote_ip.is_loopback:
+        real_ip = (request.headers.get("X-Real-IP") or "").strip()
+        try:
+            return str(ipaddress.ip_address(real_ip))
+        except ValueError:
+            pass
+    return str(remote_ip) if remote_ip is not None else (remote or "unknown")
+
+
+def _rate_limited_response(retry_after: int):
+    retry_after = max(1, int(retry_after))
+    response = jsonify({
+        "error": "too many requests; please retry later",
+        "retry_after": retry_after,
+    })
+    response.status_code = 429
+    response.headers["Retry-After"] = str(retry_after)
+    return response
 
 
 def _send_registration_notice(user: dict) -> bool:
@@ -210,28 +274,22 @@ def register():
     if len(password) < 6:
         return jsonify({"error": "password must be at least 6 characters"}), 400
 
-    # First user (admin) doesn't need invite code; all others do
-    if count_users() > 0:
-        if not invite_code:
-            return jsonify({"error": "invitation code required. Go to Settings → Request Invite"}), 400
-        if not validate_invitation_code(invite_code, email):
-            return jsonify({"error": "invalid or expired invitation code"}), 400
-
-    # Invite code already gates who can register at all, so a successful
-    # registration is the approval step — no separate preview/pending state.
-    role = "admin" if count_users() == 0 else "user"
-
-    user = create_user(email, password, nickname, role)
+    user, is_initial_admin = create_registered_user(
+        email,
+        password,
+        nickname,
+        invite_code,
+    )
     if user is None:
         if nickname and get_user_by_username(nickname):
             return jsonify({"error": "username already taken"}), 409
-        return jsonify({"error": "email already registered"}), 409
+        if get_user_by_email(email):
+            return jsonify({"error": "email already registered"}), 409
+        if not invite_code:
+            return jsonify({"error": "invitation code required. Go to Settings → Request Invite"}), 400
+        return jsonify({"error": "invalid or expired invitation code"}), 400
 
-    # Mark invite code as used
-    if invite_code:
-        use_invitation_code(invite_code)
-
-    admin_notified = _send_registration_notice(user) if role != "admin" else False
+    admin_notified = _send_registration_notice(user) if not is_initial_admin else False
 
     token = create_token(user["id"], user["role"])
     return jsonify({"token": token, "user": user, "admin_notified": admin_notified}), 201
@@ -262,10 +320,14 @@ def request_invite():
         return jsonify({"error": "admin email is not configured."}), 500
     from_email = os.environ.get("RAYNEWS_FROM_EMAIL") or "onboarding@resend.dev"
 
-    # Generate code
-    code = create_invitation_code(email)
+    reservation_token, retry_after = claim_invite_request(email)
+    if reservation_token is None:
+        return _rate_limited_response(retry_after)
 
+    from notifier import EmailDeliveryRejected
+    code = None
     try:
+        code = create_invitation_code(email)
         from notifier import send_email
         html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>
@@ -283,12 +345,30 @@ h1{{color:#6e8efb;font-size:18px}}
 </body></html>"""
         send_email(api_key, admin_email,
                    f"RayNews 新用户邀请 — {email}",
-                   html, from_name="RayNews", from_email=from_email)
-    except Exception as e:
+                   html, from_name="RayNews", from_email=from_email,
+                   idempotency_key=reservation_token)
+    except EmailDeliveryRejected as e:
         print(f"[web] Failed to send invite email: {e}")
-        delete_invitation_code_by_code(code)
-        return jsonify({"error": f"邮件发送失败，请稍后重试：{e}"}), 500
+        if code is not None:
+            delete_invitation_code_by_code(code)
+        complete_invite_request(
+            email,
+            reservation_token,
+            succeeded=False,
+        )
+        return jsonify({"error": "邮件发送失败，请稍后重试"}), 500
+    except Exception as e:
+        # A timeout, disconnect, malformed success response, or unexpected
+        # transport failure may happen after Resend accepted the message.
+        # Preserve both the code and the one-minute reservation. An immediate
+        # retry is therefore rate-limited; a later application gets a new
+        # idempotency key and atomically invalidates this code.
+        print(f"[web] Invite email delivery status is uncertain: {e}")
+        return jsonify({
+            "error": "邮件发送状态未确认，请稍后重试",
+        }), 503
 
+    complete_invite_request(email, reservation_token, succeeded=True)
     return jsonify({"ok": True, "message": "邀请码已发送至管理员邮箱，请等待审核"}), 201
 
 
@@ -297,6 +377,11 @@ def login():
     data = request.get_json(silent=True) or {}
     login_val = (data.get("login") or data.get("email") or "").strip()
     password = data.get("password") or ""
+    client_ip = _trusted_client_ip()
+
+    admitted, retry_after = admit_login_attempt(client_ip, login_val)
+    if not admitted:
+        return _rate_limited_response(retry_after)
 
     # Try email first (case-insensitive), then username (case-sensitive)
     user = get_user_by_email(login_val.lower())
@@ -305,6 +390,7 @@ def login():
     if not user or not verify_password(password, user["password"]):
         return jsonify({"error": "invalid email/username or password"}), 401
 
+    reset_login_failures(client_ip, login_val)
     token = create_token(user["id"], user["role"])
     return jsonify({
         "token": token,
@@ -467,22 +553,30 @@ def admin_get_system_ai_config():
 def admin_set_system_ai_config():
     try:
         data = request.get_json(silent=True) or {}
+        existing = get_system_ai_config()
         api_key = data.get("api_key", "")
         if "****" in api_key:
-            existing = get_system_ai_config()
             if existing.get("api_key"):
                 data["api_key"] = existing["api_key"]
             else:
                 data.pop("api_key", None)
+        try:
+            assert_public_http_url(
+                data.get("endpoint", existing.get("endpoint", "https://api.openai.com/v1"))
+            )
+        except UnsafeUrlError:
+            return jsonify({"error": "AI endpoint must be a public HTTP(S) URL"}), 400
         config = set_system_ai_config(**data)
+        # A new key/endpoint deserves a clean slate: without this, the previous
+        # config's `alerted` flag would mute the alert for an equally broken one.
+        _reset_system_ai_health()
         safe = dict(config)
         safe["has_api_key"] = bool(safe.get("api_key"))
         safe.pop("api_key", None)
         return jsonify(safe)
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": f"server error: {str(e)}"}), 500
+    except Exception:
+        app.logger.exception("Failed to update system AI configuration")
+        return jsonify({"error": "internal server error"}), 500
 
 
 # ─── Favorites API ─────────────────────────────────────────
@@ -490,10 +584,47 @@ def admin_set_system_ai_config():
 NEWS_DB = os.path.join(DATA_DIR, "news.db")
 
 
-def _ensure_news_schema(conn: sqlite3.Connection) -> None:
-    ensure_article_source_columns(conn)
-    ensure_deleted_articles_table(conn)
-    conn.commit()
+def _news_db_connect() -> sqlite3.Connection:
+    """Open news.db with the busy semantics every other writer already uses.
+
+    The fetcher commits a streaming batch every couple of seconds and holds the
+    write lock while it does. Without an explicit timeout these connections take
+    sqlite3's 5s default and surface a hard "database is locked" mid-cycle, so
+    match the timeout=30 / busy_timeout=30000 pairing used by fetcher.py,
+    refresh_server.py and models.py.
+    """
+    conn = sqlite3.connect(NEWS_DB, timeout=30, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
+
+
+def _ensure_news_schema(conn: sqlite3.Connection, *, force: bool = False) -> None:
+    # A schema upgrade is a read-then-write sequence (PRAGMA followed by
+    # ALTER TABLE), so concurrent request connections must not run it in
+    # parallel.  Keep the guard here rather than only in _get_news_db():
+    # _get_article_meta and maintenance routes also invoke this helper.
+    #
+    # ensure_article_schema() opens BEGIN IMMEDIATE — SQLite's exclusive write
+    # lock — before it can even read PRAGMA table_info. Werkzeug serves every
+    # request on a brand new thread, so a purely thread-local connection means a
+    # fresh connection (and a fresh migration pass) per request: every request
+    # would contend for the write lock just to confirm nothing changed. Latch it
+    # per database path instead, the same way models.get_db() guards the app
+    # database. Keying on the path rather than a bare bool keeps this correct
+    # when a test repoints NEWS_DB at a fresh file.
+    db_path = os.path.abspath(NEWS_DB)
+    with _news_schema_lock:
+        if db_path in _news_schema_ready_paths and not force:
+            return
+        ensure_article_schema(conn)
+        # Only latch once `articles` exists. A news.db file can be present before
+        # the fetcher has created the table (schema migration then has nothing to
+        # upgrade), and the real column migration still has to run afterwards.
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'articles'"
+        ).fetchone():
+            _news_schema_ready_paths.add(db_path)
 
 
 def _get_article_meta(article_id: int) -> dict | None:
@@ -501,11 +632,10 @@ def _get_article_meta(article_id: int) -> dict | None:
     if not os.path.exists(NEWS_DB):
         return None
     try:
-        conn = sqlite3.connect(NEWS_DB)
-        conn.row_factory = sqlite3.Row
+        conn = _news_db_connect()
         _ensure_news_schema(conn)
         row = conn.execute(
-            "SELECT id, title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
+            "SELECT id, title, original_title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
             "       COALESCE(NULLIF(feed_source, ''), source) AS feed_source, origin_source, "
             "       date, time, thumb, has_full_content, timestamp "
             "FROM articles WHERE id = ?",
@@ -528,16 +658,35 @@ def _get_article_meta(article_id: int) -> dict | None:
 # coexist cleanly — concurrent readers never block and writers serialize at the SQLite
 # level rather than clobbering a shared Python-level transaction.
 _news_conn_local = threading.local()
+# Schema checks can add columns for databases created by older releases.  Each
+# request thread owns its connection, but SQLite's PRAGMA-then-ALTER sequence
+# must still be serialized in this process: otherwise concurrent first-use
+# connections can all see a missing column and race to add it.
+_news_schema_lock = threading.RLock()
+# Database paths whose migration has already run in this process. See
+# _ensure_news_schema() for why this must not be re-run per connection.
+_news_schema_ready_paths: set[str] = set()
 
 
 def _get_news_db():
     """Per-thread persistent connection to news.db for batch queries."""
     conn = getattr(_news_conn_local, "conn", None)
+    db_path = os.path.abspath(NEWS_DB)
+    # A cached connection to a different file is stale (tests repoint NEWS_DB);
+    # drop it rather than answering queries against the previous database.
+    if conn is not None and getattr(_news_conn_local, "path", None) != db_path:
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
+        conn = None
+        _news_conn_local.conn = None
+        _news_conn_local.path = None
     if conn is None and os.path.exists(NEWS_DB):
-        conn = sqlite3.connect(NEWS_DB, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
+        conn = _news_db_connect()
         _ensure_news_schema(conn)
         _news_conn_local.conn = conn
+        _news_conn_local.path = db_path
     return conn
 
 
@@ -551,7 +700,7 @@ def _get_article_meta_batch(article_ids: list[int]) -> dict[int, dict]:
     try:
         placeholders = ",".join("?" * len(article_ids))
         rows = conn.execute(
-            "SELECT id, title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
+            "SELECT id, title, original_title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
             "       COALESCE(NULLIF(feed_source, ''), source) AS feed_source, origin_source, "
             f"      date, time, thumb, has_full_content, timestamp FROM articles WHERE id IN ({placeholders})",
             article_ids,
@@ -624,6 +773,7 @@ def list_favorites():
                 "article_id": f["article_id"],
                 "created_at": f["created_at"],
                 "title": meta["title"],
+                "original_title": meta.get("original_title", ""),
                 "source": meta["source"],
                 "feed_source": meta.get("feed_source", meta["source"]),
                 "origin_source": meta.get("origin_source", ""),
@@ -694,6 +844,27 @@ def mark_notification_read_route(nid):
     # the client only cares about the resulting unread count.
     mark_notification_read(g.user_id, nid)
     return jsonify({"ok": True, "unread": count_unread_notifications(g.user_id)})
+
+
+@app.route("/notifications/read-all", methods=["POST"])
+@require_role("user", "admin")
+def mark_all_notifications_read_route():
+    mark_all_notifications_read(g.user_id)
+    return jsonify({"ok": True, "unread": count_unread_notifications(g.user_id)})
+
+
+@app.route("/notifications/<int:nid>", methods=["DELETE"])
+@require_role("user", "admin")
+def delete_notification_route(nid):
+    delete_notification(g.user_id, nid)
+    return jsonify({"ok": True, "unread": count_unread_notifications(g.user_id)})
+
+
+@app.route("/notifications", methods=["DELETE"])
+@require_role("user", "admin")
+def delete_all_notifications_route():
+    delete_all_notifications(g.user_id)
+    return jsonify({"ok": True, "unread": 0})
 
 
 NOTIF_BROADCAST_BODY_MAX = 20000
@@ -796,6 +967,7 @@ def get_ai_config_route():
     has_key = bool(safe.get("api_key"))
     safe["has_api_key"] = has_key
     safe.pop("api_key", None)  # never expose the key to frontend
+    safe.pop("revision", None)
     return jsonify(safe)
 
 
@@ -804,24 +976,41 @@ def get_ai_config_route():
 def set_ai_config_route():
     try:
         data = request.get_json(silent=True) or {}
+        existing = get_ai_config(g.user_id)
         # If api_key contains "****", it's the masked placeholder — preserve existing
         api_key = data.get("api_key", "")
         if "****" in api_key:
-            existing = get_ai_config(g.user_id)
             if existing and existing.get("api_key"):
                 data["api_key"] = existing["api_key"]
             else:
                 data.pop("api_key", None)
+        effective_endpoint = data.get(
+            "endpoint",
+            (existing or {}).get("endpoint", "https://api.openai.com/v1"),
+        )
+        try:
+            assert_public_http_url(effective_endpoint)
+        except UnsafeUrlError:
+            return jsonify({"error": "AI endpoint must be a public HTTP(S) URL"}), 400
         config = set_ai_config(g.user_id, **data)
+        settings = get_user_settings(g.user_id) or {}
+        share_check = None
+        if _is_enabled_value(settings.get("share_ai_results")):
+            test_body, test_status = _run_ai_connection_test(config)
+            share_check = _share_check_after_personal_api_test(
+                g.user_id, test_body, test_status, (config or {}).get("revision", 0)
+            )
         safe = dict(config) if config else {}
         has_key = bool(safe.get("api_key"))
         safe["has_api_key"] = has_key
         safe.pop("api_key", None)
+        safe.pop("revision", None)
+        if share_check is not None:
+            safe["share_check"] = share_check
         return jsonify(safe)
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": f"server error: {str(e)}"}), 500
+    except Exception:
+        app.logger.exception("Failed to update personal AI configuration")
+        return jsonify({"error": "internal server error"}), 500
 
 
 @app.route("/ai/config/client", methods=["GET"])
@@ -843,7 +1032,46 @@ def get_ai_config_client_route():
             "enabled": False,
             "api_key": "",
         })
-    return jsonify(dict(config))
+    safe = dict(config)
+    safe.pop("revision", None)
+    return jsonify(safe)
+
+
+class _SystemAIService:
+    """AIService for a server-side job, reporting into the system-AI health signal.
+
+    Health has to be recorded per *provider call*, not per job iteration. A
+    cached summary/translation, or an article that turned out to need nothing,
+    finishes the iteration without touching the AI at all — counting that as
+    "the AI works" cleared a real outage, and with the key suspended the admin
+    got a 失败/恢复 pair every 30 seconds instead of one alert.
+
+    Only the background jobs use this: every call it wraps runs on the server
+    API, so a user's own key can never move this signal.
+    """
+
+    def __init__(self, job: str, **kwargs):
+        object.__setattr__(self, "_job", job)
+        object.__setattr__(self, "_svc", AIService(**kwargs))
+
+    def __getattr__(self, name):
+        attr = getattr(self._svc, name)
+        if not callable(attr):
+            return attr
+
+        def call(*args, **kwargs):
+            try:
+                result = attr(*args, **kwargs)
+            except Exception as exc:
+                _note_system_ai_failure(self._job, exc)
+                raise
+            _note_system_ai_success()
+            return result
+
+        return call
+
+    def __setattr__(self, name, value):
+        setattr(self._svc, name, value)
 
 
 def _generate_article_summary(article_id: int, config: dict,
@@ -858,7 +1086,8 @@ def _generate_article_summary(article_id: int, config: dict,
     if not article:
         raise KeyError("article not found")
 
-    svc = AIService(
+    svc = _SystemAIService(
+        "自动摘要",
         api_key=config["api_key"],
         endpoint=config["endpoint"],
         model=config["model"],
@@ -869,7 +1098,13 @@ def _generate_article_summary(article_id: int, config: dict,
         title=article.get("title", ""),
     )
     if save_shared_cache:
-        _save_ai_result(article_id, summary=summary)
+        _save_ai_result(
+            article_id,
+            summary=summary,
+            summary_provider=config.get("provider") or config.get("provider_type"),
+            summary_model=config.get("model"),
+            summary_by_user_id=config.get("user_id"),
+        )
     return summary, False
 
 
@@ -885,6 +1120,10 @@ def ai_save_result(article_id):
     Body: {"summary": "..."} or {"translation": "..."} (translation is the
     same JSON-string-encoded {"title", "html"} shape used elsewhere).
     """
+    settings = get_user_settings(g.user_id) or {}
+    if not is_share_active(settings):
+        return jsonify({"error": "shared AI result publication is not active"}), 403
+
     article = _fetch_article_body(article_id)
     if not article:
         return jsonify({"error": "article not found"}), 404
@@ -896,11 +1135,25 @@ def ai_save_result(article_id):
         return jsonify({"error": "summary or translation required"}), 400
 
     kwargs = {}
+    config = get_ai_config(g.user_id) or {}
+    provider = config.get("provider") or config.get("provider_type")
+    model = config.get("model")
     if summary:
-        kwargs["summary"] = summary
+        kwargs.update({
+            "summary": summary,
+            "summary_by_user_id": g.user_id,
+            "summary_provider": provider,
+            "summary_model": model,
+        })
     if translation:
-        kwargs["translation"] = translation
-    _save_ai_result(article_id, **kwargs)
+        kwargs.update({
+            "translation": translation,
+            "translation_by_user_id": g.user_id,
+            "translation_provider": provider,
+            "translation_model": model,
+        })
+    if not _save_ai_result(article_id, **kwargs):
+        return jsonify({"error": "internal server error"}), 500
 
     # Keep the article title in news.db in sync so the home page list shows
     # the translated title too (mirrors the old server-side translate-full behavior).
@@ -938,20 +1191,55 @@ def _run_ai_connection_test(config: dict | None) -> tuple[dict, int]:
             return {"error": "Connection test returned empty response"}, 502
         return {"ok": True, "response": response}, 200
     except requests.exceptions.ConnectTimeout:
+        app.logger.exception("AI connection test timed out while connecting")
         return {"error": "连接 AI 服务超时。请检查 API 地址是否正确，或 Docker 容器是否配置了 HTTP_PROXY 环境变量"}, 502
-    except requests.exceptions.ConnectionError as e:
-        return {"error": f"无法连接 AI 服务（{type(e).__name__}）。请检查网络代理配置：Docker 容器需要设置 HTTP_PROXY/HTTPS_PROXY 环境变量"}, 502
-    except requests.exceptions.Timeout as e:
-        return {"error": f"AI 服务响应超时: {e}"}, 502
-    except Exception as e:
-        return {"error": f"Connection test failed: {str(e)}"}, 502
+    except requests.exceptions.ConnectionError:
+        app.logger.exception("AI connection test could not connect")
+        return {"error": "无法连接 AI 服务。请检查网络代理配置"}, 502
+    except requests.exceptions.Timeout:
+        app.logger.exception("AI connection test timed out")
+        return {"error": "AI 服务响应超时"}, 502
+    except Exception:
+        app.logger.exception("AI connection test failed")
+        return {"error": "AI connection test failed"}, 502
+
+
+def _share_check_after_personal_api_test(
+    user_id: int,
+    body: dict,
+    status: int,
+    config_revision: int | None = None,
+) -> dict | None:
+    """Apply a personal API probe to opted-in sharing and return safe status."""
+    settings = get_user_settings(user_id) or {}
+    if not _is_enabled_value(settings.get("share_ai_results")):
+        return None
+    error = body.get("error", "") if status != 200 else ""
+    transition = _apply_share_connectivity_result(
+        user_id, status == 200, error, config_revision=config_revision
+    )
+    result = {
+        "status": transition,
+        "restored": transition == "restored",
+    }
+    if status != 200:
+        result["error"] = _compact_share_error(error)
+    return result
 
 
 @app.route("/ai/test-connection", methods=["POST"])
 @require_role("user", "admin")
 def ai_test_connection():
     """Test the user's own AI API configuration with a minimal prompt."""
-    body, status = _run_ai_connection_test(get_ai_config(g.user_id))
+    config = get_ai_config(g.user_id)
+    body, status = _run_ai_connection_test(config)
+    share_check = _share_check_after_personal_api_test(
+        g.user_id, body, status, (config or {}).get("revision", 0)
+    )
+    if share_check is not None:
+        body = {**body, "share_check": share_check}
+    if status != 200 and "error" in body:
+        body = {**body, "error": _compact_share_error(body["error"])}
     return jsonify(body), status
 
 
@@ -999,12 +1287,15 @@ def ai_chat_relay():
             provider_type=config.get("provider_type", "openai"),
         )
         content = svc.chat(messages, max_tokens=max_tokens, temperature=temperature)
-    except TimeoutError as e:
-        return jsonify({"error": str(e)}), 504
-    except requests.exceptions.RequestException as e:
-        return jsonify({"error": f"无法连接 AI 服务（{type(e).__name__}）"}), 502
-    except Exception as e:
-        return jsonify({"error": f"AI relay failed: {str(e)}"}), 502
+    except TimeoutError:
+        app.logger.exception("AI relay timed out")
+        return jsonify({"error": "AI service timed out"}), 504
+    except requests.exceptions.RequestException:
+        app.logger.exception("AI relay request failed")
+        return jsonify({"error": "AI service unavailable"}), 502
+    except Exception:
+        app.logger.exception("AI relay failed")
+        return jsonify({"error": "AI relay failed"}), 502
     if not (content or "").strip():
         return jsonify({"error": "AI returned an empty response"}), 502
     return jsonify({"content": content})
@@ -1015,7 +1306,29 @@ def ai_chat_relay():
 def admin_system_ai_test_connection():
     """Test the admin-configured system AI (drives background auto summary/translate)."""
     body, status = _run_ai_connection_test(get_system_ai_config())
+    # A passing test is as good as a background call succeeding — clear the
+    # streak (and send the recovery notice) without waiting for the next job.
+    # A failing one is not counted: a manual probe shouldn't push the streak
+    # toward an alert the admin is already looking at.
+    if status == 200:
+        _note_system_ai_success()
     return jsonify(body), status
+
+
+def _resend_to_email(config) -> str:
+    """The notification address out of a notification_config, in either shape it
+    travels in: a dict (request payload) or the JSON string it is stored as."""
+    if isinstance(config, str):
+        try:
+            config = json.loads(config or "{}")
+        except (json.JSONDecodeError, TypeError):
+            config = {}
+    if not isinstance(config, dict):
+        return ""
+    resend = config.get("resend")
+    if not isinstance(resend, dict):
+        return ""
+    return str(resend.get("to_email") or "").strip()
 
 
 def _notification_recipient(user_id: int) -> str:
@@ -1053,7 +1366,10 @@ def _send_notification_email(user_id: int, title: str, body: str,
     own DB-level dedup were ever bypassed."""
     api_key = os.environ.get("RESEND_API_KEY", "")
     to_email = _notification_recipient(user_id)
-    if not api_key or not to_email:
+    if not api_key:
+        _note_email_delivery_failure("RESEND_API_KEY 未配置")
+        return False
+    if not to_email:
         return False
     from_email = os.environ.get("RAYNEWS_FROM_EMAIL") or "onboarding@resend.dev"
 
@@ -1083,21 +1399,375 @@ h1{{color:#6e8efb;font-size:18px}}
             from_email=from_email,
             idempotency_key=idempotency_key,
         )
+        _clear_email_delivery_failure_alert()
         return True
     except Exception as exc:
+        _note_email_delivery_failure(str(exc))
         print(f"[notify] Failed to send notification email to user {user_id}: {exc}")
         return False
 
 
-def _notify_user(user_id: int, ntype: str, title: str, body: str = "") -> None:
+def _notify_user(user_id: int, ntype: str, title: str, body: str = "") -> bool:
     """Deliver a notification to a user on both channels: insert an in-app
     row (头像菜单 → 我的通知) and email a copy. Each leg is best-effort and
-    independent, so a DB or mail hiccup never breaks the caller."""
+    independent, so a DB or mail hiccup never breaks the caller.
+
+    Returns whether the durable in-app copy was written. Callers use that as
+    the minimum delivery signal; email remains best-effort.
+    """
+    inapp_delivered = False
     try:
         add_notification(user_id, ntype, title, body)
+        inapp_delivered = True
     except Exception as exc:
         print(f"[notify] Failed to add in-app notification for user {user_id}: {exc}")
     _send_notification_email(user_id, title, body)
+    return inapp_delivered
+
+
+def _notify_admins(ntype: str, title: str, body: str) -> int:
+    """Send one notification to every admin, both channels. Returns how many
+    admins were reached. Never raises: alerting is best-effort by definition —
+    the caller is usually a background job that must keep running."""
+    try:
+        admins = [u for u in list_users() if u.get("role") == "admin"]
+    except Exception as exc:
+        print(f"[notify] admin lookup failed for {ntype}: {exc}")
+        return 0
+    notified = 0
+    for admin in admins:
+        try:
+            if _notify_user(admin["id"], ntype, title, body):
+                notified += 1
+        except Exception as exc:
+            print(f"[notify] {ntype} to admin {admin['id']} failed: {exc}")
+    return notified
+
+
+EMAIL_DELIVERY_FAILURE_ALERTED_STATE_KEY = "email_delivery_failure_alerted"
+EMAIL_DELIVERY_FAILURE_TITLE = "邮件推送服务不可用"
+
+
+def _note_email_delivery_failure(reason: str) -> None:
+    safe_reason = str(reason or "邮件发送失败")
+    configured_api_key = os.environ.get("RESEND_API_KEY", "")
+    if configured_api_key:
+        safe_reason = safe_reason.replace(
+            configured_api_key, "[redacted credential]"
+        )
+    safe_reason = re.sub(
+        r"""(?ix)
+        ["']?\bRESEND_API_KEY\b["']?\s*[=:]\s*
+        (?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}\]]+)
+        """,
+        "[redacted credential]",
+        safe_reason,
+    )
+    safe_reason = re.sub(
+        r"""(?ix)["']?\bRESEND_API_KEY\b["']?""",
+        "[redacted credential]",
+        safe_reason,
+    )
+    safe_reason = re.sub(r"\s+", " ", safe_reason).strip()[:300]
+    try:
+        if not claim_app_state_flag(EMAIL_DELIVERY_FAILURE_ALERTED_STATE_KEY):
+            return
+    except Exception:
+        pass
+
+    delivered = 0
+    try:
+        admins = [user for user in list_users() if user.get("role") == "admin"]
+    except Exception as exc:
+        print(f"[notify] email delivery failure admin lookup failed: {exc}")
+        admins = []
+
+    for admin in admins:
+        admin_id = admin.get("id")
+        try:
+            add_notification(
+                admin_id, "email_delivery_failed", EMAIL_DELIVERY_FAILURE_TITLE,
+                f"邮件推送服务不可用。原因：{safe_reason}\n\n"
+                "请检查 RESEND_API_KEY、Resend 账户状态和 RAYNEWS_FROM_EMAIL 配置。",
+            )
+            delivered += 1
+        except Exception as exc:
+            print(
+                "[notify] email delivery failure alert to admin "
+                f"{admin_id} failed: {exc}"
+            )
+
+    if delivered == 0:
+        _clear_email_delivery_failure_alert()
+
+
+def _clear_email_delivery_failure_alert() -> None:
+    try:
+        set_app_state(EMAIL_DELIVERY_FAILURE_ALERTED_STATE_KEY, "0")
+    except Exception as exc:
+        print(f"[notify] email delivery failure alert clear failed: {exc}")
+
+
+# ─── System AI health ──────────────────────────────────────
+#
+# Every background job (auto summary/translation/title/source classification)
+# and the daily summary run on the one admin-configured system AI. Until now a
+# dead key only showed up as log lines: the jobs kept retrying forever and the
+# daily-summary alert was the single notification anyone got — and that one
+# arrives at ~21:30, hours after the failures start. Track consecutive failures
+# across all of them instead and tell the admins once the streak makes it clear
+# the AI itself, not one article, is the problem.
+# Three, not five: the evening daily-summary chain makes exactly four attempts
+# (21:00 plus three retries), so a threshold of five could only ever be reached
+# by the article jobs — which stay idle when there is nothing pending. At three
+# the failure is reported around 21:20, ahead of the daily-summary alert, on a
+# quiet day too.
+SYSTEM_AI_FAILURE_ALERT_THRESHOLD = int(
+    os.environ.get("SYSTEM_AI_FAILURE_ALERT_THRESHOLD", "3")
+)
+SYSTEM_AI_FAILURE_TITLE = "服务端 AI 调用连续失败"
+SYSTEM_AI_RECOVERED_TITLE = "服务端 AI 已恢复"
+
+_system_ai_health = {"failures": 0, "alerted": False, "last_error": "", "jobs": []}
+_system_ai_health_lock = threading.Lock()
+
+
+# "Admins have already been told about this outage" is persisted, not just held
+# in memory: the process restarts (deploys, watchdog, OOM) and an in-memory flag
+# would let one ongoing outage re-alert on every restart. One outage, one alert —
+# same rule the user-side share suspension gets from its share_suspended column.
+SYSTEM_AI_ALERTED_STATE_KEY = "system_ai_failure_alerted"
+
+
+def _system_ai_alert_already_sent() -> bool:
+    try:
+        return get_app_state(SYSTEM_AI_ALERTED_STATE_KEY) == "1"
+    except Exception as exc:
+        print(f"[system-ai] alert state read failed: {exc}")
+        return False
+
+
+def _claim_system_ai_alert() -> bool:
+    """True only for the caller that flips the persisted flag 0 → 1."""
+    try:
+        return claim_app_state_flag(SYSTEM_AI_ALERTED_STATE_KEY)
+    except Exception as exc:
+        # A DB hiccup must not turn into a silent outage; alerting twice is the
+        # safer failure mode than never alerting.
+        print(f"[system-ai] alert claim failed: {exc}")
+        return True
+
+
+def _release_system_ai_alert() -> None:
+    """Release an alert claim that reached no administrator."""
+    with _system_ai_health_lock:
+        _system_ai_health["alerted"] = False
+    try:
+        set_app_state(SYSTEM_AI_ALERTED_STATE_KEY, "0")
+    except Exception as exc:
+        print(f"[system-ai] alert state release failed: {exc}")
+
+
+def _clear_system_ai_alert() -> bool:
+    """Clear the persisted flag, returning whether it had been set."""
+    try:
+        was_set = get_app_state(SYSTEM_AI_ALERTED_STATE_KEY) == "1"
+        if was_set:
+            set_app_state(SYSTEM_AI_ALERTED_STATE_KEY, "0")
+        return was_set
+    except Exception as exc:
+        print(f"[system-ai] alert state clear failed: {exc}")
+        return False
+
+
+def _reset_system_ai_health() -> None:
+    """Forget the current streak — used when the admin saves a new system AI
+    config, so a fresh key starts from zero (and can alert again if it is also
+    broken, instead of being muted by the previous config's flag)."""
+    with _system_ai_health_lock:
+        _system_ai_health.update({"failures": 0, "alerted": False, "last_error": "", "jobs": []})
+    try:
+        set_app_state(SYSTEM_AI_ALERTED_STATE_KEY, "0")
+    except Exception as exc:
+        print(f"[system-ai] alert state reset failed: {exc}")
+
+
+def _note_system_ai_success() -> None:
+    """A system-AI call came back. Ends the streak, and if admins were told the
+    AI was down, tells them it is back — matching the share_suspended /
+    share_restored pair users already get."""
+    with _system_ai_health_lock:
+        streak = _system_ai_health["failures"]
+        alerted_here = _system_ai_health["alerted"]
+        _system_ai_health.update({"failures": 0, "alerted": False, "last_error": "", "jobs": []})
+    # Either signal means admins are owed a recovery notice: the persisted flag
+    # covers an outage that started before a restart, the in-memory one covers a
+    # deployment whose state table is momentarily unreadable.
+    recovered = _clear_system_ai_alert() or alerted_here
+    if not streak and not recovered:
+        return
+    if recovered:
+        _notify_admins(
+            "system_ai_recovered",
+            SYSTEM_AI_RECOVERED_TITLE,
+            "服务端 AI 调用已恢复正常，自动摘要、翻译、标题精简和每日摘要等后台任务会继续运行。",
+        )
+
+
+def _note_system_ai_failure(job: str, error) -> None:
+    """Count one failed system-AI call. Alerts every admin exactly once per
+    outage: the flag only clears on the next success (see above), so a provider
+    that fails every 30 seconds can't turn into a stream of notifications."""
+    reason = re.sub(r"\s+", " ", str(error or "")).strip()[:300]
+    with _system_ai_health_lock:
+        _system_ai_health["failures"] += 1
+        _system_ai_health["last_error"] = reason
+        if job not in _system_ai_health["jobs"]:
+            _system_ai_health["jobs"].append(job)
+        if (
+            _system_ai_health["failures"] < SYSTEM_AI_FAILURE_ALERT_THRESHOLD
+            or _system_ai_health["alerted"]
+        ):
+            return
+        _system_ai_health["alerted"] = True
+        failures = _system_ai_health["failures"]
+        jobs = list(_system_ai_health["jobs"])
+    # The persisted claim is what actually guarantees one alert per outage: a
+    # restart empties the counter above, and without this the same outage would
+    # alert again three failures later.
+    if not _claim_system_ai_alert():
+        return
+    body = (
+        f"服务端 AI 已连续 {failures} 次调用失败，受影响的后台任务："
+        f"{'、'.join(jobs)}。\n\n"
+        f"最近一次失败原因：{reason or '未知原因'}\n\n"
+        "请到 管理员设置 → 服务端 API 检查 Endpoint、API Key、模型和余额，"
+        "可用「测试连接」验证。恢复后系统会再发一条通知。"
+    )
+    print(f"[system-ai] {failures} consecutive failures ({', '.join(jobs)}): {reason}")
+    if _notify_admins("system_ai_failed", SYSTEM_AI_FAILURE_TITLE, body) == 0:
+        _release_system_ai_alert()
+
+
+def _compact_share_error(value: str) -> str:
+    """Return a safe summary, never an arbitrary provider response body."""
+    text = re.sub(r"\s+", " ", str(value or "connection test failed")).strip()
+    # Redact common credential transports before classifying the error. The
+    # allowlist below intentionally drops unknown provider detail altogether,
+    # but keeping these redactions makes this safe if a new allowed summary is
+    # added later.
+    text = re.sub(
+        r"(?i)\b(?:proxy-)?authorization\s*:\s*(?:bearer\s+)?[^\s,;]+",
+        "[redacted]",
+        text,
+    )
+    text = re.sub(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [redacted]", text)
+    text = re.sub(r"sk-[A-Za-z0-9_-]+", "[redacted]", text)
+    text = re.sub(
+        r"(?i)(?:api[_-]?key|x-api-key|access[_-]?token|token|secret|password|key)"
+        r"\s*(?:=|:)\s*(?:[\"']?)[^\s,;&}\]\"']+",
+        "[redacted]",
+        text,
+    )
+
+    status = re.search(r"\bAI API HTTP\s+([1-5]\d{2})\b", text, flags=re.IGNORECASE)
+    if status:
+        return f"AI API HTTP {status.group(1)}"
+    if text == "AI not configured. Save API config first.":
+        return text
+    if text == "Connection test returned empty response":
+        return text
+    if text.startswith("无法连接 AI 服务"):
+        return "无法连接 AI 服务"
+    if text.startswith("连接 AI 服务超时"):
+        return "连接 AI 服务超时"
+    if text.startswith("AI 服务响应超时"):
+        return "AI 服务响应超时"
+    return "AI connectivity check failed"
+
+
+def _apply_share_connectivity_result(
+    user_id: int,
+    ok: bool,
+    error: str = "",
+    checked_at: str | None = None,
+    config_revision: int | None = None,
+) -> str:
+    """Apply a probe only while the exact tested AI config is still current.
+
+    A suspension CAS can lose to another current-revision probe. Re-read a
+    bounded number of times so a later opposite result still owns the edge it
+    actually applies, while opt-out and config changes remain terminal.
+    """
+    import datetime as _dt
+
+    if config_revision is None:
+        config_revision = (get_ai_config(user_id) or {}).get("revision", 0)
+    try:
+        config_revision = int(config_revision)
+    except (TypeError, ValueError):
+        return "validation_failed"
+
+    checked_at = checked_at or _dt.datetime.now().isoformat(timespec="seconds")
+    target_suspended = 0 if ok else 1
+    safe_error = None if ok else _compact_share_error(error)
+    was_suspended = False
+    claimed = False
+    for attempt in range(3):
+        settings = get_user_settings(user_id) or {}
+        if not _is_enabled_value(settings.get("share_ai_results")):
+            return "not_opted_in"
+        current_revision = settings.get("share_current_config_revision")
+        try:
+            current_revision = int(current_revision) if current_revision is not None else 0
+        except (TypeError, ValueError):
+            return "stale"
+        if current_revision != config_revision:
+            return "stale"
+
+        was_suspended = _is_enabled_value(settings.get("share_suspended"))
+        # A failed CAS followed by the same target means the competing probe
+        # already applied this result. It is not another real edge.
+        if attempt and int(was_suspended) == target_suspended:
+            return "unchanged"
+        claimed = apply_share_connectivity_transition(
+            user_id,
+            expected_suspended=int(was_suspended),
+            expected_config_revision=config_revision,
+            next_suspended=target_suspended,
+            checked_at=checked_at,
+            check_ok=int(ok),
+            error=safe_error,
+        )
+        if claimed:
+            break
+    if not claimed:
+        return "unchanged"
+
+    if ok:
+        if not was_suspended:
+            return "unchanged"
+        _notify_user(
+            user_id,
+            "share_restored",
+            "共享 API 已恢复，共享状态已自动恢复",
+            "系统已确认你的个人 AI API 恢复连通。\n\n"
+            "「共享 AI 结果」及你此前选择的查看选项已自动恢复，无需手动重新开启。",
+        )
+        return "restored"
+
+    if was_suspended:
+        return "unchanged"
+    _notify_user(
+        user_id,
+        "share_suspended",
+        "共享 API 校验失败，共享已暂停",
+        "系统对你配置的个人 AI API 做连通性校验时失败，共享访问已暂停；"
+        "你的总开关和查看选项均已保留。\n\n"
+        f"失败原因：{safe_error}\n\n"
+        "请到 用户设置 → AI 更新配置。保存并校验成功后系统会自动恢复共享。",
+    )
+    return "suspended"
 
 
 def _run_ai_share_revalidation_once():
@@ -1106,41 +1776,21 @@ def _run_ai_share_revalidation_once():
     A user's "共享 AI 结果" access is only granted after a live connectivity
     test at save time (see update_settings); this loop periodically re-tests
     it so a key that later expires/runs out of credit doesn't leave shared
-    content permanently accessible. On failure, the master switch and all
-    three view sub-toggles are cascaded off — same invariant enforced by
-    update_settings (a sub-toggle must never be on while the master is off).
+    content permanently accessible. Opted-in users remain scheduled while
+    suspended, so a later successful check restores their saved preferences.
     """
-    import datetime as _dt
-    for user_id in get_users_with_share_enabled():
+    user_ids = get_users_with_share_enabled()
+    for index, user_id in enumerate(user_ids):
         config = get_ai_config(user_id)
         body, status = _run_ai_connection_test(config)
-        now_str = _dt.datetime.now().isoformat(timespec="seconds")
-        if status == 200:
-            set_user_settings(
-                user_id,
-                share_last_check_at=now_str, share_last_check_ok=1, share_last_check_error=None,
-            )
-        else:
-            err_msg = body.get("error", "connection test failed")
-            set_user_settings(
-                user_id,
-                share_ai_results=0, share_view_title=0, share_view_translation=0, share_view_summary=0,
-                share_last_check_at=now_str, share_last_check_ok=0,
-                share_last_check_error=err_msg,
-            )
-            # The switch is now off, so this user drops out of
-            # get_users_with_share_enabled() and won't be re-checked (or
-            # re-notified) next cycle — the in-app notification and its email
-            # copy fire exactly once, on the transition to failed.
-            _notify_user(
-                user_id, "share_revoked",
-                "共享校验失败，共享状态已失效",
-                "系统对你在「共享」中配置的 AI API 做定期连通性校验时失败，"
-                "「共享 AI 结果」总开关及全部查看子开关已被自动关闭。\n\n"
-                f"失败原因：{err_msg}\n\n"
-                "请到 用户设置 → 共享 检查并更新你的 API 配置，重新保存以恢复共享资格。",
-            )
-        time.sleep(0.5)  # spread requests out instead of bursting every provider at once
+        _apply_share_connectivity_result(
+            user_id,
+            status == 200,
+            body.get("error", "") if status != 200 else "",
+            config_revision=(config or {}).get("revision", 0),
+        )
+        if index + 1 < len(user_ids):
+            time.sleep(0.5)  # spread requests out instead of bursting every provider at once
 
 
 def _ai_share_revalidation_loop():
@@ -1156,121 +1806,125 @@ def _ai_share_revalidation_loop():
 @app.route("/ai/daily-summary", methods=["POST"])
 @require_role("user", "admin")
 def ai_daily_summary():
-    today_str = _today_str()
+    """Retired: the daily summary is generated by the server on a fixed schedule.
 
-    # Reuse today's shared summary if it already exists (from the fixed
-    # 21:00 broadcast or another user's request) instead of spending this
-    # user's own key on a duplicate AI call.
-    shared = _get_daily_summary_global_cache(today_str)
-    if shared:
-        _cleanup_daily_summary_jobs()
-        job_id = uuid.uuid4().hex
-        with _daily_summary_jobs_lock:
-            _daily_summary_jobs[job_id] = {
-                "job_id": job_id,
-                "user_id": g.user_id,
-                "date": today_str,
-                "status": "completed",
-                "created_at": time.time(),
-                "updated_at": time.time(),
-                "summary": shared["summary"],
-                "article_count": shared["article_count"],
-                "stats": shared["stats"],
-                "error": "",
-            }
-        return jsonify({"job_id": job_id, "status": "completed"}), 202
-
-    config = get_ai_config(g.user_id)
-    if not config or not config.get("enabled"):
-        return jsonify({"error": "AI not configured. Go to Settings → AI to set up."}), 400
-    if not config.get("api_key"):
-        return jsonify({"error": "API key not configured"}), 400
-
-    _cleanup_daily_summary_jobs()
-    with _daily_summary_jobs_lock:
-        for job in _daily_summary_jobs.values():
-            if job.get("user_id") == g.user_id and job.get("status") in ("queued", "running"):
-                return jsonify({"job_id": job["job_id"], "status": job["status"]}), 202
-
-        job_id = uuid.uuid4().hex
-        _daily_summary_jobs[job_id] = {
-            "job_id": job_id,
-            "user_id": g.user_id,
-            "date": today_str,
-            "status": "queued",
-            "created_at": time.time(),
-            "updated_at": time.time(),
-            "summary": "",
-            "article_count": 0,
-            "stats": {},
-            "error": "",
-        }
-
-    threading.Thread(
-        target=_run_daily_summary_job,
-        args=(job_id, g.user_id, config),
-        daemon=True,
-    ).start()
-    return jsonify({"job_id": job_id, "status": "queued"}), 202
+    It used to run an AI call against the *calling user's* own API key, which
+    meant the content of a shared, site-wide summary depended on whoever
+    happened to click first. Generation now happens once per day from the
+    admin-configured system AI (see _broadcast_daily_summary), so there is
+    nothing for a client to trigger. Kept as an explicit 403 rather than
+    deleted: a browser running a cached build still posts here, and a clear
+    message beats a bare 404 or, worse, a route that silently reappears.
+    """
+    return jsonify({
+        "error": (
+            f"每日摘要由服务器在北京时间每天 "
+            f"{DAILY_SUMMARY_HOUR:02d}:{DAILY_SUMMARY_MINUTE:02d} 统一生成，不支持手动触发"
+        ),
+        "status": "scheduled",
+        "generate_at": f"{DAILY_SUMMARY_HOUR:02d}:{DAILY_SUMMARY_MINUTE:02d}",
+    }), 403
 
 
 @app.route("/ai/daily-summary/today", methods=["GET"])
 @require_role("user", "admin")
 def ai_daily_summary_today():
+    """Today's shared summary, or why it isn't showing yet.
+
+    The client renders four states off `status`, so the "not yet" cases are
+    distinguished here rather than in the UI: `scheduled` (today's generation
+    time hasn't arrived), `generating` (it has, but the summary isn't stored
+    yet), `completed`, `unavailable` (the day ended with nothing produced —
+    typically no articles, or the system AI isn't configured).
+    """
     today_str = _today_str()
-    _cleanup_daily_summary_jobs()
-    with _daily_summary_jobs_lock:
-        for job in _daily_summary_jobs.values():
-            if (
-                job.get("user_id") == g.user_id
-                and job.get("date") == today_str
-                and job.get("status") in ("queued", "running")
-            ):
-                return jsonify({
-                    "status": job["status"],
-                    "job_id": job["job_id"],
-                    "date": today_str,
-                    "created_at": job.get("created_at"),
-                    "updated_at": job.get("updated_at"),
-                })
+    generate_at = f"{DAILY_SUMMARY_HOUR:02d}:{DAILY_SUMMARY_MINUTE:02d}"
 
     shared = _get_daily_summary_global_cache(today_str)
     if shared:
         return jsonify({
             "status": "completed",
             "date": today_str,
+            "generate_at": generate_at,
             "summary": shared["summary"],
             "article_count": shared["article_count"],
             "stats": shared["stats"],
             "updated_at": shared["updated_at"],
         })
 
-    cached = _get_daily_summary_cache(g.user_id, today_str)
-    if cached:
+    # A day that has failed at least once reports differently to admins: they get
+    # the reason and the retry control, everyone else gets the ordinary
+    # "generating"/"unavailable" wording — a failing system AI key is an ops
+    # detail, not something to show every reader.
+    failure = _get_daily_summary_failure(today_str)
+    if failure and int(failure.get("attempts") or 0) > 0:
+        given_up = bool(int(failure.get("given_up") or 0))
+        if getattr(g, "user_role", "") == "admin":
+            return jsonify({
+                "status": "failed" if given_up else "retrying",
+                "date": today_str,
+                "generate_at": generate_at,
+                "error": failure.get("last_error") or "",
+                "attempts": int(failure.get("attempts") or 0),
+                "max_retries": DAILY_SUMMARY_MAX_RETRIES,
+                "next_retry_at": failure.get("next_retry_at"),
+                "retry_interval_minutes": DAILY_SUMMARY_RETRY_INTERVAL_SECONDS // 60,
+                "can_retry": True,
+            })
         return jsonify({
-            "status": "completed",
+            "status": "unavailable" if given_up else "generating",
             "date": today_str,
-            "summary": cached["summary"],
-            "article_count": cached["article_count"],
-            "stats": cached["stats"],
-            "updated_at": cached["updated_at"],
+            "generate_at": generate_at,
         })
-    return jsonify({"status": "idle", "date": today_str})
+
+    now = _beijing_now()
+    target_minutes = DAILY_SUMMARY_HOUR * 60 + DAILY_SUMMARY_MINUTE
+    now_minutes = now.hour * 60 + now.minute
+    if now_minutes < target_minutes:
+        status = "scheduled"
+    elif now_minutes < target_minutes + max(DAILY_SUMMARY_WINDOW_MINUTES, 1) + 5:
+        # Inside (or just past) the scheduler's send window: a tick is either
+        # running or about to. Slack on the tail so a slow AI call reads as
+        # "still working" rather than flipping straight to unavailable.
+        status = "generating"
+    else:
+        status = "unavailable"
+    return jsonify({"status": status, "date": today_str, "generate_at": generate_at})
 
 
-@app.route("/ai/daily-summary/<job_id>", methods=["GET"])
-@require_role("user", "admin")
-def ai_daily_summary_status(job_id):
-    with _daily_summary_jobs_lock:
-        job = _daily_summary_jobs.get(job_id)
-        if not job or job.get("user_id") != g.user_id:
-            return jsonify({"error": "job not found"}), 404
-        safe = {k: v for k, v in job.items() if k != "user_id"}
-    return jsonify(safe)
+@app.route("/ai/daily-summary/retry", methods=["POST"])
+@require_role("admin")
+def ai_daily_summary_retry():
+    """Admin-triggered retry of today's failed generation.
 
+    Not a general "generate now" button: it refuses unless the day actually has
+    a failure record, which keeps the retired manual-generation path retired —
+    the only way to reach the AI from a client is to re-run a run that already
+    failed. A successful retry clears the failure record and delivers on both
+    channels exactly as the scheduled run would; a failed one restarts the
+    automatic retry chain from attempt 1.
+    """
+    today_str = _today_str()
+    failure = _get_daily_summary_failure(today_str)
+    if not failure or int(failure.get("attempts") or 0) <= 0:
+        return jsonify({
+            "error": "今日每日摘要没有失败记录，无需重试",
+            "status": "not_failed",
+        }), 409
 
-_daily_summary_jobs = {}
-_daily_summary_jobs_lock = threading.Lock()
+    _clear_daily_summary_failure(today_str)
+    result = _broadcast_daily_summary(force=False, bypass_window=True)
+    if result.get("status") == "error":
+        state = _get_daily_summary_failure(today_str) or {}
+        return jsonify({
+            "status": "failed" if int(state.get("given_up") or 0) else "retrying",
+            "error": result.get("reason") or "",
+            "attempts": int(state.get("attempts") or 0),
+            "can_retry": True,
+        }), 502
+    if result.get("status") == "skipped" and result.get("reason") == "generation already running":
+        return jsonify({"status": "retrying", "error": "", "message": "正在生成，请稍候"}), 202
+    return jsonify({"status": "completed", "message": "每日摘要生成成功"})
 
 
 def _beijing_now():
@@ -1284,89 +1938,11 @@ def _today_str() -> str:
     return _beijing_now().strftime("%Y-%m-%d")
 
 
-def _init_daily_summary_cache_table():
-    if not os.path.exists(NEWS_DB):
-        return
-    try:
-        conn = sqlite3.connect(NEWS_DB)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS daily_summary_cache (
-                user_id       INTEGER NOT NULL,
-                date          TEXT NOT NULL,
-                summary       TEXT NOT NULL,
-                article_count INTEGER NOT NULL DEFAULT 0,
-                stats         TEXT NOT NULL DEFAULT '{}',
-                updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
-                PRIMARY KEY (user_id, date)
-            )
-        """)
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"[daily-summary] cache table init failed: {e}")
-
-
-def _get_daily_summary_cache(user_id: int, date_str: str) -> dict | None:
-    if not os.path.exists(NEWS_DB):
-        return None
-    try:
-        _init_daily_summary_cache_table()
-        conn = sqlite3.connect(NEWS_DB)
-        conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            "SELECT summary, article_count, stats, updated_at "
-            "FROM daily_summary_cache WHERE user_id = ? AND date = ?",
-            (user_id, date_str),
-        ).fetchone()
-        conn.close()
-        if not row:
-            return None
-        data = dict(row)
-        try:
-            data["stats"] = json.loads(data.get("stats") or "{}")
-        except (json.JSONDecodeError, TypeError):
-            data["stats"] = {}
-        return data
-    except Exception as e:
-        print(f"[daily-summary] cache read failed: {e}")
-        return None
-
-
-def _save_daily_summary_cache(user_id: int, date_str: str, summary: str,
-                              article_count: int, stats: dict):
-    if not os.path.exists(NEWS_DB):
-        return
-    try:
-        _init_daily_summary_cache_table()
-        conn = sqlite3.connect(NEWS_DB)
-        conn.execute(
-            "INSERT INTO daily_summary_cache "
-            "(user_id, date, summary, article_count, stats, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, datetime('now')) "
-            "ON CONFLICT(user_id, date) DO UPDATE SET "
-            "summary = excluded.summary, "
-            "article_count = excluded.article_count, "
-            "stats = excluded.stats, "
-            "updated_at = datetime('now')",
-            (user_id, date_str, summary, article_count, json.dumps(stats or {}, ensure_ascii=False)),
-        )
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"[daily-summary] cache write failed: {e}")
-
-
-# ─── Shared (server-wide) daily summary ───────────────────────
-# One summary per day, generated with the admin-configured system AI and
-# broadcast by email to every user with daily_summary_enabled — replaces the
-# old per-user generation so N subscribers no longer cost N AI calls.
-
-
 def _init_daily_summary_global_table():
     if not os.path.exists(NEWS_DB):
         return
     try:
-        conn = sqlite3.connect(NEWS_DB)
+        conn = _news_db_connect()
         conn.execute("""
             CREATE TABLE IF NOT EXISTS daily_summary_global (
                 date          TEXT PRIMARY KEY,
@@ -1387,7 +1963,7 @@ def _get_daily_summary_global_cache(date_str: str) -> dict | None:
         return None
     try:
         _init_daily_summary_global_table()
-        conn = sqlite3.connect(NEWS_DB)
+        conn = _news_db_connect()
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             "SELECT summary, article_count, stats, updated_at "
@@ -1414,7 +1990,7 @@ def _save_daily_summary_global_cache(date_str: str, summary: str,
         return
     try:
         _init_daily_summary_global_table()
-        conn = sqlite3.connect(NEWS_DB)
+        conn = _news_db_connect()
         conn.execute(
             "INSERT INTO daily_summary_global "
             "(date, summary, article_count, stats, updated_at) "
@@ -1432,10 +2008,28 @@ def _save_daily_summary_global_cache(date_str: str, summary: str,
         print(f"[daily-summary] global cache write failed: {e}")
 
 
+# Why the reason travels in a module global instead of the return value: the
+# generator's contract (dict | None) is depended on by callers and tests, and the
+# only consumer of the reason is _broadcast_daily_summary, which calls it
+# synchronously on the same thread one line earlier. Generation is serialized by
+# _daily_summary_generation_lock, so there is no second writer to race with.
+_daily_summary_last_error = ""
+
+
+def _set_daily_summary_error(reason: str) -> None:
+    global _daily_summary_last_error
+    # Provider errors can carry a whole response body; keep the stored/emailed
+    # reason short enough to read at a glance.
+    text = re.sub(r"\s+", " ", str(reason or "")).strip()
+    _daily_summary_last_error = text[:400]
+
+
 def _generate_daily_summary_global(date_str: str) -> dict | None:
     """Return (generating if needed) the one shared daily summary for date_str,
     using the admin-configured system AI. Returns None if it can't be produced
-    yet (no system AI configured, or no articles for that date)."""
+    yet (no system AI configured, or no articles for that date); the reason is
+    left in _daily_summary_last_error for the caller to record and report."""
+    _set_daily_summary_error("")
     cached = _get_daily_summary_global_cache(date_str)
     if cached:
         return cached
@@ -1443,15 +2037,18 @@ def _generate_daily_summary_global(date_str: str) -> dict | None:
     sys_config = get_system_ai_config()
     if not sys_config or not sys_config.get("enabled") or not sys_config.get("api_key"):
         print("[daily-summary] system AI not configured (管理员设置→服务端API), cannot generate")
+        _set_daily_summary_error("系统 AI 未配置或未启用（管理员设置 → 服务端 API）")
         return None
 
     articles = _fetch_articles_by_date(date_str, include_shared_summary=True)
     if not articles:
         print(f"[daily-summary] no articles for {date_str}")
+        _set_daily_summary_error(f"{date_str} 当日没有可用于生成摘要的文章")
         return None
 
     try:
-        svc = AIService(
+        svc = _SystemAIService(
+            "每日摘要",
             api_key=sys_config["api_key"],
             endpoint=sys_config["endpoint"],
             model=sys_config["model"],
@@ -1468,70 +2065,10 @@ def _generate_daily_summary_global(date_str: str) -> dict | None:
             "article_count": raw_article_count,
             "stats": result["stats"],
         }
-    except Exception as e:
-        print(f"[daily-summary] global generation failed: {e}")
+    except Exception:
+        app.logger.exception("Daily summary generation failed")
+        _set_daily_summary_error("AI 生成失败")
         return None
-
-
-def _cleanup_daily_summary_jobs():
-    cutoff = time.time() - 3600
-    with _daily_summary_jobs_lock:
-        old_ids = [
-            job_id
-            for job_id, job in _daily_summary_jobs.items()
-            if job.get("updated_at", job.get("created_at", 0)) < cutoff
-        ]
-        for job_id in old_ids:
-            _daily_summary_jobs.pop(job_id, None)
-
-
-def _update_daily_summary_job(job_id, **updates):
-    updates["updated_at"] = time.time()
-    with _daily_summary_jobs_lock:
-        if job_id in _daily_summary_jobs:
-            _daily_summary_jobs[job_id].update(updates)
-
-
-def _run_daily_summary_job(job_id, user_id, config):
-    _update_daily_summary_job(job_id, status="running")
-    try:
-        today_str = _today_str()
-        articles = _fetch_articles_by_date(
-            today_str,
-            include_shared_summary=True,
-        )
-        if not articles:
-            _update_daily_summary_job(job_id, status="failed", error="no articles today")
-            return
-
-        raw_article_count = len(articles)
-        articles = _dedup_articles(articles)
-        deduped_article_count = len(articles)
-        svc = AIService(
-            api_key=config["api_key"],
-            endpoint=config["endpoint"],
-            model=config["model"],
-            provider_type=config.get("provider_type", "openai"),
-        )
-        result = svc.daily_summary(articles)
-        result["stats"]["total_articles"] = raw_article_count
-        result["stats"]["articles_after_dedup"] = deduped_article_count
-        _save_daily_summary_cache(
-            user_id,
-            today_str,
-            result["summary"],
-            raw_article_count,
-            result["stats"],
-        )
-        _update_daily_summary_job(
-            job_id,
-            status="completed",
-            summary=result["summary"],
-            article_count=raw_article_count,
-            stats=result["stats"],
-        )
-    except Exception as e:
-        _update_daily_summary_job(job_id, status="failed", error=f"AI request failed: {str(e)}")
 
 
 _auto_summary_lock = threading.Lock()
@@ -1546,7 +2083,7 @@ def _init_daily_summary_sends_table():
     if not os.path.exists(NEWS_DB):
         return
     try:
-        conn = sqlite3.connect(NEWS_DB)
+        conn = _news_db_connect()
         conn.execute("""
             CREATE TABLE IF NOT EXISTS daily_summary_sends (
                 date       TEXT NOT NULL,
@@ -1570,7 +2107,7 @@ def _get_daily_summary_sent_user_ids(date_str: str) -> set[int]:
         return set()
     try:
         _init_daily_summary_sends_table()
-        conn = sqlite3.connect(NEWS_DB)
+        conn = _news_db_connect()
         rows = conn.execute(
             "SELECT user_id FROM daily_summary_sends WHERE date = ? AND status = 'sent'",
             (date_str,),
@@ -1587,7 +2124,7 @@ def _record_daily_summary_send(date_str: str, user_id: int, email: str, status: 
         return
     try:
         _init_daily_summary_sends_table()
-        conn = sqlite3.connect(NEWS_DB)
+        conn = _news_db_connect()
         conn.execute(
             "INSERT INTO daily_summary_sends (date, user_id, email, status, sent_at) "
             "VALUES (?, ?, ?, ?, datetime('now')) "
@@ -1601,46 +2138,339 @@ def _record_daily_summary_send(date_str: str, user_id: int, email: str, status: 
         print(f"[daily-summary] sends write failed: {e}")
 
 
-def _broadcast_daily_summary(force: bool = False) -> dict:
-    """Generate (once) and email the one shared daily summary to every user
-    with daily_summary_enabled. Runs automatically at DAILY_SUMMARY_HOUR:MINUTE
-    Beijing time; `force=True` (admin manual trigger) bypasses the time
-    window and resends to every subscriber regardless of history.
+def _init_daily_summary_failures_table():
+    if not os.path.exists(NEWS_DB):
+        return
+    try:
+        conn = _news_db_connect()
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS daily_summary_failures (
+                date            TEXT PRIMARY KEY,
+                attempts        INTEGER NOT NULL DEFAULT 0,
+                last_error      TEXT NOT NULL DEFAULT '',
+                last_attempt_at INTEGER NOT NULL DEFAULT 0,
+                next_retry_at   INTEGER,
+                given_up        INTEGER NOT NULL DEFAULT 0,
+                alerted         INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[daily-summary] failures table init failed: {e}")
 
-    Send state is persisted in daily_summary_sends (date, user_id) rather than
-    kept in memory: an in-memory "already sent today" set is lost on every
+
+def _epoch_now() -> int:
+    """Wall-clock seconds, isolated so retry scheduling can be driven in tests."""
+    return int(time.time())
+
+
+def _get_daily_summary_failure(date_str: str) -> dict | None:
+    """This date's failure record, or None if the day has not failed (yet)."""
+    if not os.path.exists(NEWS_DB):
+        return None
+    try:
+        _init_daily_summary_failures_table()
+        conn = _news_db_connect()
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT date, attempts, last_error, last_attempt_at, next_retry_at, "
+            "given_up, alerted FROM daily_summary_failures WHERE date = ?",
+            (date_str,),
+        ).fetchone()
+        conn.close()
+        return dict(row) if row else None
+    except Exception as e:
+        print(f"[daily-summary] failure read failed: {e}")
+        return None
+
+
+def _record_daily_summary_failure(date_str: str, reason: str) -> dict:
+    """Count one failed attempt for date_str and schedule (or stop) the retry.
+
+    Attempt 1 is the scheduled 21:00 run; each subsequent attempt is a retry
+    DAILY_SUMMARY_RETRY_INTERVAL_SECONDS later. Once attempts exceed
+    1 + DAILY_SUMMARY_MAX_RETRIES the day is given up on and next_retry_at is
+    cleared, which is what makes the admin alert fire exactly once.
+
+    Persisted rather than kept in memory so a restart mid-retry-chain neither
+    restarts the count from zero (endless retrying) nor loses the failure state
+    the ✨ panel reads to show the admin's retry button.
+    """
+    now = _epoch_now()
+    state = {
+        "date": date_str,
+        "attempts": 1,
+        "last_error": reason,
+        "last_attempt_at": now,
+        "next_retry_at": now + DAILY_SUMMARY_RETRY_INTERVAL_SECONDS,
+        "given_up": 0,
+        "alerted": 0,
+    }
+    if not os.path.exists(NEWS_DB):
+        return state
+    try:
+        _init_daily_summary_failures_table()
+        conn = _news_db_connect()
+        conn.row_factory = sqlite3.Row
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT attempts, alerted FROM daily_summary_failures WHERE date = ?",
+            (date_str,),
+        ).fetchone()
+        attempts = int(row["attempts"]) + 1 if row else 1
+        alerted = int(row["alerted"]) if row else 0
+        given_up = 1 if attempts >= 1 + DAILY_SUMMARY_MAX_RETRIES else 0
+        next_retry_at = None if given_up else now + DAILY_SUMMARY_RETRY_INTERVAL_SECONDS
+        conn.execute(
+            "INSERT INTO daily_summary_failures "
+            "(date, attempts, last_error, last_attempt_at, next_retry_at, given_up, alerted) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(date) DO UPDATE SET "
+            "attempts = excluded.attempts, last_error = excluded.last_error, "
+            "last_attempt_at = excluded.last_attempt_at, "
+            "next_retry_at = excluded.next_retry_at, given_up = excluded.given_up",
+            (date_str, attempts, reason, now, next_retry_at, given_up, alerted),
+        )
+        # Only the current day is ever consulted; keep a short tail for support
+        # questions ("did last Tuesday fail?") and drop the rest.
+        conn.execute("DELETE FROM daily_summary_failures WHERE date < ?",
+                     ((_beijing_now() - timedelta(days=7)).strftime("%Y-%m-%d"),))
+        conn.commit()
+        conn.close()
+        state.update({
+            "attempts": attempts,
+            "next_retry_at": next_retry_at,
+            "given_up": given_up,
+            "alerted": alerted,
+        })
+    except Exception as e:
+        print(f"[daily-summary] failure write failed: {e}")
+    return state
+
+
+def _clear_daily_summary_failure(date_str: str) -> None:
+    """Drop the failure record — a later attempt succeeded, or an admin asked
+    for a manual retry and the count should start over."""
+    if not os.path.exists(NEWS_DB):
+        return
+    try:
+        _init_daily_summary_failures_table()
+        conn = _news_db_connect()
+        conn.execute("DELETE FROM daily_summary_failures WHERE date = ?", (date_str,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[daily-summary] failure clear failed: {e}")
+
+
+def _claim_daily_summary_alert(date_str: str) -> bool:
+    """Flip alerted 0→1 for this date, returning True only for the caller that
+    won the flip. Guards against a second alert if two ticks (or a restart
+    racing the tick that gave up) reach the notification step for one day."""
+    if not os.path.exists(NEWS_DB):
+        return True
+    try:
+        _init_daily_summary_failures_table()
+        conn = _news_db_connect()
+        cur = conn.execute(
+            "UPDATE daily_summary_failures SET alerted = 1 "
+            "WHERE date = ? AND alerted = 0",
+            (date_str,),
+        )
+        conn.commit()
+        claimed = cur.rowcount > 0
+        conn.close()
+        return claimed
+    except Exception as e:
+        print(f"[daily-summary] alert claim failed: {e}")
+        return False
+
+
+def _release_daily_summary_alert(date_str: str) -> None:
+    """Release a claim when no administrator received the in-app alert."""
+    if not os.path.exists(NEWS_DB):
+        return
+    try:
+        _init_daily_summary_failures_table()
+        conn = _news_db_connect()
+        conn.execute(
+            "UPDATE daily_summary_failures SET alerted = 0 "
+            "WHERE date = ? AND alerted = 1",
+            (date_str,),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[daily-summary] alert claim release failed: {e}")
+
+
+def _daily_summary_retry_due(state: dict | None, now: int | None = None) -> bool:
+    """True when an auto-retry for a failed day is owed right now."""
+    if not state or int(state.get("given_up") or 0):
+        return False
+    next_retry_at = state.get("next_retry_at")
+    if next_retry_at is None:
+        return False
+    return (now if now is not None else _epoch_now()) >= int(next_retry_at)
+
+
+def _alert_admins_daily_summary_failure(date_str: str, state: dict) -> int:
+    """Tell every admin the day's summary is not coming, and why.
+
+    Both channels go through _notify_user, so the alert lands in 头像菜单 →
+    我的通知 even when RESEND_API_KEY is unset or the mail send fails.
+    """
+    attempts = int(state.get("attempts") or 0)
+    reason = state.get("last_error") or "未知原因"
+    body = (
+        f"{date_str} 的每日摘要生成失败，已重试 {max(attempts - 1, 0)} 次仍未成功，"
+        f"今日不再自动重试。\n\n"
+        f"失败原因：{reason}\n\n"
+        f"共尝试 {attempts} 次（首次为北京时间 "
+        f"{DAILY_SUMMARY_HOUR:02d}:{DAILY_SUMMARY_MINUTE:02d} 的定时生成，"
+        f"之后每 {DAILY_SUMMARY_RETRY_INTERVAL_SECONDS // 60} 分钟重试一次）。\n\n"
+        f"可在首页 ✨ 每日摘要面板点击「重试生成」手动再试一次。"
+    )
+    notified = _notify_admins("daily_summary_failed", DAILY_SUMMARY_FAILURE_TITLE, body)
+    print(f"[daily-summary] {date_str} gave up after {attempts} attempt(s); "
+          f"alerted {notified} admin(s): {reason}")
+    return notified
+
+
+DAILY_SUMMARY_NOTIFICATION_TITLE = "每日摘要已生成"
+DAILY_SUMMARY_FAILURE_TITLE = "每日摘要生成失败"
+
+
+def _daily_summary_broadcast_id(date_str: str) -> str:
+    """Claim key for one date's in-app fan-out (see publish_broadcast_atomically)."""
+    return f"daily-summary-{date_str}"
+
+
+def _deliver_daily_summary_inapp(date_str: str, result: dict) -> dict:
+    """Drop the day's summary into every opted-in user's notification list.
+
+    Delivery is idempotent on the date-derived broadcast id, which matters here:
+    the scheduler ticks once a minute across a ten-minute window and a restart
+    inside that window replays the same date. The claim row makes every tick
+    after the first a no-op instead of a second copy in everyone's list.
+
+    Independent of the email leg by design — a user with no email address
+    configured, or a deployment with no RESEND_API_KEY at all, still gets the
+    in-app copy.
+    """
+    try:
+        user_ids = get_daily_summary_inapp_user_ids()
+        if not user_ids:
+            return {"status": "skipped", "reason": "no in-app recipients", "recipients": 0}
+        published, info = publish_broadcast_atomically(
+            user_ids,
+            _daily_summary_broadcast_id(date_str),
+            DAILY_SUMMARY_NOTIFICATION_TITLE,
+            result["summary"],
+            # The summary is Markdown (with in-app article links); the client
+            # renders it through the same escape → markdown → sanitize pipeline
+            # it uses for translated article bodies.
+            "markdown",
+            email=False,
+            ntype="daily_summary",
+        )
+        if not published:
+            return {"status": "skipped", "reason": "already delivered today",
+                    "recipients": int(info.get("recipients") or 0)}
+        print(f"[scheduler] Daily summary in-app delivery for {date_str}: {len(user_ids)} recipient(s)")
+        return {"status": "ok", "recipients": len(user_ids)}
+    except Exception:
+        # Never let the in-app leg take the email leg down with it.
+        app.logger.exception("In-app daily summary delivery failed")
+        return {"status": "error", "reason": "in-app delivery failed", "recipients": 0}
+
+
+_daily_summary_generation_lock = threading.Lock()
+
+
+def _broadcast_daily_summary(force: bool = False, bypass_window: bool = False) -> dict:
+    """Generate the one shared daily summary and deliver it on both channels.
+
+    Runs automatically at DAILY_SUMMARY_HOUR:MINUTE Beijing time; `force=True`
+    (admin manual trigger) bypasses the time window and resends to every email
+    subscriber regardless of history.
+
+    Generation happens before either channel is consulted. It used to sit behind
+    the RESEND_API_KEY and "any email subscribers?" checks, which was fine when
+    email was the only channel — but the in-app copy goes to everyone by
+    default, so a deployment with no mail configured must still produce and
+    deliver the summary.
+
+    Email send state is persisted in daily_summary_sends (date, user_id) rather
+    than kept in memory: an in-memory "already sent today" set is lost on every
     restart, which could cause a duplicate broadcast if the process restarts
     inside the same day's send window. Persisting per-recipient status also
     lets a transient per-recipient failure (e.g. one bad email) get retried
     on the next scheduler tick instead of being silently skipped for the rest
-    of the day.
+    of the day. The in-app leg uses its own all-or-nothing claim row instead —
+    it fans out in a single transaction, so it has no partial state to resume.
     """
-    import json as _json
-    from notifier import send_daily_summary_email
-
     now = _beijing_now()
     today_str = now.strftime("%Y-%m-%d")
 
-    resend_api_key = os.environ.get("RESEND_API_KEY", "")
-    if not resend_api_key:
-        print("[scheduler] RESEND_API_KEY not set, skipping")
-        return {"status": "skipped", "reason": "RESEND_API_KEY not set"}
-
-    if not force:
+    if not force and not bypass_window:
         target_minutes = DAILY_SUMMARY_HOUR * 60 + DAILY_SUMMARY_MINUTE
         now_minutes = now.hour * 60 + now.minute
         diff = now_minutes - target_minutes
         if diff < 0 or diff >= DAILY_SUMMARY_WINDOW_MINUTES:
             return {"status": "skipped", "reason": "outside daily send window"}
 
+    # A retry tick, an admin's manual retry and the scheduled run can all land on
+    # the same minute; only one may hold an AI call for the day at a time.
+    if not _daily_summary_generation_lock.acquire(blocking=False):
+        return {"status": "skipped", "reason": "generation already running"}
+    try:
+        result = _generate_daily_summary_global(today_str)
+        if not result:
+            reason = _daily_summary_last_error or "生成失败（请检查 管理员设置 → 服务端 API，或当日是否有文章）"
+            if force:
+                # An admin's ad-hoc resend (管理员设置 → 立即发送) is not the day's
+                # scheduled run: a failed one reports back to the caller and stops
+                # there. Letting it seed the retry record would start a half-hour
+                # retry chain — and eventually a failure alert to every admin —
+                # for what was a manual experiment at an arbitrary hour.
+                return {"status": "error", "reason": reason}
+            state = _record_daily_summary_failure(today_str, reason)
+            if int(state.get("given_up") or 0) and _claim_daily_summary_alert(today_str):
+                if _alert_admins_daily_summary_failure(today_str, state) == 0:
+                    _release_daily_summary_alert(today_str)
+            return {"status": "error", "reason": reason,
+                    "attempts": state.get("attempts"),
+                    "given_up": bool(state.get("given_up"))}
+
+        _clear_daily_summary_failure(today_str)
+        inapp = _deliver_daily_summary_inapp(today_str, result)
+        email = _deliver_daily_summary_email(today_str, result, force=force)
+        return {**email, "inapp": inapp}
+    finally:
+        _daily_summary_generation_lock.release()
+
+
+def _deliver_daily_summary_email(date_str: str, result: dict, force: bool = False) -> dict:
+    """Email the already-generated summary to every opted-in subscriber."""
+    import json as _json
+    from notifier import send_daily_summary_email
+
+    today_str = date_str
+    resend_api_key = os.environ.get("RESEND_API_KEY", "")
+    if not resend_api_key:
+        print("[scheduler] RESEND_API_KEY not set, skipping")
+        return {"status": "skipped", "reason": "RESEND_API_KEY not set"}
+
     try:
         db = get_db()
         rows = db.execute(
             "SELECT user_id, notification_config FROM user_settings WHERE daily_summary_enabled = 1"
         ).fetchall()
-    except Exception as e:
-        print(f"[scheduler] DB error: {e}")
-        return {"status": "error", "reason": str(e)}
+    except Exception:
+        app.logger.exception("Daily summary recipient lookup failed")
+        return {"status": "error", "reason": "recipient lookup failed"}
 
     recipients = {}  # user_id -> to_email
     for row in rows:
@@ -1663,10 +2493,6 @@ def _broadcast_daily_summary(force: bool = False) -> dict:
     pending = {uid: email for uid, email in recipients.items() if uid not in already_sent}
     if not pending:
         return {"status": "skipped", "reason": "already sent today"}
-
-    result = _generate_daily_summary_global(today_str)
-    if not result:
-        return {"status": "error", "reason": "generation failed (check 管理员设置→服务端API, or no articles yet)"}
 
     sent = 0
     for user_id, to_email in pending.items():
@@ -1691,7 +2517,23 @@ def _broadcast_daily_summary(force: bool = False) -> dict:
 
 
 def _send_daily_summaries():
-    _broadcast_daily_summary(force=False)
+    """One scheduler tick: either the scheduled run, or a due retry.
+
+    Retries have to live outside _broadcast_daily_summary's send window — the
+    window is ten minutes wide while the retry chain runs for half an hour — so
+    the decision of *whether* this tick may generate is made here, and the
+    window check is bypassed once the day has a failure record.
+    """
+    today_str = _today_str()
+    state = _get_daily_summary_failure(today_str)
+    if state and int(state.get("attempts") or 0) > 0:
+        if int(state.get("given_up") or 0):
+            return {"status": "skipped", "reason": "gave up for today"}
+        if not _daily_summary_retry_due(state):
+            return {"status": "skipped", "reason": "waiting for next retry"}
+        print(f"[scheduler] Daily summary retry #{int(state['attempts'])} for {today_str}")
+        return _broadcast_daily_summary(force=False, bypass_window=True)
+    return _broadcast_daily_summary(force=False)
 
 
 def _daily_summary_loop():
@@ -1729,9 +2571,20 @@ def _system_auto_config(*flag_columns: str) -> dict | None:
             return None
         sys_config = get_system_ai_config()
         if not sys_config or not sys_config.get("enabled") or not sys_config.get("api_key"):
+            # An admin asked for this job (the flag above matched) and there is no
+            # usable system AI to run it with. Nothing will call the provider, so
+            # no call can fail and report it — count the misconfiguration itself,
+            # or a cleared/disabled config would stay silent until the 21:30
+            # daily-summary alert. Costs nothing: this is the local check the
+            # loops already run every 10–60s, not a probe.
+            _note_system_ai_failure(
+                "服务端 API 配置",
+                "系统 AI 未配置或未启用（管理员设置 → 服务端 API），已开启的后台 AI 任务无法运行",
+            )
             return None
         config = dict(row)
         config.update({
+            "provider": sys_config.get("provider"),
             "endpoint": sys_config["endpoint"],
             "model": sys_config["model"],
             "api_key": sys_config["api_key"],
@@ -2214,13 +3067,8 @@ def _repair_title_summary(title: str | None) -> str:
 
 
 def _ensure_article_title_columns(conn) -> None:
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(articles)").fetchall()}
-    if "original_title" not in cols:
-        conn.execute("ALTER TABLE articles ADD COLUMN original_title TEXT")
-    if "title_updated_at" not in cols:
-        conn.execute("ALTER TABLE articles ADD COLUMN title_updated_at TEXT")
-    if "title_source" not in cols:
-        conn.execute("ALTER TABLE articles ADD COLUMN title_source TEXT")
+    """Compatibility wrapper for shared, cross-process-safe title migration."""
+    ensure_article_title_columns(conn)
 
 
 def _invalidate_refresh_server_cache(article_id: int) -> None:
@@ -2250,7 +3098,6 @@ def _save_article_title_update(article_id: int, title: str | None,
         return False
     conn = sqlite3.connect(NEWS_DB, timeout=30)
     try:
-        conn.execute("PRAGMA journal_mode=WAL")
         _ensure_article_title_columns(conn)
         row = conn.execute("SELECT title FROM articles WHERE id = ?", (article_id,)).fetchone()
         if not row:
@@ -2285,7 +3132,7 @@ def _fetch_untranslated_articles(config: dict, limit: int = AUTO_TRANSLATION_BAT
     try:
         _init_ai_results_table()
         today_str = _dt.datetime.now().strftime("%Y-%m-%d")
-        conn = sqlite3.connect(NEWS_DB)
+        conn = _news_db_connect()
         conn.row_factory = sqlite3.Row
         ensure_article_source_columns(conn)
         rows = conn.execute(
@@ -2311,10 +3158,12 @@ def _fetch_untranslated_articles(config: dict, limit: int = AUTO_TRANSLATION_BAT
     selected = []
     for row in rows:
         article = dict(row)
+        _, cached_html = _cached_full_translation(article.get("translation"))
         title_needed = translate_title and _needs_translation(article.get("title", ""))
         content_needed = (
             translate_content
             and bool(article.get("body_html"))
+            and not cached_html
             and _needs_translation(article.get("body_html") or article.get("summary") or "")
         )
         if title_needed or content_needed:
@@ -2328,29 +3177,14 @@ def _fetch_untranslated_articles(config: dict, limit: int = AUTO_TRANSLATION_BAT
 
 def _save_article_translation(article_id: int, title: str | None = None,
                               body_html: str | None = None) -> bool:
+    """Persist only title metadata; translated bodies live in ai_results.
+
+    ``body_html`` remains accepted for compatibility with callers/tests but is
+    deliberately never written to the canonical unauthenticated article row.
+    """
     if not os.path.exists(NEWS_DB):
         return False
-    sets = []
-    vals = []
-    if title:
-        _save_article_title_update(article_id, title, "translation")
-    if body_html:
-        sets.append("body_html = ?")
-        vals.append(body_html)
-    if not sets:
-        return False
-    vals.append(article_id)
-    conn = sqlite3.connect(NEWS_DB, timeout=30)
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        result = conn.execute(f"UPDATE articles SET {', '.join(sets)} WHERE id = ?", vals)
-        conn.commit()
-        # _save_article_title_update() above already invalidates on a title
-        # change; body_html has no such path, so cover it here too.
-        _invalidate_refresh_server_cache(article_id)
-        return result.rowcount > 0
-    finally:
-        conn.close()
+    return bool(title and _save_article_title_update(article_id, title, "translation"))
 
 
 def _cached_full_translation(translation: str | None) -> tuple[str, str]:
@@ -2369,7 +3203,8 @@ def _cached_full_translation(translation: str | None) -> tuple[str, str]:
 
 
 def _translate_article_background(article: dict, config: dict) -> bool:
-    svc = AIService(
+    svc = _SystemAIService(
+        "自动翻译",
         api_key=config["api_key"],
         endpoint=config["endpoint"],
         model=config["model"],
@@ -2408,16 +3243,18 @@ def _translate_article_background(article: dict, config: dict) -> bool:
     elif article.get("translate_title_needed"):
         translated_title = svc.translate_title(article.get("title", ""), "zh-CN")
 
-    body_writeback_committed = _save_article_translation(
-        article_id, title=translated_title, body_html=translated_html
-    )
-    # The browser's translation-update marker is visible independently of the
-    # article detail row.  Publish it only after the translated body commit so
-    # a poll can never evict a detail cache and then re-fetch English text.
+    _save_article_translation(article_id, title=translated_title)
+    # Publish only after the authenticated shared cache commit. The canonical
+    # detail body remains original and is safe for unauthenticated readers.
     if translation_cache_data is not None:
-        _save_ai_result(article_id, translation=translation_cache_data)
-        if body_writeback_committed:
-            _publish_translation_update(article_id)
+        _save_ai_result(
+            article_id,
+            translation=translation_cache_data,
+            translation_provider=config.get("provider") or config.get("provider_type"),
+            translation_model=config.get("model"),
+            translation_by_user_id=config.get("user_id"),
+        )
+        _publish_translation_update(article_id)
     return bool(translated_title or translated_html)
 
 
@@ -2527,8 +3364,9 @@ def _fetch_title_process_articles(config: dict, limit: int = AUTO_TITLE_PROCESS_
     return selected
 
 
-def _title_service(config: dict) -> AIService:
-    return AIService(
+def _title_service(config: dict) -> "_SystemAIService":
+    return _SystemAIService(
+        "标题精简",
         api_key=config["api_key"],
         endpoint=config["endpoint"],
         model=config["model"],
@@ -2717,44 +3555,44 @@ def _auto_title_process_loop():
         _time.sleep(AUTO_TITLE_PROCESS_INTERVAL_SECONDS)
 
 
-def _get_source_classification_config() -> dict | None:
-    """Return the first enabled administrator AI config."""
-    try:
-        db = get_db()
-        row = db.execute(
-            "SELECT c.user_id, c.endpoint, c.model, c.api_key, c.provider_type, c.enabled "
-            "FROM ai_configs c JOIN users u ON u.id = c.user_id "
-            "WHERE c.enabled = 1 "
-            "AND c.api_key != '' "
-            "AND u.role = 'admin' "
-            "ORDER BY c.user_id ASC LIMIT 1"
-        ).fetchone()
-        return dict(row) if row else None
-    except Exception as e:
-        print(f"[source-classify] settings DB error: {e}")
-        return None
-
-
 def _get_source_classification_users() -> list[dict]:
-    """Return one administrator AI config for shared source classification."""
+    """The server API config for shared source classification.
+
+    Source classification is a server-side job producing shared, site-wide
+    labels, so it runs on the admin-managed server API (管理员设置 → 服务端 API)
+    like every other background job. It used to read an admin's personal
+    ai_configs row instead, which meant two different keys drove server work:
+    with the server API suspended and that personal key still valid, this job
+    kept succeeding and the health signal could not tell the two apart.
+    """
     try:
-        db = get_db()
-        rows = db.execute(
-            "SELECT c.user_id, c.endpoint, c.model, c.api_key, c.provider_type, c.enabled "
-            "FROM ai_configs c JOIN users u ON u.id = c.user_id "
-            "WHERE c.enabled = 1 "
-            "AND c.api_key != '' "
-            "AND u.role = 'admin' "
-            "ORDER BY c.user_id ASC LIMIT 1"
-        ).fetchall()
-        return [dict(r) for r in rows]
+        sys_config = get_system_ai_config()
+        if not sys_config or not sys_config.get("enabled") or not sys_config.get("api_key"):
+            return []
+        return [{
+            "user_id": 0,
+            "endpoint": sys_config["endpoint"],
+            "model": sys_config["model"],
+            "api_key": sys_config["api_key"],
+            "provider_type": sys_config.get("provider_type", "openai"),
+            "enabled": sys_config.get("enabled", 1),
+        }]
     except Exception as e:
-        print(f"[source-classify] settings DB error: {e}")
+        print(f"[source-classify] server API config error: {e}")
         return []
 
 
 def _classify_source_batch(config: dict, limit: int = AUTO_SOURCE_CLASSIFY_BATCH_LIMIT,
                            force: bool = False) -> dict:
+    """Classify sources with the server API, like every other server-side job.
+
+    `config` comes from _get_source_classification_users(), i.e. from
+    system_ai_config. It used to come from an admin's own ai_configs row, which
+    meant two different keys drove server-side work: with the server API
+    suspended and that key still valid, this job kept succeeding and cancelled
+    the failure streak the summary/translation/title jobs were building, so the
+    outage never reached the alert threshold.
+    """
     conn = _get_news_db()
     if not conn:
         return {"processed": [], "failed": [], "remaining": 0}
@@ -2776,7 +3614,8 @@ def _classify_source_batch(config: dict, limit: int = AUTO_SOURCE_CLASSIFY_BATCH
         )
     ][:limit]
 
-    svc = AIService(
+    svc = _SystemAIService(
+        "订阅源分类",
         api_key=config["api_key"],
         endpoint=config["endpoint"],
         model=config["model"],
@@ -2802,7 +3641,8 @@ def _classify_source_batch(config: dict, limit: int = AUTO_SOURCE_CLASSIFY_BATCH
                 sample_titles=titles,
             )
             processed.append(saved)
-        except Exception as e:
+        except Exception:
+            app.logger.exception("Source classification failed for %s", source)
             try:
                 update_source_category(
                     conn,
@@ -2810,12 +3650,12 @@ def _classify_source_batch(config: dict, limit: int = AUTO_SOURCE_CLASSIFY_BATCH
                     row.get("category") or "Info",
                     row.get("label") or source,
                     status="failed",
-                    reason=str(e)[:300],
+                    reason="classification failed",
                     sample_titles=titles,
                 )
             except Exception:
                 pass
-            failed.append({"source": source, "error": str(e)})
+            failed.append({"source": source, "error": "classification failed"})
 
     remaining = [
         row for row in source_rows(conn)
@@ -2900,8 +3740,9 @@ def _run_source_classify_job(job_id: str, user_id: int, config: dict, force: boo
             failed=failed_total,
             remaining=remaining,
         )
-    except Exception as exc:
-        _update_source_classify_job(job_id, status="failed", error=str(exc))
+    except Exception:
+        app.logger.exception("Source classification job failed")
+        _update_source_classify_job(job_id, status="failed", error="classification failed")
 
 
 def _run_auto_source_classification_once():
@@ -3004,7 +3845,7 @@ def _fetch_recent_articles(limit: int = 20) -> list[dict]:
     if not os.path.exists(NEWS_DB):
         return []
     try:
-        conn = sqlite3.connect(NEWS_DB)
+        conn = _news_db_connect()
         conn.row_factory = sqlite3.Row
         ensure_article_source_columns(conn)
         rows = conn.execute(
@@ -3049,7 +3890,7 @@ def _fetch_articles_by_date(date_str: str, include_shared_summary: bool = True) 
         return []
     try:
         _init_ai_results_table()
-        conn = sqlite3.connect(NEWS_DB)
+        conn = _news_db_connect()
         conn.row_factory = sqlite3.Row
         ensure_article_source_columns(conn)
         summary_expr = (
@@ -3081,7 +3922,7 @@ def _fetch_unsummarized_articles(limit: int = AUTO_SUMMARY_BATCH_LIMIT) -> list[
     try:
         _init_ai_results_table()
         today_str = _dt.datetime.now().strftime("%Y-%m-%d")
-        conn = sqlite3.connect(NEWS_DB)
+        conn = _news_db_connect()
         conn.row_factory = sqlite3.Row
         ensure_article_source_columns(conn)
         rows = conn.execute(
@@ -3108,7 +3949,7 @@ def _fetch_article_body(article_id: int) -> dict | None:
     if not os.path.exists(NEWS_DB):
         return None
     try:
-        conn = sqlite3.connect(NEWS_DB)
+        conn = _news_db_connect()
         conn.row_factory = sqlite3.Row
         ensure_article_source_columns(conn)
         row = conn.execute(
@@ -3131,7 +3972,7 @@ def _init_ai_results_table():
     if not os.path.exists(NEWS_DB):
         return
     try:
-        conn = sqlite3.connect(NEWS_DB)
+        conn = _news_db_connect()
         conn.execute("""
             CREATE TABLE IF NOT EXISTS ai_results (
                 article_id   INTEGER PRIMARY KEY,
@@ -3146,6 +3987,14 @@ def _init_ai_results_table():
                 title_summary_provider TEXT,
                 title_summary_model TEXT,
                 title_summary_by_user_id INTEGER,
+                summary_provider TEXT,
+                summary_model TEXT,
+                summary_by_user_id INTEGER,
+                summary_generated_at TEXT,
+                translation_provider TEXT,
+                translation_model TEXT,
+                translation_by_user_id INTEGER,
+                translation_generated_at TEXT,
                 summary_error TEXT,
                 summary_error_at TEXT,
                 updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
@@ -3177,6 +4026,22 @@ def _init_ai_results_table():
             conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_model TEXT")
         if "title_summary_by_user_id" not in cols:
             conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_by_user_id INTEGER")
+        if "summary_provider" not in cols:
+            conn.execute("ALTER TABLE ai_results ADD COLUMN summary_provider TEXT")
+        if "summary_model" not in cols:
+            conn.execute("ALTER TABLE ai_results ADD COLUMN summary_model TEXT")
+        if "summary_by_user_id" not in cols:
+            conn.execute("ALTER TABLE ai_results ADD COLUMN summary_by_user_id INTEGER")
+        if "summary_generated_at" not in cols:
+            conn.execute("ALTER TABLE ai_results ADD COLUMN summary_generated_at TEXT")
+        if "translation_provider" not in cols:
+            conn.execute("ALTER TABLE ai_results ADD COLUMN translation_provider TEXT")
+        if "translation_model" not in cols:
+            conn.execute("ALTER TABLE ai_results ADD COLUMN translation_model TEXT")
+        if "translation_by_user_id" not in cols:
+            conn.execute("ALTER TABLE ai_results ADD COLUMN translation_by_user_id INTEGER")
+        if "translation_generated_at" not in cols:
+            conn.execute("ALTER TABLE ai_results ADD COLUMN translation_generated_at TEXT")
         if "updated_at" not in cols:
             conn.execute("ALTER TABLE ai_results ADD COLUMN updated_at TEXT")
             conn.execute("UPDATE ai_results SET updated_at = datetime('now') WHERE updated_at IS NULL")
@@ -3192,13 +4057,16 @@ def _get_ai_result(article_id: int) -> dict | None:
     if not os.path.exists(NEWS_DB):
         return None
     try:
-        conn = sqlite3.connect(NEWS_DB)
+        conn = _news_db_connect()
         conn.row_factory = sqlite3.Row
         _init_ai_results_table()
         row = conn.execute(
             "SELECT summary, translation, summary_error, summary_error_at, "
             "title_summary, title_summary_error, title_summary_error_at, "
-            "title_summary_provider, title_summary_model, title_summary_by_user_id "
+            "title_summary_provider, title_summary_model, title_summary_by_user_id, "
+            "summary_provider, summary_model, summary_by_user_id, summary_generated_at, "
+            "translation_provider, translation_model, translation_by_user_id, "
+            "translation_generated_at "
             "FROM ai_results WHERE article_id = ?",
             (article_id,),
         ).fetchone()
@@ -3303,7 +4171,15 @@ def _save_ai_result(article_id: int, summary: str | None = None,
                     title_summary_model: str | None = None,
                     title_summary_by_user_id: int | None = None,
                     title_translation_error: str | None = None,
-                    clear_title_translation_error: bool = False):
+                    clear_title_translation_error: bool = False,
+                    summary_provider: str | None = None,
+                    summary_model: str | None = None,
+                    summary_by_user_id: int | None = None,
+                    summary_generated_at: str | None = None,
+                    translation_provider: str | None = None,
+                    translation_model: str | None = None,
+                    translation_by_user_id: int | None = None,
+                    translation_generated_at: str | None = None) -> bool:
     """Save or update AI result for an article."""
     import sqlite3
     if summary is not None:
@@ -3311,10 +4187,10 @@ def _save_ai_result(article_id: int, summary: str | None = None,
     if translation is not None:
         translation = _sanitize_translation_payload(translation)
     if not os.path.exists(NEWS_DB):
-        return
+        return False
     conn = None
     try:
-        conn = sqlite3.connect(NEWS_DB)
+        conn = _news_db_connect()
         _init_ai_results_table()
         conn.execute(
             """
@@ -3384,9 +4260,47 @@ def _save_ai_result(article_id: int, summary: str | None = None,
                 1 if clear_title_translation_error else 0,
             ),
         )
+        if summary is not None:
+            conn.execute(
+                """
+                UPDATE ai_results SET
+                    summary_provider = ?,
+                    summary_model = ?,
+                    summary_by_user_id = ?,
+                    summary_generated_at = COALESCE(?, datetime('now'))
+                WHERE article_id = ?
+                """,
+                (
+                    summary_provider,
+                    summary_model,
+                    summary_by_user_id,
+                    summary_generated_at,
+                    article_id,
+                ),
+            )
+        if translation is not None:
+            conn.execute(
+                """
+                UPDATE ai_results SET
+                    translation_provider = ?,
+                    translation_model = ?,
+                    translation_by_user_id = ?,
+                    translation_generated_at = COALESCE(?, datetime('now'))
+                WHERE article_id = ?
+                """,
+                (
+                    translation_provider,
+                    translation_model,
+                    translation_by_user_id,
+                    translation_generated_at,
+                    article_id,
+                ),
+            )
         conn.commit()
+        return True
     except Exception:
-        pass
+        app.logger.exception("Failed to save shared AI result for article %s", article_id)
+        return False
     finally:
         if conn:
             conn.close()
@@ -3406,7 +4320,7 @@ def _publish_translation_update(article_id: int):
         return
     conn = None
     try:
-        conn = sqlite3.connect(NEWS_DB)
+        conn = _news_db_connect()
         _init_ai_results_table()
         conn.execute(
             """
@@ -3457,7 +4371,7 @@ def ai_translation_updates():
 
     conn = None
     try:
-        conn = sqlite3.connect(NEWS_DB)
+        conn = _news_db_connect()
         conn.row_factory = sqlite3.Row
         _init_ai_results_table()
         if not since:
@@ -3495,13 +4409,35 @@ def ai_get_result(article_id):
     seeing it (Settings → AI → 共享) — see share_view_summary/share_view_translation.
     """
     cached = dict(_get_ai_result(article_id) or {})
+    for private_key in (
+        "summary_provider",
+        "summary_model",
+        "summary_by_user_id",
+        "summary_generated_at",
+        "translation_provider",
+        "translation_model",
+        "translation_by_user_id",
+        "translation_generated_at",
+    ):
+        cached.pop(private_key, None)
     settings = get_user_settings(g.user_id) or {}
-    if not settings.get("share_view_summary"):
+    share_active = is_share_active(settings)
+    if not share_active or not settings.get("share_view_summary"):
         cached.pop("summary", None)
         cached.pop("summary_error", None)
         cached.pop("summary_error_at", None)
-    if not settings.get("share_view_translation"):
+    if not share_active or not settings.get("share_view_translation"):
         cached.pop("translation", None)
+    elif not settings.get("share_view_title") and cached.get("translation"):
+        translation = str(cached["translation"]).strip()
+        if translation.startswith("{"):
+            try:
+                payload = json.loads(translation)
+            except (json.JSONDecodeError, TypeError):
+                payload = None
+            if isinstance(payload, dict):
+                payload.pop("title", None)
+                cached["translation"] = json.dumps(payload, ensure_ascii=False)
     return jsonify(cached)
 
 
@@ -3574,7 +4510,7 @@ def list_source_articles():
     sources = list(dict.fromkeys(sources))
     placeholders = ",".join("?" * len(sources))
     rows = conn.execute(
-        "SELECT id, title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
+        "SELECT id, title, original_title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
         "       COALESCE(NULLIF(feed_source, ''), source) AS feed_source, origin_source, "
         "       date, time, timestamp, thumb, has_full_content "
         f"FROM articles WHERE COALESCE(NULLIF(feed_source, ''), source) IN ({placeholders}) "
@@ -3604,7 +4540,13 @@ def _delete_article_ids(article_ids: list[int], deleted_by: int | None = None,
         ids,
     ).fetchall()
     if not existing:
-        return {"deleted": 0, "deleted_sources": cleanup_stale_source_categories(conn)}
+        # Honour cleanup_sources here too. A batch whose articles were all already
+        # gone would otherwise still trigger the full-table stale-source scan that
+        # the batched purge passes cleanup_sources=False precisely to avoid.
+        return {
+            "deleted": 0,
+            "deleted_sources": cleanup_stale_source_categories(conn) if cleanup_sources else 0,
+        }
     for row in existing:
         conn.execute(
             """
@@ -3875,7 +4817,28 @@ _container_cpu_sample: list[tuple[int, float] | None] = [None]
 PURGE_BATCH_SIZE = 200
 _purge_tasks: dict[str, dict] = {}
 _purge_tasks_lock = threading.Lock()
-_purge_previews: dict[str, dict] = {}
+# Terminal purge tasks stay queryable so the admin UI can still poll for a result
+# after the run finishes, but the dict must not grow for the life of the process.
+# Mirrors refresh_server.py's REFRESH_JOB_HISTORY_LIMIT.
+PURGE_TASK_HISTORY_LIMIT = 16
+
+
+def _trim_purge_tasks_locked() -> None:
+    """Drop the oldest finished tasks once the history exceeds its limit.
+
+    Callers must already hold _purge_tasks_lock. Running tasks are never evicted:
+    a long purge must stay pollable no matter how many short ones ran after it.
+    """
+    finished = [
+        (task.get("finished_at") or 0, task_id)
+        for task_id, task in _purge_tasks.items()
+        if task.get("status") != "running"
+    ]
+    excess = len(_purge_tasks) - PURGE_TASK_HISTORY_LIMIT
+    if excess <= 0:
+        return
+    for _finished_at, task_id in sorted(finished)[:excess]:
+        _purge_tasks.pop(task_id, None)
 
 
 def _parse_purge_before_date(value: str) -> date | None:
@@ -3933,6 +4896,7 @@ def _purge_articles_before(before_date: str, dry_run: bool,
     }
     with _purge_tasks_lock:
         _purge_tasks[task_id] = task
+        _trim_purge_tasks_locked()
 
     def _notify(final_task: dict) -> None:
         try:
@@ -3970,7 +4934,8 @@ def _purge_articles_before(before_date: str, dry_run: bool,
                             protected_hashes=protected_hashes, conn=cache_conn,
                         )
                     except Exception as exc:
-                        task["errors"] += 1
+                        with _purge_tasks_lock:
+                            task["errors"] += 1
                         print(f"[purge] image eviction failed for {article_id}: {exc}")
                 cache_conn.commit()
                 with _purge_tasks_lock:
@@ -3980,19 +4945,32 @@ def _purge_articles_before(before_date: str, dry_run: bool,
                 time.sleep(0.02)
             orphaned = evict_unreferenced_images(protected_hashes, conn=cache_conn)
             cache_conn.commit()
-            task["images_deleted"] += orphaned
-            cleanup_stale_source_categories(conn)
-            task["status"] = "completed" if not task["errors"] else "completed_with_errors"
-        except Exception as exc:
-            task["status"] = "failed"
-            task["errors"] += 1
-            task["error"] = str(exc)[:240]
-            print(f"[purge] task failed: {exc}")
+            # Every per-batch _delete_article_ids() call above ran with
+            # cleanup_sources=False, so the stale-source sweep the batches skipped
+            # happens once here. _get_news_db() must be called from *this* thread:
+            # it returns a thread-local connection, and reusing the requesting
+            # thread's connection would drive one sqlite3 connection from two
+            # threads at once — the exact hazard the per-thread design removes.
+            purge_conn = _get_news_db()
+            if purge_conn is not None:
+                cleanup_stale_source_categories(purge_conn)
+                purge_conn.commit()
+            with _purge_tasks_lock:
+                task["images_deleted"] += orphaned
+                task["status"] = "completed" if not task["errors"] else "completed_with_errors"
+        except Exception:
+            app.logger.exception("Image purge failed")
+            with _purge_tasks_lock:
+                task["status"] = "failed"
+                task["errors"] += 1
+                task["error"] = "purge failed"
         finally:
             if cache_conn:
                 cache_conn.close()
-            task["finished_at"] = int(time.time())
-            _notify(task)
+            with _purge_tasks_lock:
+                task["finished_at"] = int(time.time())
+                final_task = dict(task)
+            _notify(final_task)
 
     threading.Thread(target=_run_purge, daemon=True, name=f"article-purge-{task_id[:8]}").start()
 
@@ -4068,16 +5046,17 @@ def classify_sources():
     conn = _get_news_db()
     if not conn:
         return jsonify({"error": "news db not found"}), 404
-    config = get_ai_config(g.user_id)
-    if not config or not config.get("enabled") or not config.get("api_key"):
-        return jsonify({"error": "请先在AI菜单中设置API"}), 400
+    # Source labels are site-wide, so they are produced with the server API —
+    # never with whichever admin happened to click. See
+    # _get_source_classification_users().
+    configs = _get_source_classification_users()
+    if not configs:
+        return jsonify({"error": "请先在 管理员设置 → 服务端 API 配置并启用服务端 API"}), 400
 
     data = request.get_json(silent=True) or {}
     limit = min(max(int(data.get("limit", 50) or 50), 1), 100)
     force = bool(data.get("force"))
-    config = dict(config)
-    config["user_id"] = g.user_id
-    return jsonify(_classify_source_batch(config, limit, force))
+    return jsonify(_classify_source_batch(configs[0], limit, force))
 
 
 @app.route("/sources/reinitialize", methods=["POST"])
@@ -4108,9 +5087,10 @@ def classify_sources_job():
     conn = _get_news_db()
     if not conn:
         return jsonify({"error": "news db not found"}), 404
-    config = get_ai_config(g.user_id)
-    if not config or not config.get("enabled") or not config.get("api_key"):
-        return jsonify({"error": "请先在AI菜单中设置API"}), 400
+    configs = _get_source_classification_users()
+    if not configs:
+        return jsonify({"error": "请先在 管理员设置 → 服务端 API 配置并启用服务端 API"}), 400
+    config = configs[0]
 
     data = request.get_json(silent=True) or {}
     force = bool(data.get("force"))
@@ -4346,8 +5326,9 @@ def _run_source_redetect_job(job_id: str, limit: int, network_limit: int, force_
     try:
         result = _redetect_article_sources_work(limit, network_limit, force_telegram, job_id)
         _update_source_redetect_job(job_id, status="completed", **result)
-    except Exception as exc:
-        _update_source_redetect_job(job_id, status="failed", error=str(exc))
+    except Exception:
+        app.logger.exception("Source redetection job failed")
+        _update_source_redetect_job(job_id, status="failed", error="redetection failed")
 
 
 @app.route("/sources/redetect", methods=["POST"])
@@ -4466,29 +5447,19 @@ def redetect_single_source():
 
 # ─── Settings Routes ────────────────────────────────────────
 
-@app.route("/settings", methods=["GET"])
-@require_role("user", "admin")
-def get_settings():
-    settings = get_user_settings(g.user_id)
-    if not settings:
-        return jsonify({
-            "auto_translate_title": False,
-            "auto_translate_content": False,
-            "auto_title_summary_enabled": False,
-            "auto_summary_enabled": False,
-            "daily_summary_enabled": False,
-            "theme_preference": "system",
-            "notification_config": {},
-            "share_ai_results": False,
-            "share_view_title": False,
-            "share_view_translation": False,
-            "share_view_summary": False,
-            "share_last_check_at": None,
-            "share_last_check_ok": None,
-            "share_last_check_error": None,
-        })
-    # Parse notification_config JSON
-    safe = dict(settings)
+def _settings_response(settings: dict | None) -> dict:
+    """Serialize settings consistently for both settings endpoints."""
+    safe = dict(settings or {})
+    safe.setdefault("share_ai_results", 0)
+    safe.setdefault("share_view_title", 0)
+    safe.setdefault("share_view_translation", 0)
+    safe.setdefault("share_view_summary", 0)
+    safe.setdefault("share_suspended", 0)
+    # On by default, including for accounts with no settings row yet — this must
+    # agree with models.get_daily_summary_inapp_user_ids(), which is what
+    # actually decides who receives the in-app copy.
+    safe.setdefault("daily_summary_inapp_enabled", 1)
+    safe["share_active"] = is_share_active(safe)
     nc = safe.get("notification_config", "{}")
     if isinstance(nc, str):
         try:
@@ -4496,13 +5467,56 @@ def get_settings():
         except (json.JSONDecodeError, TypeError):
             nc = {}
     safe["notification_config"] = nc
-    return jsonify(safe)
+    safe.pop("share_last_check_revision", None)
+    safe.pop("share_current_config_revision", None)
+    safe.pop("share_intent_revision", None)
+    return safe
+
+@app.route("/settings", methods=["GET"])
+@require_role("user", "admin")
+def get_settings():
+    settings = get_user_settings(g.user_id)
+    if not settings:
+        settings = {
+            "auto_translate_title": False,
+            "auto_translate_content": False,
+            "auto_title_summary_enabled": False,
+            "auto_summary_enabled": False,
+            "daily_summary_enabled": False,
+            "daily_summary_inapp_enabled": True,
+            "theme_preference": "system",
+            "notification_config": {},
+            "share_ai_results": False,
+            "share_view_title": False,
+            "share_view_translation": False,
+            "share_view_summary": False,
+            "share_suspended": False,
+            "share_last_check_at": None,
+            "share_last_check_ok": None,
+            "share_last_check_error": None,
+            "share_active": False,
+        }
+    return jsonify(_settings_response(settings))
 
 
 @app.route("/settings", methods=["PUT"])
 @require_role("user", "admin")
 def update_settings():
     data = request.get_json(silent=True) or {}
+    # Connectivity health and derived access are server-owned. Ignore forged
+    # values on every settings request, including requests that do not carry the
+    # sharing master switch.
+    for key in (
+        "share_suspended",
+        "share_last_check_at",
+        "share_last_check_ok",
+        "share_last_check_error",
+        "share_last_check_revision",
+        "share_current_config_revision",
+        "share_intent_revision",
+        "share_active",
+    ):
+        data.pop(key, None)
     # Auto-summary/auto-translate are admin-only; silently drop these fields
     # for non-admin requests instead of erroring, so the rest of the payload
     # (theme, notifications, daily summary) still saves normally.
@@ -4514,6 +5528,25 @@ def update_settings():
             "auto_title_summary_enabled",
         ):
             data.pop(key, None)
+    # 邮件推送 needs an address to push to. Refuse the save rather than storing a
+    # subscription that can never deliver: _deliver_daily_summary_email() only
+    # collects recipients that have a to_email, so the user would be left looking
+    # at an enabled toggle that silently sends nothing. Evaluated against the
+    # merged state (payload over stored), so clearing the address while the
+    # toggle is already on is rejected too, not just enabling without one.
+    if "daily_summary_enabled" in data or "notification_config" in data:
+        stored_settings = get_user_settings(g.user_id) or {}
+        email_push_on = _is_enabled_value(
+            data["daily_summary_enabled"] if "daily_summary_enabled" in data
+            else stored_settings.get("daily_summary_enabled")
+        )
+        to_email = _resend_to_email(
+            data["notification_config"] if "notification_config" in data
+            else stored_settings.get("notification_config")
+        )
+        if email_push_on and not to_email:
+            return jsonify({"error": "开启邮件推送前请先填写接收邮箱"}), 400
+
     # Normalize notification_config to JSON string for storage
     if "notification_config" in data:
         nc = data["notification_config"]
@@ -4531,27 +5564,52 @@ def update_settings():
     # body says, so we never persist a state where a sub-toggle is on while
     # the master is off.
     share_sub_keys = ("share_view_title", "share_view_translation", "share_view_summary")
+    share_check_ok = False
+    clear_share_suspension = False
+    share_check_revision = 0
+    observed_share_intent_revision = int(
+        (get_user_settings(g.user_id) or {}).get("share_intent_revision") or 0
+    )
     if "share_ai_results" in data:
-        import datetime as _dt
         if _is_enabled_value(data.get("share_ai_results")):
             user_ai_config = get_ai_config(g.user_id)
-            if not user_ai_config or not user_ai_config.get("enabled") or not user_ai_config.get("api_key"):
-                return jsonify({"error": "请先在AI设置中配置并启用有效的API"}), 400
+            share_check_revision = (user_ai_config or {}).get("revision", 0)
             test_body, test_status = _run_ai_connection_test(user_ai_config)
-            now_str = _dt.datetime.now().isoformat(timespec="seconds")
             if test_status != 200:
-                set_user_settings(
-                    g.user_id,
-                    share_last_check_at=now_str, share_last_check_ok=0,
-                    share_last_check_error=test_body.get("error", "connection test failed"),
+                error = test_body.get("error", "connection test failed")
+                transition = _apply_share_connectivity_result(
+                    g.user_id, False, error, config_revision=share_check_revision
                 )
-                return jsonify({"error": test_body.get("error", "AI 连通性测试失败")}), 400
+                latest = get_user_settings(g.user_id) or {}
+                paused = (
+                    _is_enabled_value(latest.get("share_ai_results"))
+                    and _is_enabled_value(latest.get("share_suspended"))
+                    and transition in {"suspended", "unchanged"}
+                )
+                return jsonify({
+                    "error": "personal AI API connection test failed",
+                    "share_check": {
+                        "ok": False,
+                        "status": "paused" if paused else transition,
+                        "error": _compact_share_error(error),
+                    },
+                }), 400
+
+            # Do not accept health fields from the request. Keeping the
+            # previous suspension until after persistence lets the atomic
+            # transition own a restored notification exactly once.
             data["share_ai_results"] = 1
-            data["share_last_check_at"] = now_str
-            data["share_last_check_ok"] = 1
-            data["share_last_check_error"] = None
+            for key in (
+                "share_suspended",
+                "share_last_check_ok",
+                "share_last_check_at",
+                "share_last_check_error",
+            ):
+                data.pop(key, None)
+            share_check_ok = True
         else:
             data["share_ai_results"] = 0
+            clear_share_suspension = True
             for key in share_sub_keys:
                 data[key] = 0
     resulting_share_master = _is_enabled_value(
@@ -4576,29 +5634,73 @@ def update_settings():
             return jsonify({
                 "error": "请先在管理员设置→服务端API中配置系统AI"
             }), 400
-    settings = set_user_settings(g.user_id, **data)
+    if share_check_ok:
+        settings = set_user_settings_for_ai_config_revision(
+            g.user_id,
+            share_check_revision,
+            observed_share_intent_revision,
+            **data,
+        )
+        if settings is None:
+            share_intent_changed = int(
+                (get_user_settings(g.user_id) or {}).get("share_intent_revision")
+                or 0
+            ) != observed_share_intent_revision
+            stale_error = (
+                "Sharing settings changed during validation; retry enabling sharing"
+                if share_intent_changed
+                else "AI config changed during validation; retry enabling sharing"
+            )
+            return jsonify({
+                "error": stale_error,
+                "share_check": {
+                    "ok": False,
+                    "status": "stale_settings" if share_intent_changed else "stale_validation",
+                    "error": stale_error,
+                },
+            }), 409
+    else:
+        settings = set_user_settings(g.user_id, **data)
+    if clear_share_suspension:
+        settings = set_share_health(g.user_id, share_suspended=0)
     if not settings:
         return jsonify({"error": "update failed"}), 400
-    # Parse back
-    safe = dict(settings)
-    nc = safe.get("notification_config", "{}")
-    if isinstance(nc, str):
-        try:
-            nc = json.loads(nc)
-        except (json.JSONDecodeError, TypeError):
-            nc = {}
-    safe["notification_config"] = nc
+    if share_check_ok:
+        _apply_share_connectivity_result(
+            g.user_id, True, config_revision=share_check_revision
+        )
+        settings = get_user_settings(g.user_id) or {}
     if _is_enabled_value(data.get("auto_summary_enabled")):
         threading.Thread(target=_run_auto_summary_once, daemon=True).start()
     if _is_enabled_value(data.get("auto_translate_title")) or _is_enabled_value(data.get("auto_translate_content")):
         threading.Thread(target=_run_auto_translation_once, daemon=True).start()
     if _is_enabled_value(data.get("auto_title_summary_enabled")) or _is_enabled_value(data.get("auto_translate_title")):
         threading.Thread(target=_run_auto_title_process_once, daemon=True).start()
-    return jsonify(safe)
+    return jsonify(_settings_response(settings))
 
 
 def _is_enabled_value(value) -> bool:
     return value is True or value == 1 or str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def is_share_active(settings: dict | None) -> bool:
+    """Whether the caller may currently read user-enabled shared AI results."""
+    settings = settings or {}
+    try:
+        revision_is_current = (
+            settings.get("share_last_check_revision") is not None
+            and settings.get("share_current_config_revision") is not None
+            and int(settings["share_last_check_revision"])
+            == int(settings["share_current_config_revision"])
+        )
+    except (TypeError, ValueError):
+        revision_is_current = False
+    return (
+        _is_enabled_value(settings.get("share_ai_results"))
+        and not _is_enabled_value(settings.get("share_suspended"))
+        and _is_enabled_value(settings.get("share_last_check_ok"))
+        and revision_is_current
+    )
 
 
 @app.route("/settings/test-notification", methods=["POST"])
@@ -4632,8 +5734,9 @@ def test_notification():
                             "<h2>✅ 配置成功</h2><p>这是一封来自 RayNews 的测试邮件，通知功能正常工作。</p>",
                             from_email=from_email)
         return jsonify({"ok": True, "id": result.get("id", "")})
-    except Exception as e:
-        return jsonify({"error": f"send failed: {str(e)}"}), 502
+    except Exception:
+        app.logger.exception("Notification test send failed")
+        return jsonify({"error": "notification send failed"}), 502
 
 
 # ─── Health (unused section divider) ────────────────────────
@@ -4650,8 +5753,10 @@ def protected_refresh():
         payload = resp.json()
         return jsonify(payload), resp.status_code
     except (http_req.RequestException, ValueError):
+        app.logger.exception("Refresh service request failed")
         return jsonify({"error": "refresh service unavailable"}), 502
     except Exception:
+        app.logger.exception("Unexpected refresh request failure")
         return jsonify({"error": "internal server error"}), 500
 
 
@@ -4673,8 +5778,10 @@ def protected_refresh_status():
         payload = resp.json()
         return jsonify(payload), resp.status_code
     except (http_req.RequestException, ValueError):
+        app.logger.exception("Refresh status request failed")
         return jsonify({"error": "refresh service unavailable"}), 502
     except Exception:
+        app.logger.exception("Unexpected refresh status failure")
         return jsonify({"error": "internal server error"}), 500
 
 
@@ -4708,9 +5815,9 @@ def scheduler_status():
 
 if __name__ == "__main__":
     _init_ai_results_table()
-    _init_daily_summary_cache_table()
     _init_daily_summary_global_table()
     _init_daily_summary_sends_table()
+    _init_daily_summary_failures_table()
     import threading as _th
     _th.Thread(target=_daily_summary_loop, daemon=True).start()
     _th.Thread(target=_auto_summary_loop, daemon=True).start()
