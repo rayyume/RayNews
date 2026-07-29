@@ -25,6 +25,21 @@ class _CountDb:
         self.closed = True
 
 
+class _EmptyNewsDb:
+    def execute(self, sql, args=()):
+        self.sql = sql
+        return self
+
+    def fetchall(self):
+        return []
+
+    def fetchone(self):
+        return (0,)
+
+    def close(self):
+        pass
+
+
 def test_api_meta_public_payload_is_exactly_the_count(monkeypatch):
     db = _CountDb(3)
     monkeypatch.setattr(refresh_server, "get_db", lambda: db)
@@ -60,9 +75,30 @@ def test_api_news_failure_keeps_diagnostics_but_hides_exception_detail(
         payload = json.loads(refresh_server.api_news_list({}))
 
     assert payload["error"] == "internal server error"
-    assert isinstance(payload["diagnostics"], dict)
+    assert set(payload["diagnostics"]) == {"refresh_job", "global_article_count"}
     assert "secret path /app/data/news.db" not in json.dumps(payload)
     assert "secret path /app/data/news.db" in caplog.text
+
+
+def test_empty_api_news_exposes_only_minimal_cold_start_diagnostics(monkeypatch):
+    monkeypatch.setattr(refresh_server, "get_db", lambda: _EmptyNewsDb())
+
+    payload = json.loads(refresh_server.api_news_list({}))
+
+    assert payload["items"] == []
+    assert payload["total"] == 0
+    assert set(payload["diagnostics"]) == {"refresh_job", "global_article_count"}
+    for private_key in (
+        "data_dir",
+        "db_path",
+        "db_exists",
+        "db_size",
+        "news_json",
+        "fetcher_state",
+        "telegram_channel",
+        "last_fetch",
+    ):
+        assert private_key not in payload["diagnostics"]
 
 
 def reset_job(monkeypatch):

@@ -567,10 +567,9 @@ def admin_set_system_ai_config():
         safe["has_api_key"] = bool(safe.get("api_key"))
         safe.pop("api_key", None)
         return jsonify(safe)
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": f"server error: {str(e)}"}), 500
+    except Exception:
+        app.logger.exception("Failed to update system AI configuration")
+        return jsonify({"error": "internal server error"}), 500
 
 
 # ─── Favorites API ─────────────────────────────────────────
@@ -994,10 +993,9 @@ def set_ai_config_route():
         if share_check is not None:
             safe["share_check"] = share_check
         return jsonify(safe)
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": f"server error: {str(e)}"}), 500
+    except Exception:
+        app.logger.exception("Failed to update personal AI configuration")
+        return jsonify({"error": "internal server error"}), 500
 
 
 @app.route("/ai/config/client", methods=["GET"])
@@ -1178,13 +1176,17 @@ def _run_ai_connection_test(config: dict | None) -> tuple[dict, int]:
             return {"error": "Connection test returned empty response"}, 502
         return {"ok": True, "response": response}, 200
     except requests.exceptions.ConnectTimeout:
+        app.logger.exception("AI connection test timed out while connecting")
         return {"error": "连接 AI 服务超时。请检查 API 地址是否正确，或 Docker 容器是否配置了 HTTP_PROXY 环境变量"}, 502
-    except requests.exceptions.ConnectionError as e:
-        return {"error": f"无法连接 AI 服务（{type(e).__name__}）。请检查网络代理配置：Docker 容器需要设置 HTTP_PROXY/HTTPS_PROXY 环境变量"}, 502
-    except requests.exceptions.Timeout as e:
-        return {"error": f"AI 服务响应超时: {e}"}, 502
-    except Exception as e:
-        return {"error": f"Connection test failed: {str(e)}"}, 502
+    except requests.exceptions.ConnectionError:
+        app.logger.exception("AI connection test could not connect")
+        return {"error": "无法连接 AI 服务。请检查网络代理配置"}, 502
+    except requests.exceptions.Timeout:
+        app.logger.exception("AI connection test timed out")
+        return {"error": "AI 服务响应超时"}, 502
+    except Exception:
+        app.logger.exception("AI connection test failed")
+        return {"error": "AI connection test failed"}, 502
 
 
 def _share_check_after_personal_api_test(
@@ -1270,12 +1272,15 @@ def ai_chat_relay():
             provider_type=config.get("provider_type", "openai"),
         )
         content = svc.chat(messages, max_tokens=max_tokens, temperature=temperature)
-    except TimeoutError as e:
-        return jsonify({"error": str(e)}), 504
-    except requests.exceptions.RequestException as e:
-        return jsonify({"error": f"无法连接 AI 服务（{type(e).__name__}）"}), 502
-    except Exception as e:
-        return jsonify({"error": f"AI relay failed: {str(e)}"}), 502
+    except TimeoutError:
+        app.logger.exception("AI relay timed out")
+        return jsonify({"error": "AI service timed out"}), 504
+    except requests.exceptions.RequestException:
+        app.logger.exception("AI relay request failed")
+        return jsonify({"error": "AI service unavailable"}), 502
+    except Exception:
+        app.logger.exception("AI relay failed")
+        return jsonify({"error": "AI relay failed"}), 502
     if not (content or "").strip():
         return jsonify({"error": "AI returned an empty response"}), 502
     return jsonify({"content": content})
@@ -2045,9 +2050,9 @@ def _generate_daily_summary_global(date_str: str) -> dict | None:
             "article_count": raw_article_count,
             "stats": result["stats"],
         }
-    except Exception as e:
-        print(f"[daily-summary] global generation failed: {e}")
-        _set_daily_summary_error(f"AI 生成失败：{e}")
+    except Exception:
+        app.logger.exception("Daily summary generation failed")
+        _set_daily_summary_error("AI 生成失败")
         return None
 
 
@@ -2360,10 +2365,10 @@ def _deliver_daily_summary_inapp(date_str: str, result: dict) -> dict:
                     "recipients": int(info.get("recipients") or 0)}
         print(f"[scheduler] Daily summary in-app delivery for {date_str}: {len(user_ids)} recipient(s)")
         return {"status": "ok", "recipients": len(user_ids)}
-    except Exception as e:
+    except Exception:
         # Never let the in-app leg take the email leg down with it.
-        print(f"[scheduler] in-app daily summary delivery failed: {e}")
-        return {"status": "error", "reason": str(e), "recipients": 0}
+        app.logger.exception("In-app daily summary delivery failed")
+        return {"status": "error", "reason": "in-app delivery failed", "recipients": 0}
 
 
 _daily_summary_generation_lock = threading.Lock()
@@ -2448,9 +2453,9 @@ def _deliver_daily_summary_email(date_str: str, result: dict, force: bool = Fals
         rows = db.execute(
             "SELECT user_id, notification_config FROM user_settings WHERE daily_summary_enabled = 1"
         ).fetchall()
-    except Exception as e:
-        print(f"[scheduler] DB error: {e}")
-        return {"status": "error", "reason": str(e)}
+    except Exception:
+        app.logger.exception("Daily summary recipient lookup failed")
+        return {"status": "error", "reason": "recipient lookup failed"}
 
     recipients = {}  # user_id -> to_email
     for row in rows:
@@ -2564,6 +2569,7 @@ def _system_auto_config(*flag_columns: str) -> dict | None:
             return None
         config = dict(row)
         config.update({
+            "provider": sys_config.get("provider"),
             "endpoint": sys_config["endpoint"],
             "model": sys_config["model"],
             "api_key": sys_config["api_key"],
@@ -3620,7 +3626,8 @@ def _classify_source_batch(config: dict, limit: int = AUTO_SOURCE_CLASSIFY_BATCH
                 sample_titles=titles,
             )
             processed.append(saved)
-        except Exception as e:
+        except Exception:
+            app.logger.exception("Source classification failed for %s", source)
             try:
                 update_source_category(
                     conn,
@@ -3628,12 +3635,12 @@ def _classify_source_batch(config: dict, limit: int = AUTO_SOURCE_CLASSIFY_BATCH
                     row.get("category") or "Info",
                     row.get("label") or source,
                     status="failed",
-                    reason=str(e)[:300],
+                    reason="classification failed",
                     sample_titles=titles,
                 )
             except Exception:
                 pass
-            failed.append({"source": source, "error": str(e)})
+            failed.append({"source": source, "error": "classification failed"})
 
     remaining = [
         row for row in source_rows(conn)
@@ -3718,8 +3725,9 @@ def _run_source_classify_job(job_id: str, user_id: int, config: dict, force: boo
             failed=failed_total,
             remaining=remaining,
         )
-    except Exception as exc:
-        _update_source_classify_job(job_id, status="failed", error=str(exc))
+    except Exception:
+        app.logger.exception("Source classification job failed")
+        _update_source_classify_job(job_id, status="failed", error="classification failed")
 
 
 def _run_auto_source_classification_once():
@@ -4935,12 +4943,12 @@ def _purge_articles_before(before_date: str, dry_run: bool,
             with _purge_tasks_lock:
                 task["images_deleted"] += orphaned
                 task["status"] = "completed" if not task["errors"] else "completed_with_errors"
-        except Exception as exc:
+        except Exception:
+            app.logger.exception("Image purge failed")
             with _purge_tasks_lock:
                 task["status"] = "failed"
                 task["errors"] += 1
-                task["error"] = str(exc)[:240]
-            print(f"[purge] task failed: {exc}")
+                task["error"] = "purge failed"
         finally:
             if cache_conn:
                 cache_conn.close()
@@ -5303,8 +5311,9 @@ def _run_source_redetect_job(job_id: str, limit: int, network_limit: int, force_
     try:
         result = _redetect_article_sources_work(limit, network_limit, force_telegram, job_id)
         _update_source_redetect_job(job_id, status="completed", **result)
-    except Exception as exc:
-        _update_source_redetect_job(job_id, status="failed", error=str(exc))
+    except Exception:
+        app.logger.exception("Source redetection job failed")
+        _update_source_redetect_job(job_id, status="failed", error="redetection failed")
 
 
 @app.route("/sources/redetect", methods=["POST"])
@@ -5710,8 +5719,9 @@ def test_notification():
                             "<h2>✅ 配置成功</h2><p>这是一封来自 RayNews 的测试邮件，通知功能正常工作。</p>",
                             from_email=from_email)
         return jsonify({"ok": True, "id": result.get("id", "")})
-    except Exception as e:
-        return jsonify({"error": f"send failed: {str(e)}"}), 502
+    except Exception:
+        app.logger.exception("Notification test send failed")
+        return jsonify({"error": "notification send failed"}), 502
 
 
 # ─── Health (unused section divider) ────────────────────────
@@ -5728,8 +5738,10 @@ def protected_refresh():
         payload = resp.json()
         return jsonify(payload), resp.status_code
     except (http_req.RequestException, ValueError):
+        app.logger.exception("Refresh service request failed")
         return jsonify({"error": "refresh service unavailable"}), 502
     except Exception:
+        app.logger.exception("Unexpected refresh request failure")
         return jsonify({"error": "internal server error"}), 500
 
 
@@ -5751,8 +5763,10 @@ def protected_refresh_status():
         payload = resp.json()
         return jsonify(payload), resp.status_code
     except (http_req.RequestException, ValueError):
+        app.logger.exception("Refresh status request failed")
         return jsonify({"error": "refresh service unavailable"}), 502
     except Exception:
+        app.logger.exception("Unexpected refresh status failure")
         return jsonify({"error": "internal server error"}), 500
 
 

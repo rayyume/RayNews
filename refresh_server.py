@@ -537,6 +537,15 @@ def _diagnostics(count: int | None = None) -> dict:
     }
 
 
+def _public_cold_start_diagnostics(count: int | None = None) -> dict:
+    """Bounded diagnostics required by the homepage during a cold start."""
+    diagnostics = _diagnostics(count)
+    return {
+        "refresh_job": diagnostics["refresh_job"],
+        "global_article_count": diagnostics["global_article_count"],
+    }
+
+
 def api_meta() -> bytes:
     """GET /api/meta — total article count."""
     conn = None
@@ -708,13 +717,13 @@ def api_news_list(params: dict) -> bytes:
             "total": total,
             "page": page,
             "size": size,
-            "diagnostics": _diagnostics(total) if total == 0 else None,
+            "diagnostics": _public_cold_start_diagnostics(total) if total == 0 else None,
         }, ensure_ascii=False).encode()
     except Exception:
         log.exception("Failed to read public news list")
         return json.dumps({
             "error": "internal server error",
-            "diagnostics": _diagnostics(None),
+            "diagnostics": _public_cold_start_diagnostics(None),
         }).encode()
     finally:
         if conn:
@@ -759,8 +768,9 @@ def api_title_updates(params: dict) -> bytes:
             "items": items,
             "cursor": cursor,
         }, ensure_ascii=False).encode()
-    except Exception as e:
-        return json.dumps({"error": str(e)}).encode()
+    except Exception:
+        log.exception("Failed to read public title updates")
+        return json.dumps({"error": "internal server error"}).encode()
     finally:
         if conn:
             conn.close()
@@ -811,8 +821,9 @@ def _build_news_detail_response(article_id: int) -> bytes:
         item = _clean_article_display_fields(item)
         result = json.dumps(item, ensure_ascii=False).encode()
         return result
-    except Exception as e:
-        return json.dumps({"error": str(e)}).encode()
+    except Exception:
+        log.exception("Failed to read public article detail")
+        return json.dumps({"error": "internal server error"}).encode()
     finally:
         if conn:
             conn.close()
@@ -872,8 +883,9 @@ def api_sources() -> bytes:
             "category_names": CATEGORY_NAMES,
             "sources": rows,
         }, ensure_ascii=False).encode()
-    except Exception as e:
-        return json.dumps({"error": str(e)}).encode()
+    except Exception:
+        log.exception("Failed to read public source metadata")
+        return json.dumps({"error": "internal server error"}).encode()
     finally:
         if conn:
             conn.close()
@@ -1006,8 +1018,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body)
                 return
-            log.warning(f"img-cache failed for {img_url[:80]}: {e}")
-            send_text(self, f"Image cache error: {e}", 502)
+            log.exception("Image cache failed")
+            send_text(self, "Image cache unavailable", 502)
 
     def log_message(self, fmt, *args):
         log.info(fmt % args)

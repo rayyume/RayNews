@@ -299,6 +299,165 @@ def test_shared_result_write_failure_is_generic_and_logged(
     assert "secret /app/data/news.db" in caplog.text
 
 
+@pytest.mark.parametrize(
+    ("path", "role", "target"),
+    (
+        ("/ai/config", "user", "set_ai_config"),
+        ("/admin/system-ai-config", "admin", "set_system_ai_config"),
+    ),
+)
+def test_config_write_failures_are_generic_and_logged(
+    path, role, target, monkeypatch, caplog
+):
+    monkeypatch.setattr(
+        models,
+        "get_user",
+        lambda user_id: {"id": user_id, "role": role},
+    )
+    monkeypatch.setattr(models, "record_access", lambda user_id: None)
+    monkeypatch.setattr(
+        web_server,
+        target,
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("secret config path /app/data/raynews.db")
+        ),
+    )
+
+    with caplog.at_level("ERROR"):
+        response = web_server.app.test_client().put(
+            path,
+            headers=_auth_headers(role=role),
+            json={"model": "safe-model"},
+        )
+
+    assert response.status_code == 500
+    assert response.get_json() == {"error": "internal server error"}
+    assert "secret config path /app/data/raynews.db" in caplog.text
+
+
+def test_connection_test_provider_failure_is_generic_and_logged(monkeypatch, caplog):
+    class FailingService:
+        def __init__(self, **kwargs):
+            pass
+
+        def test_connection(self):
+            raise RuntimeError("provider response contained secret key")
+
+    monkeypatch.setattr(web_server, "AIService", FailingService)
+    with caplog.at_level("ERROR"):
+        body, status = web_server._run_ai_connection_test({
+            "api_key": "key",
+            "endpoint": "https://provider.example",
+            "model": "model",
+            "provider_type": "openai",
+        })
+
+    assert status == 502
+    assert body == {"error": "AI connection test failed"}
+    assert "provider response contained secret key" in caplog.text
+
+
+def test_ai_relay_provider_failure_is_generic_and_logged(
+    monkeypatch, caplog, authenticated_request
+):
+    monkeypatch.setattr(
+        web_server,
+        "get_ai_config",
+        lambda user_id: {
+            "api_key": "key",
+            "endpoint": "https://provider.example",
+            "model": "model",
+            "provider_type": "openai",
+            "enabled": 1,
+        },
+    )
+
+    class FailingService:
+        def __init__(self, **kwargs):
+            pass
+
+        def chat(self, *args, **kwargs):
+            raise RuntimeError("provider body with /app/data and secret key")
+
+    monkeypatch.setattr(web_server, "AIService", FailingService)
+    with caplog.at_level("ERROR"):
+        response = web_server.app.test_client().post(
+            "/ai/chat",
+            headers=_auth_headers(),
+            json={"messages": [{"role": "user", "content": "hello"}]},
+        )
+
+    assert response.status_code == 502
+    assert response.get_json() == {"error": "AI relay failed"}
+    assert "provider body with /app/data and secret key" in caplog.text
+
+
+def test_notification_send_failure_is_generic_and_logged(
+    monkeypatch, caplog, authenticated_request
+):
+    monkeypatch.setenv("RESEND_API_KEY", "server-key")
+    monkeypatch.setattr(
+        web_server,
+        "get_user_settings",
+        lambda user_id: {
+            "notification_config": json.dumps(
+                {"resend": {"to_email": "reader@example.com"}}
+            )
+        },
+    )
+    monkeypatch.setattr(
+        notifier,
+        "send_email",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("provider response exposed secret mail detail")
+        ),
+    )
+
+    with caplog.at_level("ERROR"):
+        response = web_server.app.test_client().post(
+            "/settings/test-notification",
+            headers=_auth_headers(),
+        )
+
+    assert response.status_code == 502
+    assert response.get_json() == {"error": "notification send failed"}
+    assert "provider response exposed secret mail detail" in caplog.text
+
+
+def test_system_auto_config_carries_configured_provider(monkeypatch):
+    class AutoDb:
+        def execute(self, sql):
+            return self
+
+        def fetchone(self):
+            return {
+                "user_id": 21,
+                "auto_translate_title": 0,
+                "auto_translate_content": 0,
+                "auto_title_summary_enabled": 0,
+                "auto_summary_enabled": 1,
+            }
+
+    monkeypatch.setattr(web_server, "get_db", lambda: AutoDb())
+    monkeypatch.setattr(
+        web_server,
+        "get_system_ai_config",
+        lambda: {
+            "provider": "deepseek",
+            "api_key": "system-key",
+            "endpoint": "https://api.deepseek.com/v1",
+            "model": "deepseek-chat",
+            "provider_type": "openai",
+            "enabled": 1,
+        },
+    )
+
+    config = web_server._system_auto_config("auto_summary_enabled")
+
+    assert config["provider"] == "deepseek"
+    assert config["provider_type"] == "openai"
+
+
 def test_frontend_publishes_local_ai_results_only_while_sharing_is_active():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     start = html.index("function publishSharedAIResult(")
