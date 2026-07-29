@@ -5,8 +5,11 @@ import json
 import bcrypt
 from datetime import datetime
 from pathlib import Path
+import math
 import os
+import secrets
 import threading
+import time
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
 DB_FILE = DATA_DIR / "raynews.db"
@@ -85,6 +88,22 @@ CREATE TABLE IF NOT EXISTS invitation_codes (
     email       TEXT    NOT NULL,
     used        INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS login_failures (
+    client_ip     TEXT NOT NULL,
+    login         TEXT NOT NULL,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    locked_until  REAL NOT NULL DEFAULT 0,
+    updated_at    REAL NOT NULL,
+    PRIMARY KEY (client_ip, login)
+);
+
+CREATE TABLE IF NOT EXISTS invite_request_limits (
+    email             TEXT PRIMARY KEY,
+    last_success_at   REAL,
+    reservation_token TEXT,
+    reserved_at       REAL
 );
 
 CREATE TABLE IF NOT EXISTS system_ai_config (
@@ -317,6 +336,86 @@ def create_user(email: str, password: str, nickname: str = "",
         return None  # duplicate email
 
 
+def create_registered_user(
+    email: str,
+    password: str,
+    nickname: str,
+    invite_code: str = "",
+) -> tuple[dict | None, bool]:
+    """Atomically create a registered user and assign the initial admin.
+
+    The boolean is true only when the returned user is the initial admin.
+    A dedicated write transaction serializes the empty-database decision, so
+    concurrent unauthenticated registrations cannot both become admins (or
+    leave a second account behind without a valid invite).
+    """
+    # Initialize/migrate the selected database before opening the deliberately
+    # short-lived registration connection. Password hashing is intentionally
+    # outside the write transaction because bcrypt is the expensive part.
+    get_db()
+    password_hash = hash_password(password)
+    db_path = str(DB_FILE.resolve())
+    db = sqlite3.connect(db_path, timeout=30)
+    db.row_factory = sqlite3.Row
+    try:
+        db.execute("PRAGMA foreign_keys=ON")
+        db.execute("PRAGMA busy_timeout=30000")
+        db.execute("BEGIN IMMEDIATE")
+
+        is_initial_admin = (
+            db.execute("SELECT 1 FROM users LIMIT 1").fetchone() is None
+        )
+        role = "admin" if is_initial_admin else "user"
+
+        if not is_initial_admin:
+            if not invite_code:
+                db.rollback()
+                return None, False
+            invitation = db.execute(
+                "SELECT 1 FROM invitation_codes "
+                "WHERE code = ? AND email = ? AND used = 0",
+                (invite_code, email),
+            ).fetchone()
+            if invitation is None:
+                db.rollback()
+                return None, False
+
+        if nickname and db.execute(
+            "SELECT 1 FROM users WHERE nickname = ? AND nickname != ''",
+            (nickname,),
+        ).fetchone():
+            db.rollback()
+            return None, False
+
+        cur = db.execute(
+            "INSERT INTO users (email, password, nickname, role) "
+            "VALUES (?, ?, ?, ?)",
+            (email, password_hash, nickname, role),
+        )
+        if not is_initial_admin:
+            used = db.execute(
+                "UPDATE invitation_codes SET used = 1 "
+                "WHERE code = ? AND email = ? AND used = 0",
+                (invite_code, email),
+            )
+            if used.rowcount != 1:
+                db.rollback()
+                return None, False
+
+        row = db.execute(
+            "SELECT id, email, nickname, role, avatar_url, created_at, "
+            "visit_count, last_seen_at FROM users WHERE id = ?",
+            (cur.lastrowid,),
+        ).fetchone()
+        db.commit()
+        return dict(row), is_initial_admin
+    except sqlite3.IntegrityError:
+        db.rollback()
+        return None, False
+    finally:
+        db.close()
+
+
 def get_user(user_id: int) -> dict | None:
     db = get_db()
     row = db.execute(
@@ -387,6 +486,198 @@ def get_first_admin_email() -> str:
 def count_users() -> int:
     db = get_db()
     return db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+
+
+# ─── Authentication rate limits ─────────────────────────────
+
+AUTH_RATE_LIMIT_SECONDS = 15 * 60
+AUTH_FAILURE_LIMIT = 5
+INVITE_RESERVATION_SECONDS = AUTH_RATE_LIMIT_SECONDS
+
+
+def _normalized_rate_limit_login(login: str) -> str:
+    return (login or "").strip().casefold()
+
+
+def login_retry_after(
+    client_ip: str,
+    login: str,
+    *,
+    now: float | None = None,
+) -> int:
+    """Return remaining lock seconds for one trusted IP/account pair."""
+    current = time.time() if now is None else float(now)
+    row = get_db().execute(
+        "SELECT locked_until FROM login_failures "
+        "WHERE client_ip = ? AND login = ?",
+        (client_ip, _normalized_rate_limit_login(login)),
+    ).fetchone()
+    if row is None:
+        return 0
+    return max(0, math.ceil(float(row["locked_until"]) - current))
+
+
+def record_login_failure(
+    client_ip: str,
+    login: str,
+    *,
+    now: float | None = None,
+) -> int:
+    """Persist one failed login and return the resulting lock duration."""
+    current = time.time() if now is None else float(now)
+    normalized_login = _normalized_rate_limit_login(login)
+    db = get_db()
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        row = db.execute(
+            "SELECT failure_count, locked_until, updated_at "
+            "FROM login_failures WHERE client_ip = ? AND login = ?",
+            (client_ip, normalized_login),
+        ).fetchone()
+        if row and float(row["locked_until"]) > current:
+            db.commit()
+            return math.ceil(float(row["locked_until"]) - current)
+
+        if row and current - float(row["updated_at"]) < AUTH_RATE_LIMIT_SECONDS:
+            failure_count = int(row["failure_count"]) + 1
+        else:
+            failure_count = 1
+        locked_until = (
+            current + AUTH_RATE_LIMIT_SECONDS
+            if failure_count >= AUTH_FAILURE_LIMIT
+            else 0
+        )
+        db.execute(
+            "INSERT INTO login_failures "
+            "(client_ip, login, failure_count, locked_until, updated_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(client_ip, login) DO UPDATE SET "
+            "failure_count = excluded.failure_count, "
+            "locked_until = excluded.locked_until, "
+            "updated_at = excluded.updated_at",
+            (
+                client_ip,
+                normalized_login,
+                failure_count,
+                locked_until,
+                current,
+            ),
+        )
+        db.commit()
+        return max(0, math.ceil(locked_until - current))
+    except Exception:
+        db.rollback()
+        raise
+
+
+def reset_login_failures(client_ip: str, login: str) -> None:
+    db = get_db()
+    db.execute(
+        "DELETE FROM login_failures WHERE client_ip = ? AND login = ?",
+        (client_ip, _normalized_rate_limit_login(login)),
+    )
+    db.commit()
+
+
+def claim_invite_request(
+    email: str,
+    *,
+    now: float | None = None,
+) -> tuple[str | None, int]:
+    """Reserve an invite send, returning ``(token, retry_after)``.
+
+    Only ``complete_invite_request(..., succeeded=True)`` starts the rolling
+    cooldown. The short reservation prevents simultaneous requests from both
+    sending while still allowing a failed delivery to release the allowance.
+    """
+    current = time.time() if now is None else float(now)
+    normalized_email = (email or "").strip().lower()
+    db = get_db()
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        row = db.execute(
+            "SELECT last_success_at, reservation_token, reserved_at "
+            "FROM invite_request_limits WHERE email = ?",
+            (normalized_email,),
+        ).fetchone()
+        if row and row["last_success_at"] is not None:
+            elapsed = current - float(row["last_success_at"])
+            if elapsed < AUTH_RATE_LIMIT_SECONDS:
+                retry_after = max(1, math.ceil(AUTH_RATE_LIMIT_SECONDS - elapsed))
+                db.commit()
+                return None, retry_after
+
+        if (
+            row
+            and row["reservation_token"]
+            and row["reserved_at"] is not None
+            and current - float(row["reserved_at"]) < INVITE_RESERVATION_SECONDS
+        ):
+            retry_after = max(
+                1,
+                math.ceil(
+                    INVITE_RESERVATION_SECONDS
+                    - (current - float(row["reserved_at"]))
+                ),
+            )
+            db.commit()
+            return None, retry_after
+
+        token = secrets.token_urlsafe(24)
+        db.execute(
+            "INSERT INTO invite_request_limits "
+            "(email, last_success_at, reservation_token, reserved_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(email) DO UPDATE SET "
+            "reservation_token = excluded.reservation_token, "
+            "reserved_at = excluded.reserved_at",
+            (
+                normalized_email,
+                row["last_success_at"] if row else None,
+                token,
+                current,
+            ),
+        )
+        db.commit()
+        return token, 0
+    except Exception:
+        db.rollback()
+        raise
+
+
+def complete_invite_request(
+    email: str,
+    reservation_token: str,
+    *,
+    succeeded: bool,
+    now: float | None = None,
+) -> bool:
+    """Complete a reserved invite send; failures never start a cooldown."""
+    current = time.time() if now is None else float(now)
+    normalized_email = (email or "").strip().lower()
+    db = get_db()
+    if succeeded:
+        cur = db.execute(
+            "UPDATE invite_request_limits "
+            "SET last_success_at = ?, reservation_token = NULL, reserved_at = NULL "
+            "WHERE email = ? AND reservation_token = ?",
+            (current, normalized_email, reservation_token),
+        )
+    else:
+        cur = db.execute(
+            "UPDATE invite_request_limits "
+            "SET reservation_token = NULL, reserved_at = NULL "
+            "WHERE email = ? AND reservation_token = ?",
+            (normalized_email, reservation_token),
+        )
+        db.execute(
+            "DELETE FROM invite_request_limits "
+            "WHERE email = ? AND last_success_at IS NULL "
+            "AND reservation_token IS NULL",
+            (normalized_email,),
+        )
+    db.commit()
+    return cur.rowcount == 1
 
 
 # ─── Access Stats ──────────────────────────────────────────
@@ -1037,8 +1328,6 @@ def get_broadcast_publication(broadcast_id: str) -> dict | None:
 
 
 # ─── Invitation Codes ──────────────────────────────────────
-
-import secrets
 
 
 def create_invitation_code(email: str) -> str:

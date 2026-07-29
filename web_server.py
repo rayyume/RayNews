@@ -9,6 +9,7 @@ import sqlite3
 import threading
 import time
 import calendar
+import ipaddress
 import uuid
 import requests
 from datetime import date, datetime, timedelta
@@ -23,10 +24,11 @@ from notifier import send_email
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from models import (
-    get_db, create_user, get_user, get_user_by_email, get_user_by_username,
+    get_db, create_registered_user, get_user, get_user_by_email, get_user_by_username,
     update_user, delete_user, list_users, get_first_admin_email, count_users,
     count_active_users_since,
-    verify_password,
+    verify_password, login_retry_after, record_login_failure, reset_login_failures,
+    claim_invite_request, complete_invite_request,
     add_favorite, remove_favorite, get_favorites, get_all_favorite_article_ids, is_favorited,
     count_article_favorites,
     get_ai_config, set_ai_config, get_user_settings, set_user_settings,
@@ -37,7 +39,7 @@ from models import (
     get_daily_summary_inapp_user_ids,
     get_app_state, set_app_state, claim_app_state_flag,
     get_system_ai_config, set_system_ai_config,
-    create_invitation_code, validate_invitation_code, use_invitation_code,
+    create_invitation_code,
     list_pending_invitations, delete_invitation_code, delete_invitation_code_by_code,
     add_notification, list_notifications,
     count_unread_notifications, mark_notification_read, mark_all_notifications_read,
@@ -182,6 +184,34 @@ def _admin_email_address() -> str:
     return (os.environ.get("RAYNEWS_ADMIN_EMAIL") or get_first_admin_email() or "").strip()
 
 
+def _trusted_client_ip() -> str:
+    """Use proxy-provided client IP only when the direct peer is loopback."""
+    remote = (request.remote_addr or "").strip()
+    try:
+        remote_ip = ipaddress.ip_address(remote)
+    except ValueError:
+        remote_ip = None
+
+    if remote_ip is not None and remote_ip.is_loopback:
+        real_ip = (request.headers.get("X-Real-IP") or "").strip()
+        try:
+            return str(ipaddress.ip_address(real_ip))
+        except ValueError:
+            pass
+    return str(remote_ip) if remote_ip is not None else (remote or "unknown")
+
+
+def _rate_limited_response(retry_after: int):
+    retry_after = max(1, int(retry_after))
+    response = jsonify({
+        "error": "too many requests; please retry later",
+        "retry_after": retry_after,
+    })
+    response.status_code = 429
+    response.headers["Retry-After"] = str(retry_after)
+    return response
+
+
 def _send_registration_notice(user: dict) -> bool:
     """Notify the admin after a user successfully registers. Never blocks registration."""
     api_key = os.environ.get("RESEND_API_KEY", "")
@@ -241,28 +271,22 @@ def register():
     if len(password) < 6:
         return jsonify({"error": "password must be at least 6 characters"}), 400
 
-    # First user (admin) doesn't need invite code; all others do
-    if count_users() > 0:
-        if not invite_code:
-            return jsonify({"error": "invitation code required. Go to Settings → Request Invite"}), 400
-        if not validate_invitation_code(invite_code, email):
-            return jsonify({"error": "invalid or expired invitation code"}), 400
-
-    # Invite code already gates who can register at all, so a successful
-    # registration is the approval step — no separate preview/pending state.
-    role = "admin" if count_users() == 0 else "user"
-
-    user = create_user(email, password, nickname, role)
+    user, is_initial_admin = create_registered_user(
+        email,
+        password,
+        nickname,
+        invite_code,
+    )
     if user is None:
         if nickname and get_user_by_username(nickname):
             return jsonify({"error": "username already taken"}), 409
-        return jsonify({"error": "email already registered"}), 409
+        if get_user_by_email(email):
+            return jsonify({"error": "email already registered"}), 409
+        if not invite_code:
+            return jsonify({"error": "invitation code required. Go to Settings → Request Invite"}), 400
+        return jsonify({"error": "invalid or expired invitation code"}), 400
 
-    # Mark invite code as used
-    if invite_code:
-        use_invitation_code(invite_code)
-
-    admin_notified = _send_registration_notice(user) if role != "admin" else False
+    admin_notified = _send_registration_notice(user) if not is_initial_admin else False
 
     token = create_token(user["id"], user["role"])
     return jsonify({"token": token, "user": user, "admin_notified": admin_notified}), 201
@@ -293,10 +317,13 @@ def request_invite():
         return jsonify({"error": "admin email is not configured."}), 500
     from_email = os.environ.get("RAYNEWS_FROM_EMAIL") or "onboarding@resend.dev"
 
-    # Generate code
-    code = create_invitation_code(email)
+    reservation_token, retry_after = claim_invite_request(email)
+    if reservation_token is None:
+        return _rate_limited_response(retry_after)
 
+    code = None
     try:
+        code = create_invitation_code(email)
         from notifier import send_email
         html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>
@@ -317,9 +344,16 @@ h1{{color:#6e8efb;font-size:18px}}
                    html, from_name="RayNews", from_email=from_email)
     except Exception as e:
         print(f"[web] Failed to send invite email: {e}")
-        delete_invitation_code_by_code(code)
+        if code is not None:
+            delete_invitation_code_by_code(code)
+        complete_invite_request(
+            email,
+            reservation_token,
+            succeeded=False,
+        )
         return jsonify({"error": f"邮件发送失败，请稍后重试：{e}"}), 500
 
+    complete_invite_request(email, reservation_token, succeeded=True)
     return jsonify({"ok": True, "message": "邀请码已发送至管理员邮箱，请等待审核"}), 201
 
 
@@ -328,14 +362,21 @@ def login():
     data = request.get_json(silent=True) or {}
     login_val = (data.get("login") or data.get("email") or "").strip()
     password = data.get("password") or ""
+    client_ip = _trusted_client_ip()
+
+    retry_after = login_retry_after(client_ip, login_val)
+    if retry_after:
+        return _rate_limited_response(retry_after)
 
     # Try email first (case-insensitive), then username (case-sensitive)
     user = get_user_by_email(login_val.lower())
     if not user:
         user = get_user_by_username(login_val)
     if not user or not verify_password(password, user["password"]):
+        record_login_failure(client_ip, login_val)
         return jsonify({"error": "invalid email/username or password"}), 401
 
+    reset_login_failures(client_ip, login_val)
     token = create_token(user["id"], user["role"])
     return jsonify({
         "token": token,
