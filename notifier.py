@@ -1,11 +1,119 @@
 """RayNews Notifier — Send notifications via Resend API."""
 
+import html
 import json
 import os
 import markdown
 import requests
+from urllib.parse import quote, urlsplit
+
+from bs4 import BeautifulSoup, Comment, Declaration, Doctype, ProcessingInstruction
 
 RESEND_API = "https://api.resend.com/emails"
+
+_NOTIFICATION_EMAIL_TAGS = {
+    "a", "blockquote", "br", "code", "em", "h1", "h2", "h3", "h4", "h5",
+    "h6", "hr", "img", "li", "ol", "p", "pre", "strong", "table", "tbody",
+    "td", "th", "thead", "tr", "ul",
+}
+_NOTIFICATION_EMAIL_ATTRIBUTES = {
+    "a": {"href", "title"},
+    "code": {"class"},
+    "img": {"alt", "src", "title"},
+    "td": {"align"},
+    "th": {"align"},
+}
+_NOTIFICATION_EMAIL_DANGEROUS_TAGS = {
+    "base", "button", "embed", "form", "iframe", "input", "link", "math",
+    "meta", "noscript", "object", "script", "select", "style", "svg",
+    "template", "textarea",
+}
+
+
+def _safe_absolute_http_url(value: str) -> str | None:
+    """Return a stripped absolute HTTP(S) URL, or None for unsafe input."""
+    value = (value or "").strip()
+    if not value or any(char in value for char in "\r\n\t"):
+        return None
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except (TypeError, ValueError):
+        return None
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or port is not None and not 0 < port <= 65535
+    ):
+        return None
+    return value
+
+
+def _safe_public_base_url(value: str) -> str | None:
+    """Return a normalized public origin suitable for absolute proxy URLs."""
+    value = _safe_absolute_http_url(value)
+    if not value:
+        return None
+    parsed = urlsplit(value)
+    if parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
+        return None
+    return f"{parsed.scheme.lower()}://{parsed.netloc}"
+
+
+def render_notification_email_body(body: str, fmt: str = "plain") -> str:
+    """Render a notification body for email, sanitizing Markdown as HTML."""
+    body = body or ""
+    if fmt != "markdown":
+        return html.escape(body).replace("\n", "<br>")
+
+    rendered = markdown.markdown(
+        body,
+        extensions=["fenced_code", "tables"],
+    )
+    soup = BeautifulSoup(rendered, "html.parser")
+
+    for node in list(soup.find_all(string=lambda value: isinstance(
+        value,
+        (Comment, Declaration, Doctype, ProcessingInstruction),
+    ))):
+        node.extract()
+
+    for tag in list(soup.find_all(_NOTIFICATION_EMAIL_DANGEROUS_TAGS)):
+        tag.decompose()
+
+    public_url = _safe_public_base_url(
+        os.environ.get("RAYNEWS_PUBLIC_URL", "")
+    )
+    for tag in list(soup.find_all(True)):
+        if tag.name not in _NOTIFICATION_EMAIL_TAGS:
+            tag.unwrap()
+            continue
+
+        allowed_attributes = _NOTIFICATION_EMAIL_ATTRIBUTES.get(tag.name, set())
+        tag.attrs = {
+            name: value
+            for name, value in tag.attrs.items()
+            if name in allowed_attributes
+        }
+
+        if tag.name == "a":
+            href = _safe_absolute_http_url(tag.get("href", ""))
+            if href:
+                tag["href"] = href
+                tag["target"] = "_blank"
+                tag["rel"] = "noopener noreferrer"
+            else:
+                tag.attrs.pop("href", None)
+        elif tag.name == "img":
+            src = _safe_absolute_http_url(tag.get("src", ""))
+            if not src or not public_url:
+                tag.decompose()
+                continue
+            tag["src"] = f"{public_url}/img-cache?url={quote(src, safe='')}"
+
+    return str(soup)
 
 
 class EmailDeliveryError(Exception):

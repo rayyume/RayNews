@@ -160,6 +160,63 @@ def test_missing_resend_key_from_notification_email_alerts_admins(monkeypatch):
     assert reasons == ["RESEND_API_KEY 未配置"]
 
 
+def test_notification_email_default_format_keeps_body_literal(monkeypatch):
+    monkeypatch.setenv("RESEND_API_KEY", "test-key")
+    monkeypatch.setattr(
+        web_server,
+        "_notification_recipient",
+        lambda user_id: "user@example.com",
+    )
+    monkeypatch.setattr(web_server, "_clear_email_delivery_failure_alert", lambda: None)
+    sent = []
+    monkeypatch.setattr(
+        web_server,
+        "send_email",
+        lambda *args, **kwargs: sent.append((args, kwargs)) or {"id": "sent"},
+    )
+
+    assert web_server._send_notification_email(
+        7,
+        "标题",
+        "**literal**\n<b>x</b>",
+    ) is True
+
+    html_body = sent[0][0][3]
+    assert "**literal**<br>&lt;b&gt;x&lt;/b&gt;" in html_body
+    assert "<strong>literal</strong>" not in html_body
+
+
+def test_notification_email_markdown_format_uses_safe_renderer(monkeypatch):
+    monkeypatch.setenv("RESEND_API_KEY", "test-key")
+    monkeypatch.setenv("RAYNEWS_PUBLIC_URL", "https://news.example")
+    monkeypatch.setattr(
+        web_server,
+        "_notification_recipient",
+        lambda user_id: "user@example.com",
+    )
+    monkeypatch.setattr(web_server, "_clear_email_delivery_failure_alert", lambda: None)
+    sent = []
+    monkeypatch.setattr(
+        web_server,
+        "send_email",
+        lambda *args, **kwargs: sent.append((args, kwargs)) or {"id": "sent"},
+    )
+
+    assert web_server._send_notification_email(
+        7,
+        "标题",
+        "#### 小节\n\n![图](https://img.example/a.png)",
+        fmt="markdown",
+    ) is True
+
+    html_body = sent[0][0][3]
+    assert "<h4>小节</h4>" in html_body
+    assert (
+        "https://news.example/img-cache?url="
+        "https%3A%2F%2Fimg.example%2Fa.png"
+    ) in html_body
+
+
 def test_success_clears_suppression_and_later_failure_alerts_again(monkeypatch):
     monkeypatch.setenv("RESEND_API_KEY", "test-key")
     monkeypatch.setattr(web_server, "_notification_recipient", lambda user_id: "user@example.com")

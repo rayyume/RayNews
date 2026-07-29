@@ -42,6 +42,85 @@ def _headers(user_id, role):
     return {"Authorization": f"Bearer {web_server.create_token(user_id, role)}"}
 
 
+class _ImmediateThread:
+    """Run the production thread target synchronously for route assertions."""
+
+    def __init__(self, *, target, args=(), kwargs=None, daemon=None):
+        self.target = target
+        self.args = args
+        self.kwargs = kwargs or {}
+
+    def start(self):
+        self.target(*self.args, **self.kwargs)
+
+
+@pytest.mark.parametrize("fmt", ["markdown", "plain"])
+def test_broadcast_email_fanout_receives_committed_format(env, monkeypatch, fmt):
+    client, admin_id, u1, u2 = env
+    sent = []
+
+    def capture_send(user_id, title, body, idempotency_key=None, fmt="plain"):
+        sent.append((user_id, title, body, idempotency_key, fmt))
+        return True
+
+    monkeypatch.setattr(web_server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(web_server, "_send_notification_email", capture_send)
+
+    response = client.post(
+        "/admin/notifications/broadcast",
+        json={
+            "title": "公告",
+            "body": "**正文**",
+            "format": fmt,
+            "email": True,
+            "broadcast_id": f"format-{fmt}",
+        },
+        headers=_headers(admin_id, "admin"),
+    )
+
+    assert response.status_code == 200
+    assert [call[0] for call in sent] == [admin_id, u1, u2]
+    assert {call[4] for call in sent} == {fmt}
+
+
+def test_broadcast_email_replay_launches_no_second_fanout(env, monkeypatch):
+    client, admin_id, u1, u2 = env
+    sent = []
+
+    def capture_send(user_id, title, body, idempotency_key=None, fmt="plain"):
+        sent.append((user_id, fmt))
+        return True
+
+    monkeypatch.setattr(web_server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(web_server, "_send_notification_email", capture_send)
+    payload = {
+        "title": "公告",
+        "body": "正文",
+        "format": "markdown",
+        "email": True,
+        "broadcast_id": "email-replay-format",
+    }
+
+    first = client.post(
+        "/admin/notifications/broadcast",
+        json=payload,
+        headers=_headers(admin_id, "admin"),
+    )
+    second = client.post(
+        "/admin/notifications/broadcast",
+        json=payload,
+        headers=_headers(admin_id, "admin"),
+    )
+
+    assert first.status_code == 200
+    assert second.get_json()["replayed"] is True
+    assert sent == [
+        (admin_id, "markdown"),
+        (u1, "markdown"),
+        (u2, "markdown"),
+    ]
+
+
 def test_broadcast_reaches_every_user(env):
     client, admin_id, u1, u2 = env
     resp = client.post(
