@@ -5508,6 +5508,9 @@ def _settings_response(settings: dict | None) -> dict:
     safe.setdefault("share_view_translation", 0)
     safe.setdefault("share_view_summary", 0)
     safe.setdefault("share_suspended", 0)
+    safe.setdefault("share_revalidation_failure_streak", 0)
+    safe.setdefault("share_revalidation_last_failure_at", None)
+    safe.setdefault("share_revalidation_last_failure_error", None)
     # On by default, including for accounts with no settings row yet — this must
     # agree with models.get_daily_summary_inapp_user_ids(), which is what
     # actually decides who receives the in-app copy.
@@ -5523,6 +5526,7 @@ def _settings_response(settings: dict | None) -> dict:
     safe.pop("share_last_check_revision", None)
     safe.pop("share_current_config_revision", None)
     safe.pop("share_intent_revision", None)
+    safe.pop("share_revalidation_failure_revision", None)
     return safe
 
 @app.route("/settings", methods=["GET"])

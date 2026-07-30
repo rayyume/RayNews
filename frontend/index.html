@@ -3342,6 +3342,14 @@ async function loadShareTab() {
       '⏸ API 校验失败，共享已暂停。原有选项已保留，API 恢复后会自动重新生效。'
       + (s.share_last_check_error ? ' 原因：' + s.share_last_check_error : '');
     statusEl.style.color = '#e5a84d';
+  } else if (Number(s.share_revalidation_failure_streak || 0) === 1) {
+    statusEl.textContent =
+      '⚠️ 后台复核暂时失败（1/2），共享仍在运行；'
+      + '下次复核成功将自动清除，连续失败才会暂停。'
+      + (s.share_revalidation_last_failure_error
+        ? ' 原因：' + s.share_revalidation_last_failure_error
+        : '');
+    statusEl.style.color = '#e5a84d';
   } else if (!s.share_last_check_at) {
     statusEl.textContent = '';
   } else if (s.share_last_check_ok) {
@@ -3729,6 +3737,12 @@ async function loadUserSettings() {
       share_last_check_at: data.share_last_check_at || null,
       share_last_check_ok: data.share_last_check_ok,
       share_last_check_error: data.share_last_check_error || null,
+      share_revalidation_failure_streak:
+        Number(data.share_revalidation_failure_streak || 0),
+      share_revalidation_last_failure_at:
+        data.share_revalidation_last_failure_at || null,
+      share_revalidation_last_failure_error:
+        data.share_revalidation_last_failure_error || null,
     };
     applyThemePreference(nextSettings.theme_preference);
     await synchronizeShareAccessState(nextSettings);

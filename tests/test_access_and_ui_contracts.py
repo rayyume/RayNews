@@ -11,11 +11,32 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from auth_validation import is_valid_email
+import web_server
 from source_categories import (
     init_source_categories,
     promote_user_source_settings,
     source_rows,
 )
+
+
+def test_settings_response_exposes_safe_pending_revalidation_failure_fields_only():
+    """Readers need the first-failure warning details, never the internal revision."""
+    response = web_server._settings_response({
+        "share_revalidation_failure_streak": 1,
+        "share_revalidation_last_failure_at": "2026-07-30T10:00:00",
+        "share_revalidation_last_failure_error": "AI API HTTP 503",
+        "share_revalidation_failure_revision": 9,
+    })
+
+    assert response["share_revalidation_failure_streak"] == 1
+    assert response["share_revalidation_last_failure_at"] == "2026-07-30T10:00:00"
+    assert response["share_revalidation_last_failure_error"] == "AI API HTTP 503"
+    assert "share_revalidation_failure_revision" not in response
+
+    defaults = web_server._settings_response(None)
+    assert defaults["share_revalidation_failure_streak"] == 0
+    assert defaults["share_revalidation_last_failure_at"] is None
+    assert defaults["share_revalidation_last_failure_error"] is None
 
 
 def _source_db() -> sqlite3.Connection:
