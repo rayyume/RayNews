@@ -55,6 +55,52 @@ def test_source_rows_does_not_write(monkeypatch):
     assert any(r["source"] == "全新来源" for r in rows)
 
 
+def test_source_rows_work_does_not_multiply_by_number_of_sources():
+    """The read endpoint must aggregate articles once, not rescan them for every source.
+
+    The homepage aborts its first metadata request after eight seconds.  A LEFT JOIN
+    on COALESCE(feed_source, source) makes SQLite scan the whole articles table once
+    per source because that expression cannot use either source index.
+    """
+    conn = _make_conn()
+    conn.execute("CREATE INDEX idx_source ON articles(source)")
+    conn.execute("CREATE INDEX idx_feed_source ON articles(feed_source)")
+    conn.executemany(
+        "INSERT INTO articles (id, title, source, feed_source, origin_source, timestamp) "
+        "VALUES (?, ?, ?, ?, '', ?)",
+        (
+            (
+                article_id,
+                f"t{article_id}",
+                f"来源{article_id % 100}",
+                "" if article_id % 10 == 0 else f"来源{article_id % 100}",
+                article_id,
+            )
+            for article_id in range(1, 5001)
+        ),
+    )
+    conn.commit()
+    sc.init_source_categories(conn)
+    sc.ensure_article_sources(conn)
+
+    progress_calls = 0
+
+    def count_progress():
+        nonlocal progress_calls
+        progress_calls += 1
+        return 0
+
+    conn.set_progress_handler(count_progress, 1000)
+    rows = sc.source_rows(conn)
+    conn.set_progress_handler(None, 0)
+
+    by_source = {row["source"]: row for row in rows}
+    assert by_source["来源1"]["article_count"] == 50
+    # Leave ample SQLite-version headroom while still catching the old
+    # source-count × article-count nested scan (more than 5 million VM steps).
+    assert progress_calls * 1000 < 500_000
+
+
 def test_source_rows_bootstraps_tables_on_fresh_db():
     """On a fresh deployment the tables may not exist yet; source_rows must not crash."""
     conn = _make_conn()
