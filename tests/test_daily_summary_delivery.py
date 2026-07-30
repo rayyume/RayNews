@@ -56,6 +56,7 @@ class DailySummaryInAppDeliveryTests(unittest.TestCase):
             items = models.list_notifications(user_id)
             self.assertEqual(len(items), 1)
             self.assertEqual(items[0]["type"], "daily_summary")
+            self.assertEqual(items[0]["title"], "RayNews每日摘要")
             self.assertEqual(items[0]["format"], "markdown")
             self.assertEqual(items[0]["body"], self.result["summary"])
             self.assertEqual(models.count_unread_notifications(user_id), 1)
