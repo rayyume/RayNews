@@ -71,6 +71,10 @@ CREATE TABLE IF NOT EXISTS user_settings (
     share_last_check_ok     INTEGER,
     share_last_check_error  TEXT,
     share_last_check_revision INTEGER,
+    share_revalidation_failure_streak INTEGER NOT NULL DEFAULT 0,
+    share_revalidation_failure_revision INTEGER,
+    share_revalidation_last_failure_at TEXT,
+    share_revalidation_last_failure_error TEXT,
     share_intent_revision   INTEGER NOT NULL DEFAULT 1
 );
 
@@ -225,6 +229,14 @@ def _initialize_db(db: sqlite3.Connection) -> None:
         ("user_settings", "share_last_check_ok", "INTEGER"),
         ("user_settings", "share_last_check_error", "TEXT"),
         ("user_settings", "share_last_check_revision", "INTEGER"),
+        (
+            "user_settings",
+            "share_revalidation_failure_streak",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
+        ("user_settings", "share_revalidation_failure_revision", "INTEGER"),
+        ("user_settings", "share_revalidation_last_failure_at", "TEXT"),
+        ("user_settings", "share_revalidation_last_failure_error", "TEXT"),
         (
             "user_settings",
             "share_intent_revision",
@@ -880,7 +892,12 @@ def get_user_settings(user_id: int) -> dict | None:
         "s.theme_preference, s.notification_config, "
         "s.share_ai_results, s.share_view_title, s.share_view_translation, s.share_view_summary, "
         "s.share_suspended, s.share_last_check_at, s.share_last_check_ok, "
-        "s.share_last_check_error, s.share_last_check_revision, s.share_intent_revision, "
+        "s.share_last_check_error, s.share_last_check_revision, "
+        "s.share_revalidation_failure_streak, "
+        "s.share_revalidation_failure_revision, "
+        "s.share_revalidation_last_failure_at, "
+        "s.share_revalidation_last_failure_error, "
+        "s.share_intent_revision, "
         "c.revision AS share_current_config_revision "
         "FROM user_settings AS s LEFT JOIN ai_configs AS c ON c.user_id = s.user_id "
         "WHERE s.user_id = ?",
@@ -1004,6 +1021,10 @@ def set_share_health(user_id: int, **kwargs) -> dict:
         "share_last_check_ok",
         "share_last_check_error",
         "share_last_check_revision",
+        "share_revalidation_failure_streak",
+        "share_revalidation_failure_revision",
+        "share_revalidation_last_failure_at",
+        "share_revalidation_last_failure_error",
     }
     updates = {key: value for key, value in kwargs.items() if key in allowed}
     if not updates:
@@ -1120,7 +1141,11 @@ def apply_share_connectivity_transition(
         "UPDATE user_settings "
         "SET share_suspended = ?, share_last_check_at = ?, "
         "share_last_check_ok = ?, share_last_check_error = ?, "
-        "share_last_check_revision = ? "
+        "share_last_check_revision = ?, "
+        "share_revalidation_failure_streak = 0, "
+        "share_revalidation_failure_revision = NULL, "
+        "share_revalidation_last_failure_at = NULL, "
+        "share_revalidation_last_failure_error = NULL "
         "WHERE user_id = ? AND share_ai_results = 1 AND share_suspended = ? "
         "AND COALESCE((SELECT revision FROM ai_configs WHERE user_id = ?), 0) = ?",
         (
@@ -1137,6 +1162,88 @@ def apply_share_connectivity_transition(
     ).rowcount == 1
     db.commit()
     return changed
+
+
+def record_share_revalidation_failure(
+    user_id: int,
+    config_revision: int,
+    checked_at: str,
+    error: str,
+    threshold: int = 2,
+) -> str:
+    """Persist a scheduled failure and atomically claim its suspension edge."""
+    config_revision = int(config_revision)
+    threshold = int(threshold)
+    db = get_db()
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute(
+            "SELECT s.share_ai_results, s.share_suspended, "
+            "s.share_revalidation_failure_streak, "
+            "s.share_revalidation_failure_revision, "
+            "c.revision AS current_config_revision "
+            "FROM user_settings AS s "
+            "LEFT JOIN ai_configs AS c ON c.user_id = s.user_id "
+            "WHERE s.user_id = ?",
+            (user_id,),
+        ).fetchone()
+        if row is None or row["share_ai_results"] != 1:
+            db.rollback()
+            return "not_opted_in"
+        if row["current_config_revision"] != config_revision:
+            db.rollback()
+            return "stale"
+        if row["share_suspended"]:
+            db.rollback()
+            return "unchanged"
+
+        prior_streak = (
+            int(row["share_revalidation_failure_streak"] or 0)
+            if row["share_revalidation_failure_revision"] == config_revision
+            else 0
+        )
+        next_streak = prior_streak + 1
+        if next_streak < threshold:
+            db.execute(
+                "UPDATE user_settings "
+                "SET share_revalidation_failure_streak = ?, "
+                "share_revalidation_failure_revision = ?, "
+                "share_revalidation_last_failure_at = ?, "
+                "share_revalidation_last_failure_error = ? "
+                "WHERE user_id = ?",
+                (next_streak, config_revision, checked_at, error, user_id),
+            )
+            db.commit()
+            return "pending_failure"
+
+        db.execute(
+            "UPDATE user_settings "
+            "SET share_revalidation_failure_streak = ?, "
+            "share_revalidation_failure_revision = ?, "
+            "share_revalidation_last_failure_at = ?, "
+            "share_revalidation_last_failure_error = ?, "
+            "share_suspended = 1, "
+            "share_last_check_at = ?, "
+            "share_last_check_ok = 0, "
+            "share_last_check_error = ?, "
+            "share_last_check_revision = ? "
+            "WHERE user_id = ?",
+            (
+                next_streak,
+                config_revision,
+                checked_at,
+                error,
+                checked_at,
+                error,
+                config_revision,
+                user_id,
+            ),
+        )
+        db.commit()
+        return "suspended"
+    except sqlite3.DatabaseError:
+        db.rollback()
+        raise
 
 
 # ─── In-App Notifications ──────────────────────────────────

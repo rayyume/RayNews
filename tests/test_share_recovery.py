@@ -45,6 +45,10 @@ _SHARE_HEALTH_KEYS = {
     "share_last_check_ok",
     "share_last_check_error",
     "share_last_check_revision",
+    "share_revalidation_failure_streak",
+    "share_revalidation_failure_revision",
+    "share_revalidation_last_failure_at",
+    "share_revalidation_last_failure_error",
 }
 
 
@@ -140,6 +144,10 @@ def test_real_legacy_app_db_preserves_share_intent_when_revision_columns_migrate
     assert settings["share_view_summary"] == 1
     assert settings["share_suspended"] == 0
     assert settings["share_last_check_revision"] is None
+    assert settings["share_revalidation_failure_streak"] == 0
+    assert settings["share_revalidation_failure_revision"] is None
+    assert settings["share_revalidation_last_failure_at"] is None
+    assert settings["share_revalidation_last_failure_error"] is None
     assert settings["share_intent_revision"] == 1
     assert config["revision"] == 1
     assert web_server.is_share_active(settings) is False
@@ -1154,6 +1162,190 @@ def _validated_opted_in(user_id: int, *, suspended: int = 0) -> int:
         user_id, not suspended, config_revision=config["revision"]
     ) in {"unchanged", "restored"}
     return config["revision"]
+
+
+def test_share_revalidation_failure_fields_migrate_and_round_trip(share_env):
+    _, user_id = share_env
+    settings = _set_user_settings(user_id, theme_preference="system")
+    assert settings["share_revalidation_failure_streak"] == 0
+    assert settings["share_revalidation_failure_revision"] is None
+    assert settings["share_revalidation_last_failure_at"] is None
+    assert settings["share_revalidation_last_failure_error"] is None
+
+    settings = models.set_share_health(
+        user_id,
+        share_revalidation_failure_streak=1,
+        share_revalidation_failure_revision=7,
+        share_revalidation_last_failure_at="2026-07-30T10:00:00",
+        share_revalidation_last_failure_error="AI API HTTP 503",
+    )
+    assert settings["share_revalidation_failure_streak"] == 1
+    assert settings["share_revalidation_failure_revision"] == 7
+    assert settings["share_revalidation_last_failure_at"] == "2026-07-30T10:00:00"
+    assert settings["share_revalidation_last_failure_error"] == "AI API HTTP 503"
+
+
+def test_first_scheduled_failure_is_durable_without_revoking_access(share_env):
+    _, user_id = share_env
+    revision = _validated_opted_in(user_id)
+
+    result = models.record_share_revalidation_failure(
+        user_id,
+        revision,
+        "2026-07-30T10:00:00",
+        "AI API HTTP 503",
+    )
+
+    assert result == "pending_failure"
+    settings = models.get_user_settings(user_id)
+    assert settings["share_revalidation_failure_streak"] == 1
+    assert settings["share_revalidation_failure_revision"] == revision
+    assert settings["share_suspended"] == 0
+    assert settings["share_last_check_ok"] == 1
+    assert web_server.is_share_active(settings) is True
+
+
+def test_second_scheduled_failure_atomically_suspends(share_env):
+    _, user_id = share_env
+    revision = _validated_opted_in(user_id)
+    models.record_share_revalidation_failure(
+        user_id, revision, "2026-07-30T10:00:00", "AI API HTTP 503"
+    )
+
+    result = models.record_share_revalidation_failure(
+        user_id, revision, "2026-07-30T11:00:00", "AI API HTTP 503"
+    )
+
+    assert result == "suspended"
+    settings = models.get_user_settings(user_id)
+    assert settings["share_revalidation_failure_streak"] == 2
+    assert settings["share_suspended"] == 1
+    assert settings["share_last_check_ok"] == 0
+    assert settings["share_last_check_revision"] == revision
+    assert web_server.is_share_active(settings) is False
+
+
+def test_scheduled_failure_for_opted_out_user_is_ignored(share_env):
+    _, user_id = share_env
+    revision = _validated_opted_in(user_id)
+    _set_user_settings(user_id, share_ai_results=0)
+
+    result = models.record_share_revalidation_failure(
+        user_id, revision, "2026-07-30T10:00:00", "AI API HTTP 503"
+    )
+
+    assert result == "not_opted_in"
+    assert models.get_user_settings(user_id)["share_revalidation_failure_streak"] == 0
+
+
+def test_scheduled_failure_for_mismatched_config_revision_is_stale(share_env):
+    _, user_id = share_env
+    revision = _validated_opted_in(user_id)
+
+    result = models.record_share_revalidation_failure(
+        user_id, revision + 1, "2026-07-30T10:00:00", "AI API HTTP 503"
+    )
+
+    assert result == "stale"
+    assert models.get_user_settings(user_id)["share_revalidation_failure_streak"] == 0
+
+
+def test_first_scheduled_failure_for_new_revision_starts_new_streak(share_env):
+    _, user_id = share_env
+    old_revision = _validated_opted_in(user_id)
+    assert models.record_share_revalidation_failure(
+        user_id, old_revision, "2026-07-30T10:00:00", "AI API HTTP 503"
+    ) == "pending_failure"
+    new_revision = models.set_ai_config(user_id, api_key="replacement-key")["revision"]
+
+    result = models.record_share_revalidation_failure(
+        user_id, new_revision, "2026-07-30T11:00:00", "AI API HTTP 503"
+    )
+
+    assert result == "pending_failure"
+    settings = models.get_user_settings(user_id)
+    assert settings["share_revalidation_failure_streak"] == 1
+    assert settings["share_revalidation_failure_revision"] == new_revision
+
+
+def test_scheduled_failure_for_suspended_user_does_not_create_another_edge(share_env):
+    _, user_id = share_env
+    revision = _validated_opted_in(user_id, suspended=1)
+
+    result = models.record_share_revalidation_failure(
+        user_id, revision, "2026-07-30T10:00:00", "AI API HTTP 503"
+    )
+
+    assert result == "unchanged"
+    settings = models.get_user_settings(user_id)
+    assert settings["share_revalidation_failure_streak"] == 0
+    assert settings["share_revalidation_failure_revision"] is None
+
+
+@pytest.mark.parametrize(
+    ("next_suspended", "check_ok", "error"),
+    (
+        (0, 1, None),
+        (1, 0, "AI API HTTP 401"),
+    ),
+)
+def test_applied_connectivity_result_clears_scheduled_failure(
+    share_env, next_suspended, check_ok, error
+):
+    _, user_id = share_env
+    revision = _validated_opted_in(user_id)
+    assert models.record_share_revalidation_failure(
+        user_id, revision, "2026-07-30T10:00:00", "AI API HTTP 503"
+    ) == "pending_failure"
+
+    changed = models.apply_share_connectivity_transition(
+        user_id,
+        expected_suspended=0,
+        expected_config_revision=revision,
+        next_suspended=next_suspended,
+        checked_at="2026-07-30T10:01:00",
+        check_ok=check_ok,
+        error=error,
+    )
+
+    assert changed is True
+    settings = models.get_user_settings(user_id)
+    assert settings["share_revalidation_failure_streak"] == 0
+    assert settings["share_revalidation_failure_revision"] is None
+    assert settings["share_revalidation_last_failure_at"] is None
+    assert settings["share_revalidation_last_failure_error"] is None
+
+
+@pytest.mark.parametrize("make_ineligible", ("opt_out", "new_revision"))
+def test_ineligible_connectivity_result_cannot_clear_scheduled_failure(
+    share_env, make_ineligible
+):
+    _, user_id = share_env
+    revision = _validated_opted_in(user_id)
+    assert models.record_share_revalidation_failure(
+        user_id, revision, "2026-07-30T10:00:00", "AI API HTTP 503"
+    ) == "pending_failure"
+    if make_ineligible == "opt_out":
+        _set_user_settings(user_id, share_ai_results=0)
+    else:
+        models.set_ai_config(user_id, api_key="replacement-key")
+
+    changed = models.apply_share_connectivity_transition(
+        user_id,
+        expected_suspended=0,
+        expected_config_revision=revision,
+        next_suspended=0,
+        checked_at="2026-07-30T10:01:00",
+        check_ok=1,
+        error=None,
+    )
+
+    assert changed is False
+    settings = models.get_user_settings(user_id)
+    assert settings["share_revalidation_failure_streak"] == 1
+    assert settings["share_revalidation_failure_revision"] == revision
+    assert settings["share_revalidation_last_failure_at"] == "2026-07-30T10:00:00"
+    assert settings["share_revalidation_last_failure_error"] == "AI API HTTP 503"
 
 
 def test_new_config_save_is_effectively_inactive_until_its_probe_finishes(share_env, monkeypatch):
