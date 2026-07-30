@@ -2347,7 +2347,7 @@ def _alert_admins_daily_summary_failure(date_str: str, state: dict) -> int:
     return notified
 
 
-DAILY_SUMMARY_NOTIFICATION_TITLE = "每日摘要已生成"
+DAILY_SUMMARY_NOTIFICATION_TITLE = "RayNews每日摘要"
 DAILY_SUMMARY_FAILURE_TITLE = "每日摘要生成失败"
 
 
