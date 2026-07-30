@@ -508,4 +508,3 @@ After rebuilding the container:
 2. Force one scheduled failure and verify `/settings` reports streak `1`, active sharing, and no notification.
 3. Force the second scheduled failure and verify suspension plus exactly one notification.
 4. Restore the provider and verify the next scheduled/manual success clears the streak and restores sharing.
-
