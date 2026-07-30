@@ -35,6 +35,7 @@ from models import (
     set_user_settings_for_ai_config_revision,
     set_share_health,
     apply_share_connectivity_transition,
+    record_share_revalidation_failure,
     get_users_with_share_enabled,
     get_daily_summary_inapp_user_ids,
     get_app_state, set_app_state, claim_app_state_flag,
@@ -1695,6 +1696,18 @@ def _compact_share_error(value: str) -> str:
     return "AI connectivity check failed"
 
 
+def _notify_share_suspended(user_id: int, safe_error: str) -> None:
+    _notify_user(
+        user_id,
+        "share_suspended",
+        "共享 API 校验失败，共享已暂停",
+        "系统对你配置的个人 AI API 做连通性校验时失败，共享访问已暂停；"
+        "你的总开关和查看选项均已保留。\n\n"
+        f"失败原因：{safe_error}\n\n"
+        "请到 用户设置 → AI 更新配置。保存并校验成功后系统会自动恢复共享。",
+    )
+
+
 def _apply_share_connectivity_result(
     user_id: int,
     ok: bool,
@@ -1767,16 +1780,46 @@ def _apply_share_connectivity_result(
 
     if was_suspended:
         return "unchanged"
-    _notify_user(
-        user_id,
-        "share_suspended",
-        "共享 API 校验失败，共享已暂停",
-        "系统对你配置的个人 AI API 做连通性校验时失败，共享访问已暂停；"
-        "你的总开关和查看选项均已保留。\n\n"
-        f"失败原因：{safe_error}\n\n"
-        "请到 用户设置 → AI 更新配置。保存并校验成功后系统会自动恢复共享。",
-    )
+    _notify_share_suspended(user_id, safe_error)
     return "suspended"
+
+
+def _apply_share_background_connectivity_result(
+    user_id: int,
+    ok: bool,
+    error: str = "",
+    checked_at: str | None = None,
+    config_revision: int | None = None,
+) -> str:
+    """Apply scheduled probes with a two-consecutive-failure threshold."""
+    import datetime as _dt
+
+    if config_revision is None:
+        config_revision = (get_ai_config(user_id) or {}).get("revision", 0)
+    try:
+        config_revision = int(config_revision)
+    except (TypeError, ValueError):
+        return "validation_failed"
+
+    checked_at = checked_at or _dt.datetime.now().isoformat(timespec="seconds")
+    if ok:
+        return _apply_share_connectivity_result(
+            user_id,
+            True,
+            checked_at=checked_at,
+            config_revision=config_revision,
+        )
+
+    safe_error = _compact_share_error(error)
+    transition = record_share_revalidation_failure(
+        user_id,
+        config_revision,
+        checked_at,
+        safe_error,
+    )
+    if transition == "suspended":
+        _notify_share_suspended(user_id, safe_error)
+    return transition
 
 
 def _run_ai_share_revalidation_once():
@@ -1789,15 +1832,20 @@ def _run_ai_share_revalidation_once():
     suspended, so a later successful check restores their saved preferences.
     """
     user_ids = get_users_with_share_enabled()
+    cycle_checked_at = datetime.now().isoformat(timespec="microseconds")
     for index, user_id in enumerate(user_ids):
-        config = get_ai_config(user_id)
-        body, status = _run_ai_connection_test(config)
-        _apply_share_connectivity_result(
-            user_id,
-            status == 200,
-            body.get("error", "") if status != 200 else "",
-            config_revision=(config or {}).get("revision", 0),
-        )
+        try:
+            config = get_ai_config(user_id)
+            body, status = _run_ai_connection_test(config)
+            _apply_share_background_connectivity_result(
+                user_id,
+                status == 200,
+                body.get("error", "") if status != 200 else "",
+                checked_at=cycle_checked_at,
+                config_revision=(config or {}).get("revision", 0),
+            )
+        except Exception as e:
+            print(f"[share-revalidation] user_id={user_id} failed: {e}")
         if index + 1 < len(user_ids):
             time.sleep(0.5)  # spread requests out instead of bursting every provider at once
 
@@ -5464,6 +5512,29 @@ def _settings_response(settings: dict | None) -> dict:
     safe.setdefault("share_view_translation", 0)
     safe.setdefault("share_view_summary", 0)
     safe.setdefault("share_suspended", 0)
+    safe.setdefault("share_revalidation_failure_streak", 0)
+    safe.setdefault("share_revalidation_last_failure_at", None)
+    safe.setdefault("share_revalidation_last_failure_error", None)
+    try:
+        current_revision = int(safe.get("share_current_config_revision") or 0)
+    except (TypeError, ValueError):
+        current_revision = 0
+    try:
+        failure_revision = (
+            int(safe["share_revalidation_failure_revision"])
+            if safe.get("share_revalidation_failure_revision") is not None
+            else None
+        )
+    except (TypeError, ValueError):
+        failure_revision = None
+    try:
+        failure_streak = int(safe.get("share_revalidation_failure_streak") or 0)
+    except (TypeError, ValueError):
+        failure_streak = 0
+    if failure_streak > 0 and failure_revision != current_revision:
+        safe["share_revalidation_failure_streak"] = 0
+        safe["share_revalidation_last_failure_at"] = None
+        safe["share_revalidation_last_failure_error"] = None
     # On by default, including for accounts with no settings row yet — this must
     # agree with models.get_daily_summary_inapp_user_ids(), which is what
     # actually decides who receives the in-app copy.
@@ -5479,6 +5550,7 @@ def _settings_response(settings: dict | None) -> dict:
     safe.pop("share_last_check_revision", None)
     safe.pop("share_current_config_revision", None)
     safe.pop("share_intent_revision", None)
+    safe.pop("share_revalidation_failure_revision", None)
     return safe
 
 @app.route("/settings", methods=["GET"])
@@ -5671,7 +5743,14 @@ def update_settings():
     else:
         settings = set_user_settings(g.user_id, **data)
     if clear_share_suspension:
-        settings = set_share_health(g.user_id, share_suspended=0)
+        settings = set_share_health(
+            g.user_id,
+            share_suspended=0,
+            share_revalidation_failure_streak=0,
+            share_revalidation_failure_revision=None,
+            share_revalidation_last_failure_at=None,
+            share_revalidation_last_failure_error=None,
+        )
     if not settings:
         return jsonify({"error": "update failed"}), 400
     if share_check_ok:

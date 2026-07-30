@@ -598,46 +598,61 @@ def source_rows(conn: sqlite3.Connection) -> list[dict]:
     last maintenance pass still show up via the `unlinked` query below.
     """
     _ensure_source_tables(conn)
-    # Include article sources not yet in source_categories (e.g. misdetected titles)
-    # so they don't silently disappear from the settings page.
-    unlinked = conn.execute(
-        """
-        SELECT COALESCE(NULLIF(a2.feed_source, ''), a2.source) AS source,
-               COUNT(*) AS article_count,
-               MAX(a2.timestamp) AS latest_timestamp
-        FROM articles a2
-        WHERE COALESCE(NULLIF(a2.feed_source, ''), a2.source) IS NOT NULL
-          AND TRIM(COALESCE(NULLIF(a2.feed_source, ''), a2.source)) != ''
-          AND COALESCE(NULLIF(a2.feed_source, ''), a2.source) NOT IN (SELECT source FROM source_categories)
-        GROUP BY COALESCE(NULLIF(a2.feed_source, ''), a2.source)
-        """
-    ).fetchall()
-    unlinked_rows = [dict(
-        source=row["source"],
-        category="Info",
-        label=local_short_source_name(row["source"]),
-        status="pending",
-        confidence=None,
-        reason="unlinked",
-        sample_titles=None,
-        updated_at=None,
-        article_count=row["article_count"],
-        latest_timestamp=row["latest_timestamp"],
-    ) for row in unlinked]
-
     rows = conn.execute(
         """
+        WITH source_counts AS (
+            SELECT feed_source AS source,
+                   COUNT(*) AS article_count,
+                   MAX(timestamp) AS latest_timestamp
+            FROM articles
+            WHERE feed_source IS NOT NULL AND feed_source != ''
+            GROUP BY feed_source
+
+            UNION ALL
+
+            SELECT source,
+                   COUNT(*) AS article_count,
+                   MAX(timestamp) AS latest_timestamp
+            FROM articles
+            WHERE (feed_source IS NULL OR feed_source = '')
+              AND source IS NOT NULL
+              AND TRIM(source) != ''
+            GROUP BY source
+        ),
+        source_stats AS (
+            SELECT source,
+                   SUM(article_count) AS article_count,
+                   MAX(latest_timestamp) AS latest_timestamp
+            FROM source_counts
+            WHERE source IS NOT NULL AND TRIM(source) != ''
+            GROUP BY source
+        )
         SELECT sc.source, sc.category, sc.label, sc.status, sc.confidence,
                sc.reason, sc.sample_titles, sc.updated_at,
-               COUNT(a.id) AS article_count,
-               MAX(a.timestamp) AS latest_timestamp
+               COALESCE(stats.article_count, 0) AS article_count,
+               stats.latest_timestamp,
+               0 AS is_unlinked
         FROM source_categories sc
-        LEFT JOIN articles a ON COALESCE(NULLIF(a.feed_source, ''), a.source) = sc.source
-        GROUP BY sc.source
-        ORDER BY article_count DESC, sc.source COLLATE NOCASE
+        LEFT JOIN source_stats stats ON stats.source = sc.source
+
+        UNION ALL
+
+        SELECT stats.source, 'Info', NULL, 'pending', NULL,
+               'unlinked', NULL, NULL,
+               stats.article_count, stats.latest_timestamp,
+               1 AS is_unlinked
+        FROM source_stats stats
+        LEFT JOIN source_categories sc ON sc.source = stats.source
+        WHERE sc.source IS NULL
         """
     ).fetchall()
-    result = [dict(row) for row in rows] + unlinked_rows
+    result = []
+    for row in rows:
+        item = dict(row)
+        is_unlinked = bool(item.pop("is_unlinked"))
+        if is_unlinked:
+            item["label"] = local_short_source_name(item["source"])
+        result.append(item)
     result.sort(key=lambda r: (-(r.get("article_count") or 0), (r.get("source") or "").lower()))
     return result
 
