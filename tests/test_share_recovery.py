@@ -603,17 +603,18 @@ def test_periodic_revalidation_does_not_sleep_after_only_user(share_env, monkeyp
     assert sleeps == []
 
 
-def _run_concurrent_connectivity_results(user_id: int, *calls):
+def _run_concurrent_connectivity_results(user_id: int, *calls, apply_result=None):
     start = threading.Barrier(len(calls))
     results = []
     errors = []
     lock = threading.Lock()
+    apply_result = apply_result or web_server._apply_share_connectivity_result
 
     def run(args):
         try:
             models.close_db()
             start.wait(timeout=5)
-            result = web_server._apply_share_connectivity_result(user_id, *args)
+            result = apply_result(user_id, *args)
             with lock:
                 results.append(result)
         except Exception as exc:  # pragma: no cover - surfaced below
@@ -1164,6 +1165,188 @@ def _validated_opted_in(user_id: int, *, suspended: int = 0) -> int:
     return config["revision"]
 
 
+def test_periodic_failure_needs_two_consecutive_cycles(share_env, monkeypatch):
+    _, user_id = share_env
+    revision = _validated_opted_in(user_id)
+    monkeypatch.setattr(
+        web_server,
+        "_run_ai_connection_test",
+        lambda config: ({"error": "AI API HTTP 503"}, 502),
+    )
+    notices = []
+    monkeypatch.setattr(
+        web_server, "_notify_user", lambda *args, **kwargs: notices.append(args)
+    )
+
+    web_server._run_ai_share_revalidation_once()
+    first = models.get_user_settings(user_id)
+    assert first["share_revalidation_failure_streak"] == 1
+    assert first["share_suspended"] == 0
+    assert web_server.is_share_active(first) is True
+    assert notices == []
+
+    web_server._run_ai_share_revalidation_once()
+    second = models.get_user_settings(user_id)
+    assert second["share_revalidation_failure_streak"] == 2
+    assert second["share_suspended"] == 1
+    assert second["share_last_check_revision"] == revision
+    assert [notice[1] for notice in notices] == ["share_suspended"]
+
+
+def test_scheduled_success_resets_failure_streak_before_next_failure(
+    share_env, monkeypatch
+):
+    _, user_id = share_env
+    revision = _validated_opted_in(user_id)
+    notices = []
+    monkeypatch.setattr(
+        web_server, "_notify_user", lambda *args, **kwargs: notices.append(args)
+    )
+
+    assert web_server._apply_share_background_connectivity_result(
+        user_id,
+        False,
+        "AI API HTTP 503",
+        "2026-07-30T10:00:00",
+        revision,
+    ) == "pending_failure"
+    assert models.get_user_settings(user_id)["share_revalidation_failure_streak"] == 1
+
+    assert web_server._apply_share_background_connectivity_result(
+        user_id,
+        True,
+        checked_at="2026-07-30T10:30:00",
+        config_revision=revision,
+    ) == "unchanged"
+    after_success = models.get_user_settings(user_id)
+    assert after_success["share_revalidation_failure_streak"] == 0
+
+    assert web_server._apply_share_background_connectivity_result(
+        user_id,
+        False,
+        "AI API HTTP 503",
+        "2026-07-30T11:00:00",
+        revision,
+    ) == "pending_failure"
+    after_next_failure = models.get_user_settings(user_id)
+    assert after_next_failure["share_revalidation_failure_streak"] == 1
+    assert after_next_failure["share_suspended"] == 0
+    assert notices == []
+
+
+def test_manual_failure_after_pending_scheduled_failure_suspends_immediately(
+    share_env, monkeypatch
+):
+    _, user_id = share_env
+    revision = _validated_opted_in(user_id)
+    notices = []
+    monkeypatch.setattr(
+        web_server, "_notify_user", lambda *args, **kwargs: notices.append(args)
+    )
+    assert web_server._apply_share_background_connectivity_result(
+        user_id,
+        False,
+        "AI API HTTP 503",
+        "2026-07-30T10:00:00",
+        revision,
+    ) == "pending_failure"
+
+    result = web_server._apply_share_connectivity_result(
+        user_id,
+        False,
+        "AI API HTTP 401",
+        "2026-07-30T10:01:00",
+        revision,
+    )
+
+    assert result == "suspended"
+    settings = models.get_user_settings(user_id)
+    assert settings["share_suspended"] == 1
+    assert settings["share_revalidation_failure_streak"] == 0
+    assert [notice[1] for notice in notices] == ["share_suspended"]
+
+
+def test_manual_success_clears_pending_scheduled_failure(share_env, monkeypatch):
+    _, user_id = share_env
+    revision = _validated_opted_in(user_id)
+    notices = []
+    monkeypatch.setattr(
+        web_server, "_notify_user", lambda *args, **kwargs: notices.append(args)
+    )
+    assert web_server._apply_share_background_connectivity_result(
+        user_id,
+        False,
+        "AI API HTTP 503",
+        "2026-07-30T10:00:00",
+        revision,
+    ) == "pending_failure"
+
+    result = web_server._apply_share_connectivity_result(
+        user_id,
+        True,
+        checked_at="2026-07-30T10:01:00",
+        config_revision=revision,
+    )
+
+    assert result == "unchanged"
+    settings = models.get_user_settings(user_id)
+    assert settings["share_revalidation_failure_streak"] == 0
+    assert settings["share_revalidation_failure_revision"] is None
+    assert settings["share_revalidation_last_failure_at"] is None
+    assert settings["share_revalidation_last_failure_error"] is None
+    assert notices == []
+
+
+def test_stale_background_result_leaves_current_state_untouched(
+    share_env, monkeypatch
+):
+    _, user_id = share_env
+    old_revision = _validated_opted_in(user_id)
+    models.set_ai_config(user_id, api_key="replacement-key")
+    before = models.get_user_settings(user_id)
+    notices = []
+    monkeypatch.setattr(
+        web_server, "_notify_user", lambda *args, **kwargs: notices.append(args)
+    )
+
+    result = web_server._apply_share_background_connectivity_result(
+        user_id,
+        False,
+        "AI API HTTP 503",
+        "2026-07-30T10:00:00",
+        old_revision,
+    )
+
+    assert result == "stale"
+    assert models.get_user_settings(user_id) == before
+    assert notices == []
+
+
+def test_explicit_opt_out_clears_pending_scheduled_failure(share_env):
+    client, user_id = share_env
+    revision = _validated_opted_in(user_id)
+    assert models.record_share_revalidation_failure(
+        user_id,
+        revision,
+        "2026-07-30T10:00:00",
+        "AI API HTTP 503",
+    ) == "pending_failure"
+
+    response = client.put(
+        "/settings",
+        json={"share_ai_results": 0},
+        headers=auth_headers(user_id),
+    )
+
+    assert response.status_code == 200
+    settings = models.get_user_settings(user_id)
+    assert settings["share_suspended"] == 0
+    assert settings["share_revalidation_failure_streak"] == 0
+    assert settings["share_revalidation_failure_revision"] is None
+    assert settings["share_revalidation_last_failure_at"] is None
+    assert settings["share_revalidation_last_failure_error"] is None
+
+
 def test_share_revalidation_failure_fields_migrate_and_round_trip(share_env):
     _, user_id = share_env
     settings = _set_user_settings(user_id, theme_preference="system")
@@ -1223,6 +1406,37 @@ def test_second_scheduled_failure_atomically_suspends(share_env):
     assert settings["share_last_check_ok"] == 0
     assert settings["share_last_check_revision"] == revision
     assert web_server.is_share_active(settings) is False
+
+
+def test_concurrent_second_scheduled_failures_suspend_once_and_notify_once(
+    share_env, monkeypatch
+):
+    _, user_id = share_env
+    revision = _validated_opted_in(user_id)
+    assert models.record_share_revalidation_failure(
+        user_id,
+        revision,
+        "2026-07-30T10:00:00",
+        "AI API HTTP 503",
+    ) == "pending_failure"
+    notices = []
+    notices_lock = threading.Lock()
+
+    def record_notice(*args, **kwargs):
+        with notices_lock:
+            notices.append(args)
+
+    monkeypatch.setattr(web_server, "_notify_user", record_notice)
+
+    results = _run_concurrent_connectivity_results(
+        user_id,
+        (False, "AI API HTTP 503", "2026-07-30T11:00:00", revision),
+        (False, "AI API HTTP 503", "2026-07-30T11:00:01", revision),
+        apply_result=web_server._apply_share_background_connectivity_result,
+    )
+
+    assert sorted(results) == ["suspended", "unchanged"]
+    assert [notice[1] for notice in notices] == ["share_suspended"]
 
 
 def test_scheduled_failure_for_opted_out_user_is_ignored(share_env):

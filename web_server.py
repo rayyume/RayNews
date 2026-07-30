@@ -35,6 +35,7 @@ from models import (
     set_user_settings_for_ai_config_revision,
     set_share_health,
     apply_share_connectivity_transition,
+    record_share_revalidation_failure,
     get_users_with_share_enabled,
     get_daily_summary_inapp_user_ids,
     get_app_state, set_app_state, claim_app_state_flag,
@@ -1695,6 +1696,18 @@ def _compact_share_error(value: str) -> str:
     return "AI connectivity check failed"
 
 
+def _notify_share_suspended(user_id: int, safe_error: str) -> None:
+    _notify_user(
+        user_id,
+        "share_suspended",
+        "共享 API 校验失败，共享已暂停",
+        "系统对你配置的个人 AI API 做连通性校验时失败，共享访问已暂停；"
+        "你的总开关和查看选项均已保留。\n\n"
+        f"失败原因：{safe_error}\n\n"
+        "请到 用户设置 → AI 更新配置。保存并校验成功后系统会自动恢复共享。",
+    )
+
+
 def _apply_share_connectivity_result(
     user_id: int,
     ok: bool,
@@ -1767,16 +1780,47 @@ def _apply_share_connectivity_result(
 
     if was_suspended:
         return "unchanged"
-    _notify_user(
-        user_id,
-        "share_suspended",
-        "共享 API 校验失败，共享已暂停",
-        "系统对你配置的个人 AI API 做连通性校验时失败，共享访问已暂停；"
-        "你的总开关和查看选项均已保留。\n\n"
-        f"失败原因：{safe_error}\n\n"
-        "请到 用户设置 → AI 更新配置。保存并校验成功后系统会自动恢复共享。",
-    )
+    _notify_share_suspended(user_id, safe_error)
     return "suspended"
+
+
+def _apply_share_background_connectivity_result(
+    user_id: int,
+    ok: bool,
+    error: str = "",
+    checked_at: str | None = None,
+    config_revision: int | None = None,
+) -> str:
+    """Apply scheduled probes with a two-consecutive-failure threshold."""
+    import datetime as _dt
+
+    if config_revision is None:
+        config_revision = (get_ai_config(user_id) or {}).get("revision", 0)
+    try:
+        config_revision = int(config_revision)
+    except (TypeError, ValueError):
+        return "validation_failed"
+
+    checked_at = checked_at or _dt.datetime.now().isoformat(timespec="seconds")
+    if ok:
+        return _apply_share_connectivity_result(
+            user_id,
+            True,
+            checked_at=checked_at,
+            config_revision=config_revision,
+        )
+
+    safe_error = _compact_share_error(error)
+    transition = record_share_revalidation_failure(
+        user_id,
+        config_revision,
+        checked_at,
+        safe_error,
+        threshold=2,
+    )
+    if transition == "suspended":
+        _notify_share_suspended(user_id, safe_error)
+    return transition
 
 
 def _run_ai_share_revalidation_once():
@@ -1792,7 +1836,7 @@ def _run_ai_share_revalidation_once():
     for index, user_id in enumerate(user_ids):
         config = get_ai_config(user_id)
         body, status = _run_ai_connection_test(config)
-        _apply_share_connectivity_result(
+        _apply_share_background_connectivity_result(
             user_id,
             status == 200,
             body.get("error", "") if status != 200 else "",
@@ -5671,7 +5715,14 @@ def update_settings():
     else:
         settings = set_user_settings(g.user_id, **data)
     if clear_share_suspension:
-        settings = set_share_health(g.user_id, share_suspended=0)
+        settings = set_share_health(
+            g.user_id,
+            share_suspended=0,
+            share_revalidation_failure_streak=0,
+            share_revalidation_failure_revision=None,
+            share_revalidation_last_failure_at=None,
+            share_revalidation_last_failure_error=None,
+        )
     if not settings:
         return jsonify({"error": "update failed"}), 400
     if share_check_ok:

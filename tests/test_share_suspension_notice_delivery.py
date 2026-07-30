@@ -105,6 +105,34 @@ def test_a_failed_check_suspends_sharing_and_delivers_both_channels(share_user, 
     assert "共享" in sent_emails[0]["subject"]
 
 
+def test_periodic_failure_delivers_only_after_second_cycle(
+    share_user, sent_emails, monkeypatch
+):
+    monkeypatch.setattr(
+        web_server,
+        "_run_ai_connection_test",
+        lambda config: ({"error": "AI API HTTP 503"}, 502),
+    )
+
+    web_server._run_ai_share_revalidation_once()
+
+    first = models.get_user_settings(share_user)
+    assert first["share_revalidation_failure_streak"] == 1
+    assert first["share_suspended"] == 0
+    assert models.list_notifications(share_user) == []
+    assert sent_emails == []
+
+    web_server._run_ai_share_revalidation_once()
+
+    second = models.get_user_settings(share_user)
+    assert second["share_revalidation_failure_streak"] == 2
+    assert second["share_suspended"] == 1
+    assert [item["type"] for item in models.list_notifications(share_user)] == [
+        "share_suspended"
+    ]
+    assert len(sent_emails) == 1
+
+
 def test_the_notification_address_wins_over_the_account_address(share_user, sent_emails):
     models.set_user_settings(
         share_user,
