@@ -26,6 +26,7 @@ def test_settings_response_exposes_safe_pending_revalidation_failure_fields_only
         "share_revalidation_last_failure_at": "2026-07-30T10:00:00",
         "share_revalidation_last_failure_error": "AI API HTTP 503",
         "share_revalidation_failure_revision": 9,
+        "share_current_config_revision": 9,
     })
 
     assert response["share_revalidation_failure_streak"] == 1
@@ -37,6 +38,22 @@ def test_settings_response_exposes_safe_pending_revalidation_failure_fields_only
     assert defaults["share_revalidation_failure_streak"] == 0
     assert defaults["share_revalidation_last_failure_at"] is None
     assert defaults["share_revalidation_last_failure_error"] is None
+
+
+def test_settings_response_hides_pending_failure_from_a_stale_config_revision():
+    response = web_server._settings_response({
+        "share_revalidation_failure_streak": 1,
+        "share_revalidation_last_failure_at": "2026-07-30T10:00:00",
+        "share_revalidation_last_failure_error": "AI API HTTP 503",
+        "share_revalidation_failure_revision": 8,
+        "share_current_config_revision": 9,
+    })
+
+    assert response["share_revalidation_failure_streak"] == 0
+    assert response["share_revalidation_last_failure_at"] is None
+    assert response["share_revalidation_last_failure_error"] is None
+    assert "share_revalidation_failure_revision" not in response
+    assert "share_current_config_revision" not in response
 
 
 def _source_db() -> sqlite3.Connection:

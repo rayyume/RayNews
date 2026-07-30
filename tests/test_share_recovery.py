@@ -854,6 +854,43 @@ def test_share_error_drops_provider_body_and_redacts_common_credentials(share_en
     assert "provider response body" not in persisted
 
 
+def test_scheduled_error_is_sanitized_from_wrapper_through_settings_endpoint(
+    share_env,
+):
+    client, user_id = share_env
+    revision = _validated_opted_in(user_id)
+    secrets = (
+        "bearer-scheduled-secret",
+        "scheduled-api-key",
+        "scheduled-provider-body",
+    )
+    raw_error = (
+        "AI API HTTP 401: provider response body scheduled-provider-body; "
+        "Authorization: Bearer bearer-scheduled-secret; "
+        "api_key=scheduled-api-key"
+    )
+
+    result = web_server._apply_share_background_connectivity_result(
+        user_id,
+        False,
+        raw_error,
+        checked_at="2026-07-30T10:00:00",
+        config_revision=revision,
+    )
+    response = client.get("/settings", headers=auth_headers(user_id))
+
+    assert result == "pending_failure"
+    assert response.status_code == 200
+    persisted = models.get_user_settings(user_id)
+    data = response.get_json()
+    assert persisted["share_revalidation_last_failure_error"] == "AI API HTTP 401"
+    assert data["share_revalidation_last_failure_error"] == "AI API HTTP 401"
+    serialized = f"{persisted!r}\n{response.get_data(as_text=True)}"
+    for secret in secrets:
+        assert secret not in serialized
+    assert "provider response body" not in serialized
+
+
 def test_saving_new_api_tests_and_restores_suspended_share(share_env, monkeypatch):
     client, user_id = share_env
     opted_in(user_id, suspended=1)
@@ -1193,6 +1230,124 @@ def test_periodic_failure_needs_two_consecutive_cycles(share_env, monkeypatch):
     assert [notice[1] for notice in notices] == ["share_suspended"]
 
 
+def test_concurrent_duplicate_failures_from_same_scheduled_cycle_count_once(
+    share_env, monkeypatch
+):
+    _, user_id = share_env
+    revision = _validated_opted_in(user_id)
+    notices = []
+    notices_lock = threading.Lock()
+
+    def record_notice(*args, **kwargs):
+        with notices_lock:
+            notices.append(args)
+
+    monkeypatch.setattr(web_server, "_notify_user", record_notice)
+
+    results = _run_concurrent_connectivity_results(
+        user_id,
+        (False, "AI API HTTP 503", "2026-07-30T10:00:00", revision),
+        (False, "AI API HTTP 503", "2026-07-30T10:00:00", revision),
+        apply_result=web_server._apply_share_background_connectivity_result,
+    )
+
+    assert sorted(results) == ["pending_failure", "unchanged"]
+    settings = models.get_user_settings(user_id)
+    assert settings["share_revalidation_failure_streak"] == 1
+    assert settings["share_suspended"] == 0
+    assert notices == []
+
+
+def test_periodic_revalidation_continues_after_one_users_state_application_error(
+    share_env, monkeypatch, capsys
+):
+    _, first_user_id = share_env
+    second_user_id = models.create_user(
+        "share-second@example.com", "pw", "share-second"
+    )["id"]
+    for user_id in (first_user_id, second_user_id):
+        _validated_opted_in(user_id)
+
+    original_record_failure = web_server.record_share_revalidation_failure
+
+    def fail_first_state_application(user_id, *args, **kwargs):
+        if user_id == first_user_id:
+            raise RuntimeError("state application exploded")
+        return original_record_failure(user_id, *args, **kwargs)
+
+    monkeypatch.setattr(
+        web_server,
+        "get_users_with_share_enabled",
+        lambda: [first_user_id, second_user_id],
+    )
+    monkeypatch.setattr(
+        web_server,
+        "_run_ai_connection_test",
+        lambda config: ({"error": "AI API HTTP 503"}, 502),
+    )
+    monkeypatch.setattr(
+        web_server, "record_share_revalidation_failure", fail_first_state_application
+    )
+    monkeypatch.setattr(web_server.time, "sleep", lambda seconds: None)
+
+    web_server._run_ai_share_revalidation_once()
+
+    assert (
+        models.get_user_settings(first_user_id)[
+            "share_revalidation_failure_streak"
+        ]
+        == 0
+    )
+    assert (
+        models.get_user_settings(second_user_id)[
+            "share_revalidation_failure_streak"
+        ]
+        == 1
+    )
+    output = capsys.readouterr().out
+    assert str(first_user_id) in output
+    assert "state application exploded" in output
+
+
+def test_scheduled_failure_transaction_rolls_back_non_sqlite_exceptions(
+    share_env, monkeypatch
+):
+    _, user_id = share_env
+    revision = _validated_opted_in(user_id)
+    raw_db = models.get_db()
+
+    class FailingUpdateConnection:
+        def __init__(self, connection):
+            self.connection = connection
+            self.rollback_calls = 0
+
+        def execute(self, sql, *args, **kwargs):
+            if sql.startswith("UPDATE user_settings"):
+                raise RuntimeError("state update hook failed")
+            return self.connection.execute(sql, *args, **kwargs)
+
+        def commit(self):
+            return self.connection.commit()
+
+        def rollback(self):
+            self.rollback_calls += 1
+            return self.connection.rollback()
+
+    failing_db = FailingUpdateConnection(raw_db)
+    monkeypatch.setattr(models, "get_db", lambda: failing_db)
+
+    with pytest.raises(RuntimeError, match="state update hook failed"):
+        models.record_share_revalidation_failure(
+            user_id,
+            revision,
+            "2026-07-30T10:00:00",
+            "AI API HTTP 503",
+        )
+
+    assert failing_db.rollback_calls == 1
+    assert raw_db.in_transaction is False
+
+
 def test_scheduled_success_resets_failure_streak_before_next_failure(
     share_env, monkeypatch
 ):
@@ -1320,6 +1475,44 @@ def test_stale_background_result_leaves_current_state_untouched(
     assert result == "stale"
     assert models.get_user_settings(user_id) == before
     assert notices == []
+
+
+def test_missing_ai_config_uses_revision_zero_and_suspends_after_two_cycles(
+    share_env, monkeypatch
+):
+    _, user_id = share_env
+    _set_user_settings(
+        user_id,
+        share_ai_results=1,
+        share_view_summary=1,
+        share_suspended=0,
+        share_last_check_ok=0,
+    )
+    notices = []
+    monkeypatch.setattr(
+        web_server, "_notify_user", lambda *args, **kwargs: notices.append(args)
+    )
+
+    first = web_server._apply_share_background_connectivity_result(
+        user_id,
+        False,
+        "AI API HTTP 503",
+        checked_at="2026-07-30T10:00:00",
+    )
+    second = web_server._apply_share_background_connectivity_result(
+        user_id,
+        False,
+        "AI API HTTP 503",
+        checked_at="2026-07-30T11:00:00",
+    )
+
+    assert (first, second) == ("pending_failure", "suspended")
+    settings = models.get_user_settings(user_id)
+    assert settings["share_revalidation_failure_streak"] == 2
+    assert settings["share_revalidation_failure_revision"] == 0
+    assert settings["share_suspended"] == 1
+    assert settings["share_last_check_revision"] == 0
+    assert [notice[1] for notice in notices] == ["share_suspended"]
 
 
 def test_explicit_opt_out_clears_pending_scheduled_failure(share_env):

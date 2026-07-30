@@ -3314,9 +3314,14 @@ async function refreshShareStateAfterCheck(shareCheck) {
 function updateShareSubToggleState() {
   const masterOn = document.getElementById('shareAiResults').checked;
   const suspended = !!userAutoSettings?.share_suspended;
+  const temporarilyUnavailable =
+    masterOn
+    && !!userAutoSettings?.share_ai_results
+    && !suspended
+    && !userAutoSettings?.share_active;
   ['shareViewTitle', 'shareViewTranslation', 'shareViewSummary'].forEach(id => {
     const el = document.getElementById(id);
-    el.disabled = !masterOn || suspended;
+    el.disabled = !masterOn || suspended || temporarilyUnavailable;
     if (!masterOn) el.checked = false;
   });
   const hint = document.getElementById('shareSubHint');
@@ -3324,7 +3329,9 @@ function updateShareSubToggleState() {
     ? '需先开启共享 AI 结果'
     : (suspended
       ? 'API 校验失败，共享已暂停。更新 API 并校验成功后会自动恢复，无需重新开启。'
-      : '');
+      : (temporarilyUnavailable
+        ? '当前 AI 配置尚未通过校验，共享暂时不可用。完成校验后选项会自动恢复。'
+        : ''));
   hint.style.display = hint.textContent ? '' : 'none';
 }
 
@@ -3342,13 +3349,21 @@ async function loadShareTab() {
       '⏸ API 校验失败，共享已暂停。原有选项已保留，API 恢复后会自动重新生效。'
       + (s.share_last_check_error ? ' 原因：' + s.share_last_check_error : '');
     statusEl.style.color = '#e5a84d';
-  } else if (Number(s.share_revalidation_failure_streak || 0) === 1) {
+  } else if (
+    s.share_active
+    && Number(s.share_revalidation_failure_streak || 0) === 1
+  ) {
     statusEl.textContent =
       '⚠️ 后台复核暂时失败（1/2），共享仍在运行；'
       + '下次复核成功将自动清除，连续失败才会暂停。'
       + (s.share_revalidation_last_failure_error
         ? ' 原因：' + s.share_revalidation_last_failure_error
         : '');
+    statusEl.style.color = '#e5a84d';
+  } else if (s.share_ai_results && !s.share_active) {
+    statusEl.textContent =
+      '⚠️ 当前 AI 配置尚未通过校验，共享暂时不可用。'
+      + '请保存共享设置或测试连接以完成校验。';
     statusEl.style.color = '#e5a84d';
   } else if (!s.share_last_check_at) {
     statusEl.textContent = '';

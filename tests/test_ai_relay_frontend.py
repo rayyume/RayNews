@@ -127,6 +127,81 @@ vm.runInContext({json.dumps(_share_tab_block())}, context);
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def test_share_tab_marks_unvalidated_inactive_intent_unavailable_and_disables_controls():
+    """A stale 1/2 value must not claim an inactive share is still running."""
+    script = rf"""
+const assert = require('assert');
+const vm = require('vm');
+const elements = Object.fromEntries([
+  'shareAiResults', 'shareViewTitle', 'shareViewTranslation', 'shareViewSummary',
+].map(id => [id, {{ checked: false, disabled: false }}]));
+elements.shareSubHint = {{ textContent: '', style: {{ display: '' }} }};
+elements.shareCheckStatus = {{ textContent: '', style: {{ color: '' }} }};
+const context = {{
+  userAutoSettings: {{
+    share_ai_results: true,
+    share_active: false,
+    share_suspended: false,
+    share_view_title: true,
+    share_view_translation: true,
+    share_view_summary: true,
+    share_revalidation_failure_streak: 1,
+    share_revalidation_last_failure_error: 'AI API HTTP 503',
+  }},
+  loadUserSettings: async () => {{}},
+  document: {{ getElementById: id => elements[id] }},
+}};
+vm.createContext(context);
+vm.runInContext({json.dumps(_share_tab_block())}, context);
+(async () => {{
+  await context.loadShareTab();
+  assert.doesNotMatch(elements.shareCheckStatus.textContent, /共享仍在运行/);
+  assert.doesNotMatch(elements.shareCheckStatus.textContent, /后台复核暂时失败/);
+  assert.match(elements.shareCheckStatus.textContent, /当前 AI 配置尚未通过校验/);
+  assert.match(elements.shareCheckStatus.textContent, /共享暂时不可用/);
+  assert.match(elements.shareSubHint.textContent, /共享暂时不可用/);
+  for (const id of ['shareViewTitle', 'shareViewTranslation', 'shareViewSummary']) {{
+    assert.equal(elements[id].disabled, true);
+    assert.equal(elements[id].checked, true);
+  }}
+}})().catch(error => {{ console.error(error && error.stack ? error.stack : error); process.exitCode = 1; }});
+"""
+    result = subprocess.run(["node", "-e", script], cwd=ROOT,
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_share_subcontrols_stay_editable_while_enabling_new_unsaved_intent():
+    """Inactive persisted intent is unavailable; a newly checked switch is still editable."""
+    script = rf"""
+const assert = require('assert');
+const vm = require('vm');
+const elements = Object.fromEntries([
+  'shareViewTitle', 'shareViewTranslation', 'shareViewSummary',
+].map(id => [id, {{ checked: false, disabled: false }}]));
+elements.shareAiResults = {{ checked: true, disabled: false }};
+elements.shareSubHint = {{ textContent: '', style: {{ display: '' }} }};
+const context = {{
+  userAutoSettings: {{
+    share_ai_results: false,
+    share_active: false,
+    share_suspended: false,
+  }},
+  document: {{ getElementById: id => elements[id] }},
+}};
+vm.createContext(context);
+vm.runInContext({json.dumps(_share_tab_block())}, context);
+context.updateShareSubToggleState();
+for (const id of ['shareViewTitle', 'shareViewTranslation', 'shareViewSummary']) {{
+  assert.equal(elements[id].disabled, false);
+}}
+assert.equal(elements.shareSubHint.textContent, '');
+"""
+    result = subprocess.run(["node", "-e", script], cwd=ROOT,
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def test_failed_share_checks_refresh_effective_title_access_for_save_and_manual_probe():
     script = f"""
 const assert = require('assert');

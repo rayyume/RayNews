@@ -1816,7 +1816,6 @@ def _apply_share_background_connectivity_result(
         config_revision,
         checked_at,
         safe_error,
-        threshold=2,
     )
     if transition == "suspended":
         _notify_share_suspended(user_id, safe_error)
@@ -1833,15 +1832,20 @@ def _run_ai_share_revalidation_once():
     suspended, so a later successful check restores their saved preferences.
     """
     user_ids = get_users_with_share_enabled()
+    cycle_checked_at = datetime.now().isoformat(timespec="microseconds")
     for index, user_id in enumerate(user_ids):
-        config = get_ai_config(user_id)
-        body, status = _run_ai_connection_test(config)
-        _apply_share_background_connectivity_result(
-            user_id,
-            status == 200,
-            body.get("error", "") if status != 200 else "",
-            config_revision=(config or {}).get("revision", 0),
-        )
+        try:
+            config = get_ai_config(user_id)
+            body, status = _run_ai_connection_test(config)
+            _apply_share_background_connectivity_result(
+                user_id,
+                status == 200,
+                body.get("error", "") if status != 200 else "",
+                checked_at=cycle_checked_at,
+                config_revision=(config or {}).get("revision", 0),
+            )
+        except Exception as e:
+            print(f"[share-revalidation] user_id={user_id} failed: {e}")
         if index + 1 < len(user_ids):
             time.sleep(0.5)  # spread requests out instead of bursting every provider at once
 
@@ -5511,6 +5515,26 @@ def _settings_response(settings: dict | None) -> dict:
     safe.setdefault("share_revalidation_failure_streak", 0)
     safe.setdefault("share_revalidation_last_failure_at", None)
     safe.setdefault("share_revalidation_last_failure_error", None)
+    try:
+        current_revision = int(safe.get("share_current_config_revision") or 0)
+    except (TypeError, ValueError):
+        current_revision = 0
+    try:
+        failure_revision = (
+            int(safe["share_revalidation_failure_revision"])
+            if safe.get("share_revalidation_failure_revision") is not None
+            else None
+        )
+    except (TypeError, ValueError):
+        failure_revision = None
+    try:
+        failure_streak = int(safe.get("share_revalidation_failure_streak") or 0)
+    except (TypeError, ValueError):
+        failure_streak = 0
+    if failure_streak > 0 and failure_revision != current_revision:
+        safe["share_revalidation_failure_streak"] = 0
+        safe["share_revalidation_last_failure_at"] = None
+        safe["share_revalidation_last_failure_error"] = None
     # On by default, including for accounts with no settings row yet — this must
     # agree with models.get_daily_summary_inapp_user_ids(), which is what
     # actually decides who receives the in-app copy.

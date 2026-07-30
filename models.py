@@ -1169,11 +1169,9 @@ def record_share_revalidation_failure(
     config_revision: int,
     checked_at: str,
     error: str,
-    threshold: int = 2,
 ) -> str:
-    """Persist a scheduled failure and atomically claim its suspension edge."""
+    """Persist one cycle's failure and claim the fixed two-strike edge."""
     config_revision = int(config_revision)
-    threshold = int(threshold)
     db = get_db()
     try:
         db.execute("BEGIN IMMEDIATE")
@@ -1181,7 +1179,8 @@ def record_share_revalidation_failure(
             "SELECT s.share_ai_results, s.share_suspended, "
             "s.share_revalidation_failure_streak, "
             "s.share_revalidation_failure_revision, "
-            "c.revision AS current_config_revision "
+            "s.share_revalidation_last_failure_at, "
+            "COALESCE(c.revision, 0) AS current_config_revision "
             "FROM user_settings AS s "
             "LEFT JOIN ai_configs AS c ON c.user_id = s.user_id "
             "WHERE s.user_id = ?",
@@ -1193,6 +1192,12 @@ def record_share_revalidation_failure(
         if row["current_config_revision"] != config_revision:
             db.rollback()
             return "stale"
+        if (
+            row["share_revalidation_failure_revision"] == config_revision
+            and row["share_revalidation_last_failure_at"] == checked_at
+        ):
+            db.rollback()
+            return "unchanged"
         if row["share_suspended"]:
             db.rollback()
             return "unchanged"
@@ -1203,7 +1208,7 @@ def record_share_revalidation_failure(
             else 0
         )
         next_streak = prior_streak + 1
-        if next_streak < threshold:
+        if next_streak < 2:
             db.execute(
                 "UPDATE user_settings "
                 "SET share_revalidation_failure_streak = ?, "
@@ -1241,7 +1246,7 @@ def record_share_revalidation_failure(
         )
         db.commit()
         return "suspended"
-    except sqlite3.DatabaseError:
+    except Exception:
         db.rollback()
         raise
 
