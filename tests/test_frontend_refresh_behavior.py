@@ -768,6 +768,9 @@ assert.equal(compactBullets, '<ul><li>first</li><li>second</li></ul>');
 
 const ordered = context.renderMarkdown('1. first\\n2. second');
 assert.equal(ordered, '<ol><li>first</li><li>second</li></ol>');
+
+const spacedOrdered = context.renderMarkdown('1. first\\n\\n2. second\\n\\n3. third');
+assert.equal(spacedOrdered, '<ol><li>first</li><li>second</li><li>third</li></ol>');
 """,
     )
 
