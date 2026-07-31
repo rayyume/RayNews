@@ -39,7 +39,8 @@ from models import (
     get_users_with_share_enabled,
     get_daily_summary_inapp_user_ids,
     get_app_state, set_app_state, claim_app_state_flag,
-    claim_app_state_incident, clear_app_state_incident,
+    claim_app_state_incident,
+    complete_app_state_incident,
     get_system_ai_config, set_system_ai_config,
     create_invitation_code,
     list_pending_invitations, delete_invitation_code, delete_invitation_code_by_code,
@@ -1559,14 +1560,6 @@ SYSTEM_AI_ALERTED_STATE_KEY = "system_ai_failure_alerted"
 SYSTEM_AI_ALERT_LAST_NOTIFIED_STATE_KEY = "system_ai_alert_last_notified_at"
 
 
-def _system_ai_alert_already_sent() -> bool:
-    try:
-        return get_app_state(SYSTEM_AI_ALERTED_STATE_KEY) == "1"
-    except Exception as exc:
-        print(f"[system-ai] alert state read failed: {exc}")
-        return False
-
-
 def _system_ai_incident_is_active() -> bool:
     try:
         return get_app_state(SYSTEM_AI_ALERTED_STATE_KEY) in {"1", "2"}
@@ -1601,12 +1594,16 @@ def _release_system_ai_alert() -> None:
         print(f"[system-ai] alert state release failed: {exc}")
 
 
-def _clear_system_ai_alert() -> str:
-    """Clear the persisted incident, returning its prior state."""
+def _complete_system_ai_alert() -> str:
+    """Close an incident and persist its notified-state cooldown together."""
     try:
-        return clear_app_state_incident(SYSTEM_AI_ALERTED_STATE_KEY)
+        return complete_app_state_incident(
+            SYSTEM_AI_ALERTED_STATE_KEY,
+            SYSTEM_AI_ALERT_LAST_NOTIFIED_STATE_KEY,
+            now=time.time(),
+        )
     except Exception as exc:
-        print(f"[system-ai] alert state clear failed: {exc}")
+        print(f"[system-ai] alert completion failed: {exc}")
         return "0"
 
 
@@ -1654,15 +1651,14 @@ def _note_system_ai_success() -> None:
     # Either signal means admins are owed a recovery notice: the persisted flag
     # covers an outage that started before a restart, the in-memory one covers a
     # deployment whose state table is momentarily unreadable.
-    prior_state = _clear_system_ai_alert()
+    prior_state = _complete_system_ai_alert()
     recovered = prior_state == "1" or (alerted_here and prior_state != "2")
     if recovered:
-        if _notify_admins(
+        _notify_admins(
             "system_ai_recovered",
             SYSTEM_AI_RECOVERED_TITLE,
             "服务端 AI 调用已恢复正常，自动摘要、翻译、标题精简和每日摘要等后台任务会继续运行。",
-        ):
-            _record_system_ai_notification_time()
+        )
 
 
 def _note_system_ai_failure(job: str, error) -> None:
@@ -1699,6 +1695,9 @@ def _note_system_ai_failure(job: str, error) -> None:
     )
     print(f"[system-ai] {failures} consecutive failures ({', '.join(jobs)}): {reason}")
     if _notify_admins("system_ai_failed", SYSTEM_AI_FAILURE_TITLE, body) == 0:
+        # A zero means no durable in-app notice was created. Release rather
+        # than cooldown so a later provider failure can retry delivery; an
+        # email-only failure remains deduplicated by its separate alert path.
         _release_system_ai_alert()
     else:
         _record_system_ai_notification_time()

@@ -969,6 +969,8 @@ def claim_app_state_incident(
         if row and row["value"] in {"1", "2"}:
             db.rollback()
             return "active"
+        # The value is an epoch timestamp for numeric cooldown math; app_state
+        # updated_at remains its independent ISO-8601 audit timestamp.
         last_row = db.execute(
             "SELECT value FROM app_state WHERE key = ?", (last_notified_key,)
         ).fetchone()
@@ -990,18 +992,35 @@ def claim_app_state_incident(
         raise
 
 
-def clear_app_state_incident(key: str) -> str:
-    """Atomically clear an incident and return its prior state."""
+def complete_app_state_incident(
+    key: str,
+    last_notified_key: str,
+    now: float | None = None,
+) -> str:
+    """Atomically close an incident and start cooldown for a notified one.
+
+    ``app_state.value`` for ``last_notified_key`` is intentionally an epoch
+    timestamp because cooldown calculations use numeric seconds. ``updated_at``
+    remains the table's ISO-8601 audit field and is never used for that math.
+    """
     db = get_db()
+    current = time.time() if now is None else float(now)
     try:
         db.execute("BEGIN IMMEDIATE")
         row = db.execute("SELECT value FROM app_state WHERE key = ?", (key,)).fetchone()
         prior = str(row["value"]) if row else "0"
+        updated_at = datetime.now().isoformat(timespec="seconds")
         db.execute(
             "INSERT INTO app_state (key, value, updated_at) VALUES (?, '0', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = '0', updated_at = excluded.updated_at",
-            (key, datetime.now().isoformat(timespec="seconds")),
+            (key, updated_at),
         )
+        if prior == "1":
+            db.execute(
+                "INSERT INTO app_state (key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                (last_notified_key, str(current), updated_at),
+            )
         db.commit()
         return prior
     except Exception:

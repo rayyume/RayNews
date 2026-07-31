@@ -172,6 +172,21 @@ def test_system_ai_alert_can_be_sent_after_cooldown(alerts, monkeypatch):
     assert [item["type"] for item in alerts] == ["system_ai_failed"] * 2
 
 
+def test_recovery_records_cooldown_before_email_delivery(alerts, monkeypatch):
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
+    _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
+
+    # Simulate the legacy post-delivery timestamp write being interrupted.
+    monkeypatch.setattr(web_server, "_record_system_ai_notification_time", lambda: None)
+    clock["now"] += web_server.SYSTEM_AI_ALERT_COOLDOWN_SECONDS + 1
+    _success(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD)
+
+    assert float(web_server.get_app_state(
+        web_server.SYSTEM_AI_ALERT_LAST_NOTIFIED_STATE_KEY
+    )) == clock["now"]
+
+
 def test_a_new_outage_after_a_recovery_is_suppressed_during_cooldown(alerts):
     _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
     _success(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD)
