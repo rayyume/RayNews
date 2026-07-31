@@ -771,6 +771,15 @@ assert.equal(ordered, '<ol><li>first</li><li>second</li></ol>');
 
 const spacedOrdered = context.renderMarkdown('1. first\\n\\n2. second\\n\\n3. third');
 assert.equal(spacedOrdered, '<ol><li>first</li><li>second</li><li>third</li></ol>');
+
+const orderedThenBullets = context.renderMarkdown('1. first\\n\\n2. second\\n\\n- bullet');
+assert.equal(orderedThenBullets, '<ol><li>first</li><li>second</li></ol></p><p><ul><li>bullet</li></ul>');
+
+const orderedThenParagraph = context.renderMarkdown('1. first\\n\\n2. second\\n\\nA paragraph');
+assert.equal(orderedThenParagraph, '<ol><li>first</li><li>second</li></ol></p><p>A paragraph');
+
+const skippedSourceNumber = context.renderMarkdown('1. first\\n\\n3. third');
+assert.equal(skippedSourceNumber, '<ol><li>first</li><li>third</li></ol>');
 """,
     )
 
