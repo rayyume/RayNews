@@ -39,6 +39,11 @@ def _fail(times, job="自动摘要", error="401 invalid api key"):
         web_server._note_system_ai_failure(job, error)
 
 
+def _success(times):
+    for _ in range(times):
+        web_server._note_system_ai_success()
+
+
 def test_a_few_failures_stay_quiet(alerts):
     _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD - 1)
     assert alerts == []
@@ -111,7 +116,7 @@ def test_recovery_is_announced_once_after_an_alert(alerts):
     _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
     alerts.clear()
 
-    web_server._note_system_ai_success()
+    _success(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD)
     assert [a["type"] for a in alerts] == ["system_ai_recovered"] * 2
 
     # Nothing further to announce while it keeps working.
@@ -120,9 +125,31 @@ def test_recovery_is_announced_once_after_an_alert(alerts):
     assert alerts == []
 
 
+def test_system_ai_recovery_requires_consecutive_successes(alerts):
+    _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
+    alerts.clear()
+
+    _success(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD - 1)
+    assert alerts == []
+
+    web_server._note_system_ai_success()
+    assert [item["type"] for item in alerts] == ["system_ai_recovered"] * 2
+
+
+def test_failure_before_recovery_resets_the_success_streak(alerts):
+    _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
+    alerts.clear()
+
+    _success(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD - 1)
+    web_server._note_system_ai_failure("自动摘要", "503")
+    _success(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD - 1)
+
+    assert alerts == []
+
+
 def test_a_new_outage_after_a_recovery_alerts_again(alerts):
     _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
-    web_server._note_system_ai_success()
+    _success(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD)
     alerts.clear()
 
     _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
@@ -184,10 +211,11 @@ def test_admin_connection_test_reports_recovery_without_waiting_for_a_job(alerts
 
     monkeypatch.setattr(web_server, "get_system_ai_config", lambda: {"enabled": True})
     monkeypatch.setattr(web_server, "_run_ai_connection_test", lambda config: ({"ok": True}, 200))
-    with web_server.app.test_request_context("/admin/system-ai-config/test", method="POST"):
-        g.user_id = 1
-        g.user_role = "admin"
-        web_server.admin_system_ai_test_connection.__wrapped__()
+    for _ in range(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD):
+        with web_server.app.test_request_context("/admin/system-ai-config/test", method="POST"):
+            g.user_id = 1
+            g.user_role = "admin"
+            web_server.admin_system_ai_test_connection.__wrapped__()
 
     assert [a["type"] for a in alerts] == ["system_ai_recovered"] * 2
 
@@ -329,7 +357,7 @@ def test_fixing_the_config_sends_the_recovery_notice(admin_with_auto_jobs, alert
     alerts.clear()
 
     # The admin saves a working config and the next job call succeeds.
-    web_server._note_system_ai_success()
+    _success(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD)
 
     assert [a["type"] for a in alerts] == ["system_ai_recovered"] * 2
 
@@ -357,7 +385,7 @@ def test_after_recovery_a_new_outage_alerts_again_across_a_restart(admin_with_au
     monkeypatch.setattr(web_server, "get_system_ai_config", lambda: {"enabled": 0, "api_key": ""})
     for _ in range(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD):
         web_server._system_auto_config("auto_summary_enabled")
-    web_server._note_system_ai_success()          # fixed
+    _success(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD)  # fixed
     alerts.clear()
 
     web_server._system_ai_health.update(
@@ -377,7 +405,7 @@ def test_the_recovery_notice_is_owed_even_if_the_alert_predates_the_restart(
     web_server._system_ai_health.update(
         {"failures": 0, "alerted": False, "last_error": "", "jobs": []})   # restart
 
-    web_server._note_system_ai_success()
+    _success(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD)
 
     assert [a["type"] for a in alerts] == ["system_ai_recovered"] * 2
 
@@ -430,10 +458,10 @@ def test_a_real_call_that_returns_is_what_clears_an_outage(alerts, monkeypatch):
         web_server._note_system_ai_failure("自动摘要", "AI API HTTP 401: Invalid API key.")
     alerts.clear()
 
-    summary, cached = web_server._generate_article_summary(
-        1, {"api_key": "k", "endpoint": "e", "model": "m"})
-
-    assert (summary, cached) == ("fresh summary", False)
+    for _ in range(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD):
+        summary, cached = web_server._generate_article_summary(
+            1, {"api_key": "k", "endpoint": "e", "model": "m"})
+        assert (summary, cached) == ("fresh summary", False)
     assert [a["type"] for a in alerts] == ["system_ai_recovered"] * 2
 
 

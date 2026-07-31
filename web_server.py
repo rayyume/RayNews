@@ -1535,10 +1535,15 @@ def _clear_email_delivery_failure_alert() -> None:
 SYSTEM_AI_FAILURE_ALERT_THRESHOLD = int(
     os.environ.get("SYSTEM_AI_FAILURE_ALERT_THRESHOLD", "3")
 )
+SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD = max(
+    1, int(os.environ.get("SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD", "3"))
+)
 SYSTEM_AI_FAILURE_TITLE = "服务端 AI 调用连续失败"
 SYSTEM_AI_RECOVERED_TITLE = "服务端 AI 已恢复"
 
-_system_ai_health = {"failures": 0, "alerted": False, "last_error": "", "jobs": []}
+_system_ai_health = {
+    "failures": 0, "successes": 0, "alerted": False, "last_error": "", "jobs": [],
+}
 _system_ai_health_lock = threading.Lock()
 
 
@@ -1595,7 +1600,9 @@ def _reset_system_ai_health() -> None:
     config, so a fresh key starts from zero (and can alert again if it is also
     broken, instead of being muted by the previous config's flag)."""
     with _system_ai_health_lock:
-        _system_ai_health.update({"failures": 0, "alerted": False, "last_error": "", "jobs": []})
+        _system_ai_health.update(
+            {"failures": 0, "successes": 0, "alerted": False, "last_error": "", "jobs": []}
+        )
     try:
         set_app_state(SYSTEM_AI_ALERTED_STATE_KEY, "0")
     except Exception as exc:
@@ -1606,16 +1613,25 @@ def _note_system_ai_success() -> None:
     """A system-AI call came back. Ends the streak, and if admins were told the
     AI was down, tells them it is back — matching the share_suspended /
     share_restored pair users already get."""
+    persisted_alerted = _system_ai_alert_already_sent()
     with _system_ai_health_lock:
-        streak = _system_ai_health["failures"]
         alerted_here = _system_ai_health["alerted"]
-        _system_ai_health.update({"failures": 0, "alerted": False, "last_error": "", "jobs": []})
+        if not (alerted_here or persisted_alerted):
+            # A success before an alert still breaks a failure streak, but is
+            # not evidence that an already-reported outage has recovered.
+            _system_ai_health.update({"failures": 0, "successes": 0, "last_error": "", "jobs": []})
+            return
+        _system_ai_health["failures"] = 0
+        _system_ai_health["successes"] += 1
+        if _system_ai_health["successes"] < SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD:
+            return
+        _system_ai_health.update(
+            {"failures": 0, "successes": 0, "alerted": False, "last_error": "", "jobs": []}
+        )
     # Either signal means admins are owed a recovery notice: the persisted flag
     # covers an outage that started before a restart, the in-memory one covers a
     # deployment whose state table is momentarily unreadable.
     recovered = _clear_system_ai_alert() or alerted_here
-    if not streak and not recovered:
-        return
     if recovered:
         _notify_admins(
             "system_ai_recovered",
@@ -1630,6 +1646,7 @@ def _note_system_ai_failure(job: str, error) -> None:
     that fails every 30 seconds can't turn into a stream of notifications."""
     reason = re.sub(r"\s+", " ", str(error or "")).strip()[:300]
     with _system_ai_health_lock:
+        _system_ai_health["successes"] = 0
         _system_ai_health["failures"] += 1
         _system_ai_health["last_error"] = reason
         if job not in _system_ai_health["jobs"]:
