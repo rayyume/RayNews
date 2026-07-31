@@ -39,6 +39,7 @@ from models import (
     get_users_with_share_enabled,
     get_daily_summary_inapp_user_ids,
     get_app_state, set_app_state, claim_app_state_flag,
+    claim_app_state_incident, clear_app_state_incident,
     get_system_ai_config, set_system_ai_config,
     create_invitation_code,
     list_pending_invitations, delete_invitation_code, delete_invitation_code_by_code,
@@ -1538,6 +1539,9 @@ SYSTEM_AI_FAILURE_ALERT_THRESHOLD = int(
 SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD = max(
     1, int(os.environ.get("SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD", "3"))
 )
+SYSTEM_AI_ALERT_COOLDOWN_SECONDS = max(
+    0, int(os.environ.get("SYSTEM_AI_ALERT_COOLDOWN_SECONDS", "1800"))
+)
 SYSTEM_AI_FAILURE_TITLE = "服务端 AI 调用连续失败"
 SYSTEM_AI_RECOVERED_TITLE = "服务端 AI 已恢复"
 
@@ -1552,6 +1556,7 @@ _system_ai_health_lock = threading.Lock()
 # would let one ongoing outage re-alert on every restart. One outage, one alert —
 # same rule the user-side share suspension gets from its share_suspended column.
 SYSTEM_AI_ALERTED_STATE_KEY = "system_ai_failure_alerted"
+SYSTEM_AI_ALERT_LAST_NOTIFIED_STATE_KEY = "system_ai_alert_last_notified_at"
 
 
 def _system_ai_alert_already_sent() -> bool:
@@ -1562,15 +1567,28 @@ def _system_ai_alert_already_sent() -> bool:
         return False
 
 
-def _claim_system_ai_alert() -> bool:
-    """True only for the caller that flips the persisted flag 0 → 1."""
+def _system_ai_incident_is_active() -> bool:
     try:
-        return claim_app_state_flag(SYSTEM_AI_ALERTED_STATE_KEY)
+        return get_app_state(SYSTEM_AI_ALERTED_STATE_KEY) in {"1", "2"}
+    except Exception as exc:
+        print(f"[system-ai] incident state read failed: {exc}")
+        return False
+
+
+def _claim_system_ai_alert() -> str:
+    """Atomically start a notified or cooldown-suppressed AI incident."""
+    try:
+        return claim_app_state_incident(
+            SYSTEM_AI_ALERTED_STATE_KEY,
+            SYSTEM_AI_ALERT_LAST_NOTIFIED_STATE_KEY,
+            SYSTEM_AI_ALERT_COOLDOWN_SECONDS,
+            now=time.time(),
+        )
     except Exception as exc:
         # A DB hiccup must not turn into a silent outage; alerting twice is the
         # safer failure mode than never alerting.
         print(f"[system-ai] alert claim failed: {exc}")
-        return True
+        return "notify"
 
 
 def _release_system_ai_alert() -> None:
@@ -1583,16 +1601,20 @@ def _release_system_ai_alert() -> None:
         print(f"[system-ai] alert state release failed: {exc}")
 
 
-def _clear_system_ai_alert() -> bool:
-    """Clear the persisted flag, returning whether it had been set."""
+def _clear_system_ai_alert() -> str:
+    """Clear the persisted incident, returning its prior state."""
     try:
-        was_set = get_app_state(SYSTEM_AI_ALERTED_STATE_KEY) == "1"
-        if was_set:
-            set_app_state(SYSTEM_AI_ALERTED_STATE_KEY, "0")
-        return was_set
+        return clear_app_state_incident(SYSTEM_AI_ALERTED_STATE_KEY)
     except Exception as exc:
         print(f"[system-ai] alert state clear failed: {exc}")
-        return False
+        return "0"
+
+
+def _record_system_ai_notification_time() -> None:
+    try:
+        set_app_state(SYSTEM_AI_ALERT_LAST_NOTIFIED_STATE_KEY, str(time.time()))
+    except Exception as exc:
+        print(f"[system-ai] notification timestamp write failed: {exc}")
 
 
 def _reset_system_ai_health() -> None:
@@ -1605,6 +1627,7 @@ def _reset_system_ai_health() -> None:
         )
     try:
         set_app_state(SYSTEM_AI_ALERTED_STATE_KEY, "0")
+        set_app_state(SYSTEM_AI_ALERT_LAST_NOTIFIED_STATE_KEY, "0")
     except Exception as exc:
         print(f"[system-ai] alert state reset failed: {exc}")
 
@@ -1613,10 +1636,10 @@ def _note_system_ai_success() -> None:
     """A system-AI call came back. Ends the streak, and if admins were told the
     AI was down, tells them it is back — matching the share_suspended /
     share_restored pair users already get."""
-    persisted_alerted = _system_ai_alert_already_sent()
+    persisted_active = _system_ai_incident_is_active()
     with _system_ai_health_lock:
         alerted_here = _system_ai_health["alerted"]
-        if not (alerted_here or persisted_alerted):
+        if not (alerted_here or persisted_active):
             # A success before an alert still breaks a failure streak, but is
             # not evidence that an already-reported outage has recovered.
             _system_ai_health.update({"failures": 0, "successes": 0, "last_error": "", "jobs": []})
@@ -1631,13 +1654,15 @@ def _note_system_ai_success() -> None:
     # Either signal means admins are owed a recovery notice: the persisted flag
     # covers an outage that started before a restart, the in-memory one covers a
     # deployment whose state table is momentarily unreadable.
-    recovered = _clear_system_ai_alert() or alerted_here
+    prior_state = _clear_system_ai_alert()
+    recovered = prior_state == "1" or (alerted_here and prior_state != "2")
     if recovered:
-        _notify_admins(
+        if _notify_admins(
             "system_ai_recovered",
             SYSTEM_AI_RECOVERED_TITLE,
             "服务端 AI 调用已恢复正常，自动摘要、翻译、标题精简和每日摘要等后台任务会继续运行。",
-        )
+        ):
+            _record_system_ai_notification_time()
 
 
 def _note_system_ai_failure(job: str, error) -> None:
@@ -1662,7 +1687,8 @@ def _note_system_ai_failure(job: str, error) -> None:
     # The persisted claim is what actually guarantees one alert per outage: a
     # restart empties the counter above, and without this the same outage would
     # alert again three failures later.
-    if not _claim_system_ai_alert():
+    claim = _claim_system_ai_alert()
+    if claim != "notify":
         return
     body = (
         f"服务端 AI 已连续 {failures} 次调用失败，受影响的后台任务："
@@ -1674,6 +1700,8 @@ def _note_system_ai_failure(job: str, error) -> None:
     print(f"[system-ai] {failures} consecutive failures ({', '.join(jobs)}): {reason}")
     if _notify_admins("system_ai_failed", SYSTEM_AI_FAILURE_TITLE, body) == 0:
         _release_system_ai_alert()
+    else:
+        _record_system_ai_notification_time()
 
 
 def _compact_share_error(value: str) -> str:

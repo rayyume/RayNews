@@ -947,6 +947,68 @@ def claim_app_state_flag(key: str) -> bool:
         raise
 
 
+def claim_app_state_incident(
+    key: str,
+    last_notified_key: str,
+    cooldown_seconds: float,
+    now: float | None = None,
+) -> str:
+    """Atomically start an app-state incident.
+
+    Returns ``"notify"`` when this is a newly eligible incident,
+    ``"suppressed"`` when it is within the notification cooldown, and
+    ``"active"`` when another caller already owns an incident. State ``"1"``
+    means notified; ``"2"`` means active but deliberately silent.
+    """
+    db = get_db()
+    current = time.time() if now is None else float(now)
+    cooldown = max(0.0, float(cooldown_seconds))
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute("SELECT value FROM app_state WHERE key = ?", (key,)).fetchone()
+        if row and row["value"] in {"1", "2"}:
+            db.rollback()
+            return "active"
+        last_row = db.execute(
+            "SELECT value FROM app_state WHERE key = ?", (last_notified_key,)
+        ).fetchone()
+        try:
+            last_notified = float(last_row["value"]) if last_row else 0.0
+        except (TypeError, ValueError):
+            last_notified = 0.0
+        in_cooldown = bool(last_notified) and current - last_notified < cooldown
+        state, result = ("2", "suppressed") if in_cooldown else ("1", "notify")
+        db.execute(
+            "INSERT INTO app_state (key, value, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            (key, state, datetime.now().isoformat(timespec="seconds")),
+        )
+        db.commit()
+        return result
+    except Exception:
+        db.rollback()
+        raise
+
+
+def clear_app_state_incident(key: str) -> str:
+    """Atomically clear an incident and return its prior state."""
+    db = get_db()
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute("SELECT value FROM app_state WHERE key = ?", (key,)).fetchone()
+        prior = str(row["value"]) if row else "0"
+        db.execute(
+            "INSERT INTO app_state (key, value, updated_at) VALUES (?, '0', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = '0', updated_at = excluded.updated_at",
+            (key, datetime.now().isoformat(timespec="seconds")),
+        )
+        db.commit()
+        return prior
+    except Exception:
+        db.rollback()
+        raise
+
+
 def get_daily_summary_inapp_user_ids() -> list[int]:
     """User ids that should receive the in-app copy of the daily summary.
 
