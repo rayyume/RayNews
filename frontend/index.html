@@ -8674,9 +8674,22 @@ function renderMarkdownListBlocks(html) {
     index++;
     while (index < lines.length) {
       const next = matchListItem(lines[index]);
-      if (!next || next.tag !== tag) break;
-      items.push(next.body);
-      index++;
+      if (next && next.tag === tag) {
+        items.push(next.body);
+        index++;
+        continue;
+      }
+      // Markdown permits blank lines between items in a loose list. The
+      // daily-summary model occasionally emits that form; treating each item
+      // as a new <ol> makes every browser marker restart at "1.".
+      let nextIndex = index;
+      while (nextIndex < lines.length && !lines[nextIndex].trim()) nextIndex++;
+      const afterBlankLines = matchListItem(lines[nextIndex]);
+      if (nextIndex > index && afterBlankLines && afterBlankLines.tag === tag) {
+        index = nextIndex;
+        continue;
+      }
+      break;
     }
     output.push(`<${tag}>${items.map(item => `<li>${item}</li>`).join('')}</${tag}>`);
   }
