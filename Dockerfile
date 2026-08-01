@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends nginx superviso
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 
 COPY fetcher.py refresh_server.py models.py auth.py auth_validation.py web_server.py ai_service.py source_categories.py news_schema.py image_cache.py image_validation.py notifier.py network_safety.py .
 COPY nginx.conf /etc/nginx/conf.d/default.conf
