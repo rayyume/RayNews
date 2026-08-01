@@ -24,6 +24,7 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
+from network_safety import safe_get
 from news_schema import enable_wal_mode, ensure_article_schema
 from source_categories import (
     ensure_article_sources, init_source_categories,
@@ -74,6 +75,7 @@ REQUEST_TIMEOUT = 20
 # telegraph_url to retry), so keeping this short trades a little first-paint latency
 # for speed without costing article quality.
 FULLTEXT_TIMEOUT = 10
+FULLTEXT_BODY_LIMIT = 2 * 1024 * 1024
 # WeChat keeps the longer timeout: unlike Telegraph, a failed WeChat full-text has no
 # backfill safety net (we don't persist the source WeChat URL, and
 # backfill_missing_fulltext() only retries telegraph_url), so a short timeout here would
@@ -761,13 +763,34 @@ def _legacy_news_item_key(item: dict) -> str:
 
 
 # ─── Telegraph Fetching ──────────────────────────────────
+def _read_body_with_limit(resp, limit: int) -> str:
+    chunks: list[bytes] = []
+    total = 0
+    for chunk in resp.iter_content(chunk_size=65536):
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > limit:
+            raise ValueError("fulltext body too large")
+        chunks.append(chunk)
+    encoding = requests.utils.get_encoding_from_headers(resp.headers) or "utf-8"
+    return b"".join(chunks).decode(encoding, errors="replace")
+
+
 def fetch_telegraph(url: str) -> dict | None:
+    resp = None
     try:
         log.info(f"  Fetching Telegraph: {unquote(url)[:80]}...")
-        resp = requests.get(url, headers=HEADERS, timeout=FULLTEXT_TIMEOUT)
+        resp = safe_get(
+            url,
+            headers=HEADERS,
+            timeout=FULLTEXT_TIMEOUT,
+            stream=True,
+        )
         resp.raise_for_status()
+        body = _read_body_with_limit(resp, FULLTEXT_BODY_LIMIT)
 
-        soup = BeautifulSoup(resp.text, "html.parser")
+        soup = BeautifulSoup(body, "html.parser")
         article = soup.find("article")
         if not article:
             return None
@@ -856,6 +879,9 @@ def fetch_telegraph(url: str) -> dict | None:
     except Exception as e:
         log.error(f"  Telegraph fetch failed: {e}")
         return None
+    finally:
+        if resp is not None:
+            resp.close()
 
 
 # ─── WeChat Article Fetching ──────────────────────────────
@@ -865,12 +891,19 @@ def fetch_wechat_article(url: str) -> dict | None:
         "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
         "Referer": "https://mp.weixin.qq.com/",
     }
+    resp = None
     try:
         log.info(f"  Fetching WeChat: {url[:80]}...")
-        resp = requests.get(url, headers=headers, timeout=WECHAT_FULLTEXT_TIMEOUT)
+        resp = safe_get(
+            url,
+            headers=headers,
+            timeout=WECHAT_FULLTEXT_TIMEOUT,
+            stream=True,
+        )
         resp.raise_for_status()
+        body = _read_body_with_limit(resp, FULLTEXT_BODY_LIMIT)
 
-        soup = BeautifulSoup(resp.text, "html.parser")
+        soup = BeautifulSoup(body, "html.parser")
 
         # Main content container in WeChat articles
         content_div = (
@@ -943,6 +976,9 @@ def fetch_wechat_article(url: str) -> dict | None:
     except Exception as e:
         log.error(f"  WeChat fetch failed: {e}")
         return None
+    finally:
+        if resp is not None:
+            resp.close()
 
 
 # ─── Main Pipeline ────────────────────────────────────────

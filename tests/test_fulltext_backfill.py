@@ -134,7 +134,7 @@ def test_wechat_fetch_uses_the_longer_dedicated_timeout(monkeypatch):
     assert fetcher.WECHAT_FULLTEXT_TIMEOUT > fetcher.FULLTEXT_TIMEOUT
 
     seen = {}
-    monkeypatch.setattr(fetcher.requests, "get",
+    monkeypatch.setattr(fetcher, "safe_get",
                         lambda url, **kw: seen.update(timeout=kw.get("timeout")) or _raise())
     fetcher.fetch_wechat_article("https://mp.weixin.qq.com/s/abc")
     assert seen["timeout"] == fetcher.WECHAT_FULLTEXT_TIMEOUT
