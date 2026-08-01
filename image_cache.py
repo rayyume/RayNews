@@ -14,6 +14,7 @@ import time
 import urllib.parse
 from pathlib import Path
 
+from image_validation import detect_image_content_type
 from network_safety import UnsafeUrlError, safe_get
 
 
@@ -158,10 +159,6 @@ def fetch_remote_image(url: str) -> tuple[bytes, str]:
             resp = safe_get(candidate, headers=headers, timeout=15, stream=True)
             resp.raise_for_status()
 
-            content_type = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-            if content_type not in ALLOWED_IMAGE_TYPES:
-                raise ValueError(f"unsupported image type: {content_type or 'unknown'}")
-
             chunks: list[bytes] = []
             total = 0
             for chunk in resp.iter_content(chunk_size=65536):
@@ -174,6 +171,9 @@ def fetch_remote_image(url: str) -> tuple[bytes, str]:
             body = b"".join(chunks)
             if not body:
                 raise ValueError("empty image")
+            content_type = detect_image_content_type(body)
+            if content_type is None:
+                raise ValueError("unsupported image content")
             return body, content_type
         except UnsafeUrlError:
             raise

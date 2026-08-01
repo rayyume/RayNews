@@ -410,7 +410,7 @@ def test_image_fetch_uses_private_environment_proxy_for_public_image(monkeypatch
     captured = {}
     response = _Response(200, {"Content-Type": "image/jpeg"})
     response.raise_for_status = lambda: None
-    response.iter_content = lambda chunk_size: [b"jpeg"]
+    response.iter_content = lambda chunk_size: [b"\xff\xd8\xffvalid-jpeg"]
 
     def fake_request(self, method, request_url, **kwargs):
         captured["proxies"] = kwargs["proxies"]
@@ -420,7 +420,7 @@ def test_image_fetch_uses_private_environment_proxy_for_public_image(monkeypatch
 
     body, content_type = image_cache.fetch_remote_image("http://public.example/image.jpg")
 
-    assert (body, content_type) == (b"jpeg", "image/jpeg")
+    assert (body, content_type) == (b"\xff\xd8\xffvalid-jpeg", "image/jpeg")
     assert captured["proxies"]["http"] == "http://127.0.0.1:7890"
 
 
@@ -432,7 +432,7 @@ def test_image_fetch_rejects_private_target_before_transport(monkeypatch):
         transport_called = True
         response = _Response(200, {"Content-Type": "image/jpeg"})
         response.raise_for_status = lambda: None
-        response.iter_content = lambda chunk_size: [b"jpeg"]
+        response.iter_content = lambda chunk_size: [b"\xff\xd8\xffvalid-jpeg"]
         return response
 
     monkeypatch.setattr(network_safety, "_send_bound_request", fake_get)
@@ -479,7 +479,7 @@ class _ImageResponse(_Response):
     def __init__(self, *, headers=None, status_error=None, chunks=None):
         super().__init__(200, headers or {"Content-Type": "image/jpeg"})
         self._status_error = status_error
-        self._chunks = chunks if chunks is not None else [b"jpeg"]
+        self._chunks = chunks if chunks is not None else [b"\xff\xd8\xffvalid-jpeg"]
 
     def raise_for_status(self):
         if self._status_error is not None:
@@ -494,11 +494,11 @@ class _ImageResponse(_Response):
     "response",
     [
         _ImageResponse(status_error=RuntimeError("not found")),
-        _ImageResponse(headers={"Content-Type": "text/html"}),
+        _ImageResponse(headers={"Content-Type": "text/html"}, chunks=[b"<html>not an image</html>"]),
         _ImageResponse(chunks=[b"x" * (image_cache.MAX_FILE_BYTES + 1)]),
         _ImageResponse(chunks=[]),
     ],
-    ids=["http-status", "wrong-content-type", "too-large", "empty-body"],
+    ids=["http-status", "non-image-body", "too-large", "empty-body"],
 )
 def test_image_fetch_closes_response_after_rejected_body(monkeypatch, response):
     monkeypatch.setattr(image_cache, "_remote_image_candidates", lambda _url: ["https://public.example/image.jpg"])
@@ -515,7 +515,7 @@ def test_image_fetch_closes_successful_stream_before_returning(monkeypatch):
     monkeypatch.setattr(image_cache, "_remote_image_candidates", lambda _url: ["https://public.example/image.jpg"])
     monkeypatch.setattr(image_cache, "safe_get", lambda *args, **kwargs: response)
 
-    assert image_cache.fetch_remote_image("https://public.example/image.jpg") == (b"jpeg", "image/jpeg")
+    assert image_cache.fetch_remote_image("https://public.example/image.jpg") == (b"\xff\xd8\xffvalid-jpeg", "image/jpeg")
     assert response.closed
 
 

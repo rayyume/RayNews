@@ -1002,6 +1002,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header("Content-Type", content_type)
+            self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Cache-Control", "public, max-age=2592000")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -1013,6 +1014,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 body = path.read_bytes()
                 self.send_response(200)
                 self.send_header("Content-Type", content_type)
+                self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Cache-Control", "public, max-age=2592000")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
