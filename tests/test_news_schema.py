@@ -127,7 +127,7 @@ def test_unauthenticated_news_detail_never_serves_shared_translated_body(
     assert "original_body_html" not in item
 
 
-def test_empty_article_table_removes_dangling_user_source_aliases():
+def test_empty_article_table_preserves_alias_to_same_user_private_source():
     conn = sqlite3.connect(":memory:")
     conn.execute(
         """
@@ -154,7 +154,7 @@ def test_empty_article_table_removes_dangling_user_source_aliases():
     cleanup_stale_source_categories(conn)
 
     assert _table_count(conn, "user_source_categories") == 1
-    assert _table_count(conn, "user_source_aliases") == 0
+    assert _table_count(conn, "user_source_aliases") == 1
 
 
 def test_nonempty_article_table_preserves_manual_user_source_metadata():

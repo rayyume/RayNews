@@ -1,8 +1,10 @@
 """Persistence boundary tests for server-side AI endpoint safety."""
 
 import socket
+import logging
 
 import pytest
+import requests
 
 from ai_service import AIService
 import models
@@ -95,6 +97,130 @@ def test_system_config_accepts_public_hostname_endpoint(ai_config_env, monkeypat
 
     assert response.status_code == 200
     assert models.get_system_ai_config()["endpoint"] == "https://provider.example/v1"
+
+
+@pytest.mark.parametrize("suffix", ["?api_key=query-secret", "#fragment-secret"])
+def test_personal_config_rejects_endpoint_suffix_without_persisting(
+    ai_config_env, monkeypatch, suffix
+):
+    client, user_id, _ = ai_config_env
+    monkeypatch.setattr(socket, "getaddrinfo", _public_dns)
+    models.set_ai_config(user_id, endpoint="https://api.openai.com/v1", model="before")
+
+    response = client.put(
+        "/ai/config",
+        headers=_headers(user_id, "user"),
+        json={"endpoint": f"https://provider.example/v1{suffix}", "model": "after"},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {"error": "AI endpoint must be a public HTTP(S) URL"}
+    persisted = models.get_ai_config(user_id)
+    assert persisted["endpoint"] == "https://api.openai.com/v1"
+    assert persisted["model"] == "before"
+    assert "secret" not in response.get_data(as_text=True)
+
+
+@pytest.mark.parametrize("suffix", ["?api_key=query-secret", "#fragment-secret"])
+def test_system_config_rejects_endpoint_suffix_without_persisting(
+    ai_config_env, monkeypatch, suffix
+):
+    client, _, admin_id = ai_config_env
+    monkeypatch.setattr(socket, "getaddrinfo", _public_dns)
+    models.set_system_ai_config(endpoint="https://api.openai.com/v1", model="before")
+
+    response = client.put(
+        "/admin/system-ai-config",
+        headers=_headers(admin_id, "admin"),
+        json={"endpoint": f"https://provider.example/v1{suffix}", "model": "after"},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {"error": "AI endpoint must be a public HTTP(S) URL"}
+    persisted = models.get_system_ai_config()
+    assert persisted["endpoint"] == "https://api.openai.com/v1"
+    assert persisted["model"] == "before"
+    assert "secret" not in response.get_data(as_text=True)
+
+
+def test_legacy_endpoint_query_is_rejected_before_network(monkeypatch):
+    network_calls = []
+    monkeypatch.setattr(
+        "ai_service.safe_post", lambda *args, **kwargs: network_calls.append((args, kwargs))
+    )
+
+    with pytest.raises(ValueError, match="AI endpoint"):
+        AIService(
+            "configured-secret",
+            "https://provider.example/v1?api_key=query-secret",
+            "test-model",
+        )
+
+    assert network_calls == []
+
+
+def test_connection_test_log_redacts_request_url_secret(monkeypatch, caplog):
+    query_secret = "connection-query-secret"
+
+    class FailingService:
+        def __init__(self, **kwargs):
+            pass
+
+        def test_connection(self):
+            raise requests.ConnectionError(
+                f"failed for https://provider.example/v1?tenant={query_secret}"
+            )
+
+    monkeypatch.setattr(web_server, "AIService", FailingService)
+    with caplog.at_level(logging.ERROR):
+        body, status = web_server._run_ai_connection_test(
+            {
+                "api_key": "configured-key",
+                "endpoint": "https://provider.example/v1",
+                "model": "model",
+            }
+        )
+
+    assert status == 502
+    assert body == {"error": "无法连接 AI 服务。请检查网络代理配置"}
+    assert query_secret not in caplog.text
+    assert "https://provider.example" not in caplog.text
+    assert "ConnectionError" in caplog.text
+
+
+def test_relay_log_redacts_request_url_secret(ai_config_env, monkeypatch, caplog):
+    client, user_id, _ = ai_config_env
+    query_secret = "relay-query-secret"
+    models.set_ai_config(
+        user_id,
+        api_key="configured-key",
+        endpoint="https://provider.example/v1",
+        model="model",
+        enabled=1,
+    )
+
+    class FailingService:
+        def __init__(self, **kwargs):
+            pass
+
+        def chat(self, *args, **kwargs):
+            raise requests.ConnectionError(
+                f"failed for https://provider.example/v1?signature={query_secret}"
+            )
+
+    monkeypatch.setattr(web_server, "AIService", FailingService)
+    with caplog.at_level(logging.ERROR):
+        response = client.post(
+            "/ai/chat",
+            headers=_headers(user_id, "user"),
+            json={"messages": [{"role": "user", "content": "hello"}]},
+        )
+
+    assert response.status_code == 502
+    assert response.get_json() == {"error": "AI service unavailable"}
+    assert query_secret not in caplog.text
+    assert "https://provider.example" not in caplog.text
+    assert "ConnectionError" in caplog.text
 
 
 def test_api_error_redacts_known_and_labeled_secrets():

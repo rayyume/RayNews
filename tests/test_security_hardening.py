@@ -355,7 +355,7 @@ def test_connection_test_provider_failure_is_generic_and_logged(monkeypatch, cap
 
     assert status == 502
     assert body == {"error": "AI connection test failed"}
-    assert "provider response contained secret key" in caplog.text
+    assert "provider response contained secret [redacted]" in caplog.text
 
 
 def test_ai_relay_provider_failure_is_generic_and_logged(
@@ -390,7 +390,7 @@ def test_ai_relay_provider_failure_is_generic_and_logged(
 
     assert response.status_code == 502
     assert response.get_json() == {"error": "AI relay failed"}
-    assert "provider body with /app/data and secret key" in caplog.text
+    assert "provider body with /app/data and secret [redacted]" in caplog.text
 
 
 def test_notification_send_failure_is_generic_and_logged(

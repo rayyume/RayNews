@@ -502,7 +502,11 @@ def get_user_by_username(username: str) -> dict | None:
 
 
 def update_user(user_id: int, **kwargs) -> dict | None:
-    allowed = {"nickname", "avatar_url", "role"}
+    if "role" in kwargs:
+        raise ValueError(
+            "role changes must use set_user_role_and_rotate_token_version"
+        )
+    allowed = {"nickname", "avatar_url"}
     updates = {k: v for k, v in kwargs.items() if k in allowed}
     if not updates:
         return get_user(user_id)
@@ -852,11 +856,12 @@ _last_access_log_prune_at = 0.0
 
 
 def record_access(user_id: int) -> None:
-    """Bump a user's visit counter/last-seen timestamp, throttled per session.
+    """Record at most one visit per user across the app every five minutes.
 
-    Called on every authenticated request, so repeat calls within the
-    throttle window only refresh last_seen_at without inflating visit_count
-    or the detail log.
+    Calls inside the global per-user throttle window perform no write: they do
+    not update ``last_seen_at`` or insert an access-log row.  At the window
+    boundary, the conditional UPDATE is the concurrency guard; only its winner
+    increments the visit count and inserts the corresponding detail record.
     """
     db = get_db()
     row = db.execute("SELECT last_seen_at FROM users WHERE id = ?", (user_id,)).fetchone()

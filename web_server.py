@@ -57,7 +57,7 @@ from models import (
 from auth import init_auth, create_token, require_auth, require_role
 from auth_validation import is_valid_email
 from image_validation import detect_image_content_type
-from ai_service import AIService, _redact_api_error
+from ai_service import AIService, _redact_api_error, validate_ai_endpoint_base_url
 from network_safety import UnsafeUrlError, assert_public_http_url
 from image_cache import (
     enqueue_article_image_prefetch, unpin_article_images,
@@ -613,10 +613,12 @@ def admin_set_system_ai_config():
             else:
                 data.pop("api_key", None)
         try:
-            assert_public_http_url(
-                data.get("endpoint", existing.get("endpoint", "https://api.openai.com/v1"))
+            effective_endpoint = data.get(
+                "endpoint", existing.get("endpoint", "https://api.openai.com/v1")
             )
-        except UnsafeUrlError:
+            assert_public_http_url(effective_endpoint)
+            validate_ai_endpoint_base_url(effective_endpoint)
+        except (UnsafeUrlError, ValueError):
             return jsonify({"error": "AI endpoint must be a public HTTP(S) URL"}), 400
         config = set_system_ai_config(**data)
         # A new key/endpoint deserves a clean slate: without this, the previous
@@ -1053,7 +1055,8 @@ def set_ai_config_route():
         )
         try:
             assert_public_http_url(effective_endpoint)
-        except UnsafeUrlError:
+            validate_ai_endpoint_base_url(effective_endpoint)
+        except (UnsafeUrlError, ValueError):
             return jsonify({"error": "AI endpoint must be a public HTTP(S) URL"}), 400
         config = set_ai_config(g.user_id, **data)
         settings = get_user_settings(g.user_id) or {}
@@ -1267,18 +1270,30 @@ def _run_ai_connection_test(config: dict | None) -> tuple[dict, int]:
         if not response or not response.strip():
             return {"error": "Connection test returned empty response"}, 502
         return {"ok": True, "response": response}, 200
-    except requests.exceptions.ConnectTimeout:
-        app.logger.exception("AI connection test timed out while connecting")
+    except requests.exceptions.ConnectTimeout as exc:
+        _log_ai_failure("AI connection test timed out while connecting", exc, config["api_key"])
         return {"error": "连接 AI 服务超时。请检查 API 地址是否正确，或 Docker 容器是否配置了 HTTP_PROXY 环境变量"}, 502
-    except requests.exceptions.ConnectionError:
-        app.logger.exception("AI connection test could not connect")
+    except requests.exceptions.ConnectionError as exc:
+        _log_ai_failure("AI connection test could not connect", exc, config["api_key"])
         return {"error": "无法连接 AI 服务。请检查网络代理配置"}, 502
-    except requests.exceptions.Timeout:
-        app.logger.exception("AI connection test timed out")
+    except requests.exceptions.Timeout as exc:
+        _log_ai_failure("AI connection test timed out", exc, config["api_key"])
         return {"error": "AI 服务响应超时"}, 502
-    except Exception:
-        app.logger.exception("AI connection test failed")
+    except Exception as exc:
+        _log_ai_failure("AI connection test failed", exc, config["api_key"])
         return {"error": "AI connection test failed"}, 502
+
+
+def _log_ai_failure(message: str, exc: Exception, api_key: str = "") -> None:
+    """Log a compact provider failure without traceback URLs or credentials."""
+    if isinstance(exc, requests.exceptions.RequestException):
+        # requests exceptions may embed the complete request URL.  Arbitrary
+        # query parameter names cannot be safely redacted, so retain only the
+        # useful failure class and never stringify a network exception.
+        detail = type(exc).__name__
+    else:
+        detail = _redact_api_error(str(exc), api_key)
+    app.logger.error("%s: %s", message, detail or type(exc).__name__)
 
 
 def _share_check_after_personal_api_test(
@@ -1364,14 +1379,14 @@ def ai_chat_relay():
             provider_type=config.get("provider_type", "openai"),
         )
         content = svc.chat(messages, max_tokens=max_tokens, temperature=temperature)
-    except TimeoutError:
-        app.logger.exception("AI relay timed out")
+    except TimeoutError as exc:
+        _log_ai_failure("AI relay timed out", exc, config["api_key"])
         return jsonify({"error": "AI service timed out"}), 504
-    except requests.exceptions.RequestException:
-        app.logger.exception("AI relay request failed")
+    except requests.exceptions.RequestException as exc:
+        _log_ai_failure("AI relay request failed", exc, config["api_key"])
         return jsonify({"error": "AI service unavailable"}), 502
-    except Exception:
-        app.logger.exception("AI relay failed")
+    except Exception as exc:
+        _log_ai_failure("AI relay failed", exc, config["api_key"])
         return jsonify({"error": "AI relay failed"}), 502
     if not (content or "").strip():
         return jsonify({"error": "AI returned an empty response"}), 502

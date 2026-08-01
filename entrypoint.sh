@@ -37,8 +37,11 @@ if ! chown -R raynews:raynews /app/data; then
   echo "[entrypoint] ERROR: unable to grant raynews ownership of /app/data." >&2
   exit 1
 fi
-if ! test -w /app/data; then
-  echo "[entrypoint] ERROR: /app/data is not writable after permission setup." >&2
+if ! /usr/sbin/runuser -u raynews -- /bin/sh -c '
+  probe=$(/usr/bin/mktemp /app/data/.raynews-write-probe.XXXXXX) || exit 1
+  /bin/rm -f -- "$probe"
+'; then
+  echo "[entrypoint] ERROR: /app/data is not writable by raynews after permission setup." >&2
   exit 1
 fi
 

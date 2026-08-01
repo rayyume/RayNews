@@ -238,6 +238,39 @@ def test_cleanup_only_removes_stale_automatic_metadata():
     assert "user-dangling-alias" not in user_aliases
 
 
+def test_cleanup_preserves_user_alias_only_for_same_user_private_target():
+    conn = _make_conn()
+    sc.init_source_categories(conn)
+    conn.executemany(
+        "INSERT INTO user_source_categories "
+        "(user_id, source, category, label, status) VALUES (?, ?, 'Info', '', 'manual')",
+        [
+            (7, "same-user-private"),
+            (8, "other-user-private"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO user_source_aliases (user_id, alias_source, target_source) "
+        "VALUES (7, ?, ?)",
+        [
+            ("same-user-alias", "same-user-private"),
+            ("other-user-alias", "other-user-private"),
+            ("missing-alias", "nowhere"),
+        ],
+    )
+    conn.commit()
+
+    sc.cleanup_stale_source_categories(conn)
+
+    aliases = {
+        row[0]
+        for row in conn.execute(
+            "SELECT alias_source FROM user_source_aliases WHERE user_id = 7"
+        )
+    }
+    assert aliases == {"same-user-alias"}
+
+
 def test_refresh_server_lets_post_fetch_maintenance_be_throttled():
     # A manual/periodic refresh's post-fetch maintenance call no longer forces past
     # the throttle — back-to-back refreshes skip the two full-table scans

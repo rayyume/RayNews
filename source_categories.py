@@ -449,7 +449,15 @@ def cleanup_stale_source_categories(conn: sqlite3.Connection) -> int:
     deleted += conn.execute(
         """
         DELETE FROM user_source_aliases
-        WHERE target_source NOT IN (SELECT source FROM source_categories)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM source_categories
+            WHERE source_categories.source = user_source_aliases.target_source
+        )
+          AND NOT EXISTS (
+            SELECT 1 FROM user_source_categories
+            WHERE user_source_categories.user_id = user_source_aliases.user_id
+              AND user_source_categories.source = user_source_aliases.target_source
+        )
         """
     ).rowcount
     if deleted:

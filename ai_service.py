@@ -6,6 +6,7 @@ import requests
 import re
 from collections import defaultdict
 from typing import Optional
+from urllib.parse import urlsplit
 
 from network_safety import safe_post
 from source_categories import CATEGORY_NAMES, CATEGORY_ORDER, clamp_weighted, local_short_source_name
@@ -43,6 +44,22 @@ def _redact_api_error(value: str, *known_secrets: str) -> str:
         text,
     )
     return text
+
+
+def validate_ai_endpoint_base_url(endpoint: str) -> str:
+    """Reject endpoint suffixes that would be malformed or leak credentials.
+
+    Public-address validation remains the persistence boundary's responsibility;
+    this syntax-only guard is also applied when loading legacy persisted values so
+    no request can be made with a query or fragment in the configured base URL.
+    """
+    try:
+        parsed = urlsplit(endpoint)
+    except (TypeError, ValueError):
+        raise ValueError("AI endpoint must be a base HTTP(S) URL") from None
+    if parsed.query or parsed.fragment:
+        raise ValueError("AI endpoint must be a base HTTP(S) URL")
+    return endpoint
 
 
 def _empty_ai_content_error(finish_reason, has_reasoning: bool, max_tokens: int) -> str:
@@ -183,7 +200,7 @@ class AIService:
     def __init__(self, api_key: str, endpoint: str, model: str,
                  provider_type: str = "openai"):
         self.api_key = api_key
-        self.endpoint = endpoint.rstrip("/")
+        self.endpoint = validate_ai_endpoint_base_url(endpoint).rstrip("/")
         self.model = model
         self.provider_type = provider_type  # 'openai' or 'claude'
         self.request_timeout = int(os.environ.get("AI_REQUEST_TIMEOUT_SECONDS", "300"))

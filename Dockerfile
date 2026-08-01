@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 
 # Install nginx and process supervision
-RUN apt-get update && apt-get install -y --no-install-recommends nginx supervisor && \
+RUN apt-get update && apt-get install -y --no-install-recommends nginx supervisor util-linux && \
     rm -rf /var/lib/apt/lists/* && \
     rm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-available/default
 

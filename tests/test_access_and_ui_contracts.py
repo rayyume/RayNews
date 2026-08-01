@@ -315,7 +315,7 @@ def test_container_supervises_services_without_blocking_on_initial_fetch():
 
 def test_container_image_installs_and_copies_supervisor_configuration():
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-    assert "apt-get install -y --no-install-recommends nginx supervisor" in dockerfile
+    assert "apt-get install -y --no-install-recommends nginx supervisor util-linux" in dockerfile
     assert "COPY supervisord.conf /app/supervisord.conf" in dockerfile
 
 
@@ -348,10 +348,16 @@ def test_entrypoint_fails_clearly_when_data_directory_cannot_be_prepared():
     entrypoint = (ROOT / "entrypoint.sh").read_text(encoding="utf-8")
     assert "if ! install -d -o raynews -g raynews /app/data; then" in entrypoint
     assert "if ! chown -R raynews:raynews /app/data; then" in entrypoint
-    assert "if ! test -w /app/data; then" in entrypoint
+    assert "if ! test -w /app/data; then" not in entrypoint
+    assert "/usr/sbin/runuser -u raynews -- /bin/sh" in entrypoint
+    assert ".raynews-write-probe-$$" not in entrypoint
+    assert "/usr/bin/mktemp /app/data/.raynews-write-probe.XXXXXX" in entrypoint
+    assert '/bin/rm -f -- "$probe"' in entrypoint
     assert "ERROR:" in entrypoint
     assert "exit 1" in entrypoint
-    assert "su raynews" not in entrypoint
+    assert entrypoint.index("/usr/sbin/runuser") < entrypoint.index(
+        "exec supervisord -c /app/supervisord.conf"
+    )
 
 
 def test_compose_healthcheck_covers_all_three_service_surfaces():

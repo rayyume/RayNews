@@ -169,6 +169,17 @@ def test_role_update_and_token_rotation_are_one_database_update(auth_env):
     assert changed["token_version"] == 1
 
 
+def test_generic_user_update_rejects_role_without_mutating_security_state(auth_env):
+    user = _create_login_user()
+
+    with pytest.raises(ValueError, match="set_user_role_and_rotate_token_version"):
+        models.update_user(user["id"], role="admin")
+
+    unchanged = models.get_user(user["id"])
+    assert unchanged["role"] == "user"
+    assert unchanged["token_version"] == 0
+
+
 def test_admin_role_route_does_not_use_split_update_helpers(auth_env, monkeypatch):
     user = _create_login_user()
     admin_id = _seed_admin()
