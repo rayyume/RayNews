@@ -28,6 +28,7 @@ from models import (
     update_user, delete_user, list_users, get_first_admin_email, count_users,
     count_active_users_since,
     verify_password, admit_login_attempt, reset_login_failures,
+    admit_register_attempt, reset_register_attempts,
     claim_invite_request, complete_invite_request,
     add_favorite, remove_favorite, get_favorites, get_all_favorite_article_ids, is_favorited,
     count_article_favorites,
@@ -277,6 +278,11 @@ def register():
     if len(password) < 6:
         return jsonify({"error": "password must be at least 6 characters"}), 400
 
+    client_ip = _trusted_client_ip()
+    admitted, retry_after = admit_register_attempt(client_ip)
+    if not admitted:
+        return _rate_limited_response(retry_after)
+
     user, is_initial_admin = create_registered_user(
         email,
         password,
@@ -291,6 +297,9 @@ def register():
         if not invite_code:
             return jsonify({"error": "invitation code required. Go to Settings → Request Invite"}), 400
         return jsonify({"error": "invalid or expired invitation code"}), 400
+
+
+    reset_register_attempts(client_ip)
 
     admin_notified = _send_registration_notice(user) if not is_initial_admin else False
 

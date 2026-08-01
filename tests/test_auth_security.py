@@ -38,6 +38,188 @@ def _create_login_user():
     return user
 
 
+def _seed_admin(email="admin@example.com", nickname="admin"):
+    db = models.get_db()
+    cur = db.execute(
+        "INSERT INTO users (email, password, nickname, role) VALUES (?, ?, ?, ?)",
+        (email, "unused-test-hash", nickname, "admin"),
+    )
+    db.commit()
+    return cur.lastrowid
+
+
+def _register(
+    client,
+    *,
+    email,
+    nickname,
+    invite_code="INVALID",
+    remote_addr="198.51.100.40",
+):
+    return client.post(
+        "/auth/register",
+        json={
+            "email": email,
+            "password": "correct-password",
+            "nickname": nickname,
+            "invite_code": invite_code,
+        },
+        environ_base={"REMOTE_ADDR": remote_addr},
+    )
+
+
+def test_register_rate_limit_rejects_eleventh_attempt(auth_env):
+    client = auth_env
+    _seed_admin()
+
+    for index in range(10):
+        response = _register(
+            client,
+            email=f"failed-{index}@example.com",
+            nickname=f"failed-{index}",
+        )
+        assert response.status_code == 400
+
+    rejected = _register(
+        client,
+        email="failed-10@example.com",
+        nickname="failed-10",
+    )
+    assert rejected.status_code == 429
+    retry_after = rejected.get_json()["retry_after"]
+    assert isinstance(retry_after, int)
+    assert retry_after > 0
+    assert rejected.headers["Retry-After"] == str(retry_after)
+
+
+def test_invalid_invite_skips_bcrypt(auth_env, monkeypatch):
+    _seed_admin()
+
+    def unexpected_hash(_password):
+        raise AssertionError("bcrypt must not run for an invalid invitation")
+
+    monkeypatch.setattr(models, "hash_password", unexpected_hash)
+    user, is_initial_admin = models.create_registered_user(
+        "new@example.com",
+        "correct-password",
+        "new-reader",
+        "INVALID",
+    )
+
+    assert user is None
+    assert is_initial_admin is False
+
+
+def test_duplicate_email_skips_bcrypt(auth_env, monkeypatch):
+    _seed_admin(email="duplicate@example.com")
+
+    def unexpected_hash(_password):
+        raise AssertionError("bcrypt must not run for a duplicate email")
+
+    monkeypatch.setattr(models, "hash_password", unexpected_hash)
+    user, is_initial_admin = models.create_registered_user(
+        "duplicate@example.com",
+        "correct-password",
+        "different-reader",
+        "",
+    )
+
+    assert user is None
+    assert is_initial_admin is False
+
+
+def test_duplicate_nickname_skips_bcrypt(auth_env, monkeypatch):
+    _seed_admin(nickname="duplicate-reader")
+
+    def unexpected_hash(_password):
+        raise AssertionError("bcrypt must not run for a duplicate nickname")
+
+    monkeypatch.setattr(models, "hash_password", unexpected_hash)
+    user, is_initial_admin = models.create_registered_user(
+        "different@example.com",
+        "correct-password",
+        "duplicate-reader",
+        "",
+    )
+
+    assert user is None
+    assert is_initial_admin is False
+
+
+def test_register_rate_limit_success_resets_attempts(auth_env, monkeypatch):
+    client = auth_env
+    client_ip = "198.51.100.41"
+    _seed_admin()
+
+    for index in range(9):
+        assert _register(
+            client,
+            email=f"before-success-{index}@example.com",
+            nickname=f"before-success-{index}",
+            remote_addr=client_ip,
+        ).status_code == 400
+
+    attempt = models.get_db().execute(
+        "SELECT failure_count FROM register_attempts WHERE client_ip = ?",
+        (client_ip,),
+    ).fetchone()
+    assert attempt["failure_count"] == 9
+
+    invite_code = models.create_invitation_code("success@example.com")
+    monkeypatch.setattr(models, "hash_password", lambda _password: "test-hash")
+    monkeypatch.setattr(web_server, "_send_registration_notice", lambda _user: False)
+    successful = _register(
+        client,
+        email="success@example.com",
+        nickname="successful-reader",
+        invite_code=invite_code,
+        remote_addr=client_ip,
+    )
+    assert successful.status_code == 201
+    assert models.get_db().execute(
+        "SELECT 1 FROM register_attempts WHERE client_ip = ?",
+        (client_ip,),
+    ).fetchone() is None
+
+    after_reset = _register(
+        client,
+        email="after-reset@example.com",
+        nickname="after-reset",
+        remote_addr=client_ip,
+    )
+    assert after_reset.status_code == 400
+
+
+def test_register_attempt_cleanup_removes_only_stale_rows(auth_env):
+    now = time.time()
+    db = models.get_db()
+    db.executemany(
+        "INSERT INTO register_attempts "
+        "(client_ip, failure_count, locked_until, updated_at) "
+        "VALUES (?, ?, ?, ?)",
+        [
+            ("198.51.100.42", 3, 0, now - 7200),
+            ("198.51.100.43", 3, 0, now),
+        ],
+    )
+    db.commit()
+
+    allowed, retry_after = models.admit_register_attempt(
+        "198.51.100.44",
+        now=now,
+    )
+
+    assert allowed is True
+    assert retry_after == 0
+    rows = db.execute(
+        "SELECT client_ip FROM register_attempts ORDER BY client_ip"
+    ).fetchall()
+    assert [row["client_ip"] for row in rows] == [
+        "198.51.100.43",
+        "198.51.100.44",
+    ]
+
+
 def _failed_login(client, *, remote_addr="198.51.100.10", real_ip=None):
     headers = {"X-Real-IP": real_ip} if real_ip else {}
     return client.post(

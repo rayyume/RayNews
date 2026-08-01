@@ -103,6 +103,13 @@ CREATE TABLE IF NOT EXISTS login_failures (
     PRIMARY KEY (client_ip, login)
 );
 
+CREATE TABLE IF NOT EXISTS register_attempts (
+    client_ip     TEXT PRIMARY KEY,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    locked_until  REAL NOT NULL DEFAULT 0,
+    updated_at    REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS invite_request_limits (
     email             TEXT PRIMARY KEY,
     last_success_at   REAL,
@@ -361,10 +368,31 @@ def create_registered_user(
     concurrent unauthenticated registrations cannot both become admins (or
     leave a second account behind without a valid invite).
     """
-    # Initialize/migrate the selected database before opening the deliberately
-    # short-lived registration connection. Password hashing is intentionally
-    # outside the write transaction because bcrypt is the expensive part.
-    get_db()
+    # Reject known-invalid requests before paying bcrypt's CPU cost. These
+    # checks are repeated under the write lock below because another request
+    # can change users or invitations while the password is being hashed.
+    preflight_db = get_db()
+    if preflight_db.execute(
+        "SELECT 1 FROM users WHERE email = ?",
+        (email,),
+    ).fetchone():
+        return None, False
+    if nickname and preflight_db.execute(
+        "SELECT 1 FROM users WHERE nickname = ? AND nickname != ''",
+        (nickname,),
+    ).fetchone():
+        return None, False
+    has_users = preflight_db.execute("SELECT 1 FROM users LIMIT 1").fetchone()
+    if has_users and (
+        not invite_code
+        or preflight_db.execute(
+            "SELECT 1 FROM invitation_codes "
+            "WHERE code = ? AND email = ? AND used = 0",
+            (invite_code, email),
+        ).fetchone() is None
+    ):
+        return None, False
+
     password_hash = hash_password(password)
     db_path = str(DB_FILE.resolve())
     db = sqlite3.connect(db_path, timeout=30)
@@ -378,6 +406,13 @@ def create_registered_user(
             db.execute("SELECT 1 FROM users LIMIT 1").fetchone() is None
         )
         role = "admin" if is_initial_admin else "user"
+
+        if db.execute(
+            "SELECT 1 FROM users WHERE email = ?",
+            (email,),
+        ).fetchone():
+            db.rollback()
+            return None, False
 
         if not is_initial_admin:
             if not invite_code:
@@ -504,6 +539,9 @@ def count_users() -> int:
 
 AUTH_RATE_LIMIT_SECONDS = 15 * 60
 AUTH_FAILURE_LIMIT = 5
+REGISTER_RATE_LIMIT_SECONDS = 15 * 60
+REGISTER_ATTEMPT_LIMIT = 10
+REGISTER_ATTEMPT_STALE_SECONDS = 30 * 60
 INVITE_RATE_LIMIT_SECONDS = 60
 INVITE_RESERVATION_SECONDS = INVITE_RATE_LIMIT_SECONDS
 
@@ -594,6 +632,64 @@ def reset_login_failures(client_ip: str, login: str) -> None:
     db.execute(
         "DELETE FROM login_failures WHERE client_ip = ? AND login = ?",
         (client_ip, _normalized_rate_limit_login(login)),
+    )
+    db.commit()
+
+
+def admit_register_attempt(
+    client_ip: str,
+    *,
+    now: float | None = None,
+) -> tuple[bool, int]:
+    """Atomically reserve one of the permitted registration attempts."""
+    current = time.time() if now is None else float(now)
+    db = get_db()
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        db.execute(
+            "DELETE FROM register_attempts WHERE updated_at < ?",
+            (current - REGISTER_ATTEMPT_STALE_SECONDS,),
+        )
+        row = db.execute(
+            "SELECT failure_count, locked_until, updated_at "
+            "FROM register_attempts WHERE client_ip = ?",
+            (client_ip,),
+        ).fetchone()
+        if row and float(row["locked_until"]) > current:
+            db.commit()
+            return False, max(1, math.ceil(float(row["locked_until"]) - current))
+
+        if row and current - float(row["updated_at"]) < REGISTER_RATE_LIMIT_SECONDS:
+            failure_count = int(row["failure_count"]) + 1
+        else:
+            failure_count = 1
+        locked_until = (
+            current + REGISTER_RATE_LIMIT_SECONDS
+            if failure_count >= REGISTER_ATTEMPT_LIMIT
+            else 0
+        )
+        db.execute(
+            "INSERT INTO register_attempts "
+            "(client_ip, failure_count, locked_until, updated_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(client_ip) DO UPDATE SET "
+            "failure_count = excluded.failure_count, "
+            "locked_until = excluded.locked_until, "
+            "updated_at = excluded.updated_at",
+            (client_ip, failure_count, locked_until, current),
+        )
+        db.commit()
+        return True, max(0, math.ceil(locked_until - current))
+    except Exception:
+        db.rollback()
+        raise
+
+
+def reset_register_attempts(client_ip: str) -> None:
+    db = get_db()
+    db.execute(
+        "DELETE FROM register_attempts WHERE client_ip = ?",
+        (client_ip,),
     )
     db.commit()
 
