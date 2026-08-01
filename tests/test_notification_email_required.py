@@ -11,6 +11,7 @@ import sys
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -84,6 +85,16 @@ class EmailPushRequiresAnAddressTests(unittest.TestCase):
             "me@example.com",
         )
 
+    def test_enabling_email_push_with_a_malformed_address_is_refused(self):
+        body, status = _put({
+            "daily_summary_enabled": 1,
+            "notification_config": {"resend": {"to_email": "not-an-email"}},
+        }, self.user_id)
+
+        self.assertEqual(status, 400)
+        self.assertIn("邮箱", body["error"])
+        self.assertFalse(self._settings().get("daily_summary_enabled"))
+
     def test_clearing_the_address_while_email_push_stays_on_is_refused(self):
         _put({
             "daily_summary_enabled": 1,
@@ -122,6 +133,47 @@ class EmailPushRequiresAnAddressTests(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(self._settings()["theme_preference"], "dark")
+
+    def test_test_notification_refuses_a_malformed_configured_recipient(self):
+        models.set_user_settings(
+            self.user_id,
+            notification_config=json.dumps({"resend": {"to_email": "not-an-email"}}),
+        )
+        with patch.dict(os.environ, {"RESEND_API_KEY": "test-key"}):
+            with web_server.app.test_request_context("/settings/test-notification", method="POST"):
+                from flask import g
+
+                g.user_id = self.user_id
+                g.user_role = "user"
+                result = web_server.test_notification.__wrapped__()
+
+        body, status = result
+        self.assertEqual(status, 400)
+        self.assertIn("邮箱", body.get_json()["error"])
+
+    def test_daily_delivery_skips_legacy_invalid_recipients_but_sends_valid_ones(self):
+        other_user = models.create_user("other@example.com", "pw", "Other")["id"]
+        models.set_user_settings(
+            self.user_id,
+            daily_summary_enabled=1,
+            notification_config=json.dumps({"resend": {"to_email": "not-an-email"}}),
+        )
+        models.set_user_settings(
+            other_user,
+            daily_summary_enabled=1,
+            notification_config=json.dumps({"resend": {"to_email": "valid@example.com"}}),
+        )
+
+        with patch.dict(os.environ, {"RESEND_API_KEY": "test-key"}):
+            with patch("notifier.send_daily_summary_email") as send:
+                outcome = web_server._deliver_daily_summary_email(
+                    "2026-07-10", {"summary": "summary", "stats": {}}
+                )
+
+        self.assertEqual(outcome["subscribers"], 1)
+        self.assertEqual(outcome["sent"], 1)
+        self.assertEqual(send.call_count, 1)
+        self.assertEqual(send.call_args.args[1], "valid@example.com")
 
 
 class ResendAddressParsingTests(unittest.TestCase):

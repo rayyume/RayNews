@@ -2605,8 +2605,8 @@ def _deliver_daily_summary_email(date_str: str, result: dict, force: bool = Fals
                 nc = _json.loads(nc)
             except (_json.JSONDecodeError, TypeError):
                 nc = {}
-        to_email = (nc.get("resend") or {}).get("to_email", "")
-        if to_email:
+        to_email = _resend_to_email(nc)
+        if to_email and is_valid_email(to_email):
             recipients[int(settings["user_id"])] = to_email
 
     print(f"[scheduler] Daily summary broadcast for {today_str}: {len(recipients)} subscriber(s)")
@@ -5699,6 +5699,8 @@ def update_settings():
         )
         if email_push_on and not to_email:
             return jsonify({"error": "开启邮件推送前请先填写接收邮箱"}), 400
+        if to_email and not is_valid_email(to_email):
+            return jsonify({"error": "接收邮箱格式不正确"}), 400
 
     # Normalize notification_config to JSON string for storage
     if "notification_config" in data:
@@ -5876,15 +5878,16 @@ def test_notification():
         except (json.JSONDecodeError, TypeError):
             nc = {}
 
-    config = nc.get("resend", {})
     # Always use RESEND_API_KEY from environment
     api_key = os.environ.get("RESEND_API_KEY", "")
-    to_email = config.get("to_email", "")
+    to_email = _resend_to_email(nc)
 
     if not api_key:
         return jsonify({"error": "RESEND_API_KEY not set in server environment. Contact admin."}), 400
     if not to_email:
         return jsonify({"error": "notification not configured. Set recipient email in Settings."}), 400
+    if not is_valid_email(to_email):
+        return jsonify({"error": "接收邮箱格式不正确"}), 400
 
     try:
         from notifier import send_email
