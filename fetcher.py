@@ -150,10 +150,30 @@ def upsert_articles(
     — pass sync_sources=False there and let the caller run it once after the whole
     cycle finishes, instead of repeating a full-table pass per batch.
     """
-    sql = """INSERT OR REPLACE INTO articles
+    sql = """INSERT INTO articles
         (id, title, source, feed_source, origin_source, time, date, timestamp, thumb,
          has_full_content, telegraph_url, body_html, original_body_html, summary)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            title = excluded.title,
+            source = excluded.source,
+            feed_source = excluded.feed_source,
+            origin_source = excluded.origin_source,
+            time = excluded.time,
+            date = excluded.date,
+            timestamp = excluded.timestamp,
+            thumb = excluded.thumb,
+            has_full_content = CASE
+                WHEN articles.has_full_content = 1 OR excluded.has_full_content = 1 THEN 1 ELSE 0 END,
+            telegraph_url = CASE WHEN excluded.telegraph_url != ''
+                THEN excluded.telegraph_url ELSE articles.telegraph_url END,
+            body_html = CASE WHEN excluded.body_html != ''
+                THEN excluded.body_html ELSE articles.body_html END,
+            original_body_html = CASE
+                WHEN articles.original_body_html IS NULL OR articles.original_body_html = ''
+                THEN excluded.original_body_html ELSE articles.original_body_html END,
+            summary = CASE WHEN excluded.summary != ''
+                THEN excluded.summary ELSE articles.summary END"""
     rows = []
     deleted_ids = {
         int(row[0])

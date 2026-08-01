@@ -109,6 +109,74 @@ def test_backfill_leaves_row_downgraded_when_fetch_still_fails(tmp_path, monkeyp
     conn.close()
 
 
+def test_upsert_keeps_existing_fulltext_and_title_migration_state_on_empty_reingest(
+    tmp_path, monkeypatch
+):
+    _patch_paths(monkeypatch, tmp_path)
+    conn = fetcher.init_db()
+    original_body = "<article>original full body</article>"
+    fetcher.upsert_articles(conn, [{
+        "id": 13,
+        "title": "Original incoming title",
+        "source": "Old feed",
+        "feed_source": "Old feed",
+        "origin_source": "Old origin",
+        "time": "08:00",
+        "date": "2026-08-01",
+        "timestamp": 100,
+        "thumb": "https://img/old.jpg",
+        "has_full_content": True,
+        "telegraph_url": "https://telegra.ph/original",
+        "body_html": original_body,
+        "summary": "Existing summary",
+    }])
+    conn.execute(
+        "UPDATE articles SET original_title = ?, title_updated_at = ?, title_source = ? "
+        "WHERE id = 13",
+        ("Original incoming title", "2026-08-01 08:01:00", "title_summary"),
+    )
+    conn.commit()
+
+    fetcher.upsert_articles(conn, [{
+        "id": 13,
+        "title": "Fresh incoming title",
+        "source": "New feed",
+        "feed_source": "New feed",
+        "origin_source": "New origin",
+        "time": "09:00",
+        "date": "2026-08-02",
+        "timestamp": 200,
+        "thumb": "https://img/new.jpg",
+        "has_full_content": False,
+        "telegraph_url": "",
+        "body_html": "",
+        "summary": "",
+    }])
+
+    row = conn.execute(
+        "SELECT title, source, feed_source, origin_source, time, date, timestamp, thumb, "
+        "has_full_content, telegraph_url, body_html, original_body_html, summary, "
+        "original_title, title_updated_at, title_source FROM articles WHERE id = 13"
+    ).fetchone()
+    assert tuple(row) == (
+        "Fresh incoming title", "New feed", "New feed", "New origin", "09:00",
+        "2026-08-02", 200, "https://img/new.jpg", 1,
+        "https://telegra.ph/original", original_body, original_body, "Existing summary",
+        "Original incoming title", "2026-08-01 08:01:00", "title_summary",
+    )
+
+    fetcher.upsert_articles(conn, [{
+        "id": 13,
+        "title": "Latest incoming title",
+        "body_html": "<article>explicit replacement</article>",
+    }])
+    row = conn.execute(
+        "SELECT body_html, original_body_html FROM articles WHERE id = 13"
+    ).fetchone()
+    assert tuple(row) == ("<article>explicit replacement</article>", original_body)
+    conn.close()
+
+
 def test_run_still_backfills_when_there_are_no_new_messages(tmp_path, monkeypatch):
     # A no-new-messages cycle is exactly when a previously failed Telegraph fetch would
     # otherwise never get retried — backfill must still run so it doesn't age out of the
