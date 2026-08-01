@@ -608,3 +608,80 @@ def test_scheduler_status_requires_admin_and_alias_preserves_payload_shape(auth_
     }
     assert set(legacy.get_json()) == expected_fields
     assert set(alias.get_json()) == expected_fields
+
+@pytest.mark.parametrize(
+    ("remote_addr", "headers", "expected"),
+    [
+        (
+            "127.0.0.1",
+            {"X-Real-IP": "198.51.100.50"},
+            "198.51.100.50",
+        ),
+        (
+            "127.0.0.1",
+            {"X-Forwarded-For": "198.51.100.51"},
+            "127.0.0.1",
+        ),
+    ],
+)
+def test_trusted_client_ip_defaults_to_loopback_and_only_x_real_ip(
+    monkeypatch,
+    remote_addr,
+    headers,
+    expected,
+):
+    """Would fail if the default trust range expands or XFF is accepted."""
+    monkeypatch.delenv("TRUSTED_PROXY_PREFIXES", raising=False)
+
+    with web_server.app.test_request_context(
+        "/", headers=headers, environ_base={"REMOTE_ADDR": remote_addr}
+    ):
+        assert web_server._trusted_client_ip() == expected
+
+
+def test_trusted_client_ip_accepts_x_real_ip_from_configured_ipv4_proxy(monkeypatch):
+    """Would fail if configured IPv4 proxy CIDRs are not honored."""
+    monkeypatch.setenv("TRUSTED_PROXY_PREFIXES", "192.168.0.0/24")
+
+    with web_server.app.test_request_context(
+        "/",
+        headers={"X-Real-IP": "198.51.100.52"},
+        environ_base={"REMOTE_ADDR": "192.168.0.8"},
+    ):
+        assert web_server._trusted_client_ip() == "198.51.100.52"
+
+
+def test_trusted_client_ip_rejects_spoofing_from_untrusted_configured_peer(monkeypatch):
+    """Would fail if any peer, rather than only the configured CIDR, is trusted."""
+    monkeypatch.setenv("TRUSTED_PROXY_PREFIXES", "192.168.0.0/24")
+
+    with web_server.app.test_request_context(
+        "/",
+        headers={"X-Real-IP": "198.51.100.53"},
+        environ_base={"REMOTE_ADDR": "192.168.1.8"},
+    ):
+        assert web_server._trusted_client_ip() == "192.168.1.8"
+
+
+def test_trusted_client_ip_fails_closed_for_invalid_proxy_prefix(monkeypatch):
+    """Would fail if malformed prefixes accidentally retain or broaden trust."""
+    monkeypatch.setenv("TRUSTED_PROXY_PREFIXES", "not-a-network")
+
+    with web_server.app.test_request_context(
+        "/",
+        headers={"X-Real-IP": "198.51.100.54"},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    ):
+        assert web_server._trusted_client_ip() == "127.0.0.1"
+
+
+def test_trusted_client_ip_accepts_x_real_ip_from_configured_ipv6_proxy(monkeypatch):
+    """Would fail if IPv6 proxy CIDRs cannot establish trusted proxy status."""
+    monkeypatch.setenv("TRUSTED_PROXY_PREFIXES", "2001:db8:1::/64")
+
+    with web_server.app.test_request_context(
+        "/",
+        headers={"X-Real-IP": "2001:db8:2::99"},
+        environ_base={"REMOTE_ADDR": "2001:db8:1::8"},
+    ):
+        assert web_server._trusted_client_ip() == "2001:db8:2::99"

@@ -198,15 +198,29 @@ def _admin_email_address() -> str:
     return (os.environ.get("RAYNEWS_ADMIN_EMAIL") or get_first_admin_email() or "").strip()
 
 
+def _trusted_proxy_networks():
+    """Return configured direct-peer networks allowed to supply X-Real-IP."""
+    raw = os.environ.get("TRUSTED_PROXY_PREFIXES") or "127.0.0.1/32,::1/128"
+    networks = []
+    for prefix in raw.split(","):
+        try:
+            networks.append(ipaddress.ip_network(prefix.strip(), strict=False))
+        except ValueError:
+            continue
+    return networks
+
+
 def _trusted_client_ip() -> str:
-    """Use proxy-provided client IP only when the direct peer is loopback."""
+    """Use X-Real-IP only when the direct peer is a trusted proxy."""
     remote = (request.remote_addr or "").strip()
     try:
         remote_ip = ipaddress.ip_address(remote)
     except ValueError:
         remote_ip = None
 
-    if remote_ip is not None and remote_ip.is_loopback:
+    if remote_ip is not None and any(
+        remote_ip in network for network in _trusted_proxy_networks()
+    ):
         real_ip = (request.headers.get("X-Real-IP") or "").strip()
         try:
             return str(ipaddress.ip_address(real_ip))
