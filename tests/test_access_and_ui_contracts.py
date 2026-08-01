@@ -1,3 +1,4 @@
+import base64
 import json
 import sqlite3
 import shutil
@@ -122,6 +123,81 @@ def test_ai_result_body_accepts_normal_strings(ai_result_client):
     assert response.status_code == 200
     assert captured[0][1]["summary"] == "normal summary"
     assert captured[0][1]["translation"] == "normal translation"
+
+
+@pytest.fixture
+def avatar_client(monkeypatch, tmp_path):
+    updates = []
+    monkeypatch.setattr(models, "get_user", lambda user_id: {"id": user_id, "role": "user"})
+    monkeypatch.setattr(models, "record_access", lambda _user_id: None)
+    monkeypatch.setattr(web_server, "AVATARS_DIR", str(tmp_path / "avatars"))
+    monkeypatch.setattr(
+        web_server,
+        "update_user",
+        lambda user_id, **kwargs: updates.append((user_id, kwargs)),
+    )
+    token = web_server.create_token(1, "user")
+    return web_server.app.test_client(), {"Authorization": f"Bearer {token}"}, tmp_path, updates
+
+
+@pytest.mark.parametrize(
+    ("mime", "image_bytes", "extension"),
+    [
+        ("image/jpeg", b"\xff\xd8\xff\xe0avatar", "jpg"),
+        ("image/png", b"\x89PNG\r\n\x1a\navatar", "png"),
+        ("image/gif", b"GIF89aavatar", "gif"),
+        ("image/webp", b"RIFF\x08\x00\x00\x00WEBPavatar", "webp"),
+    ],
+)
+def test_avatar_upload_accepts_supported_image_content_and_saves_matching_extension(
+    avatar_client, mime, image_bytes, extension
+):
+    client, headers, tmp_path, updates = avatar_client
+    data_url = f"data:{mime};base64,{base64.b64encode(image_bytes).decode()}"
+
+    response = client.put("/auth/me/avatar", headers=headers, json={"image": data_url})
+
+    assert response.status_code == 200
+    assert response.json["avatar_url"].startswith(f"/avatars/1.{extension}?v=")
+    assert (tmp_path / "avatars" / f"1.{extension}").read_bytes() == image_bytes
+    assert updates and updates[-1][1]["avatar_url"] == response.json["avatar_url"]
+
+
+def test_avatar_upload_rejects_html_disguised_as_png(avatar_client):
+    client, headers, tmp_path, _updates = avatar_client
+    data_url = "data:image/png;base64," + base64.b64encode(b"<html>not an image</html>").decode()
+
+    response = client.put("/auth/me/avatar", headers=headers, json={"image": data_url})
+
+    assert response.status_code == 400
+    assert response.json == {"error": "image content does not match declared type"}
+    assert not (tmp_path / "avatars").exists()
+
+
+def test_avatar_upload_rejects_png_declared_as_jpeg(avatar_client):
+    client, headers, tmp_path, _updates = avatar_client
+    png_bytes = b"\x89PNG\r\n\x1a\navatar"
+    data_url = "data:image/jpeg;base64," + base64.b64encode(png_bytes).decode()
+
+    response = client.put("/auth/me/avatar", headers=headers, json={"image": data_url})
+
+    assert response.status_code == 400
+    assert response.json == {"error": "image content does not match declared type"}
+    assert not (tmp_path / "avatars").exists()
+
+
+def test_avatar_upload_rejects_malformed_base64(avatar_client):
+    client, headers, tmp_path, _updates = avatar_client
+
+    response = client.put(
+        "/auth/me/avatar",
+        headers=headers,
+        json={"image": "data:image/png;base64,not-valid-base64!"},
+    )
+
+    assert response.status_code == 400
+    assert response.json == {"error": "invalid image data"}
+    assert not (tmp_path / "avatars").exists()
 
 
 def test_settings_response_exposes_safe_pending_revalidation_failure_fields_only():

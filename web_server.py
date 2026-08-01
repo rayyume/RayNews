@@ -1,5 +1,6 @@
 """RayNews Web Server — auth, favorites, AI, settings via Flask."""
 
+import base64
 import os
 import re
 import sys
@@ -52,6 +53,7 @@ from models import (
 )
 from auth import init_auth, create_token, require_auth, require_role
 from auth_validation import is_valid_email
+from image_validation import detect_image_content_type
 from ai_service import AIService, _redact_api_error
 from network_safety import UnsafeUrlError, assert_public_http_url
 from image_cache import (
@@ -465,8 +467,11 @@ def upload_avatar():
         if not ext:
             return jsonify({"error": "unsupported image type (jpg/png/gif/webp only)"}), 400
 
-        import base64
-        raw_bytes = base64.b64decode(raw)
+        raw_bytes = base64.b64decode(raw, validate=True)
+        actual_mime = detect_image_content_type(raw_bytes)
+        if actual_mime is None or actual_mime != mime:
+            return jsonify({"error": "image content does not match declared type"}), 400
+        ext = ALLOWED_AVATAR_TYPES[actual_mime]
 
         if len(raw_bytes) > AVATAR_MAX_SIZE:
             return jsonify({"error": "image too large (max 500KB)"}), 400
