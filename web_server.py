@@ -145,7 +145,12 @@ TITLE_MERGE_TRANSLATE_CONDENSE = os.environ.get("TITLE_MERGE_TRANSLATE_CONDENSE"
 
 # ─── App Setup ────────────────────────────────────────────────
 
+MAX_REQUEST_BODY_BYTES = 2 * 1024 * 1024
+AI_RESULT_MAX_BODY_BYTES = 1024 * 1024
+AI_RESULT_MAX_FIELD_CHARS = 200_000
+
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BODY_BYTES
 CORS(app)
 
 
@@ -1135,6 +1140,12 @@ def ai_save_result(article_id):
     Body: {"summary": "..."} or {"translation": "..."} (translation is the
     same JSON-string-encoded {"title", "html"} shape used elsewhere).
     """
+    if (
+        request.content_length is not None
+        and request.content_length > AI_RESULT_MAX_BODY_BYTES
+    ):
+        return jsonify({"error": "request body too large"}), 413
+
     settings = get_user_settings(g.user_id) or {}
     if not is_share_active(settings):
         return jsonify({"error": "shared AI result publication is not active"}), 403
@@ -1146,6 +1157,14 @@ def ai_save_result(article_id):
     data = request.get_json(silent=True) or {}
     summary = data.get("summary")
     translation = data.get("translation")
+    if summary is not None and not isinstance(summary, str):
+        return jsonify({"error": "summary must be a string"}), 400
+    if translation is not None and not isinstance(translation, str):
+        return jsonify({"error": "translation must be a string"}), 400
+    if summary is not None and len(summary) > AI_RESULT_MAX_FIELD_CHARS:
+        return jsonify({"error": "summary too long"}), 400
+    if translation is not None and len(translation) > AI_RESULT_MAX_FIELD_CHARS:
+        return jsonify({"error": "translation too long"}), 400
     if not summary and not translation:
         return jsonify({"error": "summary or translation required"}), 400
 

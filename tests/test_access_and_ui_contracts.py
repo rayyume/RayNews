@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import shutil
 import subprocess
@@ -11,12 +12,116 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from auth_validation import is_valid_email
+import models
 import web_server
 from source_categories import (
     init_source_categories,
     promote_user_source_settings,
     source_rows,
 )
+
+
+@pytest.fixture
+def ai_result_client(monkeypatch):
+    captured = []
+    active_settings = {
+        "share_ai_results": 1,
+        "share_suspended": 0,
+        "share_last_check_ok": 1,
+        "share_last_check_revision": 1,
+        "share_current_config_revision": 1,
+    }
+    monkeypatch.setattr(
+        models,
+        "get_user",
+        lambda user_id: {"id": user_id, "role": "user"},
+    )
+    monkeypatch.setattr(models, "record_access", lambda _user_id: None)
+    monkeypatch.setattr(web_server, "get_user_settings", lambda _user_id: active_settings)
+    monkeypatch.setattr(web_server, "_fetch_article_body", lambda _article_id: {"id": 1})
+    monkeypatch.setattr(
+        web_server,
+        "get_ai_config",
+        lambda _user_id: {"provider": "openai", "model": "test-model"},
+    )
+    monkeypatch.setattr(
+        web_server,
+        "_save_ai_result",
+        lambda article_id, **kwargs: captured.append((article_id, kwargs)) or True,
+    )
+    token = web_server.create_token(1, "user")
+    return web_server.app.test_client(), {"Authorization": f"Bearer {token}"}, captured
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"summary": {"unexpected": "object"}},
+        {"translation": ["unexpected", "array"]},
+    ],
+)
+def test_ai_result_type_validation_returns_400(ai_result_client, payload):
+    client, headers, captured = ai_result_client
+
+    response = client.post("/ai/result/1", headers=headers, json=payload)
+
+    assert response.status_code == 400
+    assert captured == []
+
+
+def test_ai_result_size_validation_rejects_oversized_field(ai_result_client):
+    client, headers, captured = ai_result_client
+
+    response = client.post(
+        "/ai/result/1",
+        headers=headers,
+        json={"summary": "x" * 200_001},
+    )
+
+    assert response.status_code == 400
+    assert captured == []
+
+
+def test_ai_result_body_limit_rejects_large_irrelevant_payload(ai_result_client):
+    client, headers, captured = ai_result_client
+    body = json.dumps({"irrelevant": "x" * (2 * 1024 * 1024)})
+
+    response = client.post(
+        "/ai/result/1",
+        headers={**headers, "Content-Type": "application/json"},
+        data=body,
+    )
+
+    assert response.status_code == 413
+    assert captured == []
+
+
+def test_ai_result_body_limit_rejects_route_specific_oversize(ai_result_client):
+    client, headers, captured = ai_result_client
+    body = json.dumps({"irrelevant": "x" * (1024 * 1024)})
+
+    response = client.post(
+        "/ai/result/1",
+        headers={**headers, "Content-Type": "application/json"},
+        data=body,
+    )
+
+    assert response.status_code == 413
+    assert captured == []
+
+
+def test_ai_result_body_accepts_normal_strings(ai_result_client):
+    client, headers, captured = ai_result_client
+
+    response = client.post(
+        "/ai/result/1",
+        headers=headers,
+        json={"summary": "normal summary", "translation": "normal translation"},
+    )
+
+    assert response.status_code == 200
+    assert captured[0][1]["summary"] == "normal summary"
+    assert captured[0][1]["translation"] == "normal translation"
 
 
 def test_settings_response_exposes_safe_pending_revalidation_failure_fields_only():
