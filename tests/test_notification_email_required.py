@@ -167,7 +167,7 @@ class EmailPushRequiresAnAddressTests(unittest.TestCase):
         with patch.dict(os.environ, {"RESEND_API_KEY": "test-key"}):
             with patch("notifier.send_daily_summary_email") as send:
                 outcome = web_server._deliver_daily_summary_email(
-                    "2026-07-10", {"summary": "summary", "stats": {}}
+                    "2026-07-10", {"summary": "summary", "stats": {}}, force=True
                 )
 
         self.assertEqual(outcome["subscribers"], 1)
