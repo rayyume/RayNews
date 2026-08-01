@@ -3,7 +3,7 @@
 import sqlite3
 import json
 import bcrypt
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import math
 import os
@@ -798,6 +798,10 @@ def complete_invite_request(
 # ─── Access Stats ──────────────────────────────────────────
 
 _ACCESS_THROTTLE_SECONDS = 300  # collapse bursts of requests into one "visit"
+_ACCESS_LOG_RETENTION_SECONDS = 90 * 24 * 3600
+_ACCESS_LOG_PRUNE_INTERVAL_SECONDS = 3600
+_access_log_prune_lock = threading.Lock()
+_last_access_log_prune_at = 0.0
 
 
 def record_access(user_id: int) -> None:
@@ -812,25 +816,58 @@ def record_access(user_id: int) -> None:
     if row is None:
         return
     now = datetime.utcnow()
-    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
-    should_count = True
     last_seen = row["last_seen_at"]
     if last_seen:
         try:
             last_dt = datetime.strptime(last_seen, "%Y-%m-%d %H:%M:%S")
             if (now - last_dt).total_seconds() < _ACCESS_THROTTLE_SECONDS:
-                should_count = False
+                return
         except ValueError:
             pass
-    if should_count:
-        db.execute(
-            "UPDATE users SET visit_count = visit_count + 1, last_seen_at = ? WHERE id = ?",
-            (now_str, user_id),
-        )
-        db.execute("INSERT INTO user_access_log (user_id, accessed_at) VALUES (?, ?)", (user_id, now_str))
-    else:
-        db.execute("UPDATE users SET last_seen_at = ? WHERE id = ?", (now_str, user_id))
+
+    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    cutoff = (now - timedelta(seconds=_ACCESS_THROTTLE_SECONDS)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    updated = db.execute(
+        "UPDATE users "
+        "SET visit_count = visit_count + 1, last_seen_at = ? "
+        "WHERE id = ? AND ("
+        "last_seen_at IS NULL OR last_seen_at = '' OR last_seen_at < ?)",
+        (now_str, user_id, cutoff),
+    )
+    if updated.rowcount != 1:
+        db.rollback()
+        return
+    db.execute(
+        "INSERT INTO user_access_log (user_id, accessed_at) VALUES (?, ?)",
+        (user_id, now_str),
+    )
     db.commit()
+
+
+def prune_access_log(*, now: float | None = None) -> int:
+    """Delete old access details at most once per successful hourly run."""
+    global _last_access_log_prune_at
+    current = time.time() if now is None else float(now)
+    with _access_log_prune_lock:
+        if current - _last_access_log_prune_at < _ACCESS_LOG_PRUNE_INTERVAL_SECONDS:
+            return 0
+        db = get_db()
+        try:
+            deleted = db.execute(
+                "DELETE FROM user_access_log "
+                "WHERE accessed_at < "
+                "strftime('%Y-%m-%d %H:%M:%S', ?, 'unixepoch')",
+                (current - _ACCESS_LOG_RETENTION_SECONDS,),
+            )
+            count = max(0, int(deleted.rowcount))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        _last_access_log_prune_at = current
+        return count
 
 
 def count_active_users_since(days: int) -> int:

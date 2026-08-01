@@ -27,6 +27,7 @@ from models import (
     get_db, create_registered_user, get_user, get_user_by_email, get_user_by_username,
     update_user, delete_user, list_users, get_first_admin_email, count_users,
     count_active_users_since,
+    prune_access_log,
     verify_password, admit_login_attempt, reset_login_failures,
     admit_register_attempt, reset_register_attempts,
     claim_invite_request, complete_invite_request,
@@ -2668,6 +2669,10 @@ def _daily_summary_loop():
             _send_daily_summaries()
         except Exception as e:
             print(f"[scheduler] Error in loop: {e}")
+        try:
+            prune_access_log()
+        except Exception as e:
+            print(f"[scheduler] Access log cleanup failed: {e}")
         _time.sleep(60)
 
 

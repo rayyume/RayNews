@@ -2,16 +2,21 @@ import os
 import inspect
 import sqlite3
 import sys
+import threading
 import time
 import uuid
-from datetime import date
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date, datetime, timedelta
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import image_cache
+import models
 import web_server
 
 
@@ -23,6 +28,185 @@ ARTICLES_DDL = (
     "has_full_content INTEGER DEFAULT 0, telegraph_url TEXT DEFAULT '', "
     "body_html TEXT DEFAULT '', summary TEXT DEFAULT '')"
 )
+
+
+@pytest.fixture
+def access_log_env(tmp_path, monkeypatch):
+    old_db_file = models.DB_FILE
+    models.close_db()
+    models.DB_FILE = tmp_path / "access-log.db"
+    db = models.get_db()
+    db.execute(
+        "INSERT INTO users (email, password, nickname, role) VALUES (?, ?, ?, ?)",
+        ("reader@example.com", "unused-test-hash", "reader", "user"),
+    )
+    db.commit()
+    monkeypatch.setattr(models, "_last_access_log_prune_at", 0.0, raising=False)
+    try:
+        yield 1
+    finally:
+        models.close_db()
+        models.DB_FILE = old_db_file
+
+
+def test_record_access_window_call_is_read_only(access_log_env):
+    user_id = access_log_env
+    models.record_access(user_id)
+    db = models.get_db()
+    before = db.execute(
+        "SELECT visit_count, last_seen_at FROM users WHERE id = ?",
+        (user_id,),
+    ).fetchone()
+    statements = []
+    db.set_trace_callback(statements.append)
+
+    models.record_access(user_id)
+
+    after = db.execute(
+        "SELECT visit_count, last_seen_at FROM users WHERE id = ?",
+        (user_id,),
+    ).fetchone()
+    db.set_trace_callback(None)
+    assert tuple(after) == tuple(before)
+    assert db.execute(
+        "SELECT COUNT(*) FROM user_access_log WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()[0] == 1
+    writes = [sql for sql in statements if sql.lstrip().upper().startswith(("UPDATE", "INSERT"))]
+    assert writes == []
+
+
+def test_record_access_counts_again_after_window(access_log_env):
+    user_id = access_log_env
+    old_time = (datetime.utcnow() - timedelta(seconds=301)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    db = models.get_db()
+    db.execute(
+        "UPDATE users SET visit_count = 1, last_seen_at = ? WHERE id = ?",
+        (old_time, user_id),
+    )
+    db.commit()
+
+    models.record_access(user_id)
+
+    row = db.execute(
+        "SELECT visit_count, last_seen_at FROM users WHERE id = ?",
+        (user_id,),
+    ).fetchone()
+    assert row["visit_count"] == 2
+    assert row["last_seen_at"] > old_time
+    assert db.execute(
+        "SELECT COUNT(*) FROM user_access_log WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()[0] == 1
+
+
+def test_concurrent_record_access_counts_only_once(access_log_env, monkeypatch):
+    user_id = access_log_env
+    old_time = (datetime.utcnow() - timedelta(seconds=301)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    db = models.get_db()
+    db.execute(
+        "UPDATE users SET visit_count = 0, last_seen_at = ? WHERE id = ?",
+        (old_time, user_id),
+    )
+    db.commit()
+
+    original_get_db = models.get_db
+    barrier = threading.Barrier(2)
+
+    class CursorBarrier:
+        def __init__(self, cursor):
+            self._cursor = cursor
+
+        def fetchone(self):
+            row = self._cursor.fetchone()
+            barrier.wait(timeout=5)
+            return row
+
+    class ConnectionBarrier:
+        def __init__(self, connection):
+            self._connection = connection
+
+        def execute(self, sql, params=()):
+            cursor = self._connection.execute(sql, params)
+            if sql.startswith("SELECT last_seen_at FROM users"):
+                return CursorBarrier(cursor)
+            return cursor
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+    monkeypatch.setattr(models, "get_db", lambda: ConnectionBarrier(original_get_db()))
+
+    def record(_index):
+        try:
+            models.record_access(user_id)
+        finally:
+            models.close_db()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(record, range(2)))
+
+    row = db.execute(
+        "SELECT visit_count FROM users WHERE id = ?",
+        (user_id,),
+    ).fetchone()
+    assert row["visit_count"] == 1
+    assert db.execute(
+        "SELECT COUNT(*) FROM user_access_log WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()[0] == 1
+
+
+def test_prune_access_log_removes_old_rows_and_throttles(access_log_env):
+    user_id = access_log_env
+    now = datetime.utcnow()
+    db = models.get_db()
+    db.executemany(
+        "INSERT INTO user_access_log (user_id, accessed_at) VALUES (?, ?)",
+        [
+            (user_id, (now - timedelta(days=91)).strftime("%Y-%m-%d %H:%M:%S")),
+            (user_id, now.strftime("%Y-%m-%d %H:%M:%S")),
+        ],
+    )
+    db.commit()
+
+    assert models.prune_access_log(now=now.timestamp()) == 1
+    assert models.prune_access_log(now=now.timestamp() + 30) == 0
+    rows = db.execute(
+        "SELECT accessed_at FROM user_access_log ORDER BY accessed_at"
+    ).fetchall()
+    assert [row["accessed_at"] for row in rows] == [
+        now.strftime("%Y-%m-%d %H:%M:%S")
+    ]
+
+
+def test_prune_access_log_failure_can_retry_immediately(access_log_env, monkeypatch):
+    original_get_db = models.get_db
+    failed = False
+
+    class FailingConnection:
+        def __init__(self, connection):
+            self._connection = connection
+
+        def execute(self, sql, params=()):
+            nonlocal failed
+            if sql.startswith("DELETE FROM user_access_log") and not failed:
+                failed = True
+                raise RuntimeError("delete failed")
+            return self._connection.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+    monkeypatch.setattr(models, "get_db", lambda: FailingConnection(original_get_db()))
+
+    with pytest.raises(RuntimeError, match="delete failed"):
+        models.prune_access_log(now=1_000_000)
+    assert models.prune_access_log(now=1_000_000) == 0
 
 
 def _make_cache(tmp_path, monkeypatch):
