@@ -6,6 +6,7 @@ import threading
 import time
 
 import jwt
+import bcrypt
 import pytest
 
 import models
@@ -150,6 +151,46 @@ def test_admin_role_change_rotates_token_version(auth_env):
     assert auth_env.get("/auth/me", headers=_bearer(old_token)).status_code == 401
 
 
+def test_role_update_and_token_rotation_are_one_database_update(auth_env):
+    user = _create_login_user()
+    db = models.get_db()
+    db.execute(
+        "CREATE TRIGGER require_atomic_role_token_rotation "
+        "BEFORE UPDATE OF role ON users "
+        "WHEN NEW.role <> OLD.role "
+        "AND NEW.token_version <> OLD.token_version + 1 "
+        "BEGIN SELECT RAISE(ABORT, 'role and token version must change together'); END"
+    )
+    db.commit()
+
+    changed = models.set_user_role_and_rotate_token_version(user["id"], "admin")
+
+    assert changed["role"] == "admin"
+    assert changed["token_version"] == 1
+
+
+def test_admin_role_route_does_not_use_split_update_helpers(auth_env, monkeypatch):
+    user = _create_login_user()
+    admin_id = _seed_admin()
+
+    def split_update_called(*_args, **_kwargs):
+        raise AssertionError("role changes must use the atomic model helper")
+
+    monkeypatch.setattr(web_server, "get_user", split_update_called)
+    monkeypatch.setattr(web_server, "update_user", split_update_called)
+    monkeypatch.setattr(web_server, "rotate_token_version", split_update_called)
+
+    changed = auth_env.put(
+        f"/auth/users/{user['id']}/role",
+        json={"role": "admin"},
+        headers=_bearer(web_server.create_token(admin_id, "admin")),
+    )
+
+    assert changed.status_code == 200
+    assert changed.get_json()["role"] == "admin"
+    assert changed.get_json()["token_version"] == 1
+
+
 def test_admin_setting_same_role_keeps_token_version_and_existing_token(auth_env):
     user = _create_login_user()
     admin_id = _seed_admin()
@@ -164,6 +205,19 @@ def test_admin_setting_same_role_keeps_token_version_and_existing_token(auth_env
     assert unchanged.status_code == 200
     assert models.get_user(user["id"])["token_version"] == 0
     assert auth_env.get("/auth/me", headers=_bearer(old_token)).status_code == 200
+
+
+def test_admin_role_change_for_missing_user_returns_not_found(auth_env):
+    admin_id = _seed_admin()
+
+    response = auth_env.put(
+        "/auth/users/999/role",
+        json={"role": "user"},
+        headers=_bearer(web_server.create_token(admin_id, "admin")),
+    )
+
+    assert response.status_code == 404
+    assert response.get_json() == {"error": "not found"}
 
 
 def test_revoke_tokens_for_missing_user_returns_not_found(auth_env):
@@ -257,6 +311,67 @@ def _register(
         },
         environ_base={"REMOTE_ADDR": remote_addr},
     )
+
+
+@pytest.mark.parametrize("password", ["a" * 73, "密" * 25])
+def test_register_rejects_passwords_over_bcrypt_byte_limit(auth_env, password):
+    response = auth_env.post(
+        "/auth/register",
+        json={
+            "email": "first@example.com",
+            "password": password,
+            "nickname": "first",
+        },
+        environ_base={"REMOTE_ADDR": "198.51.100.72"},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {
+        "error": "password must be at most 72 UTF-8 bytes",
+    }
+
+
+@pytest.mark.parametrize("password", ["a" * 72, "密" * 24])
+def test_hash_password_accepts_exactly_72_utf8_bytes(password):
+    hashed = models.hash_password(password)
+
+    assert models.verify_password(password, hashed) is True
+
+
+@pytest.mark.parametrize("password", ["a" * 73, "密" * 25])
+def test_hash_password_rejects_more_than_72_utf8_bytes(password):
+    with pytest.raises(ValueError, match="at most 72 UTF-8 bytes"):
+        models.hash_password(password)
+
+
+@pytest.mark.parametrize(
+    "password",
+    [
+        "a" * 73,
+        "a" * 71 + "é",
+    ],
+)
+def test_login_accepts_legacy_bcrypt_hashes_created_from_72_byte_prefix(
+    auth_env,
+    password,
+):
+    password_bytes = password.encode("utf-8")
+    assert len(password_bytes) > 72
+    legacy_hash = bcrypt.hashpw(password_bytes[:72], bcrypt.gensalt()).decode()
+    db = models.get_db()
+    db.execute(
+        "INSERT INTO users (email, password, nickname, role) VALUES (?, ?, ?, ?)",
+        ("legacy-long@example.com", legacy_hash, "legacy-long", "user"),
+    )
+    db.commit()
+
+    response = auth_env.post(
+        "/auth/login",
+        json={"login": "legacy-long@example.com", "password": password},
+        environ_base={"REMOTE_ADDR": "198.51.100.73"},
+    )
+
+    assert response.status_code == 200
 
 
 def test_register_rate_limit_rejects_eleventh_attempt(auth_env):

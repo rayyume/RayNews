@@ -26,10 +26,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from models import (
     get_db, create_registered_user, get_user, get_user_by_email, get_user_by_username,
-    update_user, delete_user, rotate_token_version, list_users, get_first_admin_email, count_users,
+    update_user, set_user_role_and_rotate_token_version,
+    delete_user, rotate_token_version, list_users, get_first_admin_email, count_users,
     count_active_users_since,
     prune_access_log,
-    verify_password, admit_login_attempt, reset_login_failures,
+    verify_password, password_within_bcrypt_limit,
+    admit_login_attempt, reset_login_failures,
     admit_register_attempt, reset_register_attempts,
     claim_invite_request, complete_invite_request,
     add_favorite, remove_favorite, get_favorites, get_all_favorite_article_ids, is_favorited,
@@ -298,6 +300,10 @@ def register():
         return jsonify({"error": "invalid email format"}), 400
     if len(password) < 6:
         return jsonify({"error": "password must be at least 6 characters"}), 400
+    if not password_within_bcrypt_limit(password):
+        return jsonify({
+            "error": "password must be at most 72 UTF-8 bytes",
+        }), 400
 
     client_ip = _trusted_client_ip()
     admitted, retry_after = admit_register_attempt(client_ip)
@@ -553,16 +559,10 @@ def admin_set_role(user_id):
         return jsonify({"error": "invalid role"}), 400
     if user_id == g.user_id:
         return jsonify({"error": "cannot change your own role"}), 400
-    current = get_user(user_id)
-    if not current:
-        return jsonify({"error": "not found"}), 404
-    if current["role"] == new_role:
-        return jsonify(current)
-    user = update_user(user_id, role=new_role)
+    user = set_user_role_and_rotate_token_version(user_id, new_role)
     if not user:
         return jsonify({"error": "not found"}), 404
-    rotate_token_version(user_id)
-    return jsonify(get_user(user_id))
+    return jsonify(user)
 
 
 @app.route("/auth/users/<int:user_id>/revoke-tokens", methods=["POST"])

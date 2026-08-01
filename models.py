@@ -327,12 +327,25 @@ def get_db() -> sqlite3.Connection:
 
 # ─── User helpers ─────────────────────────────────────────────
 
+BCRYPT_MAX_PASSWORD_BYTES = 72
+
+
+def password_within_bcrypt_limit(password: str) -> bool:
+    return len(password.encode("utf-8")) <= BCRYPT_MAX_PASSWORD_BYTES
+
+
 def hash_password(password: str) -> str:
-    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    password_bytes = password.encode("utf-8")
+    if len(password_bytes) > BCRYPT_MAX_PASSWORD_BYTES:
+        raise ValueError("password must be at most 72 UTF-8 bytes")
+    return bcrypt.hashpw(password_bytes, bcrypt.gensalt()).decode()
 
 
 def verify_password(password: str, hashed: str) -> bool:
-    return bcrypt.checkpw(password.encode(), hashed.encode())
+    # bcrypt versions before 5.0 silently ignored bytes after byte 72. Keep
+    # those existing accounts usable while rejecting overlong new passwords.
+    password_bytes = password.encode("utf-8")[:BCRYPT_MAX_PASSWORD_BYTES]
+    return bcrypt.checkpw(password_bytes, hashed.encode())
 
 
 def create_user(email: str, password: str, nickname: str = "",
@@ -506,6 +519,28 @@ def update_user(user_id: int, **kwargs) -> dict | None:
     db.execute(f"UPDATE users SET {sets} WHERE id = ?", vals)
     db.commit()
     return get_user(user_id)
+
+
+def set_user_role_and_rotate_token_version(
+    user_id: int,
+    role: str,
+) -> dict | None:
+    """Set a role and revoke existing tokens in one atomic UPDATE.
+
+    Reapplying the current role is intentionally idempotent and leaves the
+    token version unchanged.
+    """
+    db = get_db()
+    row = db.execute(
+        "UPDATE users SET "
+        "token_version = token_version + CASE WHEN role <> ? THEN 1 ELSE 0 END, "
+        "role = ? WHERE id = ? "
+        "RETURNING id, email, nickname, role, avatar_url, created_at, "
+        "visit_count, last_seen_at, token_version",
+        (role, role, user_id),
+    ).fetchone()
+    db.commit()
+    return dict(row) if row else None
 
 
 def delete_user(user_id: int) -> bool:
