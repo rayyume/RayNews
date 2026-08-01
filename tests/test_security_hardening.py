@@ -15,6 +15,7 @@
 import datetime as dt
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -748,3 +749,133 @@ def test_daily_summary_force_resends_regardless_of_persisted_history(monkeypatch
                 os.remove(str(db_path) + suffix)
             except FileNotFoundError:
                 pass
+
+
+SECURITY_HEADERS = {
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "SAMEORIGIN",
+    "referrer-policy": "strict-origin-when-cross-origin",
+}
+NGINX_SECURITY_HEADERS_INCLUDE = "/etc/nginx/snippets/raynews-security-headers.conf"
+
+
+def test_malicious_origin_receives_no_cors_header_from_auth_health():
+    response = web_server.app.test_client().get(
+        "/auth/health", headers={"Origin": "https://evil.example"}
+    )
+
+    assert response.status_code == 200
+    assert "Access-Control-Allow-Origin" not in response.headers
+
+
+def test_same_origin_proxy_configuration_has_no_cors_policy():
+    web_server_source = (ROOT / "web_server.py").read_text(encoding="utf-8")
+    nginx_config = (ROOT / "nginx.conf").read_text(encoding="utf-8")
+
+    assert "flask_cors" not in web_server_source
+    assert "CORS(app)" not in web_server_source
+    assert not re.search(
+        r"add_header\s+Access-Control-Allow-[^;]*\*", nginx_config,
+    )
+    assert re.search(r"\bmap\b[^;{]*\$http_origin", nginx_config) is None
+    assert "proxy_hide_header Access-Control-Allow-Origin;" in nginx_config
+
+
+def test_nginx_security_headers_are_included_where_add_header_resets_inheritance():
+    snippet = ROOT / "nginx-security-headers.conf"
+    assert snippet.read_text(encoding="utf-8") == (
+        "add_header X-Content-Type-Options nosniff always;\n"
+        "add_header X-Frame-Options SAMEORIGIN always;\n"
+        "add_header Referrer-Policy strict-origin-when-cross-origin always;\n"
+    )
+
+    nginx_config = (ROOT / "nginx.conf").read_text(encoding="utf-8")
+    assert f"include {NGINX_SECURITY_HEADERS_INCLUDE};" in nginx_config
+    assert "client_max_body_size 2m;" in nginx_config
+    location_blocks = re.findall(
+        r"^    location\b.*?^    }", nginx_config, flags=re.MULTILINE | re.DOTALL
+    )
+    assert location_blocks
+    for location in location_blocks:
+        if "add_header" in location:
+            assert f"include {NGINX_SECURITY_HEADERS_INCLUDE};" in location
+
+
+def test_dockerfile_installs_nginx_security_headers_snippet():
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert (
+        "COPY nginx-security-headers.conf "
+        "/etc/nginx/snippets/raynews-security-headers.conf"
+    ) in dockerfile
+
+
+def _docker_is_usable():
+    try:
+        return subprocess.run(
+            ["docker", "info"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=10,
+        ).returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+@pytest.mark.skipif(not _docker_is_usable(), reason="Docker daemon is unavailable")
+def test_container_routes_have_security_headers_without_cors_reflection():
+    import socket
+    import time
+    from urllib.request import Request, urlopen
+
+    image = "raynews-security-plan"
+    container = f"raynews-security-test-{uuid.uuid4().hex}"
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+
+    build = subprocess.run(
+        ["docker", "build", "-t", image, "."], cwd=ROOT,
+        capture_output=True, text=True, timeout=300,
+    )
+    assert build.returncode == 0, build.stderr or build.stdout
+    nginx_test = subprocess.run(
+        ["docker", "run", "--rm", image, "nginx", "-t"],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert nginx_test.returncode == 0, nginx_test.stderr or nginx_test.stdout
+
+    try:
+        started = subprocess.run(
+            ["docker", "run", "-d", "--name", container, "-p", f"127.0.0.1:{port}:80", image],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert started.returncode == 0, started.stderr or started.stdout
+        for _ in range(30):
+            try:
+                with urlopen(f"http://127.0.0.1:{port}/", timeout=1):
+                    break
+            except Exception:
+                time.sleep(0.5)
+        else:
+            logs = subprocess.run(
+                ["docker", "logs", container], capture_output=True, text=True, timeout=30,
+            )
+            pytest.fail(logs.stderr or logs.stdout)
+
+        for path in ("/", "/auth/health", "/api/news", "/img-cache"):
+            request = Request(
+                f"http://127.0.0.1:{port}{path}",
+                headers={"Origin": "https://evil.example"}, method="HEAD",
+            )
+            try:
+                with urlopen(request, timeout=10) as response:
+                    headers = response.headers
+            except Exception as exc:
+                headers = getattr(exc, "headers", None)
+                assert headers is not None, exc
+            assert "Access-Control-Allow-Origin" not in headers
+            for name, value in SECURITY_HEADERS.items():
+                assert headers.get(name) == value
+    finally:
+        subprocess.run(
+            ["docker", "rm", "-f", container], stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=30,
+        )

@@ -17,7 +17,6 @@ from urllib.parse import urlsplit
 
 from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify, g
-from flask_cors import CORS
 from notifier import render_notification_email_body, send_email
 
 # Ensure the project root is on the path
@@ -152,7 +151,6 @@ AI_RESULT_MAX_FIELD_CHARS = 200_000
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BODY_BYTES
-CORS(app)
 
 
 # ─── JSON error handler — prevent HTML responses on errors ─────
