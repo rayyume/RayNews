@@ -13,6 +13,7 @@ import calendar
 import ipaddress
 import uuid
 import requests
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from urllib.parse import urlsplit
 
@@ -620,6 +621,15 @@ def _news_db_connect() -> sqlite3.Connection:
     return conn
 
 
+@contextmanager
+def _news_db_conn():
+    conn = _news_db_connect()
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
 def _ensure_news_schema(conn: sqlite3.Connection, *, force: bool = False) -> None:
     # A schema upgrade is a read-then-write sequence (PRAGMA followed by
     # ALTER TABLE), so concurrent request connections must not run it in
@@ -653,16 +663,15 @@ def _get_article_meta(article_id: int) -> dict | None:
     if not os.path.exists(NEWS_DB):
         return None
     try:
-        conn = _news_db_connect()
-        _ensure_news_schema(conn)
-        row = conn.execute(
-            "SELECT id, title, original_title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
-            "       COALESCE(NULLIF(feed_source, ''), source) AS feed_source, origin_source, "
-            "       date, time, thumb, has_full_content, timestamp "
-            "FROM articles WHERE id = ?",
-            (article_id,),
-        ).fetchone()
-        conn.close()
+        with _news_db_conn() as conn:
+            _ensure_news_schema(conn)
+            row = conn.execute(
+                "SELECT id, title, original_title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
+                "       COALESCE(NULLIF(feed_source, ''), source) AS feed_source, origin_source, "
+                "       date, time, thumb, has_full_content, timestamp "
+                "FROM articles WHERE id = ?",
+                (article_id,),
+            ).fetchone()
         return dict(row) if row else None
     except Exception:
         return None
@@ -2069,18 +2078,17 @@ def _init_daily_summary_global_table():
     if not os.path.exists(NEWS_DB):
         return
     try:
-        conn = _news_db_connect()
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS daily_summary_global (
-                date          TEXT PRIMARY KEY,
-                summary       TEXT NOT NULL,
-                article_count INTEGER NOT NULL DEFAULT 0,
-                stats         TEXT NOT NULL DEFAULT '{}',
-                updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
-            )
-        """)
-        conn.commit()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS daily_summary_global (
+                    date          TEXT PRIMARY KEY,
+                    summary       TEXT NOT NULL,
+                    article_count INTEGER NOT NULL DEFAULT 0,
+                    stats         TEXT NOT NULL DEFAULT '{}',
+                    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+            """)
+            conn.commit()
     except Exception as e:
         print(f"[daily-summary] global cache table init failed: {e}")
 
@@ -2090,14 +2098,13 @@ def _get_daily_summary_global_cache(date_str: str) -> dict | None:
         return None
     try:
         _init_daily_summary_global_table()
-        conn = _news_db_connect()
-        conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            "SELECT summary, article_count, stats, updated_at "
-            "FROM daily_summary_global WHERE date = ?",
-            (date_str,),
-        ).fetchone()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT summary, article_count, stats, updated_at "
+                "FROM daily_summary_global WHERE date = ?",
+                (date_str,),
+            ).fetchone()
         if not row:
             return None
         data = dict(row)
@@ -2117,20 +2124,19 @@ def _save_daily_summary_global_cache(date_str: str, summary: str,
         return
     try:
         _init_daily_summary_global_table()
-        conn = _news_db_connect()
-        conn.execute(
-            "INSERT INTO daily_summary_global "
-            "(date, summary, article_count, stats, updated_at) "
-            "VALUES (?, ?, ?, ?, datetime('now')) "
-            "ON CONFLICT(date) DO UPDATE SET "
-            "summary = excluded.summary, "
-            "article_count = excluded.article_count, "
-            "stats = excluded.stats, "
-            "updated_at = datetime('now')",
-            (date_str, summary, article_count, json.dumps(stats or {}, ensure_ascii=False)),
-        )
-        conn.commit()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.execute(
+                "INSERT INTO daily_summary_global "
+                "(date, summary, article_count, stats, updated_at) "
+                "VALUES (?, ?, ?, ?, datetime('now')) "
+                "ON CONFLICT(date) DO UPDATE SET "
+                "summary = excluded.summary, "
+                "article_count = excluded.article_count, "
+                "stats = excluded.stats, "
+                "updated_at = datetime('now')",
+                (date_str, summary, article_count, json.dumps(stats or {}, ensure_ascii=False)),
+            )
+            conn.commit()
     except Exception as e:
         print(f"[daily-summary] global cache write failed: {e}")
 
@@ -2210,19 +2216,18 @@ def _init_daily_summary_sends_table():
     if not os.path.exists(NEWS_DB):
         return
     try:
-        conn = _news_db_connect()
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS daily_summary_sends (
-                date       TEXT NOT NULL,
-                user_id    INTEGER NOT NULL,
-                email      TEXT NOT NULL,
-                status     TEXT NOT NULL DEFAULT 'sent',
-                sent_at    TEXT NOT NULL DEFAULT (datetime('now')),
-                PRIMARY KEY (date, user_id)
-            )
-        """)
-        conn.commit()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS daily_summary_sends (
+                    date       TEXT NOT NULL,
+                    user_id    INTEGER NOT NULL,
+                    email      TEXT NOT NULL,
+                    status     TEXT NOT NULL DEFAULT 'sent',
+                    sent_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (date, user_id)
+                )
+            """)
+            conn.commit()
     except Exception as e:
         print(f"[daily-summary] sends table init failed: {e}")
 
@@ -2234,12 +2239,11 @@ def _get_daily_summary_sent_user_ids(date_str: str) -> set[int]:
         return set()
     try:
         _init_daily_summary_sends_table()
-        conn = _news_db_connect()
-        rows = conn.execute(
-            "SELECT user_id FROM daily_summary_sends WHERE date = ? AND status = 'sent'",
-            (date_str,),
-        ).fetchall()
-        conn.close()
+        with _news_db_conn() as conn:
+            rows = conn.execute(
+                "SELECT user_id FROM daily_summary_sends WHERE date = ? AND status = 'sent'",
+                (date_str,),
+            ).fetchall()
         return {int(r[0]) for r in rows}
     except Exception as e:
         print(f"[daily-summary] sends read failed: {e}")
@@ -2251,16 +2255,15 @@ def _record_daily_summary_send(date_str: str, user_id: int, email: str, status: 
         return
     try:
         _init_daily_summary_sends_table()
-        conn = _news_db_connect()
-        conn.execute(
-            "INSERT INTO daily_summary_sends (date, user_id, email, status, sent_at) "
-            "VALUES (?, ?, ?, ?, datetime('now')) "
-            "ON CONFLICT(date, user_id) DO UPDATE SET "
-            "email = excluded.email, status = excluded.status, sent_at = excluded.sent_at",
-            (date_str, user_id, email, status),
-        )
-        conn.commit()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.execute(
+                "INSERT INTO daily_summary_sends (date, user_id, email, status, sent_at) "
+                "VALUES (?, ?, ?, ?, datetime('now')) "
+                "ON CONFLICT(date, user_id) DO UPDATE SET "
+                "email = excluded.email, status = excluded.status, sent_at = excluded.sent_at",
+                (date_str, user_id, email, status),
+            )
+            conn.commit()
     except Exception as e:
         print(f"[daily-summary] sends write failed: {e}")
 
@@ -2269,20 +2272,19 @@ def _init_daily_summary_failures_table():
     if not os.path.exists(NEWS_DB):
         return
     try:
-        conn = _news_db_connect()
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS daily_summary_failures (
-                date            TEXT PRIMARY KEY,
-                attempts        INTEGER NOT NULL DEFAULT 0,
-                last_error      TEXT NOT NULL DEFAULT '',
-                last_attempt_at INTEGER NOT NULL DEFAULT 0,
-                next_retry_at   INTEGER,
-                given_up        INTEGER NOT NULL DEFAULT 0,
-                alerted         INTEGER NOT NULL DEFAULT 0
-            )
-        """)
-        conn.commit()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS daily_summary_failures (
+                    date            TEXT PRIMARY KEY,
+                    attempts        INTEGER NOT NULL DEFAULT 0,
+                    last_error      TEXT NOT NULL DEFAULT '',
+                    last_attempt_at INTEGER NOT NULL DEFAULT 0,
+                    next_retry_at   INTEGER,
+                    given_up        INTEGER NOT NULL DEFAULT 0,
+                    alerted         INTEGER NOT NULL DEFAULT 0
+                )
+            """)
+            conn.commit()
     except Exception as e:
         print(f"[daily-summary] failures table init failed: {e}")
 
@@ -2298,14 +2300,13 @@ def _get_daily_summary_failure(date_str: str) -> dict | None:
         return None
     try:
         _init_daily_summary_failures_table()
-        conn = _news_db_connect()
-        conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            "SELECT date, attempts, last_error, last_attempt_at, next_retry_at, "
-            "given_up, alerted FROM daily_summary_failures WHERE date = ?",
-            (date_str,),
-        ).fetchone()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT date, attempts, last_error, last_attempt_at, next_retry_at, "
+                "given_up, alerted FROM daily_summary_failures WHERE date = ?",
+                (date_str,),
+            ).fetchone()
         return dict(row) if row else None
     except Exception as e:
         print(f"[daily-summary] failure read failed: {e}")
@@ -2338,33 +2339,32 @@ def _record_daily_summary_failure(date_str: str, reason: str) -> dict:
         return state
     try:
         _init_daily_summary_failures_table()
-        conn = _news_db_connect()
-        conn.row_factory = sqlite3.Row
-        conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute(
-            "SELECT attempts, alerted FROM daily_summary_failures WHERE date = ?",
-            (date_str,),
-        ).fetchone()
-        attempts = int(row["attempts"]) + 1 if row else 1
-        alerted = int(row["alerted"]) if row else 0
-        given_up = 1 if attempts >= 1 + DAILY_SUMMARY_MAX_RETRIES else 0
-        next_retry_at = None if given_up else now + DAILY_SUMMARY_RETRY_INTERVAL_SECONDS
-        conn.execute(
-            "INSERT INTO daily_summary_failures "
-            "(date, attempts, last_error, last_attempt_at, next_retry_at, given_up, alerted) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(date) DO UPDATE SET "
-            "attempts = excluded.attempts, last_error = excluded.last_error, "
-            "last_attempt_at = excluded.last_attempt_at, "
-            "next_retry_at = excluded.next_retry_at, given_up = excluded.given_up",
-            (date_str, attempts, reason, now, next_retry_at, given_up, alerted),
-        )
-        # Only the current day is ever consulted; keep a short tail for support
-        # questions ("did last Tuesday fail?") and drop the rest.
-        conn.execute("DELETE FROM daily_summary_failures WHERE date < ?",
-                     ((_beijing_now() - timedelta(days=7)).strftime("%Y-%m-%d"),))
-        conn.commit()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT attempts, alerted FROM daily_summary_failures WHERE date = ?",
+                (date_str,),
+            ).fetchone()
+            attempts = int(row["attempts"]) + 1 if row else 1
+            alerted = int(row["alerted"]) if row else 0
+            given_up = 1 if attempts >= 1 + DAILY_SUMMARY_MAX_RETRIES else 0
+            next_retry_at = None if given_up else now + DAILY_SUMMARY_RETRY_INTERVAL_SECONDS
+            conn.execute(
+                "INSERT INTO daily_summary_failures "
+                "(date, attempts, last_error, last_attempt_at, next_retry_at, given_up, alerted) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(date) DO UPDATE SET "
+                "attempts = excluded.attempts, last_error = excluded.last_error, "
+                "last_attempt_at = excluded.last_attempt_at, "
+                "next_retry_at = excluded.next_retry_at, given_up = excluded.given_up",
+                (date_str, attempts, reason, now, next_retry_at, given_up, alerted),
+            )
+            # Only the current day is ever consulted; keep a short tail for support
+            # questions ("did last Tuesday fail?") and drop the rest.
+            conn.execute("DELETE FROM daily_summary_failures WHERE date < ?",
+                         ((_beijing_now() - timedelta(days=7)).strftime("%Y-%m-%d"),))
+            conn.commit()
         state.update({
             "attempts": attempts,
             "next_retry_at": next_retry_at,
@@ -2383,10 +2383,9 @@ def _clear_daily_summary_failure(date_str: str) -> None:
         return
     try:
         _init_daily_summary_failures_table()
-        conn = _news_db_connect()
-        conn.execute("DELETE FROM daily_summary_failures WHERE date = ?", (date_str,))
-        conn.commit()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.execute("DELETE FROM daily_summary_failures WHERE date = ?", (date_str,))
+            conn.commit()
     except Exception as e:
         print(f"[daily-summary] failure clear failed: {e}")
 
@@ -2399,15 +2398,14 @@ def _claim_daily_summary_alert(date_str: str) -> bool:
         return True
     try:
         _init_daily_summary_failures_table()
-        conn = _news_db_connect()
-        cur = conn.execute(
-            "UPDATE daily_summary_failures SET alerted = 1 "
-            "WHERE date = ? AND alerted = 0",
-            (date_str,),
-        )
-        conn.commit()
-        claimed = cur.rowcount > 0
-        conn.close()
+        with _news_db_conn() as conn:
+            cur = conn.execute(
+                "UPDATE daily_summary_failures SET alerted = 1 "
+                "WHERE date = ? AND alerted = 0",
+                (date_str,),
+            )
+            conn.commit()
+            claimed = cur.rowcount > 0
         return claimed
     except Exception as e:
         print(f"[daily-summary] alert claim failed: {e}")
@@ -2420,14 +2418,13 @@ def _release_daily_summary_alert(date_str: str) -> None:
         return
     try:
         _init_daily_summary_failures_table()
-        conn = _news_db_connect()
-        conn.execute(
-            "UPDATE daily_summary_failures SET alerted = 0 "
-            "WHERE date = ? AND alerted = 1",
-            (date_str,),
-        )
-        conn.commit()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.execute(
+                "UPDATE daily_summary_failures SET alerted = 0 "
+                "WHERE date = ? AND alerted = 1",
+                (date_str,),
+            )
+            conn.commit()
     except Exception as e:
         print(f"[daily-summary] alert claim release failed: {e}")
 
@@ -3263,25 +3260,24 @@ def _fetch_untranslated_articles(config: dict, limit: int = AUTO_TRANSLATION_BAT
     try:
         _init_ai_results_table()
         today_str = _dt.datetime.now().strftime("%Y-%m-%d")
-        conn = _news_db_connect()
-        conn.row_factory = sqlite3.Row
-        ensure_article_source_columns(conn)
-        rows = conn.execute(
-            "SELECT a.id, a.title, COALESCE(NULLIF(a.feed_source, ''), a.source) AS source, "
-            "       a.origin_source, a.summary, a.body_html, r.translation "
-            "FROM articles a "
-            "LEFT JOIN ai_results r ON r.article_id = a.id "
-            "WHERE a.date = ? "
-            # Newest-first, and scan far more than one batch: the untranslated
-            # rows are filtered in Python (the latin/CJK heuristic can't run in
-            # SQL), so a tight oldest-first LIMIT would only ever see the oldest
-            # articles of the day. Once the day exceeds that window, freshly
-            # fetched English articles would never enter the candidate set and
-            # stay untranslated forever. Mirrors the title-process scan.
-            "ORDER BY a.timestamp DESC LIMIT ?",
-            (today_str, max(limit * 8, AUTO_TRANSLATION_SCAN_LIMIT)),
-        ).fetchall()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.row_factory = sqlite3.Row
+            ensure_article_source_columns(conn)
+            rows = conn.execute(
+                "SELECT a.id, a.title, COALESCE(NULLIF(a.feed_source, ''), a.source) AS source, "
+                "       a.origin_source, a.summary, a.body_html, r.translation "
+                "FROM articles a "
+                "LEFT JOIN ai_results r ON r.article_id = a.id "
+                "WHERE a.date = ? "
+                # Newest-first, and scan far more than one batch: the untranslated
+                # rows are filtered in Python (the latin/CJK heuristic can't run in
+                # SQL), so a tight oldest-first LIMIT would only ever see the oldest
+                # articles of the day. Once the day exceeds that window, freshly
+                # fetched English articles would never enter the candidate set and
+                # stay untranslated forever. Mirrors the title-process scan.
+                "ORDER BY a.timestamp DESC LIMIT ?",
+                (today_str, max(limit * 8, AUTO_TRANSLATION_SCAN_LIMIT)),
+            ).fetchall()
     except Exception as e:
         print(f"[auto-translate] fetch failed: {e}")
         return []
@@ -3978,16 +3974,15 @@ def _fetch_recent_articles(limit: int = 20) -> list[dict]:
     if not os.path.exists(NEWS_DB):
         return []
     try:
-        conn = _news_db_connect()
-        conn.row_factory = sqlite3.Row
-        ensure_article_source_columns(conn)
-        rows = conn.execute(
-            "SELECT id, title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
-            "       COALESCE(NULLIF(feed_source, ''), source) AS feed_source, origin_source, "
-            "       date, time FROM articles ORDER BY timestamp DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.row_factory = sqlite3.Row
+            ensure_article_source_columns(conn)
+            rows = conn.execute(
+                "SELECT id, title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
+                "       COALESCE(NULLIF(feed_source, ''), source) AS feed_source, origin_source, "
+                "       date, time FROM articles ORDER BY timestamp DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
         return [dict(r) for r in rows]
     except Exception:
         return []
@@ -4023,24 +4018,23 @@ def _fetch_articles_by_date(date_str: str, include_shared_summary: bool = True) 
         return []
     try:
         _init_ai_results_table()
-        conn = _news_db_connect()
-        conn.row_factory = sqlite3.Row
-        ensure_article_source_columns(conn)
-        summary_expr = (
-            "COALESCE(NULLIF(r.summary, ''), a.summary)"
-            if include_shared_summary else "a.summary"
-        )
-        rows = conn.execute(
-            "SELECT a.id, a.title, COALESCE(NULLIF(a.feed_source, ''), a.source) AS source, "
-            "a.origin_source, a.date, a.time, a.body_html, "
-            f"{summary_expr} AS summary, "
-            "a.telegraph_url "
-            "FROM articles a "
-            "LEFT JOIN ai_results r ON r.article_id = a.id "
-            "WHERE a.date = ? ORDER BY a.timestamp ASC",
-            (date_str,),
-        ).fetchall()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.row_factory = sqlite3.Row
+            ensure_article_source_columns(conn)
+            summary_expr = (
+                "COALESCE(NULLIF(r.summary, ''), a.summary)"
+                if include_shared_summary else "a.summary"
+            )
+            rows = conn.execute(
+                "SELECT a.id, a.title, COALESCE(NULLIF(a.feed_source, ''), a.source) AS source, "
+                "a.origin_source, a.date, a.time, a.body_html, "
+                f"{summary_expr} AS summary, "
+                "a.telegraph_url "
+                "FROM articles a "
+                "LEFT JOIN ai_results r ON r.article_id = a.id "
+                "WHERE a.date = ? ORDER BY a.timestamp ASC",
+                (date_str,),
+            ).fetchall()
         return [dict(r) for r in rows]
     except Exception:
         return []
@@ -4055,22 +4049,21 @@ def _fetch_unsummarized_articles(limit: int = AUTO_SUMMARY_BATCH_LIMIT) -> list[
     try:
         _init_ai_results_table()
         today_str = _dt.datetime.now().strftime("%Y-%m-%d")
-        conn = _news_db_connect()
-        conn.row_factory = sqlite3.Row
-        ensure_article_source_columns(conn)
-        rows = conn.execute(
-            "SELECT a.id, a.title, COALESCE(NULLIF(a.feed_source, ''), a.source) AS source, "
-            "a.origin_source, a.summary, a.body_html "
-            "FROM articles a "
-            "LEFT JOIN ai_results r ON r.article_id = a.id "
-            "WHERE a.date = ? "
-            "AND (r.summary IS NULL OR r.summary = '') "
-            "AND (r.summary_error_at IS NULL OR datetime(r.summary_error_at, '+6 hours') < datetime('now')) "
-            "AND (a.body_html != '' OR a.summary != '') "
-            "ORDER BY a.timestamp ASC LIMIT ?",
-            (today_str, limit),
-        ).fetchall()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.row_factory = sqlite3.Row
+            ensure_article_source_columns(conn)
+            rows = conn.execute(
+                "SELECT a.id, a.title, COALESCE(NULLIF(a.feed_source, ''), a.source) AS source, "
+                "a.origin_source, a.summary, a.body_html "
+                "FROM articles a "
+                "LEFT JOIN ai_results r ON r.article_id = a.id "
+                "WHERE a.date = ? "
+                "AND (r.summary IS NULL OR r.summary = '') "
+                "AND (r.summary_error_at IS NULL OR datetime(r.summary_error_at, '+6 hours') < datetime('now')) "
+                "AND (a.body_html != '' OR a.summary != '') "
+                "ORDER BY a.timestamp ASC LIMIT ?",
+                (today_str, limit),
+            ).fetchall()
         return [dict(r) for r in rows]
     except Exception:
         return []
@@ -4082,15 +4075,14 @@ def _fetch_article_body(article_id: int) -> dict | None:
     if not os.path.exists(NEWS_DB):
         return None
     try:
-        conn = _news_db_connect()
-        conn.row_factory = sqlite3.Row
-        ensure_article_source_columns(conn)
-        row = conn.execute(
-            "SELECT id, title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
-            "origin_source, summary, body_html FROM articles WHERE id = ?",
-            (article_id,),
-        ).fetchone()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.row_factory = sqlite3.Row
+            ensure_article_source_columns(conn)
+            row = conn.execute(
+                "SELECT id, title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
+                "origin_source, summary, body_html FROM articles WHERE id = ?",
+                (article_id,),
+            ).fetchone()
         return dict(row) if row else None
     except Exception:
         return None
@@ -4105,81 +4097,80 @@ def _init_ai_results_table():
     if not os.path.exists(NEWS_DB):
         return
     try:
-        conn = _news_db_connect()
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS ai_results (
-                article_id   INTEGER PRIMARY KEY,
-                summary      TEXT,
-                translation  TEXT,
-                translation_updated_at TEXT,
-                title_summary TEXT,
-                title_summary_error TEXT,
-                title_summary_error_at TEXT,
-                title_translation_error TEXT,
-                title_translation_error_at TEXT,
-                title_summary_provider TEXT,
-                title_summary_model TEXT,
-                title_summary_by_user_id INTEGER,
-                summary_provider TEXT,
-                summary_model TEXT,
-                summary_by_user_id INTEGER,
-                summary_generated_at TEXT,
-                translation_provider TEXT,
-                translation_model TEXT,
-                translation_by_user_id INTEGER,
-                translation_generated_at TEXT,
-                summary_error TEXT,
-                summary_error_at TEXT,
-                updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
-            )
-        """)
-        cols = {
-            row[1]
-            for row in conn.execute("PRAGMA table_info(ai_results)").fetchall()
-        }
-        if "summary_error" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN summary_error TEXT")
-        if "summary_error_at" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN summary_error_at TEXT")
-        if "translation_updated_at" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN translation_updated_at TEXT")
-        if "title_summary" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary TEXT")
-        if "title_summary_error" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_error TEXT")
-        if "title_summary_error_at" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_error_at TEXT")
-        if "title_translation_error" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN title_translation_error TEXT")
-        if "title_translation_error_at" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN title_translation_error_at TEXT")
-        if "title_summary_provider" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_provider TEXT")
-        if "title_summary_model" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_model TEXT")
-        if "title_summary_by_user_id" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_by_user_id INTEGER")
-        if "summary_provider" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN summary_provider TEXT")
-        if "summary_model" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN summary_model TEXT")
-        if "summary_by_user_id" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN summary_by_user_id INTEGER")
-        if "summary_generated_at" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN summary_generated_at TEXT")
-        if "translation_provider" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN translation_provider TEXT")
-        if "translation_model" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN translation_model TEXT")
-        if "translation_by_user_id" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN translation_by_user_id INTEGER")
-        if "translation_generated_at" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN translation_generated_at TEXT")
-        if "updated_at" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN updated_at TEXT")
-            conn.execute("UPDATE ai_results SET updated_at = datetime('now') WHERE updated_at IS NULL")
-        conn.commit()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS ai_results (
+                    article_id   INTEGER PRIMARY KEY,
+                    summary      TEXT,
+                    translation  TEXT,
+                    translation_updated_at TEXT,
+                    title_summary TEXT,
+                    title_summary_error TEXT,
+                    title_summary_error_at TEXT,
+                    title_translation_error TEXT,
+                    title_translation_error_at TEXT,
+                    title_summary_provider TEXT,
+                    title_summary_model TEXT,
+                    title_summary_by_user_id INTEGER,
+                    summary_provider TEXT,
+                    summary_model TEXT,
+                    summary_by_user_id INTEGER,
+                    summary_generated_at TEXT,
+                    translation_provider TEXT,
+                    translation_model TEXT,
+                    translation_by_user_id INTEGER,
+                    translation_generated_at TEXT,
+                    summary_error TEXT,
+                    summary_error_at TEXT,
+                    updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+            """)
+            cols = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(ai_results)").fetchall()
+            }
+            if "summary_error" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN summary_error TEXT")
+            if "summary_error_at" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN summary_error_at TEXT")
+            if "translation_updated_at" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN translation_updated_at TEXT")
+            if "title_summary" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary TEXT")
+            if "title_summary_error" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_error TEXT")
+            if "title_summary_error_at" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_error_at TEXT")
+            if "title_translation_error" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN title_translation_error TEXT")
+            if "title_translation_error_at" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN title_translation_error_at TEXT")
+            if "title_summary_provider" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_provider TEXT")
+            if "title_summary_model" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_model TEXT")
+            if "title_summary_by_user_id" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_by_user_id INTEGER")
+            if "summary_provider" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN summary_provider TEXT")
+            if "summary_model" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN summary_model TEXT")
+            if "summary_by_user_id" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN summary_by_user_id INTEGER")
+            if "summary_generated_at" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN summary_generated_at TEXT")
+            if "translation_provider" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN translation_provider TEXT")
+            if "translation_model" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN translation_model TEXT")
+            if "translation_by_user_id" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN translation_by_user_id INTEGER")
+            if "translation_generated_at" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN translation_generated_at TEXT")
+            if "updated_at" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN updated_at TEXT")
+                conn.execute("UPDATE ai_results SET updated_at = datetime('now') WHERE updated_at IS NULL")
+            conn.commit()
     except Exception:
         pass
 
@@ -4190,20 +4181,19 @@ def _get_ai_result(article_id: int) -> dict | None:
     if not os.path.exists(NEWS_DB):
         return None
     try:
-        conn = _news_db_connect()
-        conn.row_factory = sqlite3.Row
-        _init_ai_results_table()
-        row = conn.execute(
-            "SELECT summary, translation, summary_error, summary_error_at, "
-            "title_summary, title_summary_error, title_summary_error_at, "
-            "title_summary_provider, title_summary_model, title_summary_by_user_id, "
-            "summary_provider, summary_model, summary_by_user_id, summary_generated_at, "
-            "translation_provider, translation_model, translation_by_user_id, "
-            "translation_generated_at "
-            "FROM ai_results WHERE article_id = ?",
-            (article_id,),
-        ).fetchone()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.row_factory = sqlite3.Row
+            _init_ai_results_table()
+            row = conn.execute(
+                "SELECT summary, translation, summary_error, summary_error_at, "
+                "title_summary, title_summary_error, title_summary_error_at, "
+                "title_summary_provider, title_summary_model, title_summary_by_user_id, "
+                "summary_provider, summary_model, summary_by_user_id, summary_generated_at, "
+                "translation_provider, translation_model, translation_by_user_id, "
+                "translation_generated_at "
+                "FROM ai_results WHERE article_id = ?",
+                (article_id,),
+            ).fetchone()
         return dict(row) if row else None
     except Exception:
         return None

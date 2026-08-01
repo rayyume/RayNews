@@ -387,3 +387,81 @@ def test_news_db_connections_carry_a_busy_timeout(tmp_path, monkeypatch):
         assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
     finally:
         conn.close()
+
+
+class _TrackedNewsConnection:
+    def __init__(self, *, explode=False):
+        self.closed = False
+        self.explode = explode
+        self.queries = 0
+        self.row_factory = None
+
+    def execute(self, *_args, **_kwargs):
+        self.queries += 1
+        if self.explode:
+            raise sqlite3.OperationalError("forced query failure")
+        return self
+
+    def fetchone(self):
+        return (1,)
+
+    def close(self):
+        self.closed = True
+
+
+def _install_one_shot_connection(tmp_path, monkeypatch):
+    db = tmp_path / "news.db"
+    db.touch()
+    connection = _TrackedNewsConnection(explode=True)
+    monkeypatch.setattr(web_server, "NEWS_DB", str(db))
+    monkeypatch.setattr(web_server, "_news_db_connect", lambda: connection)
+    return connection
+
+
+def test_get_article_meta_closes_one_shot_connection_when_query_fails(tmp_path, monkeypatch):
+    connection = _install_one_shot_connection(tmp_path, monkeypatch)
+    monkeypatch.setattr(web_server, "_ensure_news_schema", lambda _conn: None)
+
+    assert web_server._get_article_meta(1) is None
+
+    assert connection.queries == 1
+    assert connection.closed
+
+
+def test_daily_summary_helper_closes_one_shot_connection_when_query_fails(tmp_path, monkeypatch):
+    connection = _install_one_shot_connection(tmp_path, monkeypatch)
+    monkeypatch.setattr(web_server, "_init_daily_summary_global_table", lambda: None)
+
+    assert web_server._get_daily_summary_global_cache("2026-08-01") is None
+
+    assert connection.queries == 1
+    assert connection.closed
+
+
+def test_ai_result_helper_closes_one_shot_connection_when_query_fails(tmp_path, monkeypatch):
+    connection = _install_one_shot_connection(tmp_path, monkeypatch)
+    monkeypatch.setattr(web_server, "_init_ai_results_table", lambda: None)
+
+    assert web_server._get_ai_result(1) is None
+
+    assert connection.queries == 1
+    assert connection.closed
+
+
+def test_get_news_db_keeps_thread_local_connection_open_between_queries(tmp_path, monkeypatch):
+    db = tmp_path / "news.db"
+    db.touch()
+    connection = _TrackedNewsConnection()
+    monkeypatch.setattr(web_server, "NEWS_DB", str(db))
+    monkeypatch.setattr(web_server, "_news_conn_local", threading.local())
+    monkeypatch.setattr(web_server, "_news_db_connect", lambda: connection)
+    monkeypatch.setattr(web_server, "_ensure_news_schema", lambda _conn: None)
+
+    first = web_server._get_news_db()
+    first.execute("SELECT 1")
+    second = web_server._get_news_db()
+    second.execute("SELECT 1")
+
+    assert first is second is connection
+    assert connection.queries == 2
+    assert not connection.closed
