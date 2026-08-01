@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS users (
     role        TEXT    NOT NULL DEFAULT 'user'
                         CHECK(role IN ('user', 'admin')),
     avatar_url  TEXT    NOT NULL DEFAULT '',
+    token_version INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -223,6 +224,7 @@ def _initialize_db(db: sqlite3.Connection) -> None:
         ),
         ("users", "visit_count", "INTEGER NOT NULL DEFAULT 0"),
         ("users", "last_seen_at", "TEXT NOT NULL DEFAULT ''"),
+        ("users", "token_version", "INTEGER NOT NULL DEFAULT 0"),
         ("user_settings", "share_ai_results", "INTEGER NOT NULL DEFAULT 0"),
         ("user_settings", "share_view_title", "INTEGER NOT NULL DEFAULT 0"),
         (
@@ -451,7 +453,7 @@ def create_registered_user(
 
         row = db.execute(
             "SELECT id, email, nickname, role, avatar_url, created_at, "
-            "visit_count, last_seen_at FROM users WHERE id = ?",
+            "visit_count, last_seen_at, token_version FROM users WHERE id = ?",
             (cur.lastrowid,),
         ).fetchone()
         db.commit()
@@ -467,7 +469,7 @@ def get_user(user_id: int) -> dict | None:
     db = get_db()
     row = db.execute(
         "SELECT id, email, nickname, role, avatar_url, created_at, "
-        "visit_count, last_seen_at FROM users WHERE id = ?",
+        "visit_count, last_seen_at, token_version FROM users WHERE id = ?",
         (user_id,),
     ).fetchone()
     return dict(row) if row else None
@@ -513,11 +515,21 @@ def delete_user(user_id: int) -> bool:
     return cur.rowcount > 0
 
 
+def rotate_token_version(user_id: int) -> bool:
+    db = get_db()
+    cur = db.execute(
+        "UPDATE users SET token_version = token_version + 1 WHERE id = ?",
+        (user_id,),
+    )
+    db.commit()
+    return cur.rowcount == 1
+
+
 def list_users() -> list[dict]:
     db = get_db()
     rows = db.execute(
         "SELECT id, email, nickname, role, avatar_url, created_at, "
-        "visit_count, last_seen_at FROM users ORDER BY id"
+        "visit_count, last_seen_at, token_version FROM users ORDER BY id"
     ).fetchall()
     return [dict(r) for r in rows]
 

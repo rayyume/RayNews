@@ -1,9 +1,11 @@
 """Security regressions for registration, login, and invite throttling."""
 
 from concurrent.futures import ThreadPoolExecutor
+import sqlite3
 import threading
 import time
 
+import jwt
 import pytest
 
 import models
@@ -46,6 +48,195 @@ def _seed_admin(email="admin@example.com", nickname="admin"):
     )
     db.commit()
     return cur.lastrowid
+
+
+def _bearer(token):
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _legacy_token(user_id, role):
+    return jwt.encode(
+        {
+            "user_id": user_id,
+            "role": role,
+            "iat": int(time.time()),
+            "exp": int(time.time()) + 3600,
+        },
+        web_server.SECRET_KEY,
+        algorithm="HS256",
+    )
+
+
+def test_token_version_schema_migrates_existing_users(tmp_path):
+    old_db_file = models.DB_FILE
+    models.close_db()
+    models.DB_FILE = tmp_path / "legacy-users.db"
+    legacy = sqlite3.connect(models.DB_FILE)
+    legacy.execute(
+        "CREATE TABLE users ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "email TEXT NOT NULL UNIQUE, password TEXT NOT NULL, "
+        "nickname TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT 'user', "
+        "avatar_url TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT '')"
+    )
+    legacy.execute(
+        "INSERT INTO users (email, password, nickname, role) VALUES (?, ?, ?, ?)",
+        ("legacy@example.com", "unused", "legacy", "user"),
+    )
+    legacy.commit()
+    legacy.close()
+    try:
+        migrated = models.get_user(1)
+        assert migrated["token_version"] == 0
+        assert models.list_users()[0]["token_version"] == 0
+    finally:
+        models.close_db()
+        models.DB_FILE = old_db_file
+
+
+def test_legacy_token_without_token_version_matches_default_database_version(auth_env):
+    user = _create_login_user()
+
+    response = auth_env.get("/auth/me", headers=_bearer(_legacy_token(user["id"], "user")))
+
+    assert response.status_code == 200
+    assert response.get_json()["token_version"] == 0
+
+
+def test_admin_revoke_tokens_rejects_old_token_and_new_login_works(auth_env):
+    user = _create_login_user()
+    admin_id = _seed_admin()
+    old_token = web_server.create_token(user["id"], "user")
+    admin_token = web_server.create_token(admin_id, "admin")
+
+    revoked = auth_env.post(
+        f"/auth/users/{user['id']}/revoke-tokens",
+        headers=_bearer(admin_token),
+    )
+
+    assert revoked.status_code == 200
+    assert revoked.get_json() == {"ok": True}
+    assert models.get_user(user["id"])["token_version"] == 1
+    rejected = auth_env.get("/auth/me", headers=_bearer(old_token))
+    assert rejected.status_code == 401
+    assert rejected.get_json() == {"error": "invalid or expired token"}
+
+    logged_in = auth_env.post(
+        "/auth/login",
+        json={"login": user["email"], "password": "correct-password"},
+        environ_base={"REMOTE_ADDR": "198.51.100.70"},
+    )
+    assert logged_in.status_code == 200
+    new_token = logged_in.get_json()["token"]
+    assert jwt.decode(new_token, web_server.SECRET_KEY, algorithms=["HS256"])["ver"] == 1
+    assert auth_env.get("/auth/me", headers=_bearer(new_token)).status_code == 200
+
+
+def test_admin_role_change_rotates_token_version(auth_env):
+    user = _create_login_user()
+    admin_id = _seed_admin()
+    old_token = web_server.create_token(user["id"], "user")
+
+    changed = auth_env.put(
+        f"/auth/users/{user['id']}/role",
+        json={"role": "admin"},
+        headers=_bearer(web_server.create_token(admin_id, "admin")),
+    )
+
+    assert changed.status_code == 200
+    current = models.get_user(user["id"])
+    assert current["role"] == "admin"
+    assert current["token_version"] == 1
+    assert auth_env.get("/auth/me", headers=_bearer(old_token)).status_code == 401
+
+
+def test_admin_setting_same_role_keeps_token_version_and_existing_token(auth_env):
+    user = _create_login_user()
+    admin_id = _seed_admin()
+    old_token = web_server.create_token(user["id"], "user")
+
+    unchanged = auth_env.put(
+        f"/auth/users/{user['id']}/role",
+        json={"role": "user"},
+        headers=_bearer(web_server.create_token(admin_id, "admin")),
+    )
+
+    assert unchanged.status_code == 200
+    assert models.get_user(user["id"])["token_version"] == 0
+    assert auth_env.get("/auth/me", headers=_bearer(old_token)).status_code == 200
+
+
+def test_revoke_tokens_for_missing_user_returns_not_found(auth_env):
+    admin_id = _seed_admin()
+
+    response = auth_env.post(
+        "/auth/users/999/revoke-tokens",
+        headers=_bearer(web_server.create_token(admin_id, "admin")),
+    )
+
+    assert response.status_code == 404
+    assert response.get_json() == {"error": "not found"}
+
+
+def test_revoked_token_is_rejected_before_recording_access(auth_env):
+    user = _create_login_user()
+    old_token = web_server.create_token(user["id"], "user")
+    assert models.rotate_token_version(user["id"])
+
+    response = auth_env.get("/auth/me", headers=_bearer(old_token))
+
+    assert response.status_code == 401
+    access_count = models.get_db().execute(
+        "SELECT COUNT(*) FROM user_access_log WHERE user_id = ?",
+        (user["id"],),
+    ).fetchone()[0]
+    assert access_count == 0
+
+
+def test_register_token_version_matches_returned_user_and_database(
+    auth_env,
+    monkeypatch,
+):
+    monkeypatch.setattr(models, "hash_password", lambda _password: "test-hash")
+
+    registered = auth_env.post(
+        "/auth/register",
+        json={
+            "email": "first@example.com",
+            "password": "correct-password",
+            "nickname": "first",
+        },
+        environ_base={"REMOTE_ADDR": "198.51.100.71"},
+    )
+
+    assert registered.status_code == 201
+    payload = registered.get_json()
+    database_user = models.get_user(payload["user"]["id"])
+    token_payload = jwt.decode(
+        payload["token"],
+        web_server.SECRET_KEY,
+        algorithms=["HS256"],
+    )
+    assert token_payload["ver"] == payload["user"]["token_version"]
+    assert token_payload["ver"] == database_user["token_version"]
+
+
+def test_regular_user_cannot_revoke_tokens_for_another_user(auth_env):
+    user = _create_login_user()
+    other = models.create_user(
+        "other@example.com",
+        "correct-password",
+        "other",
+        role="user",
+    )
+
+    response = auth_env.post(
+        f"/auth/users/{other['id']}/revoke-tokens",
+        headers=_bearer(web_server.create_token(user["id"], "user")),
+    )
+
+    assert response.status_code == 403
+    assert models.get_user(other["id"])["token_version"] == 0
 
 
 def _register(

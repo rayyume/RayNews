@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from models import (
     get_db, create_registered_user, get_user, get_user_by_email, get_user_by_username,
-    update_user, delete_user, list_users, get_first_admin_email, count_users,
+    update_user, delete_user, rotate_token_version, list_users, get_first_admin_email, count_users,
     count_active_users_since,
     prune_access_log,
     verify_password, admit_login_attempt, reset_login_failures,
@@ -324,7 +324,7 @@ def register():
 
     admin_notified = _send_registration_notice(user) if not is_initial_admin else False
 
-    token = create_token(user["id"], user["role"])
+    token = create_token(user["id"], user["role"], user["token_version"])
     return jsonify({"token": token, "user": user, "admin_notified": admin_notified}), 201
 
 
@@ -424,7 +424,7 @@ def login():
         return jsonify({"error": "invalid email/username or password"}), 401
 
     reset_login_failures(client_ip, login_val)
-    token = create_token(user["id"], user["role"])
+    token = create_token(user["id"], user["role"], user["token_version"])
     return jsonify({
         "token": token,
         "user": {k: v for k, v in user.items() if k != "password"},
@@ -553,8 +553,24 @@ def admin_set_role(user_id):
         return jsonify({"error": "invalid role"}), 400
     if user_id == g.user_id:
         return jsonify({"error": "cannot change your own role"}), 400
+    current = get_user(user_id)
+    if not current:
+        return jsonify({"error": "not found"}), 404
+    if current["role"] == new_role:
+        return jsonify(current)
     user = update_user(user_id, role=new_role)
-    return jsonify(user) if user else (jsonify({"error": "not found"}), 404)
+    if not user:
+        return jsonify({"error": "not found"}), 404
+    rotate_token_version(user_id)
+    return jsonify(get_user(user_id))
+
+
+@app.route("/auth/users/<int:user_id>/revoke-tokens", methods=["POST"])
+@require_role("admin")
+def admin_revoke_tokens(user_id):
+    if rotate_token_version(user_id):
+        return jsonify({"ok": True}), 200
+    return jsonify({"error": "not found"}), 404
 
 
 @app.route("/auth/pending-invitations", methods=["GET"])

@@ -26,10 +26,11 @@ def init_auth(secret_key: str):
 
 # ─── Token ────────────────────────────────────────────────────
 
-def create_token(user_id: int, role: str) -> str:
+def create_token(user_id: int, role: str, token_version: int = 0) -> str:
     payload = {
         "user_id": user_id,
         "role": role,
+        "ver": int(token_version),
         "exp": int(time.time()) + JWT_EXPIRY,
         "iat": int(time.time()),
     }
@@ -64,6 +65,8 @@ def require_auth(f):
         user = get_user(g.user_id)
         if not user:
             return jsonify({"error": "user not found"}), 401
+        if payload.get("ver", 0) != user.get("token_version", 0):
+            return jsonify({"error": "invalid or expired token"}), 401
         g.user_role = user["role"]
         record_access(g.user_id)
         return f(*args, **kwargs)
