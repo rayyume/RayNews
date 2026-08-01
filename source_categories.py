@@ -388,17 +388,6 @@ def cleanup_stale_source_categories(conn: sqlite3.Connection) -> int:
     ).fetchone()
     if not table:
         init_source_categories(conn)
-    live_sources = {
-        (row["source"] if isinstance(row, sqlite3.Row) else row[0])
-        for row in conn.execute(
-            """
-            SELECT DISTINCT COALESCE(NULLIF(feed_source, ''), source) AS source
-            FROM articles
-            WHERE COALESCE(NULLIF(feed_source, ''), source) IS NOT NULL
-              AND TRIM(COALESCE(NULLIF(feed_source, ''), source)) != ''
-            """
-        ).fetchall()
-    }
     rows = conn.execute(
         """
         SELECT sc.source, sc.status, COUNT(a.id) AS article_count
@@ -411,34 +400,38 @@ def cleanup_stale_source_categories(conn: sqlite3.Connection) -> int:
     deleted = 0
     for row in rows:
         source = row["source"] if isinstance(row, sqlite3.Row) else row[0]
-        cur = conn.execute("DELETE FROM source_categories WHERE source = ?", (source,))
+        cur = conn.execute(
+            """
+            DELETE FROM source_categories
+            WHERE source = ? AND status IN ('pending', 'failed')
+            """,
+            (source,),
+        )
         deleted += cur.rowcount
 
-    # The article table can be temporarily empty during first sync or recovery.
-    # Keep user-authored categories and aliases until live sources exist again.
-    if not live_sources:
-        if deleted:
-            conn.commit()
-        return deleted
-
-    placeholders = ",".join("?" for _ in live_sources)
     deleted += conn.execute(
-        "DELETE FROM source_aliases WHERE target_source NOT IN ({})".format(
-            placeholders,
-        ),
-        tuple(live_sources),
+        """
+        DELETE FROM source_aliases
+        WHERE target_source NOT IN (SELECT source FROM source_categories)
+        """
     ).rowcount
     deleted += conn.execute(
-        "DELETE FROM user_source_categories WHERE source NOT IN ({})".format(
-            placeholders,
-        ),
-        tuple(live_sources),
+        """
+        DELETE FROM user_source_categories
+        WHERE source NOT IN (
+            SELECT DISTINCT COALESCE(NULLIF(feed_source, ''), source)
+            FROM articles
+            WHERE COALESCE(NULLIF(feed_source, ''), source) IS NOT NULL
+              AND TRIM(COALESCE(NULLIF(feed_source, ''), source)) != ''
+        )
+          AND status IN ('pending', 'failed')
+        """
     ).rowcount
     deleted += conn.execute(
-        "DELETE FROM user_source_aliases WHERE target_source NOT IN ({})".format(
-            placeholders,
-        ),
-        tuple(live_sources),
+        """
+        DELETE FROM user_source_aliases
+        WHERE target_source NOT IN (SELECT source FROM source_categories)
+        """
     ).rowcount
     if deleted:
         conn.commit()
