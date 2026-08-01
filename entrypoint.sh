@@ -32,11 +32,4 @@ if [ -z "$TELEGRAM_CHANNEL_URL" ] && { [ -z "$TELEGRAM_CHANNEL" ] || [ "$TELEGRA
 fi
 
 # ─── Start services ────────────────────────────────────
-echo "=== Starting refresh server ==="
-python3 /app/refresh_server.py &
-
-echo "=== Starting web server ==="
-python3 /app/web_server.py &
-
-echo "=== Starting nginx ==="
-nginx -g 'daemon off;'
+exec supervisord -c /app/supervisord.conf

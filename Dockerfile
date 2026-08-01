@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 
-# Install nginx
-RUN apt-get update && apt-get install -y --no-install-recommends nginx && \
+# Install nginx and process supervision
+RUN apt-get update && apt-get install -y --no-install-recommends nginx supervisor && \
     rm -rf /var/lib/apt/lists/* && \
     rm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-available/default
 
@@ -13,6 +13,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY fetcher.py refresh_server.py models.py auth.py auth_validation.py web_server.py ai_service.py source_categories.py news_schema.py image_cache.py image_validation.py notifier.py network_safety.py .
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY nginx-security-headers.conf /etc/nginx/snippets/raynews-security-headers.conf
+COPY supervisord.conf /app/supervisord.conf
 COPY frontend/ /usr/share/nginx/html/
 
 RUN mkdir -p /app/data /var/log/nginx /run/nginx

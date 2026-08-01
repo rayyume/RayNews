@@ -1,4 +1,5 @@
 import base64
+import configparser
 import json
 import sqlite3
 import shutil
@@ -275,18 +276,54 @@ def test_nginx_proxies_notification_list_and_read_routes():
     assert "proxy_pass http://127.0.0.1:8082" in section
 
 
-def test_container_does_not_block_web_startup_on_initial_fetch():
+def test_container_supervises_services_without_blocking_on_initial_fetch():
     entrypoint = (ROOT / "entrypoint.sh").read_text(encoding="utf-8")
     assert "fetcher.py" not in entrypoint
-    refresh_command = entrypoint.index("python3 /app/refresh_server.py &")
-    web_command = entrypoint.index("python3 /app/web_server.py &")
-    nginx_command = entrypoint.index("nginx -g 'daemon off;'")
-    assert refresh_command < web_command < nginx_command
+    assert "python3 /app/refresh_server.py &" not in entrypoint
+    assert "python3 /app/web_server.py &" not in entrypoint
+    assert "nginx -g 'daemon off;'" not in entrypoint
+    assert entrypoint.rstrip().endswith("exec supervisord -c /app/supervisord.conf")
+
+    config = configparser.ConfigParser()
+    config.read(ROOT / "supervisord.conf", encoding="utf-8")
+    assert config["supervisord"]["nodaemon"] == "true"
+    assert config["supervisord"]["pidfile"] == "/run/supervisord.pid"
+    expected_commands = {
+        "program:refresh": "python3 /app/refresh_server.py",
+        "program:web": "python3 /app/web_server.py",
+        "program:nginx": 'nginx -g "daemon off;"',
+    }
+    for section, command in expected_commands.items():
+        program = config[section]
+        assert program["command"] == command
+        assert program["autorestart"] == "true"
+        assert program["startsecs"] == "3"
+        assert program["startretries"] == "5"
+        assert program["stopasgroup"] == "true"
+        assert program["killasgroup"] == "true"
+        assert program["stdout_logfile"] == "/dev/fd/1"
+        assert program["stdout_logfile_maxbytes"] == "0"
+        assert program["stderr_logfile"] == "/dev/fd/2"
+        assert program["stderr_logfile_maxbytes"] == "0"
+
     refresh = (ROOT / "refresh_server.py").read_text(encoding="utf-8")
     main = refresh[refresh.index('if __name__ == "__main__":'):]
     assert main.index('start_refresh_job("startup")') < main.index(
         "server.serve_forever()"
     )
+
+
+def test_container_image_installs_and_copies_supervisor_configuration():
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "apt-get install -y --no-install-recommends nginx supervisor" in dockerfile
+    assert "COPY supervisord.conf /app/supervisord.conf" in dockerfile
+
+
+def test_nginx_sends_access_and_error_logs_to_container_streams():
+    config = (ROOT / "nginx.conf").read_text(encoding="utf-8")
+    server = config.split("server {", 1)[1]
+    assert "access_log /dev/stdout;" in server
+    assert "error_log /dev/stderr warn;" in server
 
 
 def test_admin_source_overrides_promote_to_shared_settings():
