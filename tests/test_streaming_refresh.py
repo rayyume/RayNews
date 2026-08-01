@@ -298,11 +298,11 @@ def test_running_status_excludes_existing_ids_retried_after_failed_cycle(tmp_pat
     # IDs 1 and 3 were committed by the previous failed cycle; only 4 is new in
     # this job. Replaying 1 and 3 through INSERT OR REPLACE must not advertise
     # them as new running discoveries.
-    snapshots = iter(({1, 3}, {1, 3, 4}))
-    monkeypatch.setattr(refresh_server, "article_id_snapshot", lambda: next(snapshots))
+    monkeypatch.setattr(refresh_server, "article_id_snapshot", lambda: {1, 3})
     running_payload = {}
 
-    def fake_run_fetcher():
+    def fake_run_fetcher(existing_article_ids):
+        assert existing_article_ids == {1, 3}
         refresh_server.PROGRESS_FILE.write_text(
             json.dumps({
                 "job_id": "job-1",
@@ -314,7 +314,7 @@ def test_running_status_excludes_existing_ids_retried_after_failed_cycle(tmp_pat
             encoding="utf-8",
         )
         running_payload.update(json.loads(refresh_server.get_refresh_job_status()))
-        return json.dumps({"status": "ok"}).encode(), 200
+        return json.dumps({"status": "ok", "new_ids": [4]}).encode(), 200
 
     monkeypatch.setattr(refresh_server, "run_fetcher", fake_run_fetcher)
 
@@ -417,6 +417,108 @@ def test_run_fetcher_passes_current_job_id_to_fetcher_subprocess_env(monkeypatch
     assert captured_env.get("FETCH_JOB_ID") == "job-xyz"
 
 
+def test_run_fetcher_reuses_baseline_and_returns_new_ids_to_warmup(monkeypatch):
+    monkeypatch.setattr(refresh_server, "acquire_lock", lambda: True)
+    monkeypatch.setattr(refresh_server, "release_lock", lambda: None)
+    monkeypatch.setattr(refresh_server, "clear_article_cache", lambda: None)
+    snapshot_calls = []
+
+    def after_snapshot():
+        snapshot_calls.append(True)
+        return {2, 3, 4}
+
+    monkeypatch.setattr(refresh_server, "article_id_snapshot", after_snapshot)
+
+    class FakeResult:
+        returncode = 0
+        stdout = "fetch output"
+        stderr = "fetch warning"
+
+    monkeypatch.setattr(refresh_server.subprocess, "run", lambda *args, **kwargs: FakeResult())
+
+    class MaintenanceDb:
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(refresh_server.sqlite3, "connect", lambda *args, **kwargs: MaintenanceDb())
+    monkeypatch.setattr(refresh_server, "ensure_article_source_columns", lambda conn: None)
+    monkeypatch.setattr(refresh_server, "maintain_source_categories", lambda conn, force=False: {})
+
+    thread_calls = []
+
+    class ImmediateThread:
+        def __init__(self, **kwargs):
+            thread_calls.append(kwargs)
+
+        def start(self):
+            thread_calls[-1]["target"](*thread_calls[-1]["args"])
+
+    warmed_ids = []
+    monkeypatch.setattr(refresh_server.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(
+        refresh_server,
+        "enqueue_new_article_images",
+        lambda new_ids: warmed_ids.append(new_ids),
+    )
+
+    body, status = refresh_server.run_fetcher({2})
+
+    assert status == 200
+    assert json.loads(body) == {
+        "status": "ok",
+        "returncode": 0,
+        "stdout": "fetch output",
+        "stderr": "fetch warning",
+        "new_ids": [3, 4],
+    }
+    assert snapshot_calls == [True]
+    assert warmed_ids == [[3, 4]]
+
+
+def test_image_warmup_queries_only_parameterized_new_id_batches(monkeypatch):
+    queries = []
+
+    class QueryResult:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def fetchall(self):
+            return self.rows
+
+    class RecordingDb:
+        row_factory = None
+
+        def execute(self, sql, params=()):
+            queries.append((sql, params))
+            return QueryResult([
+                {"id": article_id, "thumb": f"thumb-{article_id}", "body_html": ""}
+                for article_id in params
+            ])
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(refresh_server.sqlite3, "connect", lambda *args, **kwargs: RecordingDb())
+    queued = []
+    monkeypatch.setattr(
+        refresh_server,
+        "enqueue_article_image_prefetch",
+        lambda article_id, body_html, thumb: queued.append(article_id) or 1,
+    )
+    requested_ids = list(range(1003, 0, -1)) + [2, 2, 0, -4, "bad", None]
+
+    refresh_server.enqueue_new_article_images(requested_ids)
+
+    assert [len(params) for _, params in queries] == [500, 500, 3]
+    assert [article_id for _, params in queries for article_id in params] == list(range(1, 1004))
+    assert all("WHERE id IN (" in sql for sql, _ in queries)
+    assert all(sql.count("?") == len(params) for sql, params in queries)
+    assert queued == list(range(1, 1004))
+
+
 def test_run_refresh_job_sets_current_fetch_job_id_before_running(monkeypatch):
     monkeypatch.setattr(refresh_server, "REFRESH_JOB", {
         "job_id": "job-abc", "status": "running", "trigger": "manual",
@@ -426,9 +528,9 @@ def test_run_refresh_job_sets_current_fetch_job_id_before_running(monkeypatch):
     monkeypatch.setattr(refresh_server, "CURRENT_FETCH_JOB_ID", "")
     seen_job_id = {}
 
-    def fake_run_fetcher():
+    def fake_run_fetcher(existing_article_ids):
         seen_job_id["value"] = refresh_server.CURRENT_FETCH_JOB_ID
-        return json.dumps({"status": "ok"}).encode(), 200
+        return json.dumps({"status": "ok", "new_ids": []}).encode(), 200
 
     monkeypatch.setattr(refresh_server, "run_fetcher", fake_run_fetcher)
     monkeypatch.setattr(refresh_server, "article_id_snapshot", lambda: set())

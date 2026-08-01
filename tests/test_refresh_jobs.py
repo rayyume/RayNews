@@ -124,7 +124,7 @@ def test_start_refresh_job_returns_before_worker_finishes(monkeypatch):
     release = threading.Event()
     entered = threading.Event()
 
-    def slow_fetcher():
+    def slow_fetcher(existing_article_ids):
         entered.set()
         release.wait(2)
         return json.dumps({"status": "ok"}).encode(), 200
@@ -161,7 +161,10 @@ def test_start_and_status_return_while_baseline_snapshot_is_slow(monkeypatch):
     monkeypatch.setattr(
         refresh_server,
         "run_fetcher",
-        lambda: (json.dumps({"status": "ok"}).encode(), 200),
+        lambda existing_article_ids: (
+            json.dumps({"status": "ok", "new_ids": [3]}).encode(),
+            200,
+        ),
     )
 
     start_results = []
@@ -210,7 +213,7 @@ def test_duplicate_start_returns_the_running_job(monkeypatch):
     reset_job(monkeypatch)
     release = threading.Event()
 
-    def slow_fetcher():
+    def slow_fetcher(existing_article_ids):
         release.wait(2)
         return json.dumps({"status": "ok"}).encode(), 200
 
@@ -234,7 +237,7 @@ def test_concurrent_starts_coalesce_to_one_job(monkeypatch):
     results = []
     results_lock = threading.Lock()
 
-    def slow_fetcher():
+    def slow_fetcher(existing_article_ids):
         release_worker.wait(2)
         return json.dumps({"status": "ok"}).encode(), 200
 
@@ -291,15 +294,34 @@ def test_thread_launch_failure_transitions_job_to_failed(monkeypatch, failure_po
 
 def test_refresh_job_reports_new_count_and_ids(monkeypatch):
     reset_job(monkeypatch)
-    snapshots = iter(({1, 2}, {1, 2, 3, 4}))
-    monkeypatch.setattr(refresh_server, "article_id_snapshot", lambda: next(snapshots))
+    snapshot_calls = []
+
+    def snapshot():
+        snapshot_calls.append(True)
+        return {1, 2}
+
+    received_baselines = []
+
+    def fetcher(existing_article_ids):
+        received_baselines.append(existing_article_ids)
+        return json.dumps({
+            "status": "ok",
+            "returncode": 0,
+            "stdout": "done",
+            "stderr": "",
+            "new_ids": [3, 4],
+        }).encode(), 200
+
+    monkeypatch.setattr(refresh_server, "article_id_snapshot", snapshot)
     monkeypatch.setattr(
         refresh_server,
         "run_fetcher",
-        lambda: (json.dumps({"status": "ok"}).encode(), 200),
+        fetcher,
     )
     refresh_server.start_refresh_job("manual")
     payload = wait_terminal()
+    assert snapshot_calls == [True]
+    assert received_baselines == [{1, 2}]
     assert payload["status"] == "completed"
     assert payload["new_count"] == 2
     assert payload["new_ids"] == [3, 4]
@@ -312,7 +334,10 @@ def test_refresh_job_exposes_compact_failure(monkeypatch):
     monkeypatch.setattr(
         refresh_server,
         "run_fetcher",
-        lambda: (json.dumps({"status": "error", "error": "timeout"}).encode(), 500),
+        lambda existing_article_ids: (
+            json.dumps({"status": "error", "error": "timeout"}).encode(),
+            500,
+        ),
     )
     refresh_server.start_refresh_job("manual")
     payload = wait_terminal()
@@ -328,7 +353,7 @@ def test_refresh_job_does_not_expose_internal_error_details(monkeypatch):
     monkeypatch.setattr(
         refresh_server,
         "run_fetcher",
-        lambda: (
+        lambda existing_article_ids: (
             json.dumps({
                 "status": "error",
                 "error": "unable to open /app/data/news.db",
@@ -423,7 +448,7 @@ def test_terminal_job_remains_queryable_after_next_job_starts(monkeypatch):
     release_second = threading.Event()
     fetch_count = 0
 
-    def fetcher():
+    def fetcher(existing_article_ids):
         nonlocal fetch_count
         fetch_count += 1
         if fetch_count == 2:
@@ -454,7 +479,14 @@ def test_terminal_job_remains_queryable_after_next_job_starts(monkeypatch):
 def test_terminal_history_is_bounded_and_unknown_ids_are_private(monkeypatch):
     reset_job(monkeypatch)
     monkeypatch.setattr(refresh_server, "REFRESH_JOB_HISTORY_LIMIT", 2)
-    monkeypatch.setattr(refresh_server, "run_fetcher", lambda: (json.dumps({"status": "ok"}).encode(), 200))
+    monkeypatch.setattr(
+        refresh_server,
+        "run_fetcher",
+        lambda existing_article_ids: (
+            json.dumps({"status": "ok", "new_ids": []}).encode(),
+            200,
+        ),
+    )
     monkeypatch.setattr(refresh_server, "article_id_snapshot", lambda: set())
     completed_ids = []
 
