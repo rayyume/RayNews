@@ -145,6 +145,150 @@ class StartupWarmupTests(unittest.TestCase):
         for call in enqueue.call_args_list:
             self.assertIsNone(call.kwargs["body_limit"])
 
+class CacheInitializationLifecycleTests(unittest.TestCase):
+    def _install_recording_connections(self, cache_db):
+        calls = {"execute": 0, "script": 0, "commit": 0}
+
+        class RecordingConnection:
+            def execute(self, statement, *args):
+                if statement.startswith("PRAGMA"):
+                    calls["execute"] += 1
+
+            def executescript(self, script):
+                calls["script"] += 1
+
+            def commit(self):
+                calls["commit"] += 1
+
+            def close(self):
+                pass
+
+        def connect(*args, **kwargs):
+            cache_db.touch(exist_ok=True)
+            return RecordingConnection()
+
+        return calls, connect
+
+    def test_concurrent_init_for_same_existing_path_runs_schema_setup_once(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            cache_dir = Path(directory) / "image_cache"
+            cache_db = cache_dir / "cache.db"
+            calls, connect = self._install_recording_connections(cache_db)
+            start = threading.Barrier(2)
+            with (
+                mock.patch.object(image_cache, "CACHE_DIR", cache_dir),
+                mock.patch.object(image_cache, "DB_FILE", cache_db),
+                mock.patch.object(image_cache, "_initialized_cache_paths", set(), create=True),
+                mock.patch.object(image_cache.sqlite3, "connect", side_effect=connect),
+                ThreadPoolExecutor(max_workers=2) as workers,
+            ):
+                list(workers.map(lambda _unused: (start.wait(), image_cache.init_cache()), range(2)))
+
+        self.assertEqual(calls["execute"], 1)
+        self.assertEqual(calls["script"], 1)
+        self.assertEqual(calls["commit"], 1)
+
+    def test_db_file_change_initializes_each_path_only_once(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            first_dir = Path(directory) / "first"
+            second_dir = Path(directory) / "second"
+            first_db = first_dir / "cache.db"
+            second_db = second_dir / "cache.db"
+            calls, connect = self._install_recording_connections(first_db)
+
+            def connect_for_current_path(path, *args, **kwargs):
+                Path(path).touch(exist_ok=True)
+                return connect(path, *args, **kwargs)
+
+            with (
+                mock.patch.object(image_cache, "CACHE_DIR", first_dir),
+                mock.patch.object(image_cache, "DB_FILE", first_db),
+                mock.patch.object(image_cache, "_initialized_cache_paths", set(), create=True),
+                mock.patch.object(image_cache.sqlite3, "connect", side_effect=connect_for_current_path),
+            ):
+                image_cache.init_cache()
+                image_cache.init_cache()
+                with (
+                    mock.patch.object(image_cache, "CACHE_DIR", second_dir),
+                    mock.patch.object(image_cache, "DB_FILE", second_db),
+                ):
+                    image_cache.init_cache()
+                    image_cache.init_cache()
+
+        self.assertEqual(calls["script"], 2)
+        self.assertEqual(calls["commit"], 2)
+
+    def test_deleted_cache_database_is_reinitialized(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            cache_dir = Path(directory) / "image_cache"
+            cache_db = cache_dir / "cache.db"
+            with (
+                mock.patch.object(image_cache, "CACHE_DIR", cache_dir),
+                mock.patch.object(image_cache, "DB_FILE", cache_db),
+                mock.patch.object(image_cache, "_initialized_cache_paths", set(), create=True),
+            ):
+                image_cache.init_cache()
+                cache_db.unlink()
+                image_cache.init_cache()
+
+            self.assertTrue(cache_db.exists())
+            conn = sqlite3.connect(cache_db)
+            try:
+                self.assertIsNotNone(
+                    conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'image_cache_entries'"
+                    ).fetchone()
+                )
+            finally:
+                conn.close()
+
+    def test_failed_schema_setup_is_not_marked_initialized(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            cache_dir = Path(directory) / "image_cache"
+            cache_db = cache_dir / "cache.db"
+            calls = {"script": 0}
+
+            class FailingOnceConnection:
+                def execute(self, statement, *args):
+                    pass
+
+                def executescript(self, script):
+                    calls["script"] += 1
+                    if calls["script"] == 1:
+                        raise sqlite3.OperationalError("setup failed")
+
+                def commit(self):
+                    pass
+
+                def close(self):
+                    pass
+
+            def connect(*args, **kwargs):
+                cache_db.touch(exist_ok=True)
+                return FailingOnceConnection()
+
+            with (
+                mock.patch.object(image_cache, "CACHE_DIR", cache_dir),
+                mock.patch.object(image_cache, "DB_FILE", cache_db),
+                mock.patch.object(image_cache, "_initialized_cache_paths", set(), create=True),
+                mock.patch.object(image_cache.sqlite3, "connect", side_effect=connect),
+            ):
+                with self.assertRaisesRegex(sqlite3.OperationalError, "setup failed"):
+                    image_cache.init_cache()
+                image_cache.init_cache()
+
+        self.assertEqual(calls["script"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

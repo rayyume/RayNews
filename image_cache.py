@@ -45,39 +45,50 @@ _prefetch_queue: queue.Queue[tuple[int, str, bool, bool]] = queue.Queue(maxsize=
 _prefetch_pending: set[str] = set()
 _prefetch_lock = threading.Lock()
 _prefetch_started = False
+_cache_init_lock = threading.Lock()
+_initialized_cache_paths: set[str] = set()
 
 
 def init_cache() -> None:
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_FILE, timeout=30)
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS image_cache_entries (
-                url_hash     TEXT PRIMARY KEY,
-                url          TEXT NOT NULL UNIQUE,
-                content_type TEXT NOT NULL,
-                size_bytes   INTEGER NOT NULL DEFAULT 0,
-                path         TEXT NOT NULL,
-                pinned       INTEGER NOT NULL DEFAULT 0,
-                is_cover     INTEGER NOT NULL DEFAULT 0,
-                created_at   INTEGER NOT NULL,
-                accessed_at  INTEGER NOT NULL,
-                hit_count    INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE INDEX IF NOT EXISTS idx_image_cache_cleanup
-                ON image_cache_entries(pinned, is_cover, accessed_at);
-            CREATE TABLE IF NOT EXISTS image_cache_article_images (
-                article_id INTEGER NOT NULL,
-                url_hash   TEXT NOT NULL,
-                PRIMARY KEY(article_id, url_hash)
-            );
-            """
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    with _cache_init_lock:
+        cache_key = str(DB_FILE.resolve())
+        if cache_key in _initialized_cache_paths and DB_FILE.exists():
+            return
+
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS image_cache_entries (
+                    url_hash     TEXT PRIMARY KEY,
+                    url          TEXT NOT NULL UNIQUE,
+                    content_type TEXT NOT NULL,
+                    size_bytes   INTEGER NOT NULL DEFAULT 0,
+                    path         TEXT NOT NULL,
+                    pinned       INTEGER NOT NULL DEFAULT 0,
+                    is_cover     INTEGER NOT NULL DEFAULT 0,
+                    created_at   INTEGER NOT NULL,
+                    accessed_at  INTEGER NOT NULL,
+                    hit_count    INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_image_cache_cleanup
+                    ON image_cache_entries(pinned, is_cover, accessed_at);
+                CREATE TABLE IF NOT EXISTS image_cache_article_images (
+                    article_id INTEGER NOT NULL,
+                    url_hash   TEXT NOT NULL,
+                    PRIMARY KEY(article_id, url_hash)
+                );
+                """
+            )
+            conn.commit()
+        except Exception:
+            raise
+        else:
+            _initialized_cache_paths.add(cache_key)
+        finally:
+            conn.close()
 
 
 def _connect() -> sqlite3.Connection:
@@ -137,6 +148,7 @@ def fetch_remote_image(url: str) -> tuple[bytes, str]:
         raise ValueError("invalid URL")
     last_error: Exception | None = None
     for candidate in _remote_image_candidates(url):
+        resp = None
         parsed = urllib.parse.urlparse(candidate)
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -168,6 +180,9 @@ def fetch_remote_image(url: str) -> tuple[bytes, str]:
         except Exception as exc:
             last_error = exc
             continue
+        finally:
+            if resp is not None:
+                resp.close()
     raise last_error or ValueError("image fetch failed")
 
 
