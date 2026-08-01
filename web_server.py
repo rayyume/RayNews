@@ -5953,6 +5953,8 @@ def health():
 
 
 @app.route("/scheduler/status", methods=["GET"])
+@app.route("/admin/scheduler/status", methods=["GET"])
+@require_role("admin")
 def scheduler_status():
     """Return scheduler status for debugging."""
     import datetime as _dt

@@ -574,3 +574,37 @@ def test_notifier_marks_lost_response_as_uncertain(monkeypatch):
 
     with pytest.raises(notifier.EmailDeliveryUncertain):
         notifier.send_email("key", "admin@example.com", "subject", "body")
+
+
+def test_scheduler_status_requires_admin_and_alias_preserves_payload_shape(auth_env):
+    """Removing admin protection or the nginx-reachable alias must fail this test."""
+    client = auth_env
+    user = _create_login_user()
+    admin_id = _seed_admin()
+    user_headers = {
+        "Authorization": f"Bearer {web_server.create_token(user['id'], 'user')}"
+    }
+    admin_headers = {
+        "Authorization": f"Bearer {web_server.create_token(admin_id, 'admin')}"
+    }
+
+    for path in ("/scheduler/status", "/admin/scheduler/status"):
+        assert client.get(path).status_code == 401
+        assert client.get(path, headers=user_headers).status_code == 403
+
+    legacy = client.get("/scheduler/status", headers=admin_headers)
+    alias = client.get("/admin/scheduler/status", headers=admin_headers)
+
+    assert legacy.status_code == 200
+    assert alias.status_code == 200
+    expected_fields = {
+        "running",
+        "server_time",
+        "beijing_time",
+        "today",
+        "timezone_hint",
+        "daily_summary_send_time",
+        "daily_summary_sent_user_ids_today",
+    }
+    assert set(legacy.get_json()) == expected_fields
+    assert set(alias.get_json()) == expected_fields
