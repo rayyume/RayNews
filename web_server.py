@@ -52,7 +52,7 @@ from models import (
 )
 from auth import init_auth, create_token, require_auth, require_role
 from auth_validation import is_valid_email
-from ai_service import AIService
+from ai_service import AIService, _redact_api_error
 from network_safety import UnsafeUrlError, assert_public_http_url
 from image_cache import (
     enqueue_article_image_prefetch, unpin_article_images,
@@ -1670,11 +1670,22 @@ def _note_system_ai_success() -> None:
         )
 
 
+def _redact_secrets(value, *known_secrets: str) -> str:
+    secrets = [secret for secret in known_secrets if secret]
+    try:
+        system_config = get_system_ai_config() or {}
+        if system_config.get("api_key"):
+            secrets.append(system_config["api_key"])
+    except Exception:
+        pass
+    return _redact_api_error(value, *secrets)
+
+
 def _note_system_ai_failure(job: str, error) -> None:
     """Count one failed system-AI call. Alerts every admin exactly once per
     outage: the flag only clears on the next success (see above), so a provider
     that fails every 30 seconds can't turn into a stream of notifications."""
-    reason = re.sub(r"\s+", " ", str(error or "")).strip()[:300]
+    reason = _redact_secrets(error).strip()[:300]
     with _system_ai_health_lock:
         _system_ai_health["successes"] = 0
         _system_ai_health["failures"] += 1
@@ -1714,24 +1725,7 @@ def _note_system_ai_failure(job: str, error) -> None:
 
 def _compact_share_error(value: str) -> str:
     """Return a safe summary, never an arbitrary provider response body."""
-    text = re.sub(r"\s+", " ", str(value or "connection test failed")).strip()
-    # Redact common credential transports before classifying the error. The
-    # allowlist below intentionally drops unknown provider detail altogether,
-    # but keeping these redactions makes this safe if a new allowed summary is
-    # added later.
-    text = re.sub(
-        r"(?i)\b(?:proxy-)?authorization\s*:\s*(?:bearer\s+)?[^\s,;]+",
-        "[redacted]",
-        text,
-    )
-    text = re.sub(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [redacted]", text)
-    text = re.sub(r"sk-[A-Za-z0-9_-]+", "[redacted]", text)
-    text = re.sub(
-        r"(?i)(?:api[_-]?key|x-api-key|access[_-]?token|token|secret|password|key)"
-        r"\s*(?:=|:)\s*(?:[\"']?)[^\s,;&}\]\"']+",
-        "[redacted]",
-        text,
-    )
+    text = _redact_secrets(value or "connection test failed")
 
     status = re.search(r"\bAI API HTTP\s+([1-5]\d{2})\b", text, flags=re.IGNORECASE)
     if status:
@@ -3626,7 +3620,7 @@ def _process_article_title(article: dict, config: dict) -> bool:
         if _save_article_title_update(article_id, short_title, "title_summary"):
             changed = True
     except Exception as e:
-        _save_ai_result(article_id, title_summary_error=str(e))
+        _save_ai_result(article_id, title_summary_error=_redact_secrets(e))
         raise
     return changed
 
@@ -3648,7 +3642,8 @@ def _run_auto_title_process_once():
                     if _process_article_title(article, config):
                         print(f"[auto-title] Updated article {article['id']}: {article.get('title', '')[:50]}")
                 except Exception as e:
-                    print(f"[auto-title] Article {article.get('id')}: failed: {e}")
+                    safe_error = _redact_secrets(e)
+                    print(f"[auto-title] Article {article.get('id')}: failed: {safe_error}")
     finally:
         _auto_title_process_lock.release()
 
@@ -3923,8 +3918,9 @@ def _run_auto_summary_once():
                     if not cached:
                         print(f"[auto-summary] Cached summary for article {article['id']}: {article.get('title', '')[:50]}")
                 except Exception as e:
-                    _save_ai_result(article["id"], summary_error=str(e))
-                    print(f"[auto-summary] Article {article.get('id')}: failed: {e}")
+                    safe_error = _redact_secrets(e)
+                    _save_ai_result(article["id"], summary_error=safe_error)
+                    print(f"[auto-summary] Article {article.get('id')}: failed: {safe_error}")
     finally:
         _auto_summary_lock.release()
 
@@ -4296,6 +4292,12 @@ def _save_ai_result(article_id: int, summary: str | None = None,
         summary = _sanitize_plain_text(summary)
     if translation is not None:
         translation = _sanitize_translation_payload(translation)
+    if summary_error is not None:
+        summary_error = _redact_secrets(summary_error)
+    if title_summary_error is not None:
+        title_summary_error = _redact_secrets(title_summary_error)
+    if title_translation_error is not None:
+        title_translation_error = _redact_secrets(title_translation_error)
     if not os.path.exists(NEWS_DB):
         return False
     conn = None

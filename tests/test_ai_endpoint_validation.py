@@ -4,6 +4,7 @@ import socket
 
 import pytest
 
+from ai_service import AIService
 import models
 import web_server
 
@@ -94,3 +95,35 @@ def test_system_config_accepts_public_hostname_endpoint(ai_config_env, monkeypat
 
     assert response.status_code == 200
     assert models.get_system_ai_config()["endpoint"] == "https://provider.example/v1"
+
+
+def test_api_error_redacts_known_and_labeled_secrets():
+    configured_secret = "random-configured-credential-7f3a9b"
+    bearer_secret = "bearer-provider-credential"
+    parameter_secret = "parameter-provider-credential"
+    detail = (
+        f"provider echoed {configured_secret}; "
+        f"Authorization: Bearer {bearer_secret}; "
+        f"api_key={parameter_secret}"
+    )
+
+    class ProviderResponse:
+        status_code = 401
+        reason = "Unauthorized"
+        text = detail
+
+        @staticmethod
+        def json():
+            return {"error": {"message": detail}}
+
+    service = AIService(
+        configured_secret,
+        "https://provider.example/v1",
+        "test-model",
+    )
+    formatted = service._format_api_error(ProviderResponse())
+
+    assert "AI API HTTP 401" in formatted
+    assert "[redacted]" in formatted
+    for secret in (configured_secret, bearer_secret, parameter_secret):
+        assert secret not in formatted

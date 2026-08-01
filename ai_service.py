@@ -19,6 +19,32 @@ from source_categories import CATEGORY_NAMES, CATEGORY_ORDER, clamp_weighted, lo
 TITLE_MAX_TOKENS = max(200, int(os.environ.get("AI_TITLE_MAX_TOKENS", "1024")))
 
 
+def _redact_api_error(value: str, *known_secrets: str) -> str:
+    """Return a compact provider error with credentials removed."""
+    text = " ".join(str(value or "").split())
+    for secret in known_secrets:
+        if secret:
+            text = text.replace(str(secret), "[redacted]")
+    text = re.sub(
+        r"(?i)\b(?:proxy-)?authorization\s*:\s*(?:bearer\s+)?[^\s,;]+",
+        "[redacted]",
+        text,
+    )
+    text = re.sub(
+        r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+",
+        "Bearer [redacted]",
+        text,
+    )
+    text = re.sub(r"sk-[A-Za-z0-9_-]+", "[redacted]", text)
+    text = re.sub(
+        r"(?i)(?:api[_-]?key|x-api-key|access[_-]?token|token|secret|password|key)"
+        r"\s*(?:=|:)\s*(?:[\"']?)[^\s,;&}\]\"']+",
+        "[redacted]",
+        text,
+    )
+    return text
+
+
 def _empty_ai_content_error(finish_reason, has_reasoning: bool, max_tokens: int) -> str:
     """Actionable message for a well-formed API response that carries no usable text —
     almost always a reasoning model whose hidden thinking exhausted max_tokens."""
@@ -196,7 +222,7 @@ class AIService:
                 detail = body
         if not detail:
             detail = resp.reason or "empty response"
-        detail = " ".join(str(detail).split())
+        detail = _redact_api_error(detail, self.api_key)
         if len(detail) > 500:
             detail = detail[:500] + "..."
         return f"AI API HTTP {resp.status_code}: {detail}"

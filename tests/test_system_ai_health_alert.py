@@ -215,6 +215,75 @@ def test_the_alert_never_raises_into_the_calling_job(alerts, monkeypatch):
     _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)  # must not raise
 
 
+def test_system_ai_failure_redacts_secrets_from_state_alert_and_log(
+    alerts,
+    monkeypatch,
+    capsys,
+):
+    configured_secret = "random-system-credential-4d91b7"
+    bearer_secret = "bearer-health-secret"
+    parameter_secret = "parameter-health-secret"
+    monkeypatch.setattr(
+        web_server,
+        "get_system_ai_config",
+        lambda: {"api_key": configured_secret},
+    )
+    error = (
+        f"provider echoed {configured_secret}; "
+        f"Authorization: Bearer {bearer_secret}; "
+        f"api_key={parameter_secret}"
+    )
+
+    _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD, error=error)
+
+    serialized = repr(web_server._system_ai_health) + repr(alerts) + capsys.readouterr().out
+    assert "[redacted]" in serialized
+    for secret in (configured_secret, bearer_secret, parameter_secret):
+        assert secret not in serialized
+
+
+def test_auto_summary_redacts_secret_before_persistence_and_logging(
+    alerts,
+    monkeypatch,
+    capsys,
+):
+    configured_secret = "random-background-credential-83c2e1"
+    captured = []
+    monkeypatch.setattr(
+        web_server,
+        "get_system_ai_config",
+        lambda: {"api_key": configured_secret},
+    )
+    monkeypatch.setattr(
+        web_server,
+        "_get_auto_summary_users",
+        lambda: [{"user_id": 1}],
+    )
+    monkeypatch.setattr(
+        web_server,
+        "_fetch_unsummarized_articles",
+        lambda _limit: [{"id": 99, "title": "secret regression"}],
+    )
+    monkeypatch.setattr(
+        web_server,
+        "_generate_article_summary",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError(f"provider echoed {configured_secret}")
+        ),
+    )
+    monkeypatch.setattr(
+        web_server,
+        "_save_ai_result",
+        lambda article_id, **kwargs: captured.append((article_id, kwargs)) or True,
+    )
+
+    web_server._run_auto_summary_once()
+
+    serialized = repr(captured) + capsys.readouterr().out
+    assert configured_secret not in serialized
+    assert "[redacted]" in serialized
+
+
 def test_generation_failure_feeds_the_streak(news_db_free, monkeypatch, alerts):
     class BoomService:
         def __init__(self, **kwargs):
