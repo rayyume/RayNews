@@ -168,3 +168,52 @@ def test_unknown_format_remains_literal_plain_text():
         notifier.render_notification_email_body("**not bold**", "unexpected")
         == "**not bold**"
     )
+
+
+def test_daily_summary_send_sanitizes_markdown_html(monkeypatch):
+    captured = {}
+
+    def fake_send_email(api_key, to_email, subject, html_body, **kwargs):
+        captured.update(
+            api_key=api_key,
+            to_email=to_email,
+            subject=subject,
+            html=html_body,
+            kwargs=kwargs,
+        )
+        return {"id": "sent"}
+
+    monkeypatch.setattr(notifier, "send_email", fake_send_email)
+    result = notifier.send_daily_summary_email(
+        "resend-key",
+        "reader@example.com",
+        """## 今日要闻
+
+**重点**
+
+- 第一项
+- 第二项
+
+<script>alert(1)</script>
+<p onclick="alert(2)">安全段落</p>
+[危险链接](javascript:alert(3))
+""",
+        {
+            "total_articles": 4,
+            "articles_after_dedup": 3,
+            "articles_selected_for_ai": 2,
+            "selected_articles_with_summary": 1,
+        },
+    )
+
+    assert result == {"id": "sent"}
+    rendered = captured["html"]
+    lowered = rendered.lower()
+    assert "<h2>今日要闻</h2>" in rendered
+    assert "<strong>重点</strong>" in rendered
+    assert "<ul>" in rendered and "<li>第一项</li>" in rendered
+    assert "<script" not in lowered
+    assert "alert(1)" not in lowered
+    assert "onclick" not in lowered
+    assert "javascript:" not in lowered
+    assert "<p>安全段落</p>" in rendered

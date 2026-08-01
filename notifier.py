@@ -192,11 +192,7 @@ def send_daily_summary_email(api_key: str, to_email: str,
     stats is a dict with keys: total_articles, articles_after_dedup,
     articles_selected_for_ai, selected_articles_with_summary.
     """
-    # Convert markdown to HTML with fenced code blocks and tables
-    summary_html = markdown.markdown(
-        summary_text,
-        extensions=["fenced_code", "tables"],
-    )
+    summary_html = render_notification_email_body(summary_text, fmt="markdown")
     total = stats.get("total_articles", 0)
     deduped = stats.get("articles_after_dedup", 0)
     selected = stats.get("articles_selected_for_ai", deduped)
