@@ -29,7 +29,7 @@ from news_schema import enable_wal_mode, ensure_article_schema
 from source_categories import (
     ensure_article_sources, init_source_categories,
     ensure_article_source_columns,
-    extract_domains_from_html, lookup_source_by_domain,
+    extract_domain_from_url, extract_domains_from_html, lookup_source_by_domain,
 )
 
 # ─── Config (overridable via environment variables) ──────
@@ -485,7 +485,7 @@ def _extract_bottom_html(html: str, ratio: float = 0.15) -> str:
     return "\n".join(chunks[-keep:])
 
 
-def detect_source(content: str, extra_html: str = "") -> str:
+def detect_source(content: str, extra_html: str = "", *, extra_url: str = "") -> str:
     """Extract source from the bottom-most standalone via line.
 
     Tries in priority order:
@@ -501,6 +501,14 @@ def detect_source(content: str, extra_html: str = "") -> str:
         return via_source
 
     # 2) domain from link_preview_url — this IS the original article URL, no interference
+    preview_domain = extract_domain_from_url(extra_url)
+    if preview_domain:
+        domain_match = lookup_source_by_domain([preview_domain])
+        if domain_match:
+            source_name, _category = domain_match
+            return source_name
+
+    # Keep the legacy extra_html contract for callers that provide actual HTML links.
     if extra_html:
         domains = extract_domains_from_html(extra_html)
         domain_match = lookup_source_by_domain(domains)
@@ -989,9 +997,8 @@ def process_message(msg: dict, orig_msg_id: int) -> dict:
     title = extract_title(text)
     telegraph_url = extract_telegraph_url(content)
     feed_source = detect_feed_source(content, msg.get("link_preview_title", "") or "")
-    # Pass link_preview_url as extra_html so domain detection can use the article URL
     link_preview_url = msg.get("link_preview_url", "") or ""
-    origin_source = detect_source(content, extra_html=link_preview_url)
+    origin_source = detect_source(content, extra_url=link_preview_url)
     thumb = msg["images"][0] if msg["images"] else ""
     time_info = parse_datetime(msg["datetime"])
 

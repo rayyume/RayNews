@@ -8,6 +8,7 @@ import sqlite3
 import threading
 import time
 from datetime import datetime
+from urllib.parse import urlsplit
 
 from news_schema import ensure_article_source_columns as _ensure_article_source_columns
 
@@ -162,6 +163,36 @@ _DOMAIN_EXCLUDE = {
 }
 
 
+def _root_domain(host: str) -> str | None:
+    """Normalize a hostname to its matchable root domain."""
+    host = host.lower().strip()
+    # Strip leading "www." or "wwwN." patterns
+    host = re.sub(r'^www\d*\.', '', host)
+    # Extract root domain (last two parts for known multi-part TLDs)
+    parts = host.split(".")
+    if len(parts) >= 2:
+        # Handle com.cn / co.uk / com.tw etc.
+        if parts[-2] in ("com", "co", "org", "net", "gov", "edu", "ac") and len(parts) >= 3:
+            root = ".".join(parts[-3:])
+        else:
+            root = ".".join(parts[-2:])
+    else:
+        root = host
+    return None if root in _DOMAIN_EXCLUDE else root
+
+
+def extract_domain_from_url(value: str) -> str | None:
+    """Return a matchable root domain from an HTTP(S) URL."""
+    try:
+        parsed = urlsplit((value or "").strip())
+        host = (parsed.hostname or "").lower()
+    except (TypeError, ValueError):
+        return None
+    if parsed.scheme.lower() not in {"http", "https"} or not host:
+        return None
+    return _root_domain(host)
+
+
 def extract_domains_from_html(html: str) -> list[str]:
     """Extract unique root domains from all href links in HTML.
 
@@ -175,20 +206,8 @@ def extract_domains_from_html(html: str) -> list[str]:
     seen = set()
     domains = []
     for host in urls:
-        host = host.lower().strip()
-        # Strip leading "www." or "wwwN." patterns
-        host = re.sub(r'^www\d*\.', '', host)
-        # Extract root domain (last two parts for known multi-part TLDs)
-        parts = host.split(".")
-        if len(parts) >= 2:
-            # Handle com.cn / co.uk / com.tw etc.
-            if parts[-2] in ("com", "co", "org", "net", "gov", "edu", "ac") and len(parts) >= 3:
-                root = ".".join(parts[-3:])
-            else:
-                root = ".".join(parts[-2:])
-        else:
-            root = host
-        if root in _DOMAIN_EXCLUDE:
+        root = _root_domain(host)
+        if not root:
             continue
         if root not in seen:
             seen.add(root)
