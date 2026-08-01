@@ -319,6 +319,59 @@ def test_container_image_installs_and_copies_supervisor_configuration():
     assert "COPY supervisord.conf /app/supervisord.conf" in dockerfile
 
 
+def test_container_creates_unprivileged_python_service_account_without_dropping_entrypoint_privileges():
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    normalized = " ".join(dockerfile.replace("\\\n", "").split())
+    assert "groupadd --system raynews" in normalized
+    assert (
+        "useradd --system --gid raynews --create-home "
+        "--home-dir /home/raynews --shell /usr/sbin/nologin raynews"
+    ) in normalized
+    assert "mkdir -p /app/data /var/log/nginx /run/nginx" in normalized
+    assert "chown -R raynews:raynews /app/data" in normalized
+    assert "USER raynews" not in dockerfile
+
+
+def test_supervisor_only_drops_python_service_privileges():
+    config = configparser.ConfigParser()
+    config.read(ROOT / "supervisord.conf", encoding="utf-8")
+
+    for section in ("program:refresh", "program:web"):
+        assert config[section]["user"] == "raynews"
+        assert config[section]["environment"] == 'HOME="/home/raynews",USER="raynews"'
+
+    assert "user" not in config["program:nginx"]
+    assert "environment" not in config["program:nginx"]
+
+
+def test_entrypoint_fails_clearly_when_data_directory_cannot_be_prepared():
+    entrypoint = (ROOT / "entrypoint.sh").read_text(encoding="utf-8")
+    assert "if ! install -d -o raynews -g raynews /app/data; then" in entrypoint
+    assert "if ! chown -R raynews:raynews /app/data; then" in entrypoint
+    assert "if ! test -w /app/data; then" in entrypoint
+    assert "ERROR:" in entrypoint
+    assert "exit 1" in entrypoint
+    assert "su raynews" not in entrypoint
+
+
+def test_compose_healthcheck_covers_all_three_service_surfaces():
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    healthcheck = compose.split("    healthcheck:", 1)[1].split(
+        "    restart:", 1
+    )[0]
+    assert "- CMD" in healthcheck
+    assert "- python3" in healthcheck
+    assert "- -c" in healthcheck
+    assert "http://127.0.0.1/health" in healthcheck
+    assert "http://127.0.0.1:8082/auth/health" in healthcheck
+    assert "http://127.0.0.1:8081/refresh/status" in healthcheck
+    assert "interval: 30s" in healthcheck
+    assert "timeout: 10s" in healthcheck
+    assert "retries: 3" in healthcheck
+    assert "start_period: 30s" in healthcheck
+    assert '- "8090:80"' in compose
+
+
 def test_nginx_sends_access_and_error_logs_to_container_streams():
     config = (ROOT / "nginx.conf").read_text(encoding="utf-8")
     server = config.split("server {", 1)[1]

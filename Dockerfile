@@ -16,7 +16,11 @@ COPY nginx-security-headers.conf /etc/nginx/snippets/raynews-security-headers.co
 COPY supervisord.conf /app/supervisord.conf
 COPY frontend/ /usr/share/nginx/html/
 
-RUN mkdir -p /app/data /var/log/nginx /run/nginx
+RUN groupadd --system raynews && \
+    useradd --system --gid raynews --create-home \
+      --home-dir /home/raynews --shell /usr/sbin/nologin raynews && \
+    mkdir -p /app/data /var/log/nginx /run/nginx && \
+    chown -R raynews:raynews /app/data
 
 ARG COMMIT_SHA=unknown
 ARG FULL_VERSION_OVERRIDE=
