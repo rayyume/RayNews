@@ -24,11 +24,12 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
+from network_safety import safe_get
 from news_schema import enable_wal_mode, ensure_article_schema
 from source_categories import (
     ensure_article_sources, init_source_categories,
     ensure_article_source_columns,
-    extract_domains_from_html, lookup_source_by_domain,
+    extract_domain_from_url, extract_domains_from_html, lookup_source_by_domain,
 )
 
 # ─── Config (overridable via environment variables) ──────
@@ -74,6 +75,7 @@ REQUEST_TIMEOUT = 20
 # telegraph_url to retry), so keeping this short trades a little first-paint latency
 # for speed without costing article quality.
 FULLTEXT_TIMEOUT = 10
+FULLTEXT_BODY_LIMIT = 2 * 1024 * 1024
 # WeChat keeps the longer timeout: unlike Telegraph, a failed WeChat full-text has no
 # backfill safety net (we don't persist the source WeChat URL, and
 # backfill_missing_fulltext() only retries telegraph_url), so a short timeout here would
@@ -148,10 +150,30 @@ def upsert_articles(
     — pass sync_sources=False there and let the caller run it once after the whole
     cycle finishes, instead of repeating a full-table pass per batch.
     """
-    sql = """INSERT OR REPLACE INTO articles
+    sql = """INSERT INTO articles
         (id, title, source, feed_source, origin_source, time, date, timestamp, thumb,
          has_full_content, telegraph_url, body_html, original_body_html, summary)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            title = excluded.title,
+            source = excluded.source,
+            feed_source = excluded.feed_source,
+            origin_source = excluded.origin_source,
+            time = excluded.time,
+            date = excluded.date,
+            timestamp = excluded.timestamp,
+            thumb = excluded.thumb,
+            has_full_content = CASE
+                WHEN articles.has_full_content = 1 OR excluded.has_full_content = 1 THEN 1 ELSE 0 END,
+            telegraph_url = CASE WHEN excluded.telegraph_url != ''
+                THEN excluded.telegraph_url ELSE articles.telegraph_url END,
+            body_html = CASE WHEN excluded.body_html != ''
+                THEN excluded.body_html ELSE articles.body_html END,
+            original_body_html = CASE
+                WHEN articles.original_body_html IS NULL OR articles.original_body_html = ''
+                THEN excluded.original_body_html ELSE articles.original_body_html END,
+            summary = CASE WHEN excluded.summary != ''
+                THEN excluded.summary ELSE articles.summary END"""
     rows = []
     deleted_ids = {
         int(row[0])
@@ -483,7 +505,7 @@ def _extract_bottom_html(html: str, ratio: float = 0.15) -> str:
     return "\n".join(chunks[-keep:])
 
 
-def detect_source(content: str, extra_html: str = "") -> str:
+def detect_source(content: str, extra_html: str = "", *, extra_url: str = "") -> str:
     """Extract source from the bottom-most standalone via line.
 
     Tries in priority order:
@@ -499,6 +521,14 @@ def detect_source(content: str, extra_html: str = "") -> str:
         return via_source
 
     # 2) domain from link_preview_url — this IS the original article URL, no interference
+    preview_domain = extract_domain_from_url(extra_url)
+    if preview_domain:
+        domain_match = lookup_source_by_domain([preview_domain])
+        if domain_match:
+            source_name, _category = domain_match
+            return source_name
+
+    # Keep the legacy extra_html contract for callers that provide actual HTML links.
     if extra_html:
         domains = extract_domains_from_html(extra_html)
         domain_match = lookup_source_by_domain(domains)
@@ -761,13 +791,34 @@ def _legacy_news_item_key(item: dict) -> str:
 
 
 # ─── Telegraph Fetching ──────────────────────────────────
+def _read_body_with_limit(resp, limit: int) -> str:
+    chunks: list[bytes] = []
+    total = 0
+    for chunk in resp.iter_content(chunk_size=65536):
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > limit:
+            raise ValueError("fulltext body too large")
+        chunks.append(chunk)
+    encoding = requests.utils.get_encoding_from_headers(resp.headers) or "utf-8"
+    return b"".join(chunks).decode(encoding, errors="replace")
+
+
 def fetch_telegraph(url: str) -> dict | None:
+    resp = None
     try:
         log.info(f"  Fetching Telegraph: {unquote(url)[:80]}...")
-        resp = requests.get(url, headers=HEADERS, timeout=FULLTEXT_TIMEOUT)
+        resp = safe_get(
+            url,
+            headers=HEADERS,
+            timeout=FULLTEXT_TIMEOUT,
+            stream=True,
+        )
         resp.raise_for_status()
+        body = _read_body_with_limit(resp, FULLTEXT_BODY_LIMIT)
 
-        soup = BeautifulSoup(resp.text, "html.parser")
+        soup = BeautifulSoup(body, "html.parser")
         article = soup.find("article")
         if not article:
             return None
@@ -856,6 +907,9 @@ def fetch_telegraph(url: str) -> dict | None:
     except Exception as e:
         log.error(f"  Telegraph fetch failed: {e}")
         return None
+    finally:
+        if resp is not None:
+            resp.close()
 
 
 # ─── WeChat Article Fetching ──────────────────────────────
@@ -865,12 +919,19 @@ def fetch_wechat_article(url: str) -> dict | None:
         "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
         "Referer": "https://mp.weixin.qq.com/",
     }
+    resp = None
     try:
         log.info(f"  Fetching WeChat: {url[:80]}...")
-        resp = requests.get(url, headers=headers, timeout=WECHAT_FULLTEXT_TIMEOUT)
+        resp = safe_get(
+            url,
+            headers=headers,
+            timeout=WECHAT_FULLTEXT_TIMEOUT,
+            stream=True,
+        )
         resp.raise_for_status()
+        body = _read_body_with_limit(resp, FULLTEXT_BODY_LIMIT)
 
-        soup = BeautifulSoup(resp.text, "html.parser")
+        soup = BeautifulSoup(body, "html.parser")
 
         # Main content container in WeChat articles
         content_div = (
@@ -943,6 +1004,9 @@ def fetch_wechat_article(url: str) -> dict | None:
     except Exception as e:
         log.error(f"  WeChat fetch failed: {e}")
         return None
+    finally:
+        if resp is not None:
+            resp.close()
 
 
 # ─── Main Pipeline ────────────────────────────────────────
@@ -953,9 +1017,8 @@ def process_message(msg: dict, orig_msg_id: int) -> dict:
     title = extract_title(text)
     telegraph_url = extract_telegraph_url(content)
     feed_source = detect_feed_source(content, msg.get("link_preview_title", "") or "")
-    # Pass link_preview_url as extra_html so domain detection can use the article URL
     link_preview_url = msg.get("link_preview_url", "") or ""
-    origin_source = detect_source(content, extra_html=link_preview_url)
+    origin_source = detect_source(content, extra_url=link_preview_url)
     thumb = msg["images"][0] if msg["images"] else ""
     time_info = parse_datetime(msg["datetime"])
 

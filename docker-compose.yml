@@ -54,7 +54,23 @@ services:
       - HTTP_PROXY=${HTTP_PROXY:-}
       - HTTPS_PROXY=${HTTPS_PROXY:-}
       - NO_PROXY=${NO_PROXY:-localhost,127.0.0.1}
+      - TRUSTED_PROXY_PREFIXES=${TRUSTED_PROXY_PREFIXES:-}
     # extra_hosts 按需在 .env 中配置，默认注释
     # extra_hosts:
     #  - "host.docker.internal:${HOST_IP:-}"
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - >-
+          import urllib.request;
+          [urllib.request.urlopen(url, timeout=2).read() for url in
+          ('http://127.0.0.1/health',
+          'http://127.0.0.1:8082/auth/health',
+          'http://127.0.0.1:8081/refresh/status')]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     restart: unless-stopped

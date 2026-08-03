@@ -26,17 +26,29 @@ except Exception as exc:
     print(f"[entrypoint] Custom HTML injection failed: {exc}")
 PY
 
+# Prepare the bind-mounted data directory before supervisor drops the Python
+# services to the fixed application account. Never fall back to running them as
+# root when the host mount cannot be repaired.
+if ! install -d -o raynews -g raynews /app/data; then
+  echo "[entrypoint] ERROR: unable to create or set ownership on /app/data for raynews." >&2
+  exit 1
+fi
+if ! chown -R raynews:raynews /app/data; then
+  echo "[entrypoint] ERROR: unable to grant raynews ownership of /app/data." >&2
+  exit 1
+fi
+if ! /usr/sbin/runuser -u raynews -- /bin/sh -c '
+  probe=$(/usr/bin/mktemp /app/data/.raynews-write-probe.XXXXXX) || exit 1
+  /bin/rm -f -- "$probe"
+'; then
+  echo "[entrypoint] ERROR: /app/data is not writable by raynews after permission setup." >&2
+  exit 1
+fi
+
 # ─── Configuration warning ─────────────────────────────
 if [ -z "$TELEGRAM_CHANNEL_URL" ] && { [ -z "$TELEGRAM_CHANNEL" ] || [ "$TELEGRAM_CHANNEL" = "your_channel" ]; }; then
   echo "[entrypoint] WARNING: TELEGRAM_CHANNEL_URL/TELEGRAM_CHANNEL is not configured; fetcher will not read the intended Telegram source."
 fi
 
 # ─── Start services ────────────────────────────────────
-echo "=== Starting refresh server ==="
-python3 /app/refresh_server.py &
-
-echo "=== Starting web server ==="
-python3 /app/web_server.py &
-
-echo "=== Starting nginx ==="
-nginx -g 'daemon off;'
+exec supervisord -c /app/supervisord.conf

@@ -1,5 +1,6 @@
 """RayNews Web Server — auth, favorites, AI, settings via Flask."""
 
+import base64
 import os
 import re
 import sys
@@ -12,12 +13,12 @@ import calendar
 import ipaddress
 import uuid
 import requests
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from urllib.parse import urlsplit
 
 from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify, g
-from flask_cors import CORS
 from notifier import render_notification_email_body, send_email
 
 # Ensure the project root is on the path
@@ -25,9 +26,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from models import (
     get_db, create_registered_user, get_user, get_user_by_email, get_user_by_username,
-    update_user, delete_user, list_users, get_first_admin_email, count_users,
+    update_user, set_user_role_and_rotate_token_version,
+    delete_user, rotate_token_version, list_users, get_first_admin_email, count_users,
     count_active_users_since,
-    verify_password, admit_login_attempt, reset_login_failures,
+    prune_access_log,
+    verify_password, password_within_bcrypt_limit,
+    admit_login_attempt, reset_login_failures,
+    admit_register_attempt, reset_register_attempts,
     claim_invite_request, complete_invite_request,
     add_favorite, remove_favorite, get_favorites, get_all_favorite_article_ids, is_favorited,
     count_article_favorites,
@@ -51,7 +56,8 @@ from models import (
 )
 from auth import init_auth, create_token, require_auth, require_role
 from auth_validation import is_valid_email
-from ai_service import AIService
+from image_validation import detect_image_content_type
+from ai_service import AIService, _redact_api_error, validate_ai_endpoint_base_url
 from network_safety import UnsafeUrlError, assert_public_http_url
 from image_cache import (
     enqueue_article_image_prefetch, unpin_article_images,
@@ -144,8 +150,12 @@ TITLE_MERGE_TRANSLATE_CONDENSE = os.environ.get("TITLE_MERGE_TRANSLATE_CONDENSE"
 
 # ─── App Setup ────────────────────────────────────────────────
 
+MAX_REQUEST_BODY_BYTES = 2 * 1024 * 1024
+AI_RESULT_MAX_BODY_BYTES = 1024 * 1024
+AI_RESULT_MAX_FIELD_CHARS = 200_000
+
 app = Flask(__name__)
-CORS(app)
+app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BODY_BYTES
 
 
 # ─── JSON error handler — prevent HTML responses on errors ─────
@@ -190,15 +200,29 @@ def _admin_email_address() -> str:
     return (os.environ.get("RAYNEWS_ADMIN_EMAIL") or get_first_admin_email() or "").strip()
 
 
+def _trusted_proxy_networks():
+    """Return configured direct-peer networks allowed to supply X-Real-IP."""
+    raw = os.environ.get("TRUSTED_PROXY_PREFIXES") or "127.0.0.1/32,::1/128"
+    networks = []
+    for prefix in raw.split(","):
+        try:
+            networks.append(ipaddress.ip_network(prefix.strip(), strict=False))
+        except ValueError:
+            continue
+    return networks
+
+
 def _trusted_client_ip() -> str:
-    """Use proxy-provided client IP only when the direct peer is loopback."""
+    """Use X-Real-IP only when the direct peer is a trusted proxy."""
     remote = (request.remote_addr or "").strip()
     try:
         remote_ip = ipaddress.ip_address(remote)
     except ValueError:
         remote_ip = None
 
-    if remote_ip is not None and remote_ip.is_loopback:
+    if remote_ip is not None and any(
+        remote_ip in network for network in _trusted_proxy_networks()
+    ):
         real_ip = (request.headers.get("X-Real-IP") or "").strip()
         try:
             return str(ipaddress.ip_address(real_ip))
@@ -276,6 +300,15 @@ def register():
         return jsonify({"error": "invalid email format"}), 400
     if len(password) < 6:
         return jsonify({"error": "password must be at least 6 characters"}), 400
+    if not password_within_bcrypt_limit(password):
+        return jsonify({
+            "error": "password must be at most 72 UTF-8 bytes",
+        }), 400
+
+    client_ip = _trusted_client_ip()
+    admitted, retry_after = admit_register_attempt(client_ip)
+    if not admitted:
+        return _rate_limited_response(retry_after)
 
     user, is_initial_admin = create_registered_user(
         email,
@@ -292,9 +325,12 @@ def register():
             return jsonify({"error": "invitation code required. Go to Settings → Request Invite"}), 400
         return jsonify({"error": "invalid or expired invitation code"}), 400
 
+
+    reset_register_attempts(client_ip)
+
     admin_notified = _send_registration_notice(user) if not is_initial_admin else False
 
-    token = create_token(user["id"], user["role"])
+    token = create_token(user["id"], user["role"], user["token_version"])
     return jsonify({"token": token, "user": user, "admin_notified": admin_notified}), 201
 
 
@@ -394,7 +430,7 @@ def login():
         return jsonify({"error": "invalid email/username or password"}), 401
 
     reset_login_failures(client_ip, login_val)
-    token = create_token(user["id"], user["role"])
+    token = create_token(user["id"], user["role"], user["token_version"])
     return jsonify({
         "token": token,
         "user": {k: v for k, v in user.items() if k != "password"},
@@ -452,8 +488,11 @@ def upload_avatar():
         if not ext:
             return jsonify({"error": "unsupported image type (jpg/png/gif/webp only)"}), 400
 
-        import base64
-        raw_bytes = base64.b64decode(raw)
+        raw_bytes = base64.b64decode(raw, validate=True)
+        actual_mime = detect_image_content_type(raw_bytes)
+        if actual_mime is None or actual_mime != mime:
+            return jsonify({"error": "image content does not match declared type"}), 400
+        ext = ALLOWED_AVATAR_TYPES[actual_mime]
 
         if len(raw_bytes) > AVATAR_MAX_SIZE:
             return jsonify({"error": "image too large (max 500KB)"}), 400
@@ -520,8 +559,18 @@ def admin_set_role(user_id):
         return jsonify({"error": "invalid role"}), 400
     if user_id == g.user_id:
         return jsonify({"error": "cannot change your own role"}), 400
-    user = update_user(user_id, role=new_role)
-    return jsonify(user) if user else (jsonify({"error": "not found"}), 404)
+    user = set_user_role_and_rotate_token_version(user_id, new_role)
+    if not user:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(user)
+
+
+@app.route("/auth/users/<int:user_id>/revoke-tokens", methods=["POST"])
+@require_role("admin")
+def admin_revoke_tokens(user_id):
+    if rotate_token_version(user_id):
+        return jsonify({"ok": True}), 200
+    return jsonify({"error": "not found"}), 404
 
 
 @app.route("/auth/pending-invitations", methods=["GET"])
@@ -564,10 +613,12 @@ def admin_set_system_ai_config():
             else:
                 data.pop("api_key", None)
         try:
-            assert_public_http_url(
-                data.get("endpoint", existing.get("endpoint", "https://api.openai.com/v1"))
+            effective_endpoint = data.get(
+                "endpoint", existing.get("endpoint", "https://api.openai.com/v1")
             )
-        except UnsafeUrlError:
+            assert_public_http_url(effective_endpoint)
+            validate_ai_endpoint_base_url(effective_endpoint)
+        except (UnsafeUrlError, ValueError):
             return jsonify({"error": "AI endpoint must be a public HTTP(S) URL"}), 400
         config = set_system_ai_config(**data)
         # A new key/endpoint deserves a clean slate: without this, the previous
@@ -600,6 +651,15 @@ def _news_db_connect() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=30000")
     return conn
+
+
+@contextmanager
+def _news_db_conn():
+    conn = _news_db_connect()
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def _ensure_news_schema(conn: sqlite3.Connection, *, force: bool = False) -> None:
@@ -635,16 +695,15 @@ def _get_article_meta(article_id: int) -> dict | None:
     if not os.path.exists(NEWS_DB):
         return None
     try:
-        conn = _news_db_connect()
-        _ensure_news_schema(conn)
-        row = conn.execute(
-            "SELECT id, title, original_title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
-            "       COALESCE(NULLIF(feed_source, ''), source) AS feed_source, origin_source, "
-            "       date, time, thumb, has_full_content, timestamp "
-            "FROM articles WHERE id = ?",
-            (article_id,),
-        ).fetchone()
-        conn.close()
+        with _news_db_conn() as conn:
+            _ensure_news_schema(conn)
+            row = conn.execute(
+                "SELECT id, title, original_title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
+                "       COALESCE(NULLIF(feed_source, ''), source) AS feed_source, origin_source, "
+                "       date, time, thumb, has_full_content, timestamp "
+                "FROM articles WHERE id = ?",
+                (article_id,),
+            ).fetchone()
         return dict(row) if row else None
     except Exception:
         return None
@@ -996,7 +1055,8 @@ def set_ai_config_route():
         )
         try:
             assert_public_http_url(effective_endpoint)
-        except UnsafeUrlError:
+            validate_ai_endpoint_base_url(effective_endpoint)
+        except (UnsafeUrlError, ValueError):
             return jsonify({"error": "AI endpoint must be a public HTTP(S) URL"}), 400
         config = set_ai_config(g.user_id, **data)
         settings = get_user_settings(g.user_id) or {}
@@ -1126,6 +1186,12 @@ def ai_save_result(article_id):
     Body: {"summary": "..."} or {"translation": "..."} (translation is the
     same JSON-string-encoded {"title", "html"} shape used elsewhere).
     """
+    if (
+        request.content_length is not None
+        and request.content_length > AI_RESULT_MAX_BODY_BYTES
+    ):
+        return jsonify({"error": "request body too large"}), 413
+
     settings = get_user_settings(g.user_id) or {}
     if not is_share_active(settings):
         return jsonify({"error": "shared AI result publication is not active"}), 403
@@ -1137,6 +1203,14 @@ def ai_save_result(article_id):
     data = request.get_json(silent=True) or {}
     summary = data.get("summary")
     translation = data.get("translation")
+    if summary is not None and not isinstance(summary, str):
+        return jsonify({"error": "summary must be a string"}), 400
+    if translation is not None and not isinstance(translation, str):
+        return jsonify({"error": "translation must be a string"}), 400
+    if summary is not None and len(summary) > AI_RESULT_MAX_FIELD_CHARS:
+        return jsonify({"error": "summary too long"}), 400
+    if translation is not None and len(translation) > AI_RESULT_MAX_FIELD_CHARS:
+        return jsonify({"error": "translation too long"}), 400
     if not summary and not translation:
         return jsonify({"error": "summary or translation required"}), 400
 
@@ -1196,18 +1270,30 @@ def _run_ai_connection_test(config: dict | None) -> tuple[dict, int]:
         if not response or not response.strip():
             return {"error": "Connection test returned empty response"}, 502
         return {"ok": True, "response": response}, 200
-    except requests.exceptions.ConnectTimeout:
-        app.logger.exception("AI connection test timed out while connecting")
+    except requests.exceptions.ConnectTimeout as exc:
+        _log_ai_failure("AI connection test timed out while connecting", exc, config["api_key"])
         return {"error": "连接 AI 服务超时。请检查 API 地址是否正确，或 Docker 容器是否配置了 HTTP_PROXY 环境变量"}, 502
-    except requests.exceptions.ConnectionError:
-        app.logger.exception("AI connection test could not connect")
+    except requests.exceptions.ConnectionError as exc:
+        _log_ai_failure("AI connection test could not connect", exc, config["api_key"])
         return {"error": "无法连接 AI 服务。请检查网络代理配置"}, 502
-    except requests.exceptions.Timeout:
-        app.logger.exception("AI connection test timed out")
+    except requests.exceptions.Timeout as exc:
+        _log_ai_failure("AI connection test timed out", exc, config["api_key"])
         return {"error": "AI 服务响应超时"}, 502
-    except Exception:
-        app.logger.exception("AI connection test failed")
+    except Exception as exc:
+        _log_ai_failure("AI connection test failed", exc, config["api_key"])
         return {"error": "AI connection test failed"}, 502
+
+
+def _log_ai_failure(message: str, exc: Exception, api_key: str = "") -> None:
+    """Log a compact provider failure without traceback URLs or credentials."""
+    if isinstance(exc, requests.exceptions.RequestException):
+        # requests exceptions may embed the complete request URL.  Arbitrary
+        # query parameter names cannot be safely redacted, so retain only the
+        # useful failure class and never stringify a network exception.
+        detail = type(exc).__name__
+    else:
+        detail = _redact_api_error(str(exc), api_key)
+    app.logger.error("%s: %s", message, detail or type(exc).__name__)
 
 
 def _share_check_after_personal_api_test(
@@ -1293,14 +1379,14 @@ def ai_chat_relay():
             provider_type=config.get("provider_type", "openai"),
         )
         content = svc.chat(messages, max_tokens=max_tokens, temperature=temperature)
-    except TimeoutError:
-        app.logger.exception("AI relay timed out")
+    except TimeoutError as exc:
+        _log_ai_failure("AI relay timed out", exc, config["api_key"])
         return jsonify({"error": "AI service timed out"}), 504
-    except requests.exceptions.RequestException:
-        app.logger.exception("AI relay request failed")
+    except requests.exceptions.RequestException as exc:
+        _log_ai_failure("AI relay request failed", exc, config["api_key"])
         return jsonify({"error": "AI service unavailable"}), 502
-    except Exception:
-        app.logger.exception("AI relay failed")
+    except Exception as exc:
+        _log_ai_failure("AI relay failed", exc, config["api_key"])
         return jsonify({"error": "AI relay failed"}), 502
     if not (content or "").strip():
         return jsonify({"error": "AI returned an empty response"}), 502
@@ -1661,11 +1747,22 @@ def _note_system_ai_success() -> None:
         )
 
 
+def _redact_secrets(value, *known_secrets: str) -> str:
+    secrets = [secret for secret in known_secrets if secret]
+    try:
+        system_config = get_system_ai_config() or {}
+        if system_config.get("api_key"):
+            secrets.append(system_config["api_key"])
+    except Exception:
+        pass
+    return _redact_api_error(value, *secrets)
+
+
 def _note_system_ai_failure(job: str, error) -> None:
     """Count one failed system-AI call. Alerts every admin exactly once per
     outage: the flag only clears on the next success (see above), so a provider
     that fails every 30 seconds can't turn into a stream of notifications."""
-    reason = re.sub(r"\s+", " ", str(error or "")).strip()[:300]
+    reason = _redact_secrets(error).strip()[:300]
     with _system_ai_health_lock:
         _system_ai_health["successes"] = 0
         _system_ai_health["failures"] += 1
@@ -1705,24 +1802,7 @@ def _note_system_ai_failure(job: str, error) -> None:
 
 def _compact_share_error(value: str) -> str:
     """Return a safe summary, never an arbitrary provider response body."""
-    text = re.sub(r"\s+", " ", str(value or "connection test failed")).strip()
-    # Redact common credential transports before classifying the error. The
-    # allowlist below intentionally drops unknown provider detail altogether,
-    # but keeping these redactions makes this safe if a new allowed summary is
-    # added later.
-    text = re.sub(
-        r"(?i)\b(?:proxy-)?authorization\s*:\s*(?:bearer\s+)?[^\s,;]+",
-        "[redacted]",
-        text,
-    )
-    text = re.sub(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [redacted]", text)
-    text = re.sub(r"sk-[A-Za-z0-9_-]+", "[redacted]", text)
-    text = re.sub(
-        r"(?i)(?:api[_-]?key|x-api-key|access[_-]?token|token|secret|password|key)"
-        r"\s*(?:=|:)\s*(?:[\"']?)[^\s,;&}\]\"']+",
-        "[redacted]",
-        text,
-    )
+    text = _redact_secrets(value or "connection test failed")
 
     status = re.search(r"\bAI API HTTP\s+([1-5]\d{2})\b", text, flags=re.IGNORECASE)
     if status:
@@ -2043,18 +2123,17 @@ def _init_daily_summary_global_table():
     if not os.path.exists(NEWS_DB):
         return
     try:
-        conn = _news_db_connect()
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS daily_summary_global (
-                date          TEXT PRIMARY KEY,
-                summary       TEXT NOT NULL,
-                article_count INTEGER NOT NULL DEFAULT 0,
-                stats         TEXT NOT NULL DEFAULT '{}',
-                updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
-            )
-        """)
-        conn.commit()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS daily_summary_global (
+                    date          TEXT PRIMARY KEY,
+                    summary       TEXT NOT NULL,
+                    article_count INTEGER NOT NULL DEFAULT 0,
+                    stats         TEXT NOT NULL DEFAULT '{}',
+                    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+            """)
+            conn.commit()
     except Exception as e:
         print(f"[daily-summary] global cache table init failed: {e}")
 
@@ -2064,14 +2143,13 @@ def _get_daily_summary_global_cache(date_str: str) -> dict | None:
         return None
     try:
         _init_daily_summary_global_table()
-        conn = _news_db_connect()
-        conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            "SELECT summary, article_count, stats, updated_at "
-            "FROM daily_summary_global WHERE date = ?",
-            (date_str,),
-        ).fetchone()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT summary, article_count, stats, updated_at "
+                "FROM daily_summary_global WHERE date = ?",
+                (date_str,),
+            ).fetchone()
         if not row:
             return None
         data = dict(row)
@@ -2091,20 +2169,19 @@ def _save_daily_summary_global_cache(date_str: str, summary: str,
         return
     try:
         _init_daily_summary_global_table()
-        conn = _news_db_connect()
-        conn.execute(
-            "INSERT INTO daily_summary_global "
-            "(date, summary, article_count, stats, updated_at) "
-            "VALUES (?, ?, ?, ?, datetime('now')) "
-            "ON CONFLICT(date) DO UPDATE SET "
-            "summary = excluded.summary, "
-            "article_count = excluded.article_count, "
-            "stats = excluded.stats, "
-            "updated_at = datetime('now')",
-            (date_str, summary, article_count, json.dumps(stats or {}, ensure_ascii=False)),
-        )
-        conn.commit()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.execute(
+                "INSERT INTO daily_summary_global "
+                "(date, summary, article_count, stats, updated_at) "
+                "VALUES (?, ?, ?, ?, datetime('now')) "
+                "ON CONFLICT(date) DO UPDATE SET "
+                "summary = excluded.summary, "
+                "article_count = excluded.article_count, "
+                "stats = excluded.stats, "
+                "updated_at = datetime('now')",
+                (date_str, summary, article_count, json.dumps(stats or {}, ensure_ascii=False)),
+            )
+            conn.commit()
     except Exception as e:
         print(f"[daily-summary] global cache write failed: {e}")
 
@@ -2184,19 +2261,18 @@ def _init_daily_summary_sends_table():
     if not os.path.exists(NEWS_DB):
         return
     try:
-        conn = _news_db_connect()
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS daily_summary_sends (
-                date       TEXT NOT NULL,
-                user_id    INTEGER NOT NULL,
-                email      TEXT NOT NULL,
-                status     TEXT NOT NULL DEFAULT 'sent',
-                sent_at    TEXT NOT NULL DEFAULT (datetime('now')),
-                PRIMARY KEY (date, user_id)
-            )
-        """)
-        conn.commit()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS daily_summary_sends (
+                    date       TEXT NOT NULL,
+                    user_id    INTEGER NOT NULL,
+                    email      TEXT NOT NULL,
+                    status     TEXT NOT NULL DEFAULT 'sent',
+                    sent_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (date, user_id)
+                )
+            """)
+            conn.commit()
     except Exception as e:
         print(f"[daily-summary] sends table init failed: {e}")
 
@@ -2208,12 +2284,11 @@ def _get_daily_summary_sent_user_ids(date_str: str) -> set[int]:
         return set()
     try:
         _init_daily_summary_sends_table()
-        conn = _news_db_connect()
-        rows = conn.execute(
-            "SELECT user_id FROM daily_summary_sends WHERE date = ? AND status = 'sent'",
-            (date_str,),
-        ).fetchall()
-        conn.close()
+        with _news_db_conn() as conn:
+            rows = conn.execute(
+                "SELECT user_id FROM daily_summary_sends WHERE date = ? AND status = 'sent'",
+                (date_str,),
+            ).fetchall()
         return {int(r[0]) for r in rows}
     except Exception as e:
         print(f"[daily-summary] sends read failed: {e}")
@@ -2225,16 +2300,15 @@ def _record_daily_summary_send(date_str: str, user_id: int, email: str, status: 
         return
     try:
         _init_daily_summary_sends_table()
-        conn = _news_db_connect()
-        conn.execute(
-            "INSERT INTO daily_summary_sends (date, user_id, email, status, sent_at) "
-            "VALUES (?, ?, ?, ?, datetime('now')) "
-            "ON CONFLICT(date, user_id) DO UPDATE SET "
-            "email = excluded.email, status = excluded.status, sent_at = excluded.sent_at",
-            (date_str, user_id, email, status),
-        )
-        conn.commit()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.execute(
+                "INSERT INTO daily_summary_sends (date, user_id, email, status, sent_at) "
+                "VALUES (?, ?, ?, ?, datetime('now')) "
+                "ON CONFLICT(date, user_id) DO UPDATE SET "
+                "email = excluded.email, status = excluded.status, sent_at = excluded.sent_at",
+                (date_str, user_id, email, status),
+            )
+            conn.commit()
     except Exception as e:
         print(f"[daily-summary] sends write failed: {e}")
 
@@ -2243,20 +2317,19 @@ def _init_daily_summary_failures_table():
     if not os.path.exists(NEWS_DB):
         return
     try:
-        conn = _news_db_connect()
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS daily_summary_failures (
-                date            TEXT PRIMARY KEY,
-                attempts        INTEGER NOT NULL DEFAULT 0,
-                last_error      TEXT NOT NULL DEFAULT '',
-                last_attempt_at INTEGER NOT NULL DEFAULT 0,
-                next_retry_at   INTEGER,
-                given_up        INTEGER NOT NULL DEFAULT 0,
-                alerted         INTEGER NOT NULL DEFAULT 0
-            )
-        """)
-        conn.commit()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS daily_summary_failures (
+                    date            TEXT PRIMARY KEY,
+                    attempts        INTEGER NOT NULL DEFAULT 0,
+                    last_error      TEXT NOT NULL DEFAULT '',
+                    last_attempt_at INTEGER NOT NULL DEFAULT 0,
+                    next_retry_at   INTEGER,
+                    given_up        INTEGER NOT NULL DEFAULT 0,
+                    alerted         INTEGER NOT NULL DEFAULT 0
+                )
+            """)
+            conn.commit()
     except Exception as e:
         print(f"[daily-summary] failures table init failed: {e}")
 
@@ -2272,14 +2345,13 @@ def _get_daily_summary_failure(date_str: str) -> dict | None:
         return None
     try:
         _init_daily_summary_failures_table()
-        conn = _news_db_connect()
-        conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            "SELECT date, attempts, last_error, last_attempt_at, next_retry_at, "
-            "given_up, alerted FROM daily_summary_failures WHERE date = ?",
-            (date_str,),
-        ).fetchone()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT date, attempts, last_error, last_attempt_at, next_retry_at, "
+                "given_up, alerted FROM daily_summary_failures WHERE date = ?",
+                (date_str,),
+            ).fetchone()
         return dict(row) if row else None
     except Exception as e:
         print(f"[daily-summary] failure read failed: {e}")
@@ -2312,33 +2384,32 @@ def _record_daily_summary_failure(date_str: str, reason: str) -> dict:
         return state
     try:
         _init_daily_summary_failures_table()
-        conn = _news_db_connect()
-        conn.row_factory = sqlite3.Row
-        conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute(
-            "SELECT attempts, alerted FROM daily_summary_failures WHERE date = ?",
-            (date_str,),
-        ).fetchone()
-        attempts = int(row["attempts"]) + 1 if row else 1
-        alerted = int(row["alerted"]) if row else 0
-        given_up = 1 if attempts >= 1 + DAILY_SUMMARY_MAX_RETRIES else 0
-        next_retry_at = None if given_up else now + DAILY_SUMMARY_RETRY_INTERVAL_SECONDS
-        conn.execute(
-            "INSERT INTO daily_summary_failures "
-            "(date, attempts, last_error, last_attempt_at, next_retry_at, given_up, alerted) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(date) DO UPDATE SET "
-            "attempts = excluded.attempts, last_error = excluded.last_error, "
-            "last_attempt_at = excluded.last_attempt_at, "
-            "next_retry_at = excluded.next_retry_at, given_up = excluded.given_up",
-            (date_str, attempts, reason, now, next_retry_at, given_up, alerted),
-        )
-        # Only the current day is ever consulted; keep a short tail for support
-        # questions ("did last Tuesday fail?") and drop the rest.
-        conn.execute("DELETE FROM daily_summary_failures WHERE date < ?",
-                     ((_beijing_now() - timedelta(days=7)).strftime("%Y-%m-%d"),))
-        conn.commit()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT attempts, alerted FROM daily_summary_failures WHERE date = ?",
+                (date_str,),
+            ).fetchone()
+            attempts = int(row["attempts"]) + 1 if row else 1
+            alerted = int(row["alerted"]) if row else 0
+            given_up = 1 if attempts >= 1 + DAILY_SUMMARY_MAX_RETRIES else 0
+            next_retry_at = None if given_up else now + DAILY_SUMMARY_RETRY_INTERVAL_SECONDS
+            conn.execute(
+                "INSERT INTO daily_summary_failures "
+                "(date, attempts, last_error, last_attempt_at, next_retry_at, given_up, alerted) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(date) DO UPDATE SET "
+                "attempts = excluded.attempts, last_error = excluded.last_error, "
+                "last_attempt_at = excluded.last_attempt_at, "
+                "next_retry_at = excluded.next_retry_at, given_up = excluded.given_up",
+                (date_str, attempts, reason, now, next_retry_at, given_up, alerted),
+            )
+            # Only the current day is ever consulted; keep a short tail for support
+            # questions ("did last Tuesday fail?") and drop the rest.
+            conn.execute("DELETE FROM daily_summary_failures WHERE date < ?",
+                         ((_beijing_now() - timedelta(days=7)).strftime("%Y-%m-%d"),))
+            conn.commit()
         state.update({
             "attempts": attempts,
             "next_retry_at": next_retry_at,
@@ -2357,10 +2428,9 @@ def _clear_daily_summary_failure(date_str: str) -> None:
         return
     try:
         _init_daily_summary_failures_table()
-        conn = _news_db_connect()
-        conn.execute("DELETE FROM daily_summary_failures WHERE date = ?", (date_str,))
-        conn.commit()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.execute("DELETE FROM daily_summary_failures WHERE date = ?", (date_str,))
+            conn.commit()
     except Exception as e:
         print(f"[daily-summary] failure clear failed: {e}")
 
@@ -2373,15 +2443,14 @@ def _claim_daily_summary_alert(date_str: str) -> bool:
         return True
     try:
         _init_daily_summary_failures_table()
-        conn = _news_db_connect()
-        cur = conn.execute(
-            "UPDATE daily_summary_failures SET alerted = 1 "
-            "WHERE date = ? AND alerted = 0",
-            (date_str,),
-        )
-        conn.commit()
-        claimed = cur.rowcount > 0
-        conn.close()
+        with _news_db_conn() as conn:
+            cur = conn.execute(
+                "UPDATE daily_summary_failures SET alerted = 1 "
+                "WHERE date = ? AND alerted = 0",
+                (date_str,),
+            )
+            conn.commit()
+            claimed = cur.rowcount > 0
         return claimed
     except Exception as e:
         print(f"[daily-summary] alert claim failed: {e}")
@@ -2394,14 +2463,13 @@ def _release_daily_summary_alert(date_str: str) -> None:
         return
     try:
         _init_daily_summary_failures_table()
-        conn = _news_db_connect()
-        conn.execute(
-            "UPDATE daily_summary_failures SET alerted = 0 "
-            "WHERE date = ? AND alerted = 1",
-            (date_str,),
-        )
-        conn.commit()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.execute(
+                "UPDATE daily_summary_failures SET alerted = 0 "
+                "WHERE date = ? AND alerted = 1",
+                (date_str,),
+            )
+            conn.commit()
     except Exception as e:
         print(f"[daily-summary] alert claim release failed: {e}")
 
@@ -2582,8 +2650,8 @@ def _deliver_daily_summary_email(date_str: str, result: dict, force: bool = Fals
                 nc = _json.loads(nc)
             except (_json.JSONDecodeError, TypeError):
                 nc = {}
-        to_email = (nc.get("resend") or {}).get("to_email", "")
-        if to_email:
+        to_email = _resend_to_email(nc)
+        if to_email and is_valid_email(to_email):
             recipients[int(settings["user_id"])] = to_email
 
     print(f"[scheduler] Daily summary broadcast for {today_str}: {len(recipients)} subscriber(s)")
@@ -2646,6 +2714,10 @@ def _daily_summary_loop():
             _send_daily_summaries()
         except Exception as e:
             print(f"[scheduler] Error in loop: {e}")
+        try:
+            prune_access_log()
+        except Exception as e:
+            print(f"[scheduler] Access log cleanup failed: {e}")
         _time.sleep(60)
 
 
@@ -3233,25 +3305,24 @@ def _fetch_untranslated_articles(config: dict, limit: int = AUTO_TRANSLATION_BAT
     try:
         _init_ai_results_table()
         today_str = _dt.datetime.now().strftime("%Y-%m-%d")
-        conn = _news_db_connect()
-        conn.row_factory = sqlite3.Row
-        ensure_article_source_columns(conn)
-        rows = conn.execute(
-            "SELECT a.id, a.title, COALESCE(NULLIF(a.feed_source, ''), a.source) AS source, "
-            "       a.origin_source, a.summary, a.body_html, r.translation "
-            "FROM articles a "
-            "LEFT JOIN ai_results r ON r.article_id = a.id "
-            "WHERE a.date = ? "
-            # Newest-first, and scan far more than one batch: the untranslated
-            # rows are filtered in Python (the latin/CJK heuristic can't run in
-            # SQL), so a tight oldest-first LIMIT would only ever see the oldest
-            # articles of the day. Once the day exceeds that window, freshly
-            # fetched English articles would never enter the candidate set and
-            # stay untranslated forever. Mirrors the title-process scan.
-            "ORDER BY a.timestamp DESC LIMIT ?",
-            (today_str, max(limit * 8, AUTO_TRANSLATION_SCAN_LIMIT)),
-        ).fetchall()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.row_factory = sqlite3.Row
+            ensure_article_source_columns(conn)
+            rows = conn.execute(
+                "SELECT a.id, a.title, COALESCE(NULLIF(a.feed_source, ''), a.source) AS source, "
+                "       a.origin_source, a.summary, a.body_html, r.translation "
+                "FROM articles a "
+                "LEFT JOIN ai_results r ON r.article_id = a.id "
+                "WHERE a.date = ? "
+                # Newest-first, and scan far more than one batch: the untranslated
+                # rows are filtered in Python (the latin/CJK heuristic can't run in
+                # SQL), so a tight oldest-first LIMIT would only ever see the oldest
+                # articles of the day. Once the day exceeds that window, freshly
+                # fetched English articles would never enter the candidate set and
+                # stay untranslated forever. Mirrors the title-process scan.
+                "ORDER BY a.timestamp DESC LIMIT ?",
+                (today_str, max(limit * 8, AUTO_TRANSLATION_SCAN_LIMIT)),
+            ).fetchall()
     except Exception as e:
         print(f"[auto-translate] fetch failed: {e}")
         return []
@@ -3617,7 +3688,7 @@ def _process_article_title(article: dict, config: dict) -> bool:
         if _save_article_title_update(article_id, short_title, "title_summary"):
             changed = True
     except Exception as e:
-        _save_ai_result(article_id, title_summary_error=str(e))
+        _save_ai_result(article_id, title_summary_error=_redact_secrets(e))
         raise
     return changed
 
@@ -3639,7 +3710,8 @@ def _run_auto_title_process_once():
                     if _process_article_title(article, config):
                         print(f"[auto-title] Updated article {article['id']}: {article.get('title', '')[:50]}")
                 except Exception as e:
-                    print(f"[auto-title] Article {article.get('id')}: failed: {e}")
+                    safe_error = _redact_secrets(e)
+                    print(f"[auto-title] Article {article.get('id')}: failed: {safe_error}")
     finally:
         _auto_title_process_lock.release()
 
@@ -3914,8 +3986,9 @@ def _run_auto_summary_once():
                     if not cached:
                         print(f"[auto-summary] Cached summary for article {article['id']}: {article.get('title', '')[:50]}")
                 except Exception as e:
-                    _save_ai_result(article["id"], summary_error=str(e))
-                    print(f"[auto-summary] Article {article.get('id')}: failed: {e}")
+                    safe_error = _redact_secrets(e)
+                    _save_ai_result(article["id"], summary_error=safe_error)
+                    print(f"[auto-summary] Article {article.get('id')}: failed: {safe_error}")
     finally:
         _auto_summary_lock.release()
 
@@ -3946,16 +4019,15 @@ def _fetch_recent_articles(limit: int = 20) -> list[dict]:
     if not os.path.exists(NEWS_DB):
         return []
     try:
-        conn = _news_db_connect()
-        conn.row_factory = sqlite3.Row
-        ensure_article_source_columns(conn)
-        rows = conn.execute(
-            "SELECT id, title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
-            "       COALESCE(NULLIF(feed_source, ''), source) AS feed_source, origin_source, "
-            "       date, time FROM articles ORDER BY timestamp DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.row_factory = sqlite3.Row
+            ensure_article_source_columns(conn)
+            rows = conn.execute(
+                "SELECT id, title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
+                "       COALESCE(NULLIF(feed_source, ''), source) AS feed_source, origin_source, "
+                "       date, time FROM articles ORDER BY timestamp DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
         return [dict(r) for r in rows]
     except Exception:
         return []
@@ -3991,24 +4063,23 @@ def _fetch_articles_by_date(date_str: str, include_shared_summary: bool = True) 
         return []
     try:
         _init_ai_results_table()
-        conn = _news_db_connect()
-        conn.row_factory = sqlite3.Row
-        ensure_article_source_columns(conn)
-        summary_expr = (
-            "COALESCE(NULLIF(r.summary, ''), a.summary)"
-            if include_shared_summary else "a.summary"
-        )
-        rows = conn.execute(
-            "SELECT a.id, a.title, COALESCE(NULLIF(a.feed_source, ''), a.source) AS source, "
-            "a.origin_source, a.date, a.time, a.body_html, "
-            f"{summary_expr} AS summary, "
-            "a.telegraph_url "
-            "FROM articles a "
-            "LEFT JOIN ai_results r ON r.article_id = a.id "
-            "WHERE a.date = ? ORDER BY a.timestamp ASC",
-            (date_str,),
-        ).fetchall()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.row_factory = sqlite3.Row
+            ensure_article_source_columns(conn)
+            summary_expr = (
+                "COALESCE(NULLIF(r.summary, ''), a.summary)"
+                if include_shared_summary else "a.summary"
+            )
+            rows = conn.execute(
+                "SELECT a.id, a.title, COALESCE(NULLIF(a.feed_source, ''), a.source) AS source, "
+                "a.origin_source, a.date, a.time, a.body_html, "
+                f"{summary_expr} AS summary, "
+                "a.telegraph_url "
+                "FROM articles a "
+                "LEFT JOIN ai_results r ON r.article_id = a.id "
+                "WHERE a.date = ? ORDER BY a.timestamp ASC",
+                (date_str,),
+            ).fetchall()
         return [dict(r) for r in rows]
     except Exception:
         return []
@@ -4023,22 +4094,21 @@ def _fetch_unsummarized_articles(limit: int = AUTO_SUMMARY_BATCH_LIMIT) -> list[
     try:
         _init_ai_results_table()
         today_str = _dt.datetime.now().strftime("%Y-%m-%d")
-        conn = _news_db_connect()
-        conn.row_factory = sqlite3.Row
-        ensure_article_source_columns(conn)
-        rows = conn.execute(
-            "SELECT a.id, a.title, COALESCE(NULLIF(a.feed_source, ''), a.source) AS source, "
-            "a.origin_source, a.summary, a.body_html "
-            "FROM articles a "
-            "LEFT JOIN ai_results r ON r.article_id = a.id "
-            "WHERE a.date = ? "
-            "AND (r.summary IS NULL OR r.summary = '') "
-            "AND (r.summary_error_at IS NULL OR datetime(r.summary_error_at, '+6 hours') < datetime('now')) "
-            "AND (a.body_html != '' OR a.summary != '') "
-            "ORDER BY a.timestamp ASC LIMIT ?",
-            (today_str, limit),
-        ).fetchall()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.row_factory = sqlite3.Row
+            ensure_article_source_columns(conn)
+            rows = conn.execute(
+                "SELECT a.id, a.title, COALESCE(NULLIF(a.feed_source, ''), a.source) AS source, "
+                "a.origin_source, a.summary, a.body_html "
+                "FROM articles a "
+                "LEFT JOIN ai_results r ON r.article_id = a.id "
+                "WHERE a.date = ? "
+                "AND (r.summary IS NULL OR r.summary = '') "
+                "AND (r.summary_error_at IS NULL OR datetime(r.summary_error_at, '+6 hours') < datetime('now')) "
+                "AND (a.body_html != '' OR a.summary != '') "
+                "ORDER BY a.timestamp ASC LIMIT ?",
+                (today_str, limit),
+            ).fetchall()
         return [dict(r) for r in rows]
     except Exception:
         return []
@@ -4050,15 +4120,14 @@ def _fetch_article_body(article_id: int) -> dict | None:
     if not os.path.exists(NEWS_DB):
         return None
     try:
-        conn = _news_db_connect()
-        conn.row_factory = sqlite3.Row
-        ensure_article_source_columns(conn)
-        row = conn.execute(
-            "SELECT id, title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
-            "origin_source, summary, body_html FROM articles WHERE id = ?",
-            (article_id,),
-        ).fetchone()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.row_factory = sqlite3.Row
+            ensure_article_source_columns(conn)
+            row = conn.execute(
+                "SELECT id, title, COALESCE(NULLIF(feed_source, ''), source) AS source, "
+                "origin_source, summary, body_html FROM articles WHERE id = ?",
+                (article_id,),
+            ).fetchone()
         return dict(row) if row else None
     except Exception:
         return None
@@ -4073,81 +4142,80 @@ def _init_ai_results_table():
     if not os.path.exists(NEWS_DB):
         return
     try:
-        conn = _news_db_connect()
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS ai_results (
-                article_id   INTEGER PRIMARY KEY,
-                summary      TEXT,
-                translation  TEXT,
-                translation_updated_at TEXT,
-                title_summary TEXT,
-                title_summary_error TEXT,
-                title_summary_error_at TEXT,
-                title_translation_error TEXT,
-                title_translation_error_at TEXT,
-                title_summary_provider TEXT,
-                title_summary_model TEXT,
-                title_summary_by_user_id INTEGER,
-                summary_provider TEXT,
-                summary_model TEXT,
-                summary_by_user_id INTEGER,
-                summary_generated_at TEXT,
-                translation_provider TEXT,
-                translation_model TEXT,
-                translation_by_user_id INTEGER,
-                translation_generated_at TEXT,
-                summary_error TEXT,
-                summary_error_at TEXT,
-                updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
-            )
-        """)
-        cols = {
-            row[1]
-            for row in conn.execute("PRAGMA table_info(ai_results)").fetchall()
-        }
-        if "summary_error" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN summary_error TEXT")
-        if "summary_error_at" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN summary_error_at TEXT")
-        if "translation_updated_at" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN translation_updated_at TEXT")
-        if "title_summary" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary TEXT")
-        if "title_summary_error" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_error TEXT")
-        if "title_summary_error_at" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_error_at TEXT")
-        if "title_translation_error" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN title_translation_error TEXT")
-        if "title_translation_error_at" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN title_translation_error_at TEXT")
-        if "title_summary_provider" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_provider TEXT")
-        if "title_summary_model" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_model TEXT")
-        if "title_summary_by_user_id" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_by_user_id INTEGER")
-        if "summary_provider" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN summary_provider TEXT")
-        if "summary_model" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN summary_model TEXT")
-        if "summary_by_user_id" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN summary_by_user_id INTEGER")
-        if "summary_generated_at" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN summary_generated_at TEXT")
-        if "translation_provider" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN translation_provider TEXT")
-        if "translation_model" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN translation_model TEXT")
-        if "translation_by_user_id" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN translation_by_user_id INTEGER")
-        if "translation_generated_at" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN translation_generated_at TEXT")
-        if "updated_at" not in cols:
-            conn.execute("ALTER TABLE ai_results ADD COLUMN updated_at TEXT")
-            conn.execute("UPDATE ai_results SET updated_at = datetime('now') WHERE updated_at IS NULL")
-        conn.commit()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS ai_results (
+                    article_id   INTEGER PRIMARY KEY,
+                    summary      TEXT,
+                    translation  TEXT,
+                    translation_updated_at TEXT,
+                    title_summary TEXT,
+                    title_summary_error TEXT,
+                    title_summary_error_at TEXT,
+                    title_translation_error TEXT,
+                    title_translation_error_at TEXT,
+                    title_summary_provider TEXT,
+                    title_summary_model TEXT,
+                    title_summary_by_user_id INTEGER,
+                    summary_provider TEXT,
+                    summary_model TEXT,
+                    summary_by_user_id INTEGER,
+                    summary_generated_at TEXT,
+                    translation_provider TEXT,
+                    translation_model TEXT,
+                    translation_by_user_id INTEGER,
+                    translation_generated_at TEXT,
+                    summary_error TEXT,
+                    summary_error_at TEXT,
+                    updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+            """)
+            cols = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(ai_results)").fetchall()
+            }
+            if "summary_error" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN summary_error TEXT")
+            if "summary_error_at" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN summary_error_at TEXT")
+            if "translation_updated_at" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN translation_updated_at TEXT")
+            if "title_summary" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary TEXT")
+            if "title_summary_error" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_error TEXT")
+            if "title_summary_error_at" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_error_at TEXT")
+            if "title_translation_error" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN title_translation_error TEXT")
+            if "title_translation_error_at" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN title_translation_error_at TEXT")
+            if "title_summary_provider" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_provider TEXT")
+            if "title_summary_model" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_model TEXT")
+            if "title_summary_by_user_id" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_by_user_id INTEGER")
+            if "summary_provider" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN summary_provider TEXT")
+            if "summary_model" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN summary_model TEXT")
+            if "summary_by_user_id" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN summary_by_user_id INTEGER")
+            if "summary_generated_at" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN summary_generated_at TEXT")
+            if "translation_provider" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN translation_provider TEXT")
+            if "translation_model" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN translation_model TEXT")
+            if "translation_by_user_id" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN translation_by_user_id INTEGER")
+            if "translation_generated_at" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN translation_generated_at TEXT")
+            if "updated_at" not in cols:
+                conn.execute("ALTER TABLE ai_results ADD COLUMN updated_at TEXT")
+                conn.execute("UPDATE ai_results SET updated_at = datetime('now') WHERE updated_at IS NULL")
+            conn.commit()
     except Exception:
         pass
 
@@ -4158,20 +4226,19 @@ def _get_ai_result(article_id: int) -> dict | None:
     if not os.path.exists(NEWS_DB):
         return None
     try:
-        conn = _news_db_connect()
-        conn.row_factory = sqlite3.Row
-        _init_ai_results_table()
-        row = conn.execute(
-            "SELECT summary, translation, summary_error, summary_error_at, "
-            "title_summary, title_summary_error, title_summary_error_at, "
-            "title_summary_provider, title_summary_model, title_summary_by_user_id, "
-            "summary_provider, summary_model, summary_by_user_id, summary_generated_at, "
-            "translation_provider, translation_model, translation_by_user_id, "
-            "translation_generated_at "
-            "FROM ai_results WHERE article_id = ?",
-            (article_id,),
-        ).fetchone()
-        conn.close()
+        with _news_db_conn() as conn:
+            conn.row_factory = sqlite3.Row
+            _init_ai_results_table()
+            row = conn.execute(
+                "SELECT summary, translation, summary_error, summary_error_at, "
+                "title_summary, title_summary_error, title_summary_error_at, "
+                "title_summary_provider, title_summary_model, title_summary_by_user_id, "
+                "summary_provider, summary_model, summary_by_user_id, summary_generated_at, "
+                "translation_provider, translation_model, translation_by_user_id, "
+                "translation_generated_at "
+                "FROM ai_results WHERE article_id = ?",
+                (article_id,),
+            ).fetchone()
         return dict(row) if row else None
     except Exception:
         return None
@@ -4287,6 +4354,12 @@ def _save_ai_result(article_id: int, summary: str | None = None,
         summary = _sanitize_plain_text(summary)
     if translation is not None:
         translation = _sanitize_translation_payload(translation)
+    if summary_error is not None:
+        summary_error = _redact_secrets(summary_error)
+    if title_summary_error is not None:
+        title_summary_error = _redact_secrets(title_summary_error)
+    if title_translation_error is not None:
+        title_translation_error = _redact_secrets(title_translation_error)
     if not os.path.exists(NEWS_DB):
         return False
     conn = None
@@ -5671,6 +5744,8 @@ def update_settings():
         )
         if email_push_on and not to_email:
             return jsonify({"error": "开启邮件推送前请先填写接收邮箱"}), 400
+        if to_email and not is_valid_email(to_email):
+            return jsonify({"error": "接收邮箱格式不正确"}), 400
 
     # Normalize notification_config to JSON string for storage
     if "notification_config" in data:
@@ -5848,15 +5923,16 @@ def test_notification():
         except (json.JSONDecodeError, TypeError):
             nc = {}
 
-    config = nc.get("resend", {})
     # Always use RESEND_API_KEY from environment
     api_key = os.environ.get("RESEND_API_KEY", "")
-    to_email = config.get("to_email", "")
+    to_email = _resend_to_email(nc)
 
     if not api_key:
         return jsonify({"error": "RESEND_API_KEY not set in server environment. Contact admin."}), 400
     if not to_email:
         return jsonify({"error": "notification not configured. Set recipient email in Settings."}), 400
+    if not is_valid_email(to_email):
+        return jsonify({"error": "接收邮箱格式不正确"}), 400
 
     try:
         from notifier import send_email
@@ -5925,6 +6001,8 @@ def health():
 
 
 @app.route("/scheduler/status", methods=["GET"])
+@app.route("/admin/scheduler/status", methods=["GET"])
+@require_role("admin")
 def scheduler_status():
     """Return scheduler status for debugging."""
     import datetime as _dt

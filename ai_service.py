@@ -6,6 +6,7 @@ import requests
 import re
 from collections import defaultdict
 from typing import Optional
+from urllib.parse import urlsplit
 
 from network_safety import safe_post
 from source_categories import CATEGORY_NAMES, CATEGORY_ORDER, clamp_weighted, local_short_source_name
@@ -17,6 +18,48 @@ from source_categories import CATEGORY_NAMES, CATEGORY_ORDER, clamp_weighted, lo
 # surfacing as "empty AI title summary". Give these calls enough room to finish; tune
 # via AI_TITLE_MAX_TOKENS if a heavier reasoning model still comes back empty.
 TITLE_MAX_TOKENS = max(200, int(os.environ.get("AI_TITLE_MAX_TOKENS", "1024")))
+
+
+def _redact_api_error(value: str, *known_secrets: str) -> str:
+    """Return a compact provider error with credentials removed."""
+    text = " ".join(str(value or "").split())
+    for secret in known_secrets:
+        if secret:
+            text = text.replace(str(secret), "[redacted]")
+    text = re.sub(
+        r"(?i)\b(?:proxy-)?authorization\s*:\s*(?:bearer\s+)?[^\s,;]+",
+        "[redacted]",
+        text,
+    )
+    text = re.sub(
+        r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+",
+        "Bearer [redacted]",
+        text,
+    )
+    text = re.sub(r"sk-[A-Za-z0-9_-]+", "[redacted]", text)
+    text = re.sub(
+        r"(?i)(?:api[_-]?key|x-api-key|access[_-]?token|token|secret|password|key)"
+        r"\s*(?:=|:)\s*(?:[\"']?)[^\s,;&}\]\"']+",
+        "[redacted]",
+        text,
+    )
+    return text
+
+
+def validate_ai_endpoint_base_url(endpoint: str) -> str:
+    """Reject endpoint suffixes that would be malformed or leak credentials.
+
+    Public-address validation remains the persistence boundary's responsibility;
+    this syntax-only guard is also applied when loading legacy persisted values so
+    no request can be made with a query or fragment in the configured base URL.
+    """
+    try:
+        parsed = urlsplit(endpoint)
+    except (TypeError, ValueError):
+        raise ValueError("AI endpoint must be a base HTTP(S) URL") from None
+    if parsed.query or parsed.fragment:
+        raise ValueError("AI endpoint must be a base HTTP(S) URL")
+    return endpoint
 
 
 def _empty_ai_content_error(finish_reason, has_reasoning: bool, max_tokens: int) -> str:
@@ -157,7 +200,7 @@ class AIService:
     def __init__(self, api_key: str, endpoint: str, model: str,
                  provider_type: str = "openai"):
         self.api_key = api_key
-        self.endpoint = endpoint.rstrip("/")
+        self.endpoint = validate_ai_endpoint_base_url(endpoint).rstrip("/")
         self.model = model
         self.provider_type = provider_type  # 'openai' or 'claude'
         self.request_timeout = int(os.environ.get("AI_REQUEST_TIMEOUT_SECONDS", "300"))
@@ -196,7 +239,7 @@ class AIService:
                 detail = body
         if not detail:
             detail = resp.reason or "empty response"
-        detail = " ".join(str(detail).split())
+        detail = _redact_api_error(detail, self.api_key)
         if len(detail) > 500:
             detail = detail[:500] + "..."
         return f"AI API HTTP {resp.status_code}: {detail}"

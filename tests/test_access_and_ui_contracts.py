@@ -1,3 +1,6 @@
+import base64
+import configparser
+import json
 import sqlite3
 import shutil
 import subprocess
@@ -11,12 +14,191 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from auth_validation import is_valid_email
+import models
 import web_server
 from source_categories import (
     init_source_categories,
     promote_user_source_settings,
     source_rows,
 )
+
+
+@pytest.fixture
+def ai_result_client(monkeypatch):
+    captured = []
+    active_settings = {
+        "share_ai_results": 1,
+        "share_suspended": 0,
+        "share_last_check_ok": 1,
+        "share_last_check_revision": 1,
+        "share_current_config_revision": 1,
+    }
+    monkeypatch.setattr(
+        models,
+        "get_user",
+        lambda user_id: {"id": user_id, "role": "user"},
+    )
+    monkeypatch.setattr(models, "record_access", lambda _user_id: None)
+    monkeypatch.setattr(web_server, "get_user_settings", lambda _user_id: active_settings)
+    monkeypatch.setattr(web_server, "_fetch_article_body", lambda _article_id: {"id": 1})
+    monkeypatch.setattr(
+        web_server,
+        "get_ai_config",
+        lambda _user_id: {"provider": "openai", "model": "test-model"},
+    )
+    monkeypatch.setattr(
+        web_server,
+        "_save_ai_result",
+        lambda article_id, **kwargs: captured.append((article_id, kwargs)) or True,
+    )
+    token = web_server.create_token(1, "user")
+    return web_server.app.test_client(), {"Authorization": f"Bearer {token}"}, captured
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"summary": {"unexpected": "object"}},
+        {"translation": ["unexpected", "array"]},
+    ],
+)
+def test_ai_result_type_validation_returns_400(ai_result_client, payload):
+    client, headers, captured = ai_result_client
+
+    response = client.post("/ai/result/1", headers=headers, json=payload)
+
+    assert response.status_code == 400
+    assert captured == []
+
+
+def test_ai_result_size_validation_rejects_oversized_field(ai_result_client):
+    client, headers, captured = ai_result_client
+
+    response = client.post(
+        "/ai/result/1",
+        headers=headers,
+        json={"summary": "x" * 200_001},
+    )
+
+    assert response.status_code == 400
+    assert captured == []
+
+
+def test_ai_result_body_limit_rejects_large_irrelevant_payload(ai_result_client):
+    client, headers, captured = ai_result_client
+    body = json.dumps({"irrelevant": "x" * (2 * 1024 * 1024)})
+
+    response = client.post(
+        "/ai/result/1",
+        headers={**headers, "Content-Type": "application/json"},
+        data=body,
+    )
+
+    assert response.status_code == 413
+    assert captured == []
+
+
+def test_ai_result_body_limit_rejects_route_specific_oversize(ai_result_client):
+    client, headers, captured = ai_result_client
+    body = json.dumps({"irrelevant": "x" * (1024 * 1024)})
+
+    response = client.post(
+        "/ai/result/1",
+        headers={**headers, "Content-Type": "application/json"},
+        data=body,
+    )
+
+    assert response.status_code == 413
+    assert captured == []
+
+
+def test_ai_result_body_accepts_normal_strings(ai_result_client):
+    client, headers, captured = ai_result_client
+
+    response = client.post(
+        "/ai/result/1",
+        headers=headers,
+        json={"summary": "normal summary", "translation": "normal translation"},
+    )
+
+    assert response.status_code == 200
+    assert captured[0][1]["summary"] == "normal summary"
+    assert captured[0][1]["translation"] == "normal translation"
+
+
+@pytest.fixture
+def avatar_client(monkeypatch, tmp_path):
+    updates = []
+    monkeypatch.setattr(models, "get_user", lambda user_id: {"id": user_id, "role": "user"})
+    monkeypatch.setattr(models, "record_access", lambda _user_id: None)
+    monkeypatch.setattr(web_server, "AVATARS_DIR", str(tmp_path / "avatars"))
+    monkeypatch.setattr(
+        web_server,
+        "update_user",
+        lambda user_id, **kwargs: updates.append((user_id, kwargs)),
+    )
+    token = web_server.create_token(1, "user")
+    return web_server.app.test_client(), {"Authorization": f"Bearer {token}"}, tmp_path, updates
+
+
+@pytest.mark.parametrize(
+    ("mime", "image_bytes", "extension"),
+    [
+        ("image/jpeg", b"\xff\xd8\xff\xe0avatar", "jpg"),
+        ("image/png", b"\x89PNG\r\n\x1a\navatar", "png"),
+        ("image/gif", b"GIF89aavatar", "gif"),
+        ("image/webp", b"RIFF\x08\x00\x00\x00WEBPavatar", "webp"),
+    ],
+)
+def test_avatar_upload_accepts_supported_image_content_and_saves_matching_extension(
+    avatar_client, mime, image_bytes, extension
+):
+    client, headers, tmp_path, updates = avatar_client
+    data_url = f"data:{mime};base64,{base64.b64encode(image_bytes).decode()}"
+
+    response = client.put("/auth/me/avatar", headers=headers, json={"image": data_url})
+
+    assert response.status_code == 200
+    assert response.json["avatar_url"].startswith(f"/avatars/1.{extension}?v=")
+    assert (tmp_path / "avatars" / f"1.{extension}").read_bytes() == image_bytes
+    assert updates and updates[-1][1]["avatar_url"] == response.json["avatar_url"]
+
+
+def test_avatar_upload_rejects_html_disguised_as_png(avatar_client):
+    client, headers, tmp_path, _updates = avatar_client
+    data_url = "data:image/png;base64," + base64.b64encode(b"<html>not an image</html>").decode()
+
+    response = client.put("/auth/me/avatar", headers=headers, json={"image": data_url})
+
+    assert response.status_code == 400
+    assert response.json == {"error": "image content does not match declared type"}
+    assert not (tmp_path / "avatars").exists()
+
+
+def test_avatar_upload_rejects_png_declared_as_jpeg(avatar_client):
+    client, headers, tmp_path, _updates = avatar_client
+    png_bytes = b"\x89PNG\r\n\x1a\navatar"
+    data_url = "data:image/jpeg;base64," + base64.b64encode(png_bytes).decode()
+
+    response = client.put("/auth/me/avatar", headers=headers, json={"image": data_url})
+
+    assert response.status_code == 400
+    assert response.json == {"error": "image content does not match declared type"}
+    assert not (tmp_path / "avatars").exists()
+
+
+def test_avatar_upload_rejects_malformed_base64(avatar_client):
+    client, headers, tmp_path, _updates = avatar_client
+
+    response = client.put(
+        "/auth/me/avatar",
+        headers=headers,
+        json={"image": "data:image/png;base64,not-valid-base64!"},
+    )
+
+    assert response.status_code == 400
+    assert response.json == {"error": "invalid image data"}
+    assert not (tmp_path / "avatars").exists()
 
 
 def test_settings_response_exposes_safe_pending_revalidation_failure_fields_only():
@@ -92,22 +274,115 @@ def test_nginx_proxies_notification_list_and_read_routes():
     assert "location /notifications" in config
     section = config.split("location /notifications", 1)[1].split("}", 1)[0]
     assert "proxy_pass http://127.0.0.1:8082" in section
-    assert '"GET, POST, PUT, DELETE, OPTIONS"' in section
-    assert '"Authorization, Content-Type"' in section
 
 
-def test_container_does_not_block_web_startup_on_initial_fetch():
+def test_container_supervises_services_without_blocking_on_initial_fetch():
     entrypoint = (ROOT / "entrypoint.sh").read_text(encoding="utf-8")
     assert "fetcher.py" not in entrypoint
-    refresh_command = entrypoint.index("python3 /app/refresh_server.py &")
-    web_command = entrypoint.index("python3 /app/web_server.py &")
-    nginx_command = entrypoint.index("nginx -g 'daemon off;'")
-    assert refresh_command < web_command < nginx_command
+    assert "python3 /app/refresh_server.py &" not in entrypoint
+    assert "python3 /app/web_server.py &" not in entrypoint
+    assert "nginx -g 'daemon off;'" not in entrypoint
+    assert entrypoint.rstrip().endswith("exec supervisord -c /app/supervisord.conf")
+
+    config = configparser.ConfigParser()
+    config.read(ROOT / "supervisord.conf", encoding="utf-8")
+    assert config["supervisord"]["nodaemon"] == "true"
+    assert config["supervisord"]["pidfile"] == "/run/supervisord.pid"
+    expected_commands = {
+        "program:refresh": "python3 /app/refresh_server.py",
+        "program:web": "python3 /app/web_server.py",
+        "program:nginx": 'nginx -g "daemon off;"',
+    }
+    for section, command in expected_commands.items():
+        program = config[section]
+        assert program["command"] == command
+        assert program["autorestart"] == "true"
+        assert program["startsecs"] == "3"
+        assert program["startretries"] == "5"
+        assert program["stopasgroup"] == "true"
+        assert program["killasgroup"] == "true"
+        assert program["stdout_logfile"] == "/dev/fd/1"
+        assert program["stdout_logfile_maxbytes"] == "0"
+        assert program["stderr_logfile"] == "/dev/fd/2"
+        assert program["stderr_logfile_maxbytes"] == "0"
+
     refresh = (ROOT / "refresh_server.py").read_text(encoding="utf-8")
     main = refresh[refresh.index('if __name__ == "__main__":'):]
     assert main.index('start_refresh_job("startup")') < main.index(
         "server.serve_forever()"
     )
+
+
+def test_container_image_installs_and_copies_supervisor_configuration():
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "apt-get install -y --no-install-recommends nginx supervisor util-linux" in dockerfile
+    assert "COPY supervisord.conf /app/supervisord.conf" in dockerfile
+
+
+def test_container_creates_unprivileged_python_service_account_without_dropping_entrypoint_privileges():
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    normalized = " ".join(dockerfile.replace("\\\n", "").split())
+    assert "groupadd --system raynews" in normalized
+    assert (
+        "useradd --system --gid raynews --create-home "
+        "--home-dir /home/raynews --shell /usr/sbin/nologin raynews"
+    ) in normalized
+    assert "mkdir -p /app/data /var/log/nginx /run/nginx" in normalized
+    assert "chown -R raynews:raynews /app/data" in normalized
+    assert "USER raynews" not in dockerfile
+
+
+def test_supervisor_only_drops_python_service_privileges():
+    config = configparser.ConfigParser()
+    config.read(ROOT / "supervisord.conf", encoding="utf-8")
+
+    for section in ("program:refresh", "program:web"):
+        assert config[section]["user"] == "raynews"
+        assert config[section]["environment"] == 'HOME="/home/raynews",USER="raynews"'
+
+    assert "user" not in config["program:nginx"]
+    assert "environment" not in config["program:nginx"]
+
+
+def test_entrypoint_fails_clearly_when_data_directory_cannot_be_prepared():
+    entrypoint = (ROOT / "entrypoint.sh").read_text(encoding="utf-8")
+    assert "if ! install -d -o raynews -g raynews /app/data; then" in entrypoint
+    assert "if ! chown -R raynews:raynews /app/data; then" in entrypoint
+    assert "if ! test -w /app/data; then" not in entrypoint
+    assert "/usr/sbin/runuser -u raynews -- /bin/sh" in entrypoint
+    assert ".raynews-write-probe-$$" not in entrypoint
+    assert "/usr/bin/mktemp /app/data/.raynews-write-probe.XXXXXX" in entrypoint
+    assert '/bin/rm -f -- "$probe"' in entrypoint
+    assert "ERROR:" in entrypoint
+    assert "exit 1" in entrypoint
+    assert entrypoint.index("/usr/sbin/runuser") < entrypoint.index(
+        "exec supervisord -c /app/supervisord.conf"
+    )
+
+
+def test_compose_healthcheck_covers_all_three_service_surfaces():
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    healthcheck = compose.split("    healthcheck:", 1)[1].split(
+        "    restart:", 1
+    )[0]
+    assert "- CMD" in healthcheck
+    assert "- python3" in healthcheck
+    assert "- -c" in healthcheck
+    assert "http://127.0.0.1/health" in healthcheck
+    assert "http://127.0.0.1:8082/auth/health" in healthcheck
+    assert "http://127.0.0.1:8081/refresh/status" in healthcheck
+    assert "interval: 30s" in healthcheck
+    assert "timeout: 10s" in healthcheck
+    assert "retries: 3" in healthcheck
+    assert "start_period: 30s" in healthcheck
+    assert '- "8090:80"' in compose
+
+
+def test_nginx_sends_access_and_error_logs_to_container_streams():
+    config = (ROOT / "nginx.conf").read_text(encoding="utf-8")
+    server = config.split("server {", 1)[1]
+    assert "access_log /dev/stdout;" in server
+    assert "error_log /dev/stderr warn;" in server
 
 
 def test_admin_source_overrides_promote_to_shared_settings():

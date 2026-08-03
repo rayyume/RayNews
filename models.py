@@ -3,7 +3,7 @@
 import sqlite3
 import json
 import bcrypt
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import math
 import os
@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS users (
     role        TEXT    NOT NULL DEFAULT 'user'
                         CHECK(role IN ('user', 'admin')),
     avatar_url  TEXT    NOT NULL DEFAULT '',
+    token_version INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -101,6 +102,13 @@ CREATE TABLE IF NOT EXISTS login_failures (
     locked_until  REAL NOT NULL DEFAULT 0,
     updated_at    REAL NOT NULL,
     PRIMARY KEY (client_ip, login)
+);
+
+CREATE TABLE IF NOT EXISTS register_attempts (
+    client_ip     TEXT PRIMARY KEY,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    locked_until  REAL NOT NULL DEFAULT 0,
+    updated_at    REAL NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS invite_request_limits (
@@ -216,6 +224,7 @@ def _initialize_db(db: sqlite3.Connection) -> None:
         ),
         ("users", "visit_count", "INTEGER NOT NULL DEFAULT 0"),
         ("users", "last_seen_at", "TEXT NOT NULL DEFAULT ''"),
+        ("users", "token_version", "INTEGER NOT NULL DEFAULT 0"),
         ("user_settings", "share_ai_results", "INTEGER NOT NULL DEFAULT 0"),
         ("user_settings", "share_view_title", "INTEGER NOT NULL DEFAULT 0"),
         (
@@ -318,12 +327,25 @@ def get_db() -> sqlite3.Connection:
 
 # ─── User helpers ─────────────────────────────────────────────
 
+BCRYPT_MAX_PASSWORD_BYTES = 72
+
+
+def password_within_bcrypt_limit(password: str) -> bool:
+    return len(password.encode("utf-8")) <= BCRYPT_MAX_PASSWORD_BYTES
+
+
 def hash_password(password: str) -> str:
-    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    password_bytes = password.encode("utf-8")
+    if len(password_bytes) > BCRYPT_MAX_PASSWORD_BYTES:
+        raise ValueError("password must be at most 72 UTF-8 bytes")
+    return bcrypt.hashpw(password_bytes, bcrypt.gensalt()).decode()
 
 
 def verify_password(password: str, hashed: str) -> bool:
-    return bcrypt.checkpw(password.encode(), hashed.encode())
+    # bcrypt versions before 5.0 silently ignored bytes after byte 72. Keep
+    # those existing accounts usable while rejecting overlong new passwords.
+    password_bytes = password.encode("utf-8")[:BCRYPT_MAX_PASSWORD_BYTES]
+    return bcrypt.checkpw(password_bytes, hashed.encode())
 
 
 def create_user(email: str, password: str, nickname: str = "",
@@ -361,10 +383,31 @@ def create_registered_user(
     concurrent unauthenticated registrations cannot both become admins (or
     leave a second account behind without a valid invite).
     """
-    # Initialize/migrate the selected database before opening the deliberately
-    # short-lived registration connection. Password hashing is intentionally
-    # outside the write transaction because bcrypt is the expensive part.
-    get_db()
+    # Reject known-invalid requests before paying bcrypt's CPU cost. These
+    # checks are repeated under the write lock below because another request
+    # can change users or invitations while the password is being hashed.
+    preflight_db = get_db()
+    if preflight_db.execute(
+        "SELECT 1 FROM users WHERE email = ?",
+        (email,),
+    ).fetchone():
+        return None, False
+    if nickname and preflight_db.execute(
+        "SELECT 1 FROM users WHERE nickname = ? AND nickname != ''",
+        (nickname,),
+    ).fetchone():
+        return None, False
+    has_users = preflight_db.execute("SELECT 1 FROM users LIMIT 1").fetchone()
+    if has_users and (
+        not invite_code
+        or preflight_db.execute(
+            "SELECT 1 FROM invitation_codes "
+            "WHERE code = ? AND email = ? AND used = 0",
+            (invite_code, email),
+        ).fetchone() is None
+    ):
+        return None, False
+
     password_hash = hash_password(password)
     db_path = str(DB_FILE.resolve())
     db = sqlite3.connect(db_path, timeout=30)
@@ -378,6 +421,13 @@ def create_registered_user(
             db.execute("SELECT 1 FROM users LIMIT 1").fetchone() is None
         )
         role = "admin" if is_initial_admin else "user"
+
+        if db.execute(
+            "SELECT 1 FROM users WHERE email = ?",
+            (email,),
+        ).fetchone():
+            db.rollback()
+            return None, False
 
         if not is_initial_admin:
             if not invite_code:
@@ -416,7 +466,7 @@ def create_registered_user(
 
         row = db.execute(
             "SELECT id, email, nickname, role, avatar_url, created_at, "
-            "visit_count, last_seen_at FROM users WHERE id = ?",
+            "visit_count, last_seen_at, token_version FROM users WHERE id = ?",
             (cur.lastrowid,),
         ).fetchone()
         db.commit()
@@ -432,7 +482,7 @@ def get_user(user_id: int) -> dict | None:
     db = get_db()
     row = db.execute(
         "SELECT id, email, nickname, role, avatar_url, created_at, "
-        "visit_count, last_seen_at FROM users WHERE id = ?",
+        "visit_count, last_seen_at, token_version FROM users WHERE id = ?",
         (user_id,),
     ).fetchone()
     return dict(row) if row else None
@@ -452,7 +502,11 @@ def get_user_by_username(username: str) -> dict | None:
 
 
 def update_user(user_id: int, **kwargs) -> dict | None:
-    allowed = {"nickname", "avatar_url", "role"}
+    if "role" in kwargs:
+        raise ValueError(
+            "role changes must use set_user_role_and_rotate_token_version"
+        )
+    allowed = {"nickname", "avatar_url"}
     updates = {k: v for k, v in kwargs.items() if k in allowed}
     if not updates:
         return get_user(user_id)
@@ -471,6 +525,28 @@ def update_user(user_id: int, **kwargs) -> dict | None:
     return get_user(user_id)
 
 
+def set_user_role_and_rotate_token_version(
+    user_id: int,
+    role: str,
+) -> dict | None:
+    """Set a role and revoke existing tokens in one atomic UPDATE.
+
+    Reapplying the current role is intentionally idempotent and leaves the
+    token version unchanged.
+    """
+    db = get_db()
+    row = db.execute(
+        "UPDATE users SET "
+        "token_version = token_version + CASE WHEN role <> ? THEN 1 ELSE 0 END, "
+        "role = ? WHERE id = ? "
+        "RETURNING id, email, nickname, role, avatar_url, created_at, "
+        "visit_count, last_seen_at, token_version",
+        (role, role, user_id),
+    ).fetchone()
+    db.commit()
+    return dict(row) if row else None
+
+
 def delete_user(user_id: int) -> bool:
     db = get_db()
     cur = db.execute("DELETE FROM users WHERE id = ?", (user_id,))
@@ -478,11 +554,21 @@ def delete_user(user_id: int) -> bool:
     return cur.rowcount > 0
 
 
+def rotate_token_version(user_id: int) -> bool:
+    db = get_db()
+    cur = db.execute(
+        "UPDATE users SET token_version = token_version + 1 WHERE id = ?",
+        (user_id,),
+    )
+    db.commit()
+    return cur.rowcount == 1
+
+
 def list_users() -> list[dict]:
     db = get_db()
     rows = db.execute(
         "SELECT id, email, nickname, role, avatar_url, created_at, "
-        "visit_count, last_seen_at FROM users ORDER BY id"
+        "visit_count, last_seen_at, token_version FROM users ORDER BY id"
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -504,6 +590,9 @@ def count_users() -> int:
 
 AUTH_RATE_LIMIT_SECONDS = 15 * 60
 AUTH_FAILURE_LIMIT = 5
+REGISTER_RATE_LIMIT_SECONDS = 15 * 60
+REGISTER_ATTEMPT_LIMIT = 10
+REGISTER_ATTEMPT_STALE_SECONDS = 30 * 60
 INVITE_RATE_LIMIT_SECONDS = 60
 INVITE_RESERVATION_SECONDS = INVITE_RATE_LIMIT_SECONDS
 
@@ -594,6 +683,64 @@ def reset_login_failures(client_ip: str, login: str) -> None:
     db.execute(
         "DELETE FROM login_failures WHERE client_ip = ? AND login = ?",
         (client_ip, _normalized_rate_limit_login(login)),
+    )
+    db.commit()
+
+
+def admit_register_attempt(
+    client_ip: str,
+    *,
+    now: float | None = None,
+) -> tuple[bool, int]:
+    """Atomically reserve one of the permitted registration attempts."""
+    current = time.time() if now is None else float(now)
+    db = get_db()
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        db.execute(
+            "DELETE FROM register_attempts WHERE updated_at < ?",
+            (current - REGISTER_ATTEMPT_STALE_SECONDS,),
+        )
+        row = db.execute(
+            "SELECT failure_count, locked_until, updated_at "
+            "FROM register_attempts WHERE client_ip = ?",
+            (client_ip,),
+        ).fetchone()
+        if row and float(row["locked_until"]) > current:
+            db.commit()
+            return False, max(1, math.ceil(float(row["locked_until"]) - current))
+
+        if row and current - float(row["updated_at"]) < REGISTER_RATE_LIMIT_SECONDS:
+            failure_count = int(row["failure_count"]) + 1
+        else:
+            failure_count = 1
+        locked_until = (
+            current + REGISTER_RATE_LIMIT_SECONDS
+            if failure_count >= REGISTER_ATTEMPT_LIMIT
+            else 0
+        )
+        db.execute(
+            "INSERT INTO register_attempts "
+            "(client_ip, failure_count, locked_until, updated_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(client_ip) DO UPDATE SET "
+            "failure_count = excluded.failure_count, "
+            "locked_until = excluded.locked_until, "
+            "updated_at = excluded.updated_at",
+            (client_ip, failure_count, locked_until, current),
+        )
+        db.commit()
+        return True, max(0, math.ceil(locked_until - current))
+    except Exception:
+        db.rollback()
+        raise
+
+
+def reset_register_attempts(client_ip: str) -> None:
+    db = get_db()
+    db.execute(
+        "DELETE FROM register_attempts WHERE client_ip = ?",
+        (client_ip,),
     )
     db.commit()
 
@@ -702,39 +849,77 @@ def complete_invite_request(
 # ─── Access Stats ──────────────────────────────────────────
 
 _ACCESS_THROTTLE_SECONDS = 300  # collapse bursts of requests into one "visit"
+_ACCESS_LOG_RETENTION_SECONDS = 90 * 24 * 3600
+_ACCESS_LOG_PRUNE_INTERVAL_SECONDS = 3600
+_access_log_prune_lock = threading.Lock()
+_last_access_log_prune_at = 0.0
 
 
 def record_access(user_id: int) -> None:
-    """Bump a user's visit counter/last-seen timestamp, throttled per session.
+    """Record at most one visit per user across the app every five minutes.
 
-    Called on every authenticated request, so repeat calls within the
-    throttle window only refresh last_seen_at without inflating visit_count
-    or the detail log.
+    Calls inside the global per-user throttle window perform no write: they do
+    not update ``last_seen_at`` or insert an access-log row.  At the window
+    boundary, the conditional UPDATE is the concurrency guard; only its winner
+    increments the visit count and inserts the corresponding detail record.
     """
     db = get_db()
     row = db.execute("SELECT last_seen_at FROM users WHERE id = ?", (user_id,)).fetchone()
     if row is None:
         return
     now = datetime.utcnow()
-    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
-    should_count = True
     last_seen = row["last_seen_at"]
     if last_seen:
         try:
             last_dt = datetime.strptime(last_seen, "%Y-%m-%d %H:%M:%S")
             if (now - last_dt).total_seconds() < _ACCESS_THROTTLE_SECONDS:
-                should_count = False
+                return
         except ValueError:
             pass
-    if should_count:
-        db.execute(
-            "UPDATE users SET visit_count = visit_count + 1, last_seen_at = ? WHERE id = ?",
-            (now_str, user_id),
-        )
-        db.execute("INSERT INTO user_access_log (user_id, accessed_at) VALUES (?, ?)", (user_id, now_str))
-    else:
-        db.execute("UPDATE users SET last_seen_at = ? WHERE id = ?", (now_str, user_id))
+
+    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    cutoff = (now - timedelta(seconds=_ACCESS_THROTTLE_SECONDS)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    updated = db.execute(
+        "UPDATE users "
+        "SET visit_count = visit_count + 1, last_seen_at = ? "
+        "WHERE id = ? AND ("
+        "last_seen_at IS NULL OR last_seen_at = '' OR last_seen_at < ?)",
+        (now_str, user_id, cutoff),
+    )
+    if updated.rowcount != 1:
+        db.rollback()
+        return
+    db.execute(
+        "INSERT INTO user_access_log (user_id, accessed_at) VALUES (?, ?)",
+        (user_id, now_str),
+    )
     db.commit()
+
+
+def prune_access_log(*, now: float | None = None) -> int:
+    """Delete old access details at most once per successful hourly run."""
+    global _last_access_log_prune_at
+    current = time.time() if now is None else float(now)
+    with _access_log_prune_lock:
+        if current - _last_access_log_prune_at < _ACCESS_LOG_PRUNE_INTERVAL_SECONDS:
+            return 0
+        db = get_db()
+        try:
+            deleted = db.execute(
+                "DELETE FROM user_access_log "
+                "WHERE accessed_at < "
+                "strftime('%Y-%m-%d %H:%M:%S', ?, 'unixepoch')",
+                (current - _ACCESS_LOG_RETENTION_SECONDS,),
+            )
+            count = max(0, int(deleted.rowcount))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        _last_access_log_prune_at = current
+        return count
 
 
 def count_active_users_since(days: int) -> int:

@@ -149,6 +149,128 @@ def test_maintain_is_throttled(monkeypatch):
     assert len(ensure_calls) == 1
 
 
+def test_cleanup_only_removes_stale_automatic_metadata():
+    """Cleanup must not discard explicit metadata merely because its source is quiet.
+
+    This catches a cleanup regression that deletes manual/classified source settings or
+    aliases whenever they have no current articles.  Only stale pending/failed category
+    records and aliases whose category target is gone may be removed.
+    """
+    conn = _make_conn()
+    sc.init_source_categories(conn)
+    _add_article(conn, 1, "global-live-pending")
+    _add_article(conn, 2, "user-live-pending")
+
+    conn.executemany(
+        "INSERT INTO source_categories (source, category, label, status) VALUES (?, 'Info', '', ?)",
+        [
+            ("global-manual", "manual"),
+            ("global-classified", "classified"),
+            ("global-pending-stale", "pending"),
+            ("global-failed-stale", "failed"),
+            ("global-live-pending", "pending"),
+            ("user-manual", "manual"),
+            ("user-classified", "classified"),
+            ("user-pending-stale", "pending"),
+            ("user-failed-stale", "failed"),
+            ("user-live-pending", "pending"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO user_source_categories (user_id, source, category, label, status) "
+        "VALUES (7, ?, 'Info', '', ?)",
+        [
+            ("user-manual", "manual"),
+            ("user-classified", "classified"),
+            ("user-pending-stale", "pending"),
+            ("user-failed-stale", "failed"),
+            ("user-live-pending", "pending"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO source_aliases (alias_source, target_source) VALUES (?, ?)",
+        [
+            ("global-manual-alias", "global-manual"),
+            ("global-classified-alias", "global-classified"),
+            ("global-dangling-alias", "missing-global-target"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO user_source_aliases (user_id, alias_source, target_source) VALUES (7, ?, ?)",
+        [
+            ("user-manual-alias", "user-manual"),
+            ("user-classified-alias", "user-classified"),
+            ("user-dangling-alias", "missing-user-target"),
+        ],
+    )
+    conn.commit()
+
+    sc.cleanup_stale_source_categories(conn)
+
+    global_categories = {
+        row[0] for row in conn.execute(
+            "SELECT source FROM source_categories WHERE source LIKE 'global-%'"
+        )
+    }
+    user_categories = {
+        row[0] for row in conn.execute(
+            "SELECT source FROM user_source_categories WHERE user_id = 7"
+        )
+    }
+    global_aliases = {
+        row[0] for row in conn.execute("SELECT alias_source FROM source_aliases")
+    }
+    user_aliases = {
+        row[0] for row in conn.execute(
+            "SELECT alias_source FROM user_source_aliases WHERE user_id = 7"
+        )
+    }
+
+    assert global_categories == {
+        "global-manual", "global-classified", "global-live-pending"
+    }
+    assert user_categories == {
+        "user-manual", "user-classified", "user-live-pending"
+    }
+    assert {"global-manual-alias", "global-classified-alias"} <= global_aliases
+    assert "global-dangling-alias" not in global_aliases
+    assert {"user-manual-alias", "user-classified-alias"} <= user_aliases
+    assert "user-dangling-alias" not in user_aliases
+
+
+def test_cleanup_preserves_user_alias_only_for_same_user_private_target():
+    conn = _make_conn()
+    sc.init_source_categories(conn)
+    conn.executemany(
+        "INSERT INTO user_source_categories "
+        "(user_id, source, category, label, status) VALUES (?, ?, 'Info', '', 'manual')",
+        [
+            (7, "same-user-private"),
+            (8, "other-user-private"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO user_source_aliases (user_id, alias_source, target_source) "
+        "VALUES (7, ?, ?)",
+        [
+            ("same-user-alias", "same-user-private"),
+            ("other-user-alias", "other-user-private"),
+            ("missing-alias", "nowhere"),
+        ],
+    )
+    conn.commit()
+
+    sc.cleanup_stale_source_categories(conn)
+
+    aliases = {
+        row[0]
+        for row in conn.execute(
+            "SELECT alias_source FROM user_source_aliases WHERE user_id = 7"
+        )
+    }
+    assert aliases == {"same-user-alias"}
+
+
 def test_refresh_server_lets_post_fetch_maintenance_be_throttled():
     # A manual/periodic refresh's post-fetch maintenance call no longer forces past
     # the throttle — back-to-back refreshes skip the two full-table scans

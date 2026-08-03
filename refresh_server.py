@@ -131,13 +131,17 @@ def release_lock():
         pass
 
 
-def run_fetcher():
+def run_fetcher(existing_article_ids: set[int] | None = None):
     """Run fetcher.py and return the result dict + HTTP status code."""
+    baseline = (
+        set(existing_article_ids)
+        if existing_article_ids is not None
+        else article_id_snapshot()
+    )
     if not acquire_lock():
         log.warning("Fetcher already running — skipping")
         body = json.dumps({"status": "skipped", "error": "fetcher already running"}).encode()
         return body, 429
-    existing_article_ids = article_id_snapshot()
     try:
         log.info("Triggering fetcher...")
         env = {**os.environ, "FETCH_JOB_ID": CURRENT_FETCH_JOB_ID}
@@ -146,12 +150,18 @@ def run_fetcher():
             capture_output=True, text=True, timeout=120, env=env,
         )
         is_ok = result.returncode == 0
-        body = json.dumps({
+        payload = {
             "status": "ok" if is_ok else "error",
             "returncode": result.returncode,
             "stdout": result.stdout[-300:],
             "stderr": result.stderr[-300:],
-        }).encode()
+        }
+        new_ids = []
+        if is_ok:
+            after_ids = article_id_snapshot()
+            new_ids = sorted(after_ids - baseline)
+            payload["new_ids"] = new_ids
+        body = json.dumps(payload).encode()
         LAST_FETCH_STATUS.update({
             "status": "ok" if is_ok else "error",
             "returncode": result.returncode,
@@ -188,7 +198,7 @@ def run_fetcher():
                 log.warning(f"Source cleanup failed: {e}")
             threading.Thread(
                 target=enqueue_new_article_images,
-                args=(existing_article_ids,),
+                args=(new_ids,),
                 daemon=True,
             ).start()
         return body, 200 if is_ok else 500
@@ -333,12 +343,11 @@ def _run_refresh_job(job_id: str) -> None:
             # database scan for every poll.
             REFRESH_JOB["_baseline_ids"] = before_ids
         CURRENT_FETCH_JOB_ID = job_id
-        body, status = run_fetcher()
+        body, status = run_fetcher(before_ids)
         payload = json.loads(body)
         completed = 200 <= status < 300 and payload.get("status") == "ok"
         if completed:
-            after_ids = article_id_snapshot()
-            new_ids = sorted(after_ids - before_ids)
+            new_ids = _positive_article_ids(payload.get("new_ids"))
             new_count = len(new_ids)
         else:
             payload_error = payload.get("error")
@@ -401,23 +410,31 @@ def start_refresh_job(trigger: str = "manual") -> tuple[bytes, int]:
     return body, 202
 
 
-def enqueue_new_article_images(existing_article_ids: set[int]) -> None:
+def enqueue_new_article_images(new_article_ids) -> None:
     """Queue image cache warmup for newly fetched articles without blocking refresh."""
+    article_ids = _positive_article_ids(new_article_ids)
+    if not article_ids:
+        return
     conn = None
     try:
         conn = sqlite3.connect(str(DB_FILE), timeout=30)
         conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            """
-            SELECT id, thumb, body_html
-            FROM articles
-            ORDER BY timestamp DESC
-            """
-        ).fetchall()
-        rows = [row for row in rows if int(row["id"]) not in existing_article_ids]
         queued = 0
-        for row in rows:
-            queued += enqueue_article_image_prefetch(row["id"], row["body_html"], row["thumb"])
+        for offset in range(0, len(article_ids), 500):
+            batch = article_ids[offset:offset + 500]
+            placeholders = ",".join("?" for _ in batch)
+            rows = conn.execute(
+                f"""
+                SELECT id, thumb, body_html
+                FROM articles
+                WHERE id IN ({placeholders})
+                """,
+                tuple(batch),
+            ).fetchall()
+            for row in rows:
+                queued += enqueue_article_image_prefetch(
+                    row["id"], row["body_html"], row["thumb"]
+                )
         if queued:
             log.info(f"Queued {queued} image(s) for background cache warmup")
     except Exception as exc:
@@ -1002,6 +1019,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header("Content-Type", content_type)
+            self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Cache-Control", "public, max-age=2592000")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -1013,6 +1031,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 body = path.read_bytes()
                 self.send_response(200)
                 self.send_header("Content-Type", content_type)
+                self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Cache-Control", "public, max-age=2592000")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()

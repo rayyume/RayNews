@@ -8,6 +8,7 @@ import sqlite3
 import threading
 import time
 from datetime import datetime
+from urllib.parse import urlsplit
 
 from news_schema import ensure_article_source_columns as _ensure_article_source_columns
 
@@ -162,6 +163,36 @@ _DOMAIN_EXCLUDE = {
 }
 
 
+def _root_domain(host: str) -> str | None:
+    """Normalize a hostname to its matchable root domain."""
+    host = host.lower().strip()
+    # Strip leading "www." or "wwwN." patterns
+    host = re.sub(r'^www\d*\.', '', host)
+    # Extract root domain (last two parts for known multi-part TLDs)
+    parts = host.split(".")
+    if len(parts) >= 2:
+        # Handle com.cn / co.uk / com.tw etc.
+        if parts[-2] in ("com", "co", "org", "net", "gov", "edu", "ac") and len(parts) >= 3:
+            root = ".".join(parts[-3:])
+        else:
+            root = ".".join(parts[-2:])
+    else:
+        root = host
+    return None if root in _DOMAIN_EXCLUDE else root
+
+
+def extract_domain_from_url(value: str) -> str | None:
+    """Return a matchable root domain from an HTTP(S) URL."""
+    try:
+        parsed = urlsplit((value or "").strip())
+        host = (parsed.hostname or "").lower()
+    except (TypeError, ValueError):
+        return None
+    if parsed.scheme.lower() not in {"http", "https"} or not host:
+        return None
+    return _root_domain(host)
+
+
 def extract_domains_from_html(html: str) -> list[str]:
     """Extract unique root domains from all href links in HTML.
 
@@ -175,20 +206,8 @@ def extract_domains_from_html(html: str) -> list[str]:
     seen = set()
     domains = []
     for host in urls:
-        host = host.lower().strip()
-        # Strip leading "www." or "wwwN." patterns
-        host = re.sub(r'^www\d*\.', '', host)
-        # Extract root domain (last two parts for known multi-part TLDs)
-        parts = host.split(".")
-        if len(parts) >= 2:
-            # Handle com.cn / co.uk / com.tw etc.
-            if parts[-2] in ("com", "co", "org", "net", "gov", "edu", "ac") and len(parts) >= 3:
-                root = ".".join(parts[-3:])
-            else:
-                root = ".".join(parts[-2:])
-        else:
-            root = host
-        if root in _DOMAIN_EXCLUDE:
+        root = _root_domain(host)
+        if not root:
             continue
         if root not in seen:
             seen.add(root)
@@ -388,17 +407,6 @@ def cleanup_stale_source_categories(conn: sqlite3.Connection) -> int:
     ).fetchone()
     if not table:
         init_source_categories(conn)
-    live_sources = {
-        (row["source"] if isinstance(row, sqlite3.Row) else row[0])
-        for row in conn.execute(
-            """
-            SELECT DISTINCT COALESCE(NULLIF(feed_source, ''), source) AS source
-            FROM articles
-            WHERE COALESCE(NULLIF(feed_source, ''), source) IS NOT NULL
-              AND TRIM(COALESCE(NULLIF(feed_source, ''), source)) != ''
-            """
-        ).fetchall()
-    }
     rows = conn.execute(
         """
         SELECT sc.source, sc.status, COUNT(a.id) AS article_count
@@ -411,34 +419,46 @@ def cleanup_stale_source_categories(conn: sqlite3.Connection) -> int:
     deleted = 0
     for row in rows:
         source = row["source"] if isinstance(row, sqlite3.Row) else row[0]
-        cur = conn.execute("DELETE FROM source_categories WHERE source = ?", (source,))
+        cur = conn.execute(
+            """
+            DELETE FROM source_categories
+            WHERE source = ? AND status IN ('pending', 'failed')
+            """,
+            (source,),
+        )
         deleted += cur.rowcount
 
-    # The article table can be temporarily empty during first sync or recovery.
-    # Keep user-authored categories and aliases until live sources exist again.
-    if not live_sources:
-        if deleted:
-            conn.commit()
-        return deleted
-
-    placeholders = ",".join("?" for _ in live_sources)
     deleted += conn.execute(
-        "DELETE FROM source_aliases WHERE target_source NOT IN ({})".format(
-            placeholders,
-        ),
-        tuple(live_sources),
+        """
+        DELETE FROM source_aliases
+        WHERE target_source NOT IN (SELECT source FROM source_categories)
+        """
     ).rowcount
     deleted += conn.execute(
-        "DELETE FROM user_source_categories WHERE source NOT IN ({})".format(
-            placeholders,
-        ),
-        tuple(live_sources),
+        """
+        DELETE FROM user_source_categories
+        WHERE source NOT IN (
+            SELECT DISTINCT COALESCE(NULLIF(feed_source, ''), source)
+            FROM articles
+            WHERE COALESCE(NULLIF(feed_source, ''), source) IS NOT NULL
+              AND TRIM(COALESCE(NULLIF(feed_source, ''), source)) != ''
+        )
+          AND status IN ('pending', 'failed')
+        """
     ).rowcount
     deleted += conn.execute(
-        "DELETE FROM user_source_aliases WHERE target_source NOT IN ({})".format(
-            placeholders,
-        ),
-        tuple(live_sources),
+        """
+        DELETE FROM user_source_aliases
+        WHERE NOT EXISTS (
+            SELECT 1 FROM source_categories
+            WHERE source_categories.source = user_source_aliases.target_source
+        )
+          AND NOT EXISTS (
+            SELECT 1 FROM user_source_categories
+            WHERE user_source_categories.user_id = user_source_aliases.user_id
+              AND user_source_categories.source = user_source_aliases.target_source
+        )
+        """
     ).rowcount
     if deleted:
         conn.commit()

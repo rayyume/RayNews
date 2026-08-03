@@ -410,7 +410,7 @@ def test_image_fetch_uses_private_environment_proxy_for_public_image(monkeypatch
     captured = {}
     response = _Response(200, {"Content-Type": "image/jpeg"})
     response.raise_for_status = lambda: None
-    response.iter_content = lambda chunk_size: [b"jpeg"]
+    response.iter_content = lambda chunk_size: [b"\xff\xd8\xffvalid-jpeg"]
 
     def fake_request(self, method, request_url, **kwargs):
         captured["proxies"] = kwargs["proxies"]
@@ -420,7 +420,7 @@ def test_image_fetch_uses_private_environment_proxy_for_public_image(monkeypatch
 
     body, content_type = image_cache.fetch_remote_image("http://public.example/image.jpg")
 
-    assert (body, content_type) == (b"jpeg", "image/jpeg")
+    assert (body, content_type) == (b"\xff\xd8\xffvalid-jpeg", "image/jpeg")
     assert captured["proxies"]["http"] == "http://127.0.0.1:7890"
 
 
@@ -432,7 +432,7 @@ def test_image_fetch_rejects_private_target_before_transport(monkeypatch):
         transport_called = True
         response = _Response(200, {"Content-Type": "image/jpeg"})
         response.raise_for_status = lambda: None
-        response.iter_content = lambda chunk_size: [b"jpeg"]
+        response.iter_content = lambda chunk_size: [b"\xff\xd8\xffvalid-jpeg"]
         return response
 
     monkeypatch.setattr(network_safety, "_send_bound_request", fake_get)
@@ -474,3 +474,85 @@ def test_ai_requests_reject_private_endpoint_before_transport(monkeypatch, provi
         service.chat([{"role": "user", "content": "hello"}])
 
     assert transport_called is False
+
+class _ImageResponse(_Response):
+    def __init__(self, *, headers=None, status_error=None, chunks=None):
+        super().__init__(200, headers or {"Content-Type": "image/jpeg"})
+        self._status_error = status_error
+        self._chunks = chunks if chunks is not None else [b"\xff\xd8\xffvalid-jpeg"]
+
+    def raise_for_status(self):
+        if self._status_error is not None:
+            raise self._status_error
+
+    def iter_content(self, chunk_size):
+        assert chunk_size == 65536
+        return iter(self._chunks)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        _ImageResponse(status_error=RuntimeError("not found")),
+        _ImageResponse(headers={"Content-Type": "text/html"}, chunks=[b"<html>not an image</html>"]),
+        _ImageResponse(chunks=[b"x" * (image_cache.MAX_FILE_BYTES + 1)]),
+        _ImageResponse(chunks=[]),
+    ],
+    ids=["http-status", "non-image-body", "too-large", "empty-body"],
+)
+def test_image_fetch_closes_response_after_rejected_body(monkeypatch, response):
+    monkeypatch.setattr(image_cache, "_remote_image_candidates", lambda _url: ["https://public.example/image.jpg"])
+    monkeypatch.setattr(image_cache, "safe_get", lambda *args, **kwargs: response)
+
+    with pytest.raises((RuntimeError, ValueError)):
+        image_cache.fetch_remote_image("https://public.example/image.jpg")
+
+    assert response.closed
+
+
+def test_image_fetch_closes_successful_stream_before_returning(monkeypatch):
+    response = _ImageResponse()
+    monkeypatch.setattr(image_cache, "_remote_image_candidates", lambda _url: ["https://public.example/image.jpg"])
+    monkeypatch.setattr(image_cache, "safe_get", lambda *args, **kwargs: response)
+
+    assert image_cache.fetch_remote_image("https://public.example/image.jpg") == (b"\xff\xd8\xffvalid-jpeg", "image/jpeg")
+    assert response.closed
+
+
+def test_image_fetch_closes_prior_candidate_when_later_safe_get_is_unsafe(monkeypatch):
+    rejected = _ImageResponse(status_error=RuntimeError("not found"))
+    candidates = iter((rejected, UnsafeUrlError("URL target is not allowed")))
+    monkeypatch.setattr(
+        image_cache,
+        "_remote_image_candidates",
+        lambda _url: ["https://public.example/first.jpg", "https://public.example/second.jpg"],
+    )
+
+    def fake_safe_get(*args, **kwargs):
+        result = next(candidates)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(image_cache, "safe_get", fake_safe_get)
+
+    with pytest.raises(UnsafeUrlError):
+        image_cache.fetch_remote_image("https://public.example/first.jpg")
+
+    assert rejected.closed
+
+
+def test_image_fetch_propagates_unsafe_error_when_safe_get_raises_before_returning(monkeypatch):
+    monkeypatch.setattr(
+        image_cache,
+        "_remote_image_candidates",
+        lambda _url: ["https://public.example/image.jpg"],
+    )
+    monkeypatch.setattr(
+        image_cache,
+        "safe_get",
+        lambda *args, **kwargs: (_ for _ in ()).throw(UnsafeUrlError("URL target is not allowed")),
+    )
+
+    with pytest.raises(UnsafeUrlError, match="URL target is not allowed"):
+        image_cache.fetch_remote_image("https://public.example/image.jpg")

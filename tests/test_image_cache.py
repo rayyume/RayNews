@@ -1,4 +1,6 @@
+import io
 import sqlite3
+import tempfile
 import sys
 import unittest
 import uuid
@@ -11,6 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import image_cache
+from image_validation import detect_image_content_type
 import network_safety
 import refresh_server
 
@@ -53,7 +56,7 @@ class RemoteImageCandidateTests(unittest.TestCase):
         succeeded = mock.Mock()
         succeeded.headers = {"Content-Type": "image/jpeg"}
         succeeded.raise_for_status.return_value = None
-        succeeded.iter_content.return_value = [b"jpeg"]
+        succeeded.iter_content.return_value = [b"\xff\xd8\xffvalid-jpeg"]
 
         with mock.patch.object(
             network_safety,
@@ -62,7 +65,7 @@ class RemoteImageCandidateTests(unittest.TestCase):
         ) as request_get:
             body, content_type = image_cache.fetch_remote_image(SSPAI_WSRV)
 
-        self.assertEqual(body, b"jpeg")
+        self.assertEqual(body, b"\xff\xd8\xffvalid-jpeg")
         self.assertEqual(content_type, "image/jpeg")
         self.assertEqual(
             request_get.call_args_list[1].args[0],
@@ -77,7 +80,7 @@ class RemoteImageCandidateTests(unittest.TestCase):
         succeeded = mock.Mock()
         succeeded.headers = {"Content-Type": "image/jpeg"}
         succeeded.raise_for_status.return_value = None
-        succeeded.iter_content.return_value = [b"jpeg"]
+        succeeded.iter_content.return_value = [b"\xff\xd8\xffvalid-jpeg"]
 
         with mock.patch.object(
             network_safety,
@@ -86,7 +89,7 @@ class RemoteImageCandidateTests(unittest.TestCase):
         ) as request_get:
             body, content_type = image_cache.fetch_remote_image(SSPAI_WSRV)
 
-        self.assertEqual((body, content_type), (b"jpeg", "image/jpeg"))
+        self.assertEqual((body, content_type), (b"\xff\xd8\xffvalid-jpeg", "image/jpeg"))
         final_call = request_get.call_args_list[2]
         self.assertEqual(final_call.args[0], SSPAI_INNER)
         self.assertEqual(
@@ -144,6 +147,320 @@ class StartupWarmupTests(unittest.TestCase):
         self.assertEqual([call.args[0] for call in enqueue.call_args_list], [1, 2])
         for call in enqueue.call_args_list:
             self.assertIsNone(call.kwargs["body_limit"])
+
+class CacheInitializationLifecycleTests(unittest.TestCase):
+    def _install_recording_connections(self, cache_db):
+        calls = {"execute": 0, "script": 0, "commit": 0}
+
+        class RecordingConnection:
+            def execute(self, statement, *args):
+                if statement.startswith("PRAGMA"):
+                    calls["execute"] += 1
+
+            def executescript(self, script):
+                calls["script"] += 1
+
+            def commit(self):
+                calls["commit"] += 1
+
+            def close(self):
+                pass
+
+        def connect(*args, **kwargs):
+            cache_db.touch(exist_ok=True)
+            return RecordingConnection()
+
+        return calls, connect
+
+    def test_concurrent_init_for_same_existing_path_runs_schema_setup_once(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            cache_dir = Path(directory) / "image_cache"
+            cache_db = cache_dir / "cache.db"
+            calls, connect = self._install_recording_connections(cache_db)
+            start = threading.Barrier(2)
+            with (
+                mock.patch.object(image_cache, "CACHE_DIR", cache_dir),
+                mock.patch.object(image_cache, "DB_FILE", cache_db),
+                mock.patch.object(image_cache, "_initialized_cache_paths", set(), create=True),
+                mock.patch.object(image_cache.sqlite3, "connect", side_effect=connect),
+                ThreadPoolExecutor(max_workers=2) as workers,
+            ):
+                list(workers.map(lambda _unused: (start.wait(), image_cache.init_cache()), range(2)))
+
+        self.assertEqual(calls["execute"], 1)
+        self.assertEqual(calls["script"], 1)
+        self.assertEqual(calls["commit"], 1)
+
+    def test_db_file_change_initializes_each_path_only_once(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            first_dir = Path(directory) / "first"
+            second_dir = Path(directory) / "second"
+            first_db = first_dir / "cache.db"
+            second_db = second_dir / "cache.db"
+            calls, connect = self._install_recording_connections(first_db)
+
+            def connect_for_current_path(path, *args, **kwargs):
+                Path(path).touch(exist_ok=True)
+                return connect(path, *args, **kwargs)
+
+            with (
+                mock.patch.object(image_cache, "CACHE_DIR", first_dir),
+                mock.patch.object(image_cache, "DB_FILE", first_db),
+                mock.patch.object(image_cache, "_initialized_cache_paths", set(), create=True),
+                mock.patch.object(image_cache.sqlite3, "connect", side_effect=connect_for_current_path),
+            ):
+                image_cache.init_cache()
+                image_cache.init_cache()
+                with (
+                    mock.patch.object(image_cache, "CACHE_DIR", second_dir),
+                    mock.patch.object(image_cache, "DB_FILE", second_db),
+                ):
+                    image_cache.init_cache()
+                    image_cache.init_cache()
+
+        self.assertEqual(calls["script"], 2)
+        self.assertEqual(calls["commit"], 2)
+
+    def test_deleted_cache_database_is_reinitialized(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            cache_dir = Path(directory) / "image_cache"
+            cache_db = cache_dir / "cache.db"
+            with (
+                mock.patch.object(image_cache, "CACHE_DIR", cache_dir),
+                mock.patch.object(image_cache, "DB_FILE", cache_db),
+                mock.patch.object(image_cache, "_initialized_cache_paths", set(), create=True),
+            ):
+                image_cache.init_cache()
+                cache_db.unlink()
+                image_cache.init_cache()
+
+            self.assertTrue(cache_db.exists())
+            conn = sqlite3.connect(cache_db)
+            try:
+                self.assertIsNotNone(
+                    conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'image_cache_entries'"
+                    ).fetchone()
+                )
+            finally:
+                conn.close()
+
+    def test_failed_schema_setup_is_not_marked_initialized(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            cache_dir = Path(directory) / "image_cache"
+            cache_db = cache_dir / "cache.db"
+            calls = {"script": 0}
+
+            class FailingOnceConnection:
+                def execute(self, statement, *args):
+                    pass
+
+                def executescript(self, script):
+                    calls["script"] += 1
+                    if calls["script"] == 1:
+                        raise sqlite3.OperationalError("setup failed")
+
+                def commit(self):
+                    pass
+
+                def close(self):
+                    pass
+
+            def connect(*args, **kwargs):
+                cache_db.touch(exist_ok=True)
+                return FailingOnceConnection()
+
+            with (
+                mock.patch.object(image_cache, "CACHE_DIR", cache_dir),
+                mock.patch.object(image_cache, "DB_FILE", cache_db),
+                mock.patch.object(image_cache, "_initialized_cache_paths", set(), create=True),
+                mock.patch.object(image_cache.sqlite3, "connect", side_effect=connect),
+            ):
+                with self.assertRaisesRegex(sqlite3.OperationalError, "setup failed"):
+                    image_cache.init_cache()
+                image_cache.init_cache()
+
+        self.assertEqual(calls["script"], 2)
+
+
+class ImageContentValidationTests(unittest.TestCase):
+    JPEG = b"\xff\xd8\xffvalid-jpeg"
+    PNG = b"\x89PNG\r\n\x1a\nvalid-png"
+    GIF = b"GIF89avalid-gif"
+    WEBP = b"RIFF\x00\x00\x00\x00WEBPVP8 valid-webp"
+
+    def test_detects_supported_image_magic_bytes(self):
+        cases = {
+            self.JPEG: "image/jpeg",
+            self.PNG: "image/png",
+            self.GIF: "image/gif",
+            self.WEBP: "image/webp",
+        }
+
+        for data, content_type in cases.items():
+            with self.subTest(content_type=content_type):
+                self.assertEqual(detect_image_content_type(data), content_type)
+
+    def test_fetch_uses_detected_type_when_declared_type_is_wrong(self):
+        response = mock.Mock()
+        response.headers = {"Content-Type": "image/jpeg"}
+        response.raise_for_status.return_value = None
+        response.iter_content.return_value = [self.PNG]
+
+        with (
+            mock.patch.object(image_cache, "_remote_image_candidates", return_value=["https://public.example/image"]),
+            mock.patch.object(image_cache, "safe_get", return_value=response),
+        ):
+            body, content_type = image_cache.fetch_remote_image("https://public.example/image")
+
+        self.assertEqual((body, content_type), (self.PNG, "image/png"))
+        response.close.assert_called_once_with()
+
+    def test_cache_uses_detected_type_for_path_and_record(self):
+        response = mock.Mock()
+        response.headers = {"Content-Type": "image/jpeg"}
+        response.raise_for_status.return_value = None
+        response.iter_content.return_value = [self.PNG]
+
+        with tempfile.TemporaryDirectory() as directory:
+            cache_dir = Path(directory) / "image_cache"
+            db_file = cache_dir / "cache.db"
+            with (
+                mock.patch.object(image_cache, "CACHE_DIR", cache_dir),
+                mock.patch.object(image_cache, "DB_FILE", db_file),
+                mock.patch.object(image_cache, "_initialized_cache_paths", set()),
+                mock.patch.object(image_cache, "_remote_image_candidates", return_value=["https://public.example/image"]),
+                mock.patch.object(image_cache, "safe_get", return_value=response),
+            ):
+                path, content_type = image_cache.cache_image("https://public.example/image")
+                self.assertEqual((path.suffix, content_type), (".png", "image/png"))
+                self.assertEqual(path.read_bytes(), self.PNG)
+                conn = sqlite3.connect(db_file)
+                try:
+                    self.assertEqual(
+                        conn.execute("SELECT content_type FROM image_cache_entries").fetchone()[0],
+                        "image/png",
+                    )
+                finally:
+                    conn.close()
+
+    def test_non_image_body_is_not_cached_or_recorded(self):
+        response = mock.Mock()
+        response.headers = {"Content-Type": "image/jpeg"}
+        response.raise_for_status.return_value = None
+        response.iter_content.return_value = [b"<html>not an image</html>"]
+
+        with tempfile.TemporaryDirectory() as directory:
+            cache_dir = Path(directory) / "image_cache"
+            db_file = cache_dir / "cache.db"
+            with (
+                mock.patch.object(image_cache, "CACHE_DIR", cache_dir),
+                mock.patch.object(image_cache, "DB_FILE", db_file),
+                mock.patch.object(image_cache, "_initialized_cache_paths", set()),
+                mock.patch.object(image_cache, "_remote_image_candidates", return_value=["https://public.example/image"]),
+                mock.patch.object(image_cache, "safe_get", return_value=response),
+                self.assertRaisesRegex(ValueError, "unsupported image content"),
+            ):
+                image_cache.cache_image("https://public.example/image")
+
+            self.assertFalse(list(cache_dir.rglob("*.jpg")))
+            self.assertFalse(list(cache_dir.rglob("*.png")))
+            conn = sqlite3.connect(db_file)
+            try:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM image_cache_entries").fetchone()[0], 0)
+            finally:
+                conn.close()
+
+    def test_fetch_tries_next_safe_candidate_after_non_image_body(self):
+        rejected = mock.Mock()
+        rejected.headers = {"Content-Type": "image/jpeg"}
+        rejected.raise_for_status.return_value = None
+        rejected.iter_content.return_value = [b"<html>not an image</html>"]
+        succeeded = mock.Mock()
+        succeeded.headers = {"Content-Type": "text/plain"}
+        succeeded.raise_for_status.return_value = None
+        succeeded.iter_content.return_value = [self.GIF]
+
+        with (
+            mock.patch.object(
+                image_cache,
+                "_remote_image_candidates",
+                return_value=["https://public.example/first", "https://public.example/second"],
+            ),
+            mock.patch.object(image_cache, "safe_get", side_effect=[rejected, succeeded]),
+        ):
+            self.assertEqual(
+                image_cache.fetch_remote_image("https://public.example/first"),
+                (self.GIF, "image/gif"),
+            )
+
+        rejected.close.assert_called_once_with()
+        succeeded.close.assert_called_once_with()
+
+    def _handler(self):
+        handler = refresh_server.Handler.__new__(refresh_server.Handler)
+        handler.wfile = io.BytesIO()
+        handler.statuses = []
+        handler.headers_sent = []
+        handler.send_response = handler.statuses.append
+        handler.send_header = lambda name, value: handler.headers_sent.append((name, value))
+        handler.end_headers = lambda: None
+        return handler
+
+    def test_img_cache_returns_502_for_non_image_fetch_failure(self):
+        handler = self._handler()
+        with (
+            mock.patch.object(refresh_server, "get_cached_image", return_value=None),
+            mock.patch.object(refresh_server, "cache_image", side_effect=ValueError("unsupported image content")),
+        ):
+            handler._handle_img_cache({"url": ["https://public.example/image"]})
+
+        self.assertEqual(handler.statuses, [502])
+
+    def test_img_cache_success_responses_include_nosniff(self):
+        body = self.JPEG
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cached.jpg"
+            path.write_bytes(body)
+            scenarios = [
+                {
+                    "get_cached_image": mock.Mock(return_value=(path, "image/jpeg")),
+                    "cache_image": mock.Mock(),
+                    "fetch_remote_image": mock.Mock(),
+                },
+                {
+                    "get_cached_image": mock.Mock(return_value=None),
+                    "cache_image": mock.Mock(return_value=None),
+                    "fetch_remote_image": mock.Mock(return_value=(body, "image/jpeg")),
+                },
+                {
+                    "get_cached_image": mock.Mock(side_effect=[None, (path, "image/jpeg")]),
+                    "cache_image": mock.Mock(side_effect=ValueError("fetch failed")),
+                    "fetch_remote_image": mock.Mock(),
+                },
+            ]
+            for scenario in scenarios:
+                with self.subTest(scenario=scenario):
+                    handler = self._handler()
+                    with (
+                        mock.patch.object(refresh_server, "get_cached_image", scenario["get_cached_image"]),
+                        mock.patch.object(refresh_server, "cache_image", scenario["cache_image"]),
+                        mock.patch.object(refresh_server, "fetch_remote_image", scenario["fetch_remote_image"]),
+                    ):
+                        handler._handle_img_cache({"url": ["https://public.example/image"]})
+
+                    self.assertEqual(handler.statuses, [200])
+                    self.assertIn(("X-Content-Type-Options", "nosniff"), handler.headers_sent)
 
 
 if __name__ == "__main__":

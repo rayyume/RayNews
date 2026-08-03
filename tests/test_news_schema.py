@@ -127,7 +127,7 @@ def test_unauthenticated_news_detail_never_serves_shared_translated_body(
     assert "original_body_html" not in item
 
 
-def test_empty_article_table_preserves_user_source_metadata():
+def test_empty_article_table_preserves_alias_to_same_user_private_source():
     conn = sqlite3.connect(":memory:")
     conn.execute(
         """
@@ -157,7 +157,7 @@ def test_empty_article_table_preserves_user_source_metadata():
     assert _table_count(conn, "user_source_aliases") == 1
 
 
-def test_nonempty_article_table_removes_only_stale_user_source_metadata():
+def test_nonempty_article_table_preserves_manual_user_source_metadata():
     conn = sqlite3.connect(":memory:")
     conn.execute(
         """
@@ -172,12 +172,16 @@ def test_nonempty_article_table_removes_only_stale_user_source_metadata():
         "INSERT INTO articles (id, source, feed_source) VALUES (1, 'Live Feed', 'Live Feed')"
     )
     init_source_categories(conn)
-    for source in ("Live Feed", "Stale Feed"):
+    for source, status in (
+        ("Live Feed", "manual"),
+        ("Stale Feed", "manual"),
+        ("Stale Automatic Feed", "pending"),
+    ):
         conn.execute(
             "INSERT INTO user_source_categories "
-            "(user_id, source, category, label, updated_at) "
-            "VALUES (1, ?, 'Tech', ?, datetime('now'))",
-            (source, source),
+            "(user_id, source, category, label, status, updated_at) "
+            "VALUES (1, ?, 'Tech', ?, ?, datetime('now'))",
+            (source, source, status),
         )
     conn.commit()
 
@@ -186,4 +190,4 @@ def test_nonempty_article_table_removes_only_stale_user_source_metadata():
     rows = conn.execute(
         "SELECT source FROM user_source_categories ORDER BY source"
     ).fetchall()
-    assert rows == [("Live Feed",)]
+    assert rows == [("Live Feed",), ("Stale Feed",)]
