@@ -5337,7 +5337,17 @@ def _refresh_runtime_stats(http_get=None) -> dict:
         payload = response.json()
         if not isinstance(payload, dict):
             raise ValueError("refresh runtime stats must be an object")
-        return payload
+        metrics = {}
+        for key in (
+            "article_cache_items",
+            "article_cache_bytes",
+            "article_cache_inflight",
+        ):
+            value = payload.get(key)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"invalid refresh runtime metric: {key}")
+            metrics[key] = value
+        return metrics
     except (requests.RequestException, AttributeError, TypeError, ValueError):
         return {"status": "unavailable"}
 

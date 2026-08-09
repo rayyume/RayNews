@@ -571,6 +571,72 @@ def test_server_stats_reports_refresh_unavailable_on_one_second_timeout(
     }
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"error": "wrong service"},
+        {"article_cache_items": 2, "article_cache_bytes": 8},
+        {
+            "article_cache_items": "2",
+            "article_cache_bytes": 8,
+            "article_cache_inflight": 1,
+        },
+        {
+            "article_cache_items": 2,
+            "article_cache_bytes": -1,
+            "article_cache_inflight": 1,
+        },
+        {
+            "article_cache_items": 2,
+            "article_cache_bytes": 8,
+            "article_cache_inflight": False,
+        },
+    ],
+    ids=["empty", "error", "missing", "string", "negative", "bool"],
+)
+def test_refresh_runtime_stats_rejects_malformed_metric_objects(payload):
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return payload
+
+    def fake_get(url, *, timeout):
+        assert url == "http://127.0.0.1:8081/internal/runtime-stats"
+        assert timeout == 1
+        return FakeResponse()
+
+    assert web_server._refresh_runtime_stats(fake_get) == {
+        "status": "unavailable"
+    }
+
+
+def test_refresh_runtime_stats_returns_only_normalized_required_metrics():
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "article_cache_items": 2,
+                "article_cache_bytes": 8,
+                "article_cache_inflight": 1,
+                "future_metric": 99,
+            }
+
+    stats = web_server._refresh_runtime_stats(
+        lambda url, timeout: FakeResponse()
+    )
+
+    assert stats == {
+        "article_cache_items": 2,
+        "article_cache_bytes": 8,
+        "article_cache_inflight": 1,
+    }
+
+
 def test_purge_date_parser_rejects_invalid_and_future_dates(monkeypatch):
     monkeypatch.setattr(web_server, "date", type("Today", (), {"today": staticmethod(lambda: date(2026, 7, 16))}))
 
