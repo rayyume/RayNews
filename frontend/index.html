@@ -1063,6 +1063,9 @@ body.body-scroll-lock{overflow:hidden!important}
 
 <script>
 const PAGE_SIZE = 30;
+const SEARCH_REQUEST_TIMEOUT_MS = 8000;
+const SEARCH_MAX_AUTO_RETRIES = 2;
+const SEARCH_RETRY_DELAY_MS = 500;
 const INCREMENTAL_FETCH_LIMIT = 200;
 const NEWS_CACHE_DB = 'raynews-news-cache-v1';
 const NEWS_CACHE_STORE = 'entries';
@@ -1138,6 +1141,8 @@ let articleBodyRequestGenerations = {};
 let articleDetailRetryInProgress = new Set();
 let activeArticleRequestId = 0;
 let searchDebounceTimer = null;
+let searchRetryTimer = null;
+let searchRetryCount = 0;
 let titleUpdateCursor = '';
 let titleUpdatePolling = false;
 let translationUpdateCursor = '';
@@ -7365,10 +7370,11 @@ function openSearch() {
 function closeSearch() {
   const overlay = document.getElementById('searchOverlay');
   const input = document.getElementById('articleSearchInput');
-  if (!overlay.classList.contains('open')) return;
   clearTimeout(searchDebounceTimer);
+  cancelSearchRetry();
   searchRequestSeq++;
   if (searchRequestController) searchRequestController.abort();
+  if (!overlay.classList.contains('open')) return;
   input.blur();
   overlay.classList.remove('open');
   overlay.setAttribute('aria-hidden', 'true');
@@ -7378,6 +7384,7 @@ function closeSearch() {
 function clearArticleSearch() {
   const input = document.getElementById('articleSearchInput');
   clearTimeout(searchDebounceTimer);
+  cancelSearchRetry();
   searchRequestSeq++;
   if (searchRequestController) searchRequestController.abort();
   input.value = '';
@@ -7400,9 +7407,11 @@ function focusSearchInput() {
 
 function scheduleSearchRender() {
   clearTimeout(searchDebounceTimer);
+  cancelSearchRetry();
+  searchRequestSeq++;
+  if (searchRequestController) searchRequestController.abort();
   renderSearchResults();
   const query = (document.getElementById('articleSearchInput').value || '').trim();
-  if (searchRequestController) searchRequestController.abort();
   if (!query) return;
   searchPage = 1;
   searchTotal = 0;
@@ -7457,12 +7466,67 @@ function renderServerSearchItems() {
   resultsEl.innerHTML = searchItems.map(articleItemHtml).join('') + more;
 }
 
+function cancelSearchRetry({ resetCount = true } = {}) {
+  if (searchRetryTimer) clearTimeout(searchRetryTimer);
+  searchRetryTimer = null;
+  if (resetCount) searchRetryCount = 0;
+}
+
+function scheduleSearchRetry(query, page, { append = false, requestSeq = searchRequestSeq } = {}) {
+  cancelSearchRetry({ resetCount: false });
+  if (searchRetryCount >= SEARCH_MAX_AUTO_RETRIES) return false;
+  searchRetryCount++;
+  searchRetryTimer = setTimeout(() => {
+    searchRetryTimer = null;
+    const activeQuery = (document.getElementById('articleSearchInput').value || '').trim();
+    if (activeQuery !== query || searchRequestSeq !== requestSeq) return;
+    return fetchServerSearchResults(query, page, { append });
+  }, SEARCH_RETRY_DELAY_MS);
+  return true;
+}
+
+function searchRetryCardHtml() {
+  return '<div style="display:flex;justify-content:center;padding:16px"><button class="page-btn" onclick="retryServerSearch()">重新搜索</button></div>';
+}
+
+function renderSearchRetryExhausted(query, localMatches, { append = false } = {}) {
+  const status = document.getElementById('searchStatus');
+  const resultsEl = document.getElementById('searchResults');
+  if (append && searchItems.length) {
+    renderServerSearchItems();
+    status.textContent = `已显示 ${searchItems.length} 条结果，加载更多失败`;
+    resultsEl.innerHTML += searchRetryCardHtml();
+    return;
+  }
+  status.textContent = localMatches.length
+    ? `当前页找到 ${localMatches.length} 条，完整搜索暂时不可用`
+    : '完整搜索暂时不可用';
+  if (localMatches.length) {
+    resultsEl.className = 'search-results';
+    resultsEl.innerHTML = localMatches.map(articleItemHtml).join('') + searchRetryCardHtml();
+    return;
+  }
+  resultsEl.className = '';
+  resultsEl.innerHTML = '<div class="search-empty"><div class="search-empty-icon">⌕</div><p>完整搜索暂时不可用</p>' + searchRetryCardHtml() + '</div>';
+}
+
+function retryServerSearch() {
+  const query = (document.getElementById('articleSearchInput').value || '').trim();
+  if (!query) return;
+  cancelSearchRetry();
+  searchRequestSeq++;
+  if (searchRequestController) searchRequestController.abort();
+  fetchServerSearchResults(query, 1);
+}
+
 async function fetchServerSearchResults(query, page = 1, { append = false } = {}) {
   const currentInput = document.getElementById('articleSearchInput');
   const status = document.getElementById('searchStatus');
   const requestSeq = ++searchRequestSeq;
+  const controller = new AbortController();
   if (searchRequestController) searchRequestController.abort();
-  searchRequestController = new AbortController();
+  searchRequestController = controller;
+  const timeoutTimer = setTimeout(() => controller.abort(), SEARCH_REQUEST_TIMEOUT_MS);
   const localMatches = searchArticles(query);
   status.textContent = append
     ? `正在加载更多结果...`
@@ -7472,12 +7536,13 @@ async function fetchServerSearchResults(query, page = 1, { append = false } = {}
     params.set('q', query);
     params.set('page', String(page));
     params.set('size', String(PAGE_SIZE));
-    const resp = await fetch('/api/news?' + params.toString(), { signal: searchRequestController.signal });
+    const resp = await fetch('/api/news?' + params.toString(), { signal: controller.signal });
     if (!resp.ok) throw new Error('search failed');
     const data = await resp.json();
     if (data.error) throw new Error(data.error);
     const activeQuery = (currentInput.value || '').trim();
     if (requestSeq !== searchRequestSeq || activeQuery !== query) return;
+    cancelSearchRetry();
     const items = data.items || [];
     searchQuery = query;
     searchPage = page;
@@ -7487,13 +7552,18 @@ async function fetchServerSearchResults(query, page = 1, { append = false } = {}
       : items;
     renderServerSearchItems();
   } catch (e) {
-    if (e.name === 'AbortError') return;
     const activeQuery = (currentInput.value || '').trim();
-    if (activeQuery === query) {
-      status.textContent = searchItems.length
-        ? `已显示 ${searchItems.length} 条结果，加载更多失败`
-        : `当前页找到 ${localMatches.length} 条，完整搜索暂时不可用`;
+    if (requestSeq !== searchRequestSeq || activeQuery !== query) return;
+    if (scheduleSearchRetry(query, page, { append, requestSeq })) {
+      status.textContent = append
+        ? `正在重试加载更多结果（${searchRetryCount}/${SEARCH_MAX_AUTO_RETRIES}）...`
+        : `当前页找到 ${localMatches.length} 条，正在重试完整搜索（${searchRetryCount}/${SEARCH_MAX_AUTO_RETRIES}）...`;
+      return;
     }
+    renderSearchRetryExhausted(query, localMatches, { append });
+  } finally {
+    clearTimeout(timeoutTimer);
+    if (searchRequestController === controller) searchRequestController = null;
   }
 }
 

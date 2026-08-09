@@ -71,6 +71,184 @@ def _title_list_rendering_block():
     return HTML[source_start:source_end] + "\n" + HTML[favorites_start:favorites_end]
 
 
+def _search_block():
+    start = HTML.index("function openSearch()")
+    end = HTML.index("function toggleSidebar()", start)
+    return HTML[start:end]
+
+
+def _run_search_vm(body):
+    script = f"""
+const assert = require('assert');
+const vm = require('vm');
+
+function element(extra = {{}}) {{
+  return Object.assign({{
+    value: '', textContent: '', innerHTML: '', className: '',
+    style: {{}}, dataset: {{}},
+    classList: {{ contains: () => true, add() {{}}, remove() {{}} }},
+    setAttribute() {{}}, focus() {{}}, blur() {{}},
+  }}, extra);
+}}
+
+const requestedIds = [];
+const elements = {{
+  articleSearchInput: element(),
+  articleSearchClear: element(),
+  searchStatus: element(),
+  searchResults: element(),
+  searchOverlay: element(),
+}};
+const timers = [];
+const context = {{
+  console,
+  URLSearchParams,
+  AbortController,
+  PAGE_SIZE: 20,
+  SEARCH_REQUEST_TIMEOUT_MS: 8000,
+  SEARCH_MAX_AUTO_RETRIES: 2,
+  SEARCH_RETRY_DELAY_MS: 500,
+  searchDebounceTimer: null,
+  searchRetryTimer: null,
+  searchRetryCount: 0,
+  searchRequestController: null,
+  searchRequestSeq: 0,
+  searchPage: 1,
+  searchTotal: 0,
+  searchItems: [],
+  searchQuery: '',
+  authToken: 'token',
+  document: {{
+    getElementById(id) {{ requestedIds.push(id); return elements[id] || null; }},
+  }},
+  setTimeout(fn, delay) {{
+    const timer = {{ fn, delay, cleared: false }};
+    timers.push(timer);
+    return timer;
+  }},
+  clearTimeout(timer) {{ if (timer) timer.cleared = true; }},
+  searchArticles: () => [],
+  articleItemHtml: item => `<article data-id="${{item.id}}">${{item.title}}</article>`,
+  focusSearchInput() {{}},
+  lockBodyScroll() {{}},
+  unlockBodyScroll() {{}},
+  showToast() {{}},
+  showAuth() {{}},
+}};
+vm.createContext(context);
+vm.runInContext({json.dumps(_search_block())}, context);
+
+async function flush() {{
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+}}
+
+(async () => {{
+{body}
+  assert.equal(requestedIds.some(id => id.startsWith('#')), false, requestedIds.join(','));
+}})().catch(error => {{ console.error(error && error.stack ? error.stack : error); process.exitCode = 1; }});
+"""
+    return subprocess.run(
+        ["node", "-e", script], cwd=ROOT, capture_output=True, text=True, timeout=10
+    )
+
+
+def test_search_retries_once_after_transient_failure_then_renders_success():
+    result = _run_search_vm(
+        """
+  elements.articleSearchInput.value = 'database';
+  let attempts = 0;
+  context.fetch = async () => {
+    attempts++;
+    if (attempts === 1) throw new TypeError('temporary network failure');
+    return { ok: true, json: async () => ({ items: [{ id: 9, title: 'Recovered' }], total: 1 }) };
+  };
+
+  await context.fetchServerSearchResults('database', 1);
+  assert.equal(attempts, 1);
+  const retry = timers.find(timer => !timer.cleared && timer.delay === context.SEARCH_RETRY_DELAY_MS);
+  assert.ok(retry, 'first failure did not schedule a retry');
+  await retry.fn();
+
+  assert.equal(attempts, 2);
+  assert.match(elements.searchResults.innerHTML, /Recovered/);
+  assert.equal(context.searchRetryCount, 0);
+"""
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_search_changing_query_cancels_and_guards_the_old_retry():
+    result = _run_search_vm(
+        """
+  elements.articleSearchInput.value = 'old';
+  let attempts = 0;
+  context.fetch = async () => { attempts++; throw new TypeError('temporary'); };
+
+  await context.fetchServerSearchResults('old', 1);
+  const retry = timers.find(timer => !timer.cleared && timer.delay === context.SEARCH_RETRY_DELAY_MS);
+  assert.ok(retry);
+  elements.articleSearchInput.value = 'new';
+  context.scheduleSearchRender();
+  assert.equal(retry.cleared, true);
+
+  retry.fn(); // A queued callback can still race after clearTimeout; its own guards must stop it.
+  await flush();
+  assert.equal(attempts, 1);
+"""
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_search_retry_exhaustion_keeps_local_results_and_offers_manual_retry():
+    result = _run_search_vm(
+        """
+  elements.articleSearchInput.value = 'local';
+  context.searchArticles = () => [{ id: 7, title: 'Local match' }];
+  let attempts = 0;
+  context.fetch = async () => { attempts++; throw new TypeError('still unavailable'); };
+
+  await context.fetchServerSearchResults('local', 1);
+  while (true) {
+    const retry = timers.find(timer => !timer.cleared && !timer.ran && timer.delay === context.SEARCH_RETRY_DELAY_MS);
+    if (!retry) break;
+    retry.ran = true;
+    await retry.fn();
+  }
+
+  assert.equal(attempts, 1 + context.SEARCH_MAX_AUTO_RETRIES);
+  assert.match(elements.searchResults.innerHTML, /Local match/);
+  assert.ok(elements.searchResults.innerHTML.includes('onclick="retryServerSearch()"'));
+  assert.match(elements.searchResults.innerHTML, />重新搜索</);
+"""
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_old_search_timeout_never_aborts_the_new_request_controller():
+    result = _run_search_vm(
+        """
+  elements.articleSearchInput.value = 'first';
+  const requests = [];
+  context.fetch = (url, options) => new Promise(resolve => requests.push({ url, options, resolve }));
+
+  context.fetchServerSearchResults('first', 1);
+  const firstTimeout = timers.find(timer => timer.delay === context.SEARCH_REQUEST_TIMEOUT_MS);
+  assert.ok(firstTimeout);
+  elements.articleSearchInput.value = 'second';
+  context.fetchServerSearchResults('second', 1);
+  assert.equal(requests.length, 2);
+  const newSignal = requests[1].options.signal;
+  assert.equal(newSignal.aborted, false);
+
+  firstTimeout.fn();
+  assert.equal(newSignal.aborted, false);
+"""
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def test_display_title_requires_active_shared_access():
     script = f"""
 const assert = require('assert');

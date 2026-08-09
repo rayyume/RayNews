@@ -615,6 +615,17 @@ def test_search_uses_server_side_pagination_without_limiting_database_scope():
     assert "加载更多" in html
 
 
+def test_search_recovery_has_retry_lifecycle_and_request_local_timeout_contracts():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert "function cancelSearchRetry({ resetCount = true } = {})" in html
+    assert "function scheduleSearchRetry(" in html
+    assert "function retryServerSearch()" in html
+    assert "const controller = new AbortController();" in html
+    assert "setTimeout(() => controller.abort(), SEARCH_REQUEST_TIMEOUT_MS)" in html
+    assert "if (searchRequestController === controller) searchRequestController = null;" in html
+    assert 'onclick="retryServerSearch()"' in html
+
+
 def test_paged_list_mutations_keep_server_total_and_new_article_prompt():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     delete_start = html.index("async function deleteArticlesByIds(ids)")
