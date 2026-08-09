@@ -530,16 +530,18 @@ def temp_db_path():
 
 
 def test_cache_evict_endpoint_pops_only_the_given_article():
-    refresh_server._article_cache[5] = b'{"stale": true}'
-    refresh_server._article_cache[6] = b'{"other": true}'
+    refresh_server.clear_article_cache()
+    refresh_server._store_cached_article(5, b"stale")
+    refresh_server._store_cached_article(6, b"other")
     try:
         body, status = refresh_server.api_cache_evict({"id": ["5"]})
         assert status == 200
-        assert 5 not in refresh_server._article_cache
-        assert 6 in refresh_server._article_cache  # untouched
+        assert json.loads(body) == {"ok": True}
+        assert refresh_server._get_cached_article(5) is None
+        assert refresh_server._get_cached_article(6) == b"other"
+        assert refresh_server.refresh_runtime_stats()["article_cache_bytes"] == 5
     finally:
-        refresh_server._article_cache.pop(5, None)
-        refresh_server._article_cache.pop(6, None)
+        refresh_server.clear_article_cache()
 
 
 def test_cache_evict_rejects_non_numeric_id():

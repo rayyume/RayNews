@@ -76,6 +76,29 @@ _schema_ready = False
 _schema_ready_event = threading.Event()
 
 
+def _nonnegative_int_env(name: str, default: int) -> int:
+    """Return a non-negative integer setting, falling back on bad input."""
+    try:
+        value = int(os.environ.get(name, str(default)).strip())
+    except (AttributeError, TypeError, ValueError):
+        return default
+    return value if value >= 0 else default
+
+
+def _article_cache_config_from_env() -> dict[str, int]:
+    """Parse article-cache limits without letting bad env values break startup."""
+    return {
+        "max_items": _nonnegative_int_env("ARTICLE_DETAIL_CACHE_MAX_ITEMS", 256),
+        "max_mb": _nonnegative_int_env("ARTICLE_DETAIL_CACHE_MAX_MB", 64),
+    }
+
+
+_ARTICLE_CACHE_CONFIG = _article_cache_config_from_env()
+ARTICLE_DETAIL_CACHE_MAX_ITEMS = _ARTICLE_CACHE_CONFIG["max_items"]
+ARTICLE_DETAIL_CACHE_MAX_MB = _ARTICLE_CACHE_CONFIG["max_mb"]
+ARTICLE_DETAIL_CACHE_MAX_BYTES = ARTICLE_DETAIL_CACHE_MAX_MB * 1024 * 1024
+
+
 def ensure_schema_once(conn: sqlite3.Connection) -> None:
     global _schema_ready
     if _schema_ready_event.is_set() and _schema_ready:
@@ -121,9 +144,59 @@ def _warm_news_schema() -> bool:
 
 
 # In-memory cache for article detail responses — invalidated on fetcher run
-_article_cache: dict[int, bytes] = {}
-_article_cache_lock = threading.Lock()
+_article_cache: OrderedDict[int, bytes] = OrderedDict()
+_article_cache_bytes = 0
+_article_cache_lock = threading.RLock()
 _article_cache_inflight: dict[int, threading.Event] = {}
+
+
+def _get_cached_article(article_id: int) -> bytes | None:
+    """Return and touch an article cache entry; this helper acquires the cache lock."""
+    with _article_cache_lock:
+        payload = _article_cache.get(article_id)
+        if payload is not None:
+            _article_cache.move_to_end(article_id)
+        return payload
+
+
+def _store_cached_article(article_id: int, payload: bytes) -> bool:
+    """Store under both limits, removing any old value even if replacement is rejected.
+
+    This helper acquires the cache lock.  Treating a rejected replacement as an
+    eviction prevents a stale response from surviving after a newly built response
+    becomes too large for the configured cache.
+    """
+    global _article_cache_bytes
+    with _article_cache_lock:
+        previous = _article_cache.pop(article_id, None)
+        if previous is not None:
+            _article_cache_bytes -= len(previous)
+        if (
+            ARTICLE_DETAIL_CACHE_MAX_ITEMS == 0
+            or ARTICLE_DETAIL_CACHE_MAX_BYTES == 0
+            or len(payload) > ARTICLE_DETAIL_CACHE_MAX_BYTES
+        ):
+            return False
+        _article_cache[article_id] = payload
+        _article_cache_bytes += len(payload)
+        while (
+            len(_article_cache) > ARTICLE_DETAIL_CACHE_MAX_ITEMS
+            or _article_cache_bytes > ARTICLE_DETAIL_CACHE_MAX_BYTES
+        ):
+            _, evicted = _article_cache.popitem(last=False)
+            _article_cache_bytes -= len(evicted)
+        return article_id in _article_cache
+
+
+def _evict_cached_article(article_id: int) -> bool:
+    """Remove one entry and its byte count; this helper acquires the cache lock."""
+    global _article_cache_bytes
+    with _article_cache_lock:
+        payload = _article_cache.pop(article_id, None)
+        if payload is None:
+            return False
+        _article_cache_bytes -= len(payload)
+        return True
 
 
 def refresh_runtime_stats() -> dict[str, int]:
@@ -131,7 +204,7 @@ def refresh_runtime_stats() -> dict[str, int]:
     with _article_cache_lock:
         return {
             "article_cache_items": len(_article_cache),
-            "article_cache_bytes": sum(len(payload) for payload in _article_cache.values()),
+            "article_cache_bytes": _article_cache_bytes,
             "article_cache_inflight": len(_article_cache_inflight),
         }
 
@@ -145,8 +218,10 @@ def _is_loopback_peer(handler: http.server.BaseHTTPRequestHandler) -> bool:
 
 
 def clear_article_cache():
+    global _article_cache_bytes
     with _article_cache_lock:
         _article_cache.clear()
+        _article_cache_bytes = 0
         _article_cache_inflight.clear()
 
 
@@ -813,9 +888,8 @@ def api_title_updates(params: dict) -> bytes:
         ).fetchall()
         items = [dict(r) for r in rows]
         if items:
-            with _article_cache_lock:
-                for item in items:
-                    _article_cache.pop(int(item["id"]), None)
+            for item in items:
+                _evict_cached_article(int(item["id"]))
         cursor = f"{items[-1]['title_updated_at']}|{items[-1]['id']}" if items else since
         return json.dumps({
             "items": items,
@@ -840,8 +914,7 @@ def api_cache_evict(params: dict) -> tuple[bytes, int]:
     article_id = (params.get("id", [""])[0] or "").strip()
     if not article_id.isdigit():
         return json.dumps({"error": "invalid id"}).encode(), 400
-    with _article_cache_lock:
-        _article_cache.pop(int(article_id), None)
+    _evict_cached_article(int(article_id))
     return json.dumps({"ok": True}).encode(), 200
 
 
@@ -885,7 +958,7 @@ def _build_news_detail_response(article_id: int) -> bytes:
 def api_news_detail(article_id: int) -> bytes:
     """GET /api/news/<id> - single article with body_html (cached)."""
     with _article_cache_lock:
-        cached = _article_cache.get(article_id)
+        cached = _get_cached_article(article_id)
         if cached is not None:
             return cached
         event = _article_cache_inflight.get(article_id)
@@ -898,10 +971,9 @@ def api_news_detail(article_id: int) -> bytes:
 
     if not producer:
         event.wait()
-        with _article_cache_lock:
-            cached = _article_cache.get(article_id)
-            if cached is not None:
-                return cached
+        cached = _get_cached_article(article_id)
+        if cached is not None:
+            return cached
         return _build_news_detail_response(article_id)
 
     try:
@@ -912,9 +984,9 @@ def api_news_detail(article_id: int) -> bytes:
             except Exception:
                 data = {}
             if not data.get("error"):
-                _article_cache[article_id] = result
+                _store_cached_article(article_id, result)
             else:
-                _article_cache.pop(article_id, None)
+                _evict_cached_article(article_id)
             _article_cache_inflight.pop(article_id, None)
             event.set()
         return result

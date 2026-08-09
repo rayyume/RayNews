@@ -36,8 +36,7 @@ class _LockGuardedDict(dict):
         return super().__len__()
 
     def values(self):
-        assert self._lock.held
-        return super().values()
+        raise AssertionError("runtime stats must use the maintained byte counter")
 
 
 def test_refresh_runtime_stats_reads_cache_bytes_items_and_inflight_under_lock(
@@ -55,6 +54,7 @@ def test_refresh_runtime_stats_reads_cache_bytes_items_and_inflight_under_lock(
         "_article_cache_inflight",
         _LockGuardedDict(lock, {12: threading.Event()}),
     )
+    monkeypatch.setattr(refresh_server, "_article_cache_bytes", 8, raising=False)
 
     stats = refresh_server.refresh_runtime_stats()
 
