@@ -215,6 +215,17 @@ def _success(times):
         web_server._note_system_ai_success()
 
 
+def test_daily_summary_deduplication_recognizes_only_notified_incidents(
+    isolated_app_state_db,
+):
+    """Only the administrator-visible state 1 suppresses a daily alert."""
+    models.set_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY, "1")
+    assert web_server._system_ai_incident_is_notified() is True
+
+    models.set_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY, "2")
+    assert web_server._system_ai_incident_is_notified() is False
+
+
 def test_quiet_day_recovers_after_one_success_and_stability_window(
     isolated_app_state_db, alerts, monkeypatch
 ):

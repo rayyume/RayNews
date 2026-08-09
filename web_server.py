@@ -1735,6 +1735,16 @@ def _system_ai_incident_is_active() -> bool:
         return False
 
 
+def _system_ai_incident_is_notified() -> bool:
+    """Whether admins have already received the current system-AI alert."""
+    try:
+        return get_app_state(SYSTEM_AI_ALERTED_STATE_KEY) == "1"
+    except Exception as exc:
+        # A failure here must leave the independent daily-summary alert intact.
+        print(f"[daily-summary] system-AI state read failed: {exc}")
+        return False
+
+
 def _claim_system_ai_alert() -> str:
     """Atomically start a notified or cooldown-suppressed AI incident."""
     try:
@@ -2807,9 +2817,16 @@ def _broadcast_daily_summary(force: bool = False, bypass_window: bool = False) -
                 # for what was a manual experiment at an arbitrary hour.
                 return {"status": "error", "reason": reason}
             state = _record_daily_summary_failure(today_str, reason)
-            if int(state.get("given_up") or 0) and _claim_daily_summary_alert(today_str):
-                if _alert_admins_daily_summary_failure(today_str, state) == 0:
-                    _release_daily_summary_alert(today_str)
+            if int(state.get("given_up") or 0):
+                if _system_ai_incident_is_notified():
+                    print(
+                        f"[daily-summary] {today_str} gave up after "
+                        f"{int(state.get('attempts') or 0)} attempt(s); suppressed "
+                        "because the system-AI incident is already notified"
+                    )
+                elif _claim_daily_summary_alert(today_str):
+                    if _alert_admins_daily_summary_failure(today_str, state) == 0:
+                        _release_daily_summary_alert(today_str)
             return {"status": "error", "reason": reason,
                     "attempts": state.get("attempts"),
                     "given_up": bool(state.get("given_up"))}

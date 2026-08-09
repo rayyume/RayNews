@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import web_server
+import models
 
 BEIJING = dt.timezone(dt.timedelta(hours=8))
 TODAY = "2026-07-10"
@@ -32,6 +33,26 @@ def news_db(tmp_path, monkeypatch):
     monkeypatch.setattr(web_server, "_beijing_now",
                         lambda: dt.datetime(2026, 7, 10, 21, 3, tzinfo=BEIJING))
     return db_path
+
+
+@pytest.fixture
+def isolated_app_db(tmp_path, monkeypatch):
+    """Keep the system-AI incident state out of the developer's app DB."""
+    models.close_db()
+    monkeypatch.setattr(models, "DB_FILE", tmp_path / "app-state.db")
+    monkeypatch.setattr(
+        web_server,
+        "SYSTEM_AI_LAST_FAILURE_MARKER_FILE",
+        tmp_path / "system-ai-last-failure.marker",
+        raising=False,
+    )
+    models.get_db()
+    web_server._reset_system_ai_health()
+    try:
+        yield
+    finally:
+        web_server._reset_system_ai_health()
+        models.close_db()
 
 
 @pytest.fixture
@@ -64,8 +85,9 @@ def alerts(monkeypatch):
         {"id": 1, "role": "admin"}, {"id": 2, "role": "user"}, {"id": 3, "role": "admin"},
     ])
     monkeypatch.setattr(web_server, "_notify_user",
-                        lambda user_id, ntype, title, body: sent.append(
-                            {"user_id": user_id, "type": ntype, "title": title, "body": body}))
+                        lambda user_id, ntype, title, body: (sent.append(
+                            {"user_id": user_id, "type": ntype, "title": title, "body": body})
+                            or True))
     return sent
 
 
@@ -145,6 +167,79 @@ def test_undelivered_daily_summary_alert_releases_the_claim(
     assert state["given_up"] == 1
     assert state["alerted"] == 0
     assert web_server._claim_daily_summary_alert(TODAY) is True
+
+
+def test_same_daily_outage_sends_only_system_ai_alert(
+        isolated_app_db, news_db, clock, alerts, monkeypatch):
+    """A notified AI incident replaces, but does not erase, the daily alert."""
+    def failing(_date):
+        web_server._note_system_ai_failure("每日摘要", "401 invalid key")
+        web_server._set_daily_summary_error("AI 生成失败")
+        return None
+
+    monkeypatch.setattr(web_server, "_generate_daily_summary_global", failing)
+
+    for _ in range(1 + web_server.DAILY_SUMMARY_MAX_RETRIES):
+        web_server._broadcast_daily_summary(force=False, bypass_window=True)
+
+    types = [alert["type"] for alert in alerts]
+    assert types.count("system_ai_failed") == 2
+    assert "daily_summary_failed" not in types
+    assert web_server._get_daily_summary_failure(TODAY)["given_up"] == 1
+
+
+def test_daily_alert_remains_when_system_incident_was_cooldown_suppressed(
+        isolated_app_db, news_db, clock, alerts, monkeypatch):
+    """A muted cooldown incident must not suppress the daily-summary signal."""
+    def failing(_date):
+        web_server._note_system_ai_failure("每日摘要", "401 invalid key")
+        web_server._set_daily_summary_error("AI 生成失败")
+        return None
+
+    _failures_to_notify = web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD
+    for _ in range(_failures_to_notify):
+        web_server._note_system_ai_failure("自动摘要", "401 invalid key")
+    for _ in range(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD):
+        web_server._note_system_ai_success()
+    alerts.clear()
+
+    for _ in range(_failures_to_notify):
+        web_server._note_system_ai_failure("自动摘要", "401 invalid key")
+    assert models.get_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY) == "2"
+
+    monkeypatch.setattr(web_server, "_generate_daily_summary_global", failing)
+    for _ in range(1 + web_server.DAILY_SUMMARY_MAX_RETRIES):
+        web_server._broadcast_daily_summary(force=False, bypass_window=True)
+
+    assert [alert["user_id"] for alert in alerts] == [1, 3]
+    assert [alert["type"] for alert in alerts] == ["daily_summary_failed"] * 2
+    assert web_server._get_daily_summary_failure(TODAY)["given_up"] == 1
+
+
+def test_daily_alert_fails_open_when_system_ai_incident_read_fails(
+        isolated_app_db, news_db, clock, alerts, monkeypatch):
+    """A broken app-state read must not silence the independent daily alert."""
+    for _ in range(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD):
+        web_server._note_system_ai_failure("自动摘要", "401 invalid key")
+    assert models.get_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY) == "1"
+    alerts.clear()
+
+    def failing(_date):
+        web_server._set_daily_summary_error("AI 生成失败")
+        return None
+
+    monkeypatch.setattr(web_server, "_generate_daily_summary_global", failing)
+    monkeypatch.setattr(
+        web_server,
+        "get_app_state",
+        lambda _key: (_ for _ in ()).throw(sqlite3.OperationalError("state unavailable")),
+    )
+    for _ in range(1 + web_server.DAILY_SUMMARY_MAX_RETRIES):
+        web_server._broadcast_daily_summary(force=False, bypass_window=True)
+
+    assert [alert["user_id"] for alert in alerts] == [1, 3]
+    assert [alert["type"] for alert in alerts] == ["daily_summary_failed"] * 2
+    assert web_server._get_daily_summary_failure(TODAY)["given_up"] == 1
 
 
 def test_an_admin_ad_hoc_resend_does_not_seed_the_retry_chain(news_db, clock, alerts, monkeypatch):
