@@ -350,6 +350,22 @@ def write_fetch_progress(
         log.warning(f"Could not write fetch progress: {e}")
 
 
+def _commit_stream_batch(
+    conn: sqlite3.Connection,
+    batch: list[dict],
+    inserted_ids: list[int],
+    total_messages: int,
+) -> int:
+    """Commit one completed batch and immediately release its article payloads."""
+    batch_size = len(batch)
+    committed_ids = upsert_articles(conn, batch, sync_sources=False)
+    batch.clear()
+    inserted_ids.extend(committed_ids)
+    del committed_ids
+    write_fetch_progress(len(set(inserted_ids)), total_messages, inserted_ids)
+    return batch_size
+
+
 def migrate_news_json(conn: sqlite3.Connection):
     """Import existing news.json into SQLite if DB is empty."""
     count = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
@@ -809,21 +825,6 @@ def parse_datetime(dt_str: str) -> dict:
     }
 
 
-def _legacy_news_item_key(item: dict) -> str:
-    """Return a stable key for legacy news.json accumulation."""
-    article_id = item.get("id")
-    if article_id not in (None, ""):
-        return f"id:{article_id}"
-    telegraph_url = item.get("telegraph_url") or ""
-    if telegraph_url:
-        return f"url:{telegraph_url}"
-    return "fallback:{source}:{date}:{title}".format(
-        source=item.get("source", ""),
-        date=item.get("date", ""),
-        title=item.get("title", ""),
-    )
-
-
 # ─── Telegraph Fetching ──────────────────────────────────
 def _read_body_with_limit(resp, limit: int) -> str:
     chunks: list[bytes] = []
@@ -1280,10 +1281,10 @@ def run():
     # in small batches as they finish (rather than one big upsert at the end) so
     # readers can see new articles well before the whole cycle — including every
     # full-text fetch — has finished.
-    new_entries = []
     failed_count = 0
     stream_conn = None
     stream_batch = []
+    failed_batches: list[list[dict]] = []
     inserted_total = 0
     inserted_ids: list[int] = []
     last_commit_at = time.monotonic()
@@ -1292,39 +1293,74 @@ def run():
         stream_conn = init_db()
         stream_conn.execute("PRAGMA busy_timeout=30000")
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = {executor.submit(process_message, msg, msg["id"]): msg for msg in messages}
+            futures = {
+                executor.submit(process_message, msg, msg["id"]): int(msg["id"])
+                for msg in messages
+            }
             for future in as_completed(futures):
+                msg_id = futures.pop(future)
                 try:
                     entry = future.result()
-                    new_entries.append(entry)
                     stream_batch.append(entry)
+                    del entry
                 except Exception as e:
                     failed_count += 1
-                    msg_id = futures[future].get("id", "?")
                     log.error(f"Message processing failed (ID={msg_id}): {e}")
+                finally:
+                    # A completed Future owns its result. Removing both the mapping
+                    # entry and loop-local Future lets a committed batch's full body
+                    # become unreachable as soon as the batch list is cleared.
+                    del future
+                    del msg_id
                 if stream_batch and (
                     len(stream_batch) >= STREAM_BATCH_SIZE
                     or time.monotonic() - last_commit_at >= STREAM_BATCH_SECONDS
                 ):
-                    committed_ids = upsert_articles(
-                        stream_conn,
-                        stream_batch,
-                        sync_sources=False,
-                    )
-                    inserted_total += len(stream_batch)
-                    inserted_ids.extend(committed_ids)
-                    stream_batch = []
+                    try:
+                        inserted_total += _commit_stream_batch(
+                            stream_conn,
+                            stream_batch,
+                            inserted_ids,
+                            len(messages),
+                        )
+                    except Exception as e:
+                        stream_conn.rollback()
+                        failed_batches.append(stream_batch)
+                        stream_batch = []
+                        log.error(f"Streaming SQLite batch ingest failed: {e}")
                     last_commit_at = time.monotonic()
-                    write_fetch_progress(len(set(inserted_ids)), len(messages), inserted_ids)
+            del futures
         if stream_batch:
-            committed_ids = upsert_articles(
-                stream_conn,
-                stream_batch,
-                sync_sources=False,
-            )
-            inserted_total += len(stream_batch)
-            inserted_ids.extend(committed_ids)
-            write_fetch_progress(len(set(inserted_ids)), len(messages), inserted_ids)
+            try:
+                inserted_total += _commit_stream_batch(
+                    stream_conn,
+                    stream_batch,
+                    inserted_ids,
+                    len(messages),
+                )
+            except Exception as e:
+                stream_conn.rollback()
+                failed_batches.append(stream_batch)
+                stream_batch = []
+                log.error(f"Streaming SQLite trailing batch ingest failed: {e}")
+
+        # Retry only batches that did not commit. Provider work is complete and is
+        # never re-run; already committed batches were cleared and are absent here.
+        for failed_batch in failed_batches:
+            try:
+                inserted_total += _commit_stream_batch(
+                    stream_conn,
+                    failed_batch,
+                    inserted_ids,
+                    len(messages),
+                )
+            except Exception as e:
+                stream_conn.rollback()
+                log.error(f"Streaming SQLite batch retry failed: {e}")
+                failed_batch.clear()
+            finally:
+                del failed_batch
+        failed_batches.clear()
     except Exception as e:
         log.error(f"Streaming SQLite ingest failed: {e}")
     finally:
@@ -1357,22 +1393,14 @@ def run():
     # GET /sources and the drawer rely on. Runs before the news.json mirror below
     # so a slow/failed news.json write can never delay or block it.
     sqlite_sync_started_at = time.monotonic()
+    mirror_entries = None
     try:
         conn = init_db()
         migrate_news_json(conn)
-        if inserted_total < len(new_entries):
-            # The streaming loop above didn't manage to write every entry (a batch
-            # upsert failed mid-cycle, or the whole streaming block raised) —
-            # fall back to a full upsert so nothing collected in new_entries is
-            # lost, at the cost of the full-table source sync it also runs.
-            upsert_articles(conn, new_entries)
-        else:
-            # Common case: streaming already wrote every entry with
-            # sync_sources=False (see the comment above the streaming loop) — just
-            # run the one full-table source sync that upsert_articles(...,
-            # sync_sources=True) would otherwise needlessly repeat.
-            ensure_article_sources(conn)
-            conn.commit()
+        # Streaming batches always skip the expensive full-table source sync. Run
+        # that bookkeeping exactly once after both initial commits and batch retries.
+        ensure_article_sources(conn)
+        conn.commit()
         # Retry any recent articles whose Telegraph full text failed on arrival, so a
         # transient timeout/5xx doesn't leave them permanently downgraded to the excerpt
         # (see backfill_missing_fulltext()). Isolated in its own try so a backfill hiccup
@@ -1381,6 +1409,10 @@ def run():
             backfill_missing_fulltext(conn)
         except Exception as e:
             log.error(f"Full-text backfill failed: {e}")
+        mirror_entries = _load_recent_articles_for_mirror(
+            conn,
+            limit=NEWS_JSON_MIRROR_LIMIT,
+        )
         conn.close()
     except Exception as e:
         log.error(f"SQLite write failed: {e}")
@@ -1392,9 +1424,13 @@ def run():
     # articles are already durably in SQLite by this point regardless.
     news_json_started_at = time.monotonic()
     try:
-        write_news_json_mirror(new_entries)
+        if mirror_entries is not None:
+            write_news_json_mirror(mirror_entries)
     except Exception as e:
         log.error(f"news.json write failed: {e}")
+    finally:
+        if mirror_entries is not None:
+            mirror_entries.clear()
     log.info(f"[timing] news.json mirror write: {time.monotonic() - news_json_started_at:.2f}s")
 
     log.info(f"[timing] Fetch cycle total: {time.monotonic() - cycle_started_at:.2f}s")
@@ -1407,41 +1443,34 @@ def run():
 NEWS_JSON_MIRROR_LIMIT = 2000
 
 
-def write_news_json_mirror(new_entries: list[dict]) -> None:
+def _load_recent_articles_for_mirror(
+    conn: sqlite3.Connection,
+    limit: int = NEWS_JSON_MIRROR_LIMIT,
+) -> list[dict]:
+    """Load a stable, bounded recent-article snapshot for the legacy JSON mirror."""
+    rows = conn.execute(
+        """SELECT id, title, source, feed_source, origin_source, time, date,
+                  timestamp, thumb, has_full_content, telegraph_url, body_html,
+                  original_body_html, summary
+             FROM articles
+            ORDER BY timestamp DESC, id DESC
+            LIMIT ?""",
+        (max(0, int(limit)),),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def write_news_json_mirror(recent_entries: list[dict]) -> None:
     """Best-effort mirror of the most recent articles to news.json.
 
     Not on the critical path: only read back by migrate_news_json() to bootstrap
     SQLite when the DB is empty. Raises on failure (caller logs and moves on) —
     articles are already durably in SQLite by the time this runs regardless.
     """
-    # Merge with existing data (accumulate), then keep only the most recent
-    # NEWS_JSON_MIRROR_LIMIT — this file is a bootstrap fallback, not a growing
-    # archive, and serializing years of accumulated body_html on every cycle was
-    # pure wasted latency.
-    existing_data = {"items": []}
-    try:
-        if OUTPUT_FILE.exists():
-            existing_data = json.loads(OUTPUT_FILE.read_text(encoding="utf-8"))
-    except Exception as e:
-        log.warning(f"Could not read existing news.json: {e}")
-
-    # Build seen_ids from existing items to avoid duplicates
-    existing_ids = set()
-    for item in existing_data.get("items", []):
-        key = _legacy_news_item_key(item)
-        existing_ids.add(key)
-
-    # Only add truly new entries
-    for entry in new_entries:
-        key = _legacy_news_item_key(entry)
-        if key not in existing_ids:
-            existing_data["items"].append(entry)
-            existing_ids.add(key)
-
-    # Sort by timestamp descending, then truncate to the most recent slice
-    all_items = existing_data["items"]
-    all_items.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
-    all_items = all_items[:NEWS_JSON_MIRROR_LIMIT]
+    # The caller loads this bounded snapshot from SQLite after all writes/backfill.
+    # Do not merge the previous JSON contents: SQLite is authoritative and merging
+    # would retain stale or deleted articles outside its recent window.
+    all_items = list(recent_entries[:NEWS_JSON_MIRROR_LIMIT])
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     output = {
@@ -1454,7 +1483,7 @@ def write_news_json_mirror(new_entries: list[dict]) -> None:
     tmp = OUTPUT_FILE.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(output, ensure_ascii=False), encoding="utf-8")
     tmp.replace(OUTPUT_FILE)
-    log.info(f"Wrote {len(all_items)} entries to {OUTPUT_FILE} (added {len(new_entries)} new)")
+    log.info(f"Wrote {len(all_items)} SQLite entries to {OUTPUT_FILE}")
 
 
 if __name__ == "__main__":

@@ -734,14 +734,16 @@ def test_fetcher_tracks_failed_message_count_instead_of_boolean():
     assert "any_failed = True" not in source
 
 
-def test_legacy_news_json_deduplicates_by_stable_article_id():
+def test_news_json_mirror_is_loaded_from_sqlite_in_stable_recent_order():
     source = (ROOT / "fetcher.py").read_text(encoding="utf-8")
 
-    assert "def _legacy_news_item_key" in source
-    assert "_legacy_news_item_key(item)" in source
-    assert "_legacy_news_item_key(entry)" in source
-    assert "title + timestamp" not in source
-    assert "title|timestamp" not in source
+    loader = source[
+        source.index("def _load_recent_articles_for_mirror("):
+        source.index("def write_news_json_mirror(")
+    ]
+    assert "FROM articles" in loader
+    assert "ORDER BY timestamp DESC, id DESC" in loader
+    assert "LIMIT ?" in loader
 
 
 def test_fulltext_fetches_use_a_shorter_timeout_than_the_telegram_list_page():
@@ -763,16 +765,15 @@ def test_fulltext_fetches_use_a_shorter_timeout_than_the_telegram_list_page():
     assert "timeout=REQUEST_TIMEOUT" in telegram_page
 
 
-def test_run_skips_redundant_full_table_upsert_when_streaming_already_succeeded():
+def test_run_does_not_retain_or_repeat_all_streamed_entries_at_cycle_end():
     source = (ROOT / "fetcher.py").read_text(encoding="utf-8")
     run_block = source[source.index("def run():"):source.index("def write_news_json_mirror(")]
 
-    assert "if inserted_total < len(new_entries):" in run_block
-    assert "upsert_articles(conn, new_entries)" in run_block
+    assert "new_entries" not in run_block
+    assert "failed_batches.append(stream_batch)" in run_block
+    assert "for failed_batch in failed_batches:" in run_block
     assert "ensure_article_sources(conn)" in run_block
-    # The old unconditional end-of-cycle upsert_articles(conn, new_entries) (which
-    # re-scanned every article's sources every cycle) must be gone.
-    assert run_block.count("upsert_articles(conn, new_entries)") == 1
+    assert "upsert_articles(conn," not in run_block
 
 
 def test_news_json_write_is_best_effort_and_does_not_block_sqlite_sync():
@@ -780,7 +781,7 @@ def test_news_json_write_is_best_effort_and_does_not_block_sqlite_sync():
     run_block = source[source.index("def run():"):source.index("def write_news_json_mirror(")]
 
     sqlite_sync_at = run_block.index("sqlite_sync_started_at")
-    news_json_at = run_block.index("write_news_json_mirror(new_entries)")
+    news_json_at = run_block.index("write_news_json_mirror(mirror_entries)")
     assert sqlite_sync_at < news_json_at
     news_json_call_block = run_block[news_json_at - 60:news_json_at + 120]
     assert "try:" in news_json_call_block

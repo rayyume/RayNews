@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import time
+from collections import Counter
 
 import fetcher
 import refresh_server
@@ -99,6 +100,218 @@ def test_run_streams_articles_into_sqlite_in_batches_before_cycle_completes(tmp_
     assert progress["inserted_ids"] == [1, 2, 3, 4, 5, 6]
     assert progress["inserted"] == len(progress["inserted_ids"])
     assert progress["total_messages"] == 6
+
+
+def test_run_releases_large_completed_payloads_and_builds_bounded_mirror_from_sqlite(
+    tmp_path, monkeypatch
+):
+    _patch_fetcher_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(fetcher, "STREAM_BATCH_SIZE", 5)
+    monkeypatch.setattr(fetcher, "STREAM_BATCH_SECONDS", 100.0)
+    monkeypatch.setattr(fetcher, "NEWS_JSON_MIRROR_LIMIT", 3)
+
+    # This durable row is not part of the provider response. Seeing it in the mirror
+    # proves the mirror is rebuilt from SQLite rather than the just-processed payloads.
+    seed = fetcher.init_db()
+    fetcher.upsert_articles(
+        seed,
+        [
+            {
+                "id": 1000,
+                "title": "durable history",
+                "source": "s",
+                "feed_source": "s",
+                "timestamp": 1000,
+                "has_full_content": True,
+                "body_html": "historical body",
+            }
+        ],
+    )
+    seed.close()
+
+    messages = [{"id": article_id} for article_id in range(1, 101)]
+    monkeypatch.setattr(
+        fetcher,
+        "fetch_all_new_messages",
+        lambda state: (messages, 100),
+    )
+
+    released_ids = []
+
+    class TrackedEntry(dict):
+        def __del__(self):
+            released_ids.append(self["id"])
+
+    def process_message(msg, orig_id):
+        return TrackedEntry(
+            id=orig_id,
+            title=f"t{orig_id}",
+            source="s",
+            feed_source="s",
+            timestamp=orig_id,
+            has_full_content=True,
+            body_html=(f"body-{orig_id}-" + "x" * (128 * 1024)),
+        )
+
+    monkeypatch.setattr(fetcher, "process_message", process_message)
+
+    observed_future_values = []
+    observed_future_mapping = {}
+    real_as_completed = fetcher.as_completed
+
+    def observing_as_completed(futures):
+        observed_future_values.extend(futures.values())
+        observed_future_mapping["mapping"] = futures
+        # Iterate over a snapshot so production may remove completed futures from
+        # its own explicit mapping without invalidating this test iterator.
+        yield from real_as_completed(tuple(futures))
+
+    monkeypatch.setattr(fetcher, "as_completed", observing_as_completed)
+
+    committed_batch_refs = []
+    original_upsert = fetcher.upsert_articles
+
+    def tracking_upsert(conn, entries, sync_sources=True):
+        if not sync_sources:
+            committed_batch_refs.append(entries)
+        return original_upsert(conn, entries, sync_sources=sync_sources)
+
+    monkeypatch.setattr(fetcher, "upsert_articles", tracking_upsert)
+
+    mirror_snapshots = []
+    released_at_mirror = []
+
+    def capture_mirror(entries):
+        mirror_snapshots.append([dict(entry) for entry in entries])
+        released_at_mirror.extend(released_ids)
+
+    monkeypatch.setattr(fetcher, "write_news_json_mirror", capture_mirror)
+
+    fetcher.run()
+
+    assert observed_future_values == list(range(1, 101))
+    assert observed_future_mapping["mapping"] == {}
+    assert committed_batch_refs
+    assert all(batch == [] for batch in committed_batch_refs)
+    # Every provider-produced entry should already be unreachable at mirror time.
+    # The mirror rows are fresh bounded dicts loaded from SQLite.
+    assert sorted(released_at_mirror) == list(range(1, 101))
+    assert [[entry["id"] for entry in snapshot] for snapshot in mirror_snapshots] == [
+        [1000, 100, 99]
+    ]
+
+
+def test_run_retries_only_failed_stream_batch_once_without_refetching_provider(
+    tmp_path, monkeypatch
+):
+    _patch_fetcher_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(fetcher, "STREAM_BATCH_SIZE", 2)
+    monkeypatch.setattr(fetcher, "STREAM_BATCH_SECONDS", 100.0)
+
+    messages = [{"id": article_id} for article_id in range(1, 7)]
+    monkeypatch.setattr(
+        fetcher,
+        "fetch_all_new_messages",
+        lambda state: (messages, 6),
+    )
+    provider_calls = []
+
+    def process_message(msg, orig_id):
+        provider_calls.append(orig_id)
+        return {
+            "id": orig_id,
+            "title": f"t{orig_id}",
+            "source": "s",
+            "feed_source": "s",
+            "timestamp": orig_id,
+            "has_full_content": True,
+            "body_html": f"body {orig_id}",
+        }
+
+    monkeypatch.setattr(fetcher, "process_message", process_message)
+
+    upsert_calls = []
+    batch_refs = []
+    failed_once = False
+    original_upsert = fetcher.upsert_articles
+
+    def flaky_upsert(conn, entries, sync_sources=True):
+        nonlocal failed_once
+        ids = [entry["id"] for entry in entries]
+        if not sync_sources:
+            upsert_calls.append(ids)
+            batch_refs.append(entries)
+            if len(upsert_calls) == 2 and not failed_once:
+                failed_once = True
+                raise sqlite3.OperationalError("transient batch failure")
+        return original_upsert(conn, entries, sync_sources=sync_sources)
+
+    monkeypatch.setattr(fetcher, "upsert_articles", flaky_upsert)
+
+    ensure_sources_calls = []
+    original_ensure_sources = fetcher.ensure_article_sources
+
+    def tracking_ensure_sources(conn):
+        ensure_sources_calls.append(True)
+        return original_ensure_sources(conn)
+
+    monkeypatch.setattr(fetcher, "ensure_article_sources", tracking_ensure_sources)
+    backfill_calls = []
+    monkeypatch.setattr(
+        fetcher,
+        "backfill_missing_fulltext",
+        lambda conn: backfill_calls.append(True) or 0,
+    )
+
+    fetcher.run()
+
+    assert Counter(provider_calls) == Counter({article_id: 1 for article_id in range(1, 7)})
+    assert len(upsert_calls) == 4
+    assert sorted(article_id for batch in upsert_calls[:3] for article_id in batch) == list(
+        range(1, 7)
+    )
+    assert upsert_calls[3] == upsert_calls[1]
+    assert all(batch == [] for batch in batch_refs)
+    assert ensure_sources_calls == [True]
+    assert backfill_calls == [True]
+
+    conn = sqlite3.connect(fetcher.DB_FILE)
+    ids = [row[0] for row in conn.execute("SELECT id FROM articles ORDER BY id")]
+    conn.close()
+    assert ids == [1, 2, 3, 4, 5, 6]
+
+    progress = json.loads(fetcher.PROGRESS_FILE.read_text(encoding="utf-8"))
+    assert progress["inserted"] == 6
+    assert progress["inserted_ids"] == [1, 2, 3, 4, 5, 6]
+
+
+def test_load_recent_articles_for_mirror_has_stable_order_and_limit(
+    tmp_path, monkeypatch
+):
+    _patch_fetcher_paths(monkeypatch, tmp_path)
+    conn = fetcher.init_db()
+    fetcher.upsert_articles(
+        conn,
+        [
+            {
+                "id": article_id,
+                "title": f"t{article_id}",
+                "source": "s",
+                "feed_source": "s",
+                "timestamp": 100 if article_id <= 3 else 99,
+                "body_html": f"body {article_id}",
+            }
+            for article_id in range(1, 6)
+        ],
+    )
+
+    try:
+        rows = fetcher._load_recent_articles_for_mirror(conn, limit=4)
+    finally:
+        conn.close()
+
+    assert [row["id"] for row in rows] == [3, 2, 1, 5]
+    assert rows[0]["body_html"] == "body 3"
 
 
 def test_news_json_mirror_is_truncated_and_unindented(tmp_path, monkeypatch):
