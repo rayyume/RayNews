@@ -398,16 +398,17 @@ def test_run_fetcher_passes_current_job_id_to_fetcher_subprocess_env(monkeypatch
 
     captured_env = {}
 
-    class FakeResult:
-        returncode = 0
-        stdout = ""
-        stderr = ""
+    def fake_run_fetcher_process(env, timeout):
+        captured_env.update(env)
+        captured_env["timeout"] = timeout
+        return {
+            "returncode": 0,
+            "stdout_tail": "",
+            "stderr_tail": "",
+            "timed_out": False,
+        }
 
-    def fake_run(*args, **kwargs):
-        captured_env.update(kwargs.get("env") or {})
-        return FakeResult()
-
-    monkeypatch.setattr(refresh_server.subprocess, "run", fake_run)
+    monkeypatch.setattr(refresh_server, "_run_fetcher_process", fake_run_fetcher_process)
     monkeypatch.setattr(refresh_server.threading, "Thread", lambda **kwargs: type(
         "T", (), {"start": lambda self: None},
     )())
@@ -415,6 +416,46 @@ def test_run_fetcher_passes_current_job_id_to_fetcher_subprocess_env(monkeypatch
     refresh_server.run_fetcher()
 
     assert captured_env.get("FETCH_JOB_ID") == "job-xyz"
+    assert captured_env["timeout"] == 120
+
+
+def test_run_fetcher_maps_streaming_timeout_to_existing_error_contract(
+    caplog, monkeypatch
+):
+    monkeypatch.setattr(refresh_server, "acquire_lock", lambda: True)
+    monkeypatch.setattr(refresh_server, "release_lock", lambda: None)
+    monkeypatch.setattr(refresh_server, "article_id_snapshot", lambda: set())
+    monkeypatch.setattr(
+        refresh_server,
+        "LAST_FETCH_STATUS",
+        {
+            "status": "never",
+            "returncode": None,
+            "stdout": "",
+            "stderr": "",
+            "updated_at": None,
+        },
+    )
+    monkeypatch.setattr(
+        refresh_server,
+        "_run_fetcher_process",
+        lambda env, timeout: {
+            "returncode": None,
+            "stdout_tail": "before timeout",
+            "stderr_tail": "",
+            "timed_out": True,
+        },
+    )
+
+    body, status = refresh_server.run_fetcher(set())
+
+    assert status == 500
+    assert json.loads(body) == {"status": "error", "error": "timeout"}
+    assert refresh_server.LAST_FETCH_STATUS["status"] == "error"
+    assert refresh_server.LAST_FETCH_STATUS["returncode"] is None
+    assert refresh_server.LAST_FETCH_STATUS["stdout"] == ""
+    assert refresh_server.LAST_FETCH_STATUS["stderr"] == "timeout"
+    assert "Fetcher timed out after 120 seconds" in caplog.text
 
 
 def test_run_fetcher_reuses_baseline_and_returns_new_ids_to_warmup(monkeypatch):
@@ -429,12 +470,16 @@ def test_run_fetcher_reuses_baseline_and_returns_new_ids_to_warmup(monkeypatch):
 
     monkeypatch.setattr(refresh_server, "article_id_snapshot", after_snapshot)
 
-    class FakeResult:
-        returncode = 0
-        stdout = "fetch output"
-        stderr = "fetch warning"
-
-    monkeypatch.setattr(refresh_server.subprocess, "run", lambda *args, **kwargs: FakeResult())
+    monkeypatch.setattr(
+        refresh_server,
+        "_run_fetcher_process",
+        lambda env, timeout: {
+            "returncode": 0,
+            "stdout_tail": "fetch output",
+            "stderr_tail": "fetch warning",
+            "timed_out": False,
+        },
+    )
 
     class MaintenanceDb:
         def commit(self):

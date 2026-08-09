@@ -11,9 +11,10 @@ import urllib.parse
 import os
 import sqlite3
 import re
+import signal
 import time
 import uuid
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -42,6 +43,9 @@ DB_FILE = DATA_DIR / "news.db"
 NEWS_JSON_FILE = DATA_DIR / "news.json"
 STATE_FILE = DATA_DIR / "fetcher_state.json"
 PROGRESS_FILE = DATA_DIR / "fetch_progress.json"
+FETCHER_COMMAND = ("python3", "/app/fetcher.py")
+FETCHER_TAIL_MAX_LINES = 50
+FETCHER_TAIL_MAX_BYTES = 16 * 1024
 LAST_FETCH_STATUS = {
     "status": "never",
     "returncode": None,
@@ -252,6 +256,157 @@ def release_lock():
         pass
 
 
+def _truncate_utf8_tail(value: str, max_bytes: int) -> str:
+    encoded = value.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return value
+    return encoded[-max_bytes:].decode("utf-8", errors="ignore")
+
+
+class _BoundedLineTail:
+    """Retain the newest complete lines under both line and UTF-8 byte limits."""
+
+    def __init__(self, max_lines: int, max_bytes: int):
+        self._lines = deque(maxlen=max_lines)
+        self._bytes = 0
+        self._max_bytes = max_bytes
+
+    def append(self, line: str) -> None:
+        line = _truncate_utf8_tail(line, self._max_bytes)
+        if len(self._lines) == self._lines.maxlen:
+            oldest = self._lines.popleft()
+            self._bytes -= len(oldest.encode("utf-8"))
+            if self._lines:
+                self._bytes -= 1
+        if self._lines:
+            self._bytes += 1
+        self._lines.append(line)
+        self._bytes += len(line.encode("utf-8"))
+        while self._bytes > self._max_bytes:
+            oldest = self._lines.popleft()
+            self._bytes -= len(oldest.encode("utf-8"))
+            if self._lines:
+                self._bytes -= 1
+
+    def value(self) -> str:
+        return "\n".join(self._lines)
+
+
+def _read_fetcher_stream(pipe, stream: str, tail: _BoundedLineTail) -> None:
+    """Drain one binary subprocess pipe without ever buffering an unbounded line."""
+    line_tail = bytearray()
+    has_pending_line = False
+
+    def emit_line() -> None:
+        raw_line = bytes(line_tail)
+        if raw_line.endswith(b"\r"):
+            raw_line = raw_line[:-1]
+        line = raw_line.decode("utf-8", errors="replace")
+        line = _truncate_utf8_tail(line, FETCHER_TAIL_MAX_BYTES)
+        print(f"[fetcher:{stream}] {line}", flush=True)
+        tail.append(line)
+
+    try:
+        while True:
+            # BufferedReader.read(size) may wait for the entire size even when a
+            # flushed line is already available. One raw pipe read forwards each
+            # available chunk immediately instead.
+            chunk = os.read(pipe.fileno(), 4096)
+            if not chunk:
+                break
+            pieces = chunk.split(b"\n")
+            for index, piece in enumerate(pieces):
+                if piece:
+                    line_tail.extend(piece)
+                    excess = len(line_tail) - FETCHER_TAIL_MAX_BYTES
+                    if excess > 0:
+                        del line_tail[:excess]
+                    has_pending_line = True
+                if index < len(pieces) - 1:
+                    emit_line()
+                    line_tail.clear()
+                    has_pending_line = False
+        if has_pending_line:
+            emit_line()
+    finally:
+        pipe.close()
+
+
+def _run_fetcher_process(env, timeout):
+    """Stream a fetcher child process while retaining only a bounded output tail."""
+    process = subprocess.Popen(
+        FETCHER_COMMAND,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        start_new_session=True,
+    )
+    stdout_tail = _BoundedLineTail(FETCHER_TAIL_MAX_LINES, FETCHER_TAIL_MAX_BYTES)
+    stderr_tail = _BoundedLineTail(FETCHER_TAIL_MAX_LINES, FETCHER_TAIL_MAX_BYTES)
+    readers = [
+        threading.Thread(
+            target=_read_fetcher_stream,
+            args=(process.stdout, "stdout", stdout_tail),
+            name="fetcher-stdout-reader",
+            daemon=True,
+        ),
+        threading.Thread(
+            target=_read_fetcher_stream,
+            args=(process.stderr, "stderr", stderr_tail),
+            name="fetcher-stderr-reader",
+            daemon=True,
+        ),
+    ]
+    for reader in readers:
+        reader.start()
+    deadline = time.monotonic() + timeout
+    timed_out = False
+    try:
+        returncode = process.wait(timeout=max(0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        returncode = None
+
+    if not timed_out:
+        for reader in readers:
+            reader.join(timeout=max(0, deadline - time.monotonic()))
+        if any(reader.is_alive() for reader in readers):
+            # A descendant can inherit stdout/stderr after the direct child has
+            # exited. Treat open pipes past the deadline as a process timeout,
+            # rather than blocking forever in reader.join().
+            timed_out = True
+            returncode = None
+
+    if timed_out:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=0.25)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+        else:
+            # The direct child may have exited on SIGTERM while a descendant in
+            # the same group ignored it. Kill any such holder of our pipe FDs.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        for reader in readers:
+            reader.join()
+    return {
+        "returncode": returncode,
+        "stdout_tail": stdout_tail.value(),
+        "stderr_tail": stderr_tail.value(),
+        "timed_out": timed_out,
+    }
+
+
 def run_fetcher(existing_article_ids: set[int] | None = None):
     """Run fetcher.py and return the result dict + HTTP status code."""
     baseline = (
@@ -266,16 +421,24 @@ def run_fetcher(existing_article_ids: set[int] | None = None):
     try:
         log.info("Triggering fetcher...")
         env = {**os.environ, "FETCH_JOB_ID": CURRENT_FETCH_JOB_ID}
-        result = subprocess.run(
-            ["python3", "/app/fetcher.py"],
-            capture_output=True, text=True, timeout=120, env=env,
-        )
-        is_ok = result.returncode == 0
+        result = _run_fetcher_process(env, timeout=120)
+        if result["timed_out"]:
+            LAST_FETCH_STATUS.update({
+                "status": "error",
+                "returncode": None,
+                "stdout": "",
+                "stderr": "timeout",
+                "updated_at": int(time.time()),
+            })
+            log.warning("Fetcher timed out after 120 seconds")
+            body = json.dumps({"status": "error", "error": "timeout"}).encode()
+            return body, 500
+        is_ok = result["returncode"] == 0
         payload = {
             "status": "ok" if is_ok else "error",
-            "returncode": result.returncode,
-            "stdout": result.stdout[-300:],
-            "stderr": result.stderr[-300:],
+            "returncode": result["returncode"],
+            "stdout": result["stdout_tail"],
+            "stderr": result["stderr_tail"],
         }
         new_ids = []
         if is_ok:
@@ -285,12 +448,12 @@ def run_fetcher(existing_article_ids: set[int] | None = None):
         body = json.dumps(payload).encode()
         LAST_FETCH_STATUS.update({
             "status": "ok" if is_ok else "error",
-            "returncode": result.returncode,
-            "stdout": result.stdout[-300:],
-            "stderr": result.stderr[-300:],
+            "returncode": result["returncode"],
+            "stdout": result["stdout_tail"],
+            "stderr": result["stderr_tail"],
             "updated_at": int(time.time()),
         })
-        log.info(f"Fetcher done (exit={result.returncode})")
+        log.info(f"Fetcher done (exit={result['returncode']})")
         if is_ok:
             clear_article_cache()
             try:

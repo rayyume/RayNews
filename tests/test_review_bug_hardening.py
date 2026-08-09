@@ -1,7 +1,11 @@
+import concurrent.futures
 import json
+import os
+import signal
 import sqlite3
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -12,6 +16,261 @@ if str(ROOT) not in sys.path:
 
 import fetcher
 import refresh_server
+
+
+def _use_python_fetcher(monkeypatch, source):
+    monkeypatch.setattr(
+        refresh_server,
+        "FETCHER_COMMAND",
+        (sys.executable, "-u", "-c", source),
+    )
+
+
+def test_fetcher_process_streams_large_stdout_and_stderr_without_deadlock(
+    tmp_path, monkeypatch,
+):
+    release_path = tmp_path / "release-fetcher-output"
+    _use_python_fetcher(
+        monkeypatch,
+        f"""
+import pathlib
+import sys
+import time
+
+print("ready", flush=True)
+print("err-ready", file=sys.stderr, flush=True)
+release = pathlib.Path({str(release_path)!r})
+while not release.exists():
+    time.sleep(0.01)
+for number in range(5000):
+    print(f"stdout-{{number}}", flush=True)
+    print(f"stderr-{{number}}", file=sys.stderr, flush=True)
+""",
+    )
+    ready = threading.Event()
+    stderr_ready = threading.Event()
+    sink_lines = []
+
+    def sink(message, flush=False):
+        assert flush is True
+        sink_lines.append(message)
+        if message == "[fetcher:stdout] ready":
+            ready.set()
+        if message == "[fetcher:stderr] err-ready":
+            stderr_ready.set()
+
+    monkeypatch.setattr(refresh_server, "print", sink, raising=False)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            refresh_server._run_fetcher_process,
+            os.environ.copy(),
+            5,
+        )
+        try:
+            assert ready.wait(timeout=2), "first line was not forwarded in real time"
+            assert stderr_ready.wait(timeout=2), "stderr was not forwarded in real time"
+            assert not future.done(), "helper waited for exit before forwarding output"
+        finally:
+            release_path.write_text("continue", encoding="utf-8")
+        result = future.result(timeout=10)
+
+    assert result["returncode"] == 0
+    assert result["timed_out"] is False
+    assert result["stdout_tail"].splitlines() == [
+        f"stdout-{number}" for number in range(4950, 5000)
+    ]
+    assert result["stderr_tail"].splitlines() == [
+        f"stderr-{number}" for number in range(4950, 5000)
+    ]
+    assert len(result["stdout_tail"].encode("utf-8")) <= 16 * 1024
+    assert len(result["stderr_tail"].encode("utf-8")) <= 16 * 1024
+    assert "[fetcher:stdout] stdout-4999" in sink_lines
+    assert "[fetcher:stderr] stderr-4999" in sink_lines
+
+
+def test_fetcher_process_truncates_one_overlong_utf8_line_from_the_tail(
+    monkeypatch,
+):
+    _use_python_fetcher(
+        monkeypatch,
+        'print("BEGIN-" + ("界" * 10000) + "-END", flush=True)',
+    )
+    monkeypatch.setattr(refresh_server, "print", lambda *args, **kwargs: None, raising=False)
+
+    result = refresh_server._run_fetcher_process(os.environ.copy(), timeout=5)
+
+    assert result["returncode"] == 0
+    assert result["stdout_tail"].endswith("-END")
+    assert "BEGIN-" not in result["stdout_tail"]
+    assert len(result["stdout_tail"].splitlines()) == 1
+    assert len(result["stdout_tail"].encode("utf-8")) <= 16 * 1024
+
+
+def test_fetcher_process_applies_utf8_byte_limit_across_retained_lines(monkeypatch):
+    _use_python_fetcher(
+        monkeypatch,
+        'for number in range(30): print(f"{number:02d}-" + ("界" * 400))',
+    )
+    monkeypatch.setattr(refresh_server, "print", lambda *args, **kwargs: None, raising=False)
+
+    result = refresh_server._run_fetcher_process(os.environ.copy(), timeout=5)
+
+    retained_lines = result["stdout_tail"].splitlines()
+    assert retained_lines[-1].startswith("29-")
+    assert not any(line.startswith("00-") for line in retained_lines)
+    assert len(result["stdout_tail"].encode("utf-8")) <= 16 * 1024
+
+
+def test_fetcher_process_returns_nonzero_exit_code_and_both_tails(monkeypatch):
+    _use_python_fetcher(
+        monkeypatch,
+        'import sys; print("out"); print("err", file=sys.stderr); raise SystemExit(7)',
+    )
+    monkeypatch.setattr(refresh_server, "print", lambda *args, **kwargs: None, raising=False)
+
+    result = refresh_server._run_fetcher_process(os.environ.copy(), timeout=5)
+
+    assert result == {
+        "returncode": 7,
+        "stdout_tail": "out",
+        "stderr_tail": "err",
+        "timed_out": False,
+    }
+
+
+def test_fetcher_process_timeout_kills_process_group_and_reaps_child(
+    tmp_path, monkeypatch
+):
+    survived_path = tmp_path / "grandchild-survived"
+    grandchild_source = (
+        "import pathlib, signal, time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "time.sleep(2); "
+        f"pathlib.Path({str(survived_path)!r}).write_text('alive')"
+    )
+    _use_python_fetcher(
+        monkeypatch,
+        f"""
+import signal
+import subprocess
+import sys
+import time
+
+subprocess.Popen([sys.executable, "-c", {grandchild_source!r}])
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+print("started", flush=True)
+time.sleep(30)
+""",
+    )
+    monkeypatch.setattr(refresh_server, "print", lambda *args, **kwargs: None, raising=False)
+    real_popen = refresh_server.subprocess.Popen
+    children = []
+    popen_options = []
+
+    def recording_popen(*args, **kwargs):
+        popen_options.append(kwargs)
+        process = real_popen(*args, **kwargs)
+        children.append(process)
+        return process
+
+    monkeypatch.setattr(refresh_server.subprocess, "Popen", recording_popen)
+
+    started_at = time.monotonic()
+    try:
+        result = refresh_server._run_fetcher_process(os.environ.copy(), timeout=1)
+        elapsed = time.monotonic() - started_at
+    finally:
+        for child in children:
+            if child.poll() is None:
+                os.killpg(child.pid, signal.SIGKILL)
+                child.wait()
+
+    assert elapsed < 3
+    assert result == {
+        "returncode": None,
+        "stdout_tail": "started",
+        "stderr_tail": "",
+        "timed_out": True,
+    }
+    assert popen_options[0]["start_new_session"] is True
+    assert children[0].returncode is not None
+    with pytest.raises(ChildProcessError):
+        os.waitpid(children[0].pid, os.WNOHANG)
+    time.sleep(1.2)
+    assert not survived_path.exists(), "grandchild escaped the timed-out process group"
+
+
+def test_fetcher_process_does_not_deadlock_when_exited_parent_leaves_pipe_open(
+    tmp_path, monkeypatch
+):
+    ready_path = tmp_path / "grandchild-ready"
+    grandchild_source = (
+        "import pathlib, signal, time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"pathlib.Path({str(ready_path)!r}).write_text('ready'); "
+        "time.sleep(30)"
+    )
+    _use_python_fetcher(
+        monkeypatch,
+        f"""
+import pathlib
+import os
+import subprocess
+import sys
+import time
+
+subprocess.Popen([sys.executable, "-c", {grandchild_source!r}])
+ready = pathlib.Path({str(ready_path)!r})
+while not ready.exists():
+    time.sleep(0.01)
+print("parent-exit", flush=True)
+os._exit(0)
+""",
+    )
+    monkeypatch.setattr(refresh_server, "print", lambda *args, **kwargs: None, raising=False)
+    real_popen = refresh_server.subprocess.Popen
+    children = []
+
+    def recording_popen(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        children.append(process)
+        return process
+
+    monkeypatch.setattr(refresh_server.subprocess, "Popen", recording_popen)
+    finished = threading.Event()
+    result_box = {}
+
+    def run_helper():
+        try:
+            result_box["result"] = refresh_server._run_fetcher_process(
+                os.environ.copy(), timeout=0.5
+            )
+        finally:
+            finished.set()
+
+    worker = threading.Thread(target=run_helper, daemon=True)
+    started_at = time.monotonic()
+    worker.start()
+    try:
+        completed_without_deadlock = finished.wait(timeout=1.5)
+    finally:
+        for child in children:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        worker.join(timeout=2)
+
+    assert completed_without_deadlock
+    assert time.monotonic() - started_at < 3
+    assert children[0].returncode == 0
+    assert result_box["result"] == {
+        "returncode": None,
+        "stdout_tail": "parent-exit",
+        "stderr_tail": "",
+        "timed_out": True,
+    }
 
 
 class _TrackingLock:
