@@ -20,6 +20,20 @@ import web_server
 
 
 @pytest.fixture
+def isolated_app_state_db(tmp_path, monkeypatch):
+    """Run persisted incident assertions against an isolated app-state DB."""
+    import models
+
+    models.close_db()
+    monkeypatch.setattr(models, "DB_FILE", tmp_path / "system-ai-health.db")
+    models.get_db()
+    try:
+        yield
+    finally:
+        models.close_db()
+
+
+@pytest.fixture
 def alerts(monkeypatch):
     sent = []
     monkeypatch.setattr(web_server, "list_users", lambda: [
@@ -156,6 +170,30 @@ def test_cooldown_suppresses_a_second_system_ai_incident(alerts, monkeypatch):
     _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
     _success(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD)
 
+    assert alerts == []
+
+
+def test_cooldown_incident_stays_silent_and_closes_after_successes(
+    isolated_app_state_db, alerts, monkeypatch
+):
+    """A muted incident must be state 2, then close without a recovery email.
+
+    This catches both a regression that reuses state 1 during cooldown (which
+    would repeat the outage notice) and one that leaves state 2 stuck active.
+    """
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
+
+    _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
+    _success(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD)
+    alerts.clear()
+
+    _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
+    assert web_server.get_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY) == "2"
+    assert alerts == []
+
+    _success(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD)
+    assert web_server.get_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY) == "0"
     assert alerts == []
 
 
