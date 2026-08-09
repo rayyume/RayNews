@@ -5,12 +5,22 @@ log() {
 }
 
 log "=== Injecting custom HTML ==="
-if ! python3 - <<'PY'
+inject_output_file=""
+if ! inject_output_file=$(mktemp /tmp/raynews-inject.XXXXXX 2>/dev/null); then
+  log "ERROR: unable to allocate temporary output for custom HTML injection." >&2
+else
+  injector_status=0
+  python3 - <<'PY' >"$inject_output_file" 2>&1 || injector_status=$?
 import os
 import sys
 from pathlib import Path
 
-path = Path("/usr/share/nginx/html/index.html")
+path = Path(
+    os.environ.get(
+        "RAYNEWS_INJECT_HTML_PATH",
+        "/usr/share/nginx/html/index.html",
+    )
+)
 placeholder = "<!-- {{CUSTOM_HEAD_HTML}} -->"
 custom_head = os.environ.get("CUSTOM_HEAD_HTML", "").replace("\\n", "\n")
 footer_start = "<!-- {{CUSTOM_FOOTER_HTML_START}} -->"
@@ -28,11 +38,18 @@ try:
         html = html.replace(footer_start, "").replace(footer_end, "")
     path.write_text(html, encoding="utf-8")
 except Exception as exc:
-    print(f"[inject] Custom HTML injection failed: {exc}", file=sys.stderr)
+    print(f"Custom HTML injection failed: {exc}", file=sys.stderr)
     raise SystemExit(1)
 PY
-then
-  log "ERROR: custom HTML injection failed." >&2
+  if [ "$injector_status" -ne 0 ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      log "[inject] $line" >&2
+    done < "$inject_output_file"
+    log "ERROR: custom HTML injection failed (exit status $injector_status)." >&2
+  fi
+  if ! rm -f -- "$inject_output_file" 2>/dev/null; then
+    log "WARNING: unable to remove custom HTML injection output file." >&2
+  fi
 fi
 
 # Prepare the bind-mounted data directory before supervisor drops the Python

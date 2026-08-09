@@ -441,20 +441,46 @@ def test_entrypoint_shell_messages_use_log_and_errors_stay_on_stderr():
     assert all(line.endswith(">&2") for line in error_lines)
 
 
-def test_html_injection_failure_has_one_untimestamped_inject_message_and_outer_log():
+def test_html_injection_failure_timestamps_every_emitted_line(tmp_path):
     entrypoint = (ROOT / "entrypoint.sh").read_text(encoding="utf-8")
-    python_block = entrypoint.split("python3 - <<'PY'", 1)[1].split("\nPY\n", 1)[0]
-
-    assert "if ! python3 - <<'PY'" in entrypoint
-    assert 'print(f"[inject] Custom HTML injection failed: {exc}"' in python_block
-    assert "file=sys.stderr" in python_block
-    assert "raise SystemExit(1)" in python_block
-    assert "date" not in python_block
-    assert "datetime" not in python_block
-    assert "[entrypoint]" not in python_block
-
-    shell_after_python = entrypoint.split("\nPY\n", 1)[1]
-    assert re.search(
-        r'(?m)^\s*log "ERROR: custom HTML injection failed\." >&2$',
-        shell_after_python,
+    injection_start = entrypoint.index('log "=== Injecting custom HTML ==="')
+    injection_end = entrypoint.index(
+        "\n\n# Prepare the bind-mounted data directory",
+        injection_start,
     )
+    injection_section = entrypoint[injection_start:injection_end]
+    script = (
+        _extract_shell_function(ROOT / "entrypoint.sh", "log")
+        + "\n"
+        + injection_section
+    )
+    missing_html = tmp_path / "missing" / "index.html"
+
+    result = subprocess.run(
+        ["bash", "-eu", "-c", script],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "TZ": "UTC",
+            "RAYNEWS_INJECT_HTML_PATH": str(missing_html),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    lines = [
+        line
+        for stream in (result.stdout, result.stderr)
+        for line in stream.splitlines()
+        if line
+    ]
+    assert lines
+    timestamped = re.compile(
+        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00 \[entrypoint\] .+$"
+    )
+    assert all(timestamped.fullmatch(line) for line in lines), lines
+    assert "[inject] Custom HTML injection failed:" in result.stderr
+    assert str(missing_html) in result.stderr
+    assert "exit status 1" in result.stderr
