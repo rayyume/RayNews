@@ -1,6 +1,7 @@
 """Automatic translation must publish only after its gated cache commits."""
 
 import datetime as dt
+import json
 import sqlite3
 import threading
 import time
@@ -365,3 +366,172 @@ def test_auto_translation_publishes_marker_after_cache_without_body_writeback(mo
 
     assert [call[0] for call in calls] == ["article", "cache", "marker"]
     assert calls[0][3] is None
+
+
+def test_stale_translation_bypasses_content_cache_and_reuses_cached_title(monkeypatch):
+    translated = []
+    saved = []
+
+    class TranslationService:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def translate_full(self, html, *_args, **_kwargs):
+            translated.append(html)
+            return {"html": "<p>完整译文</p>", "title": ""}
+
+        def translate_title(self, *_args, **_kwargs):
+            raise AssertionError("cached title must be reused")
+
+    monkeypatch.setattr(web_server, "_SystemAIService", TranslationService)
+    monkeypatch.setattr(web_server, "_save_article_translation", lambda *_a, **_k: False)
+    monkeypatch.setattr(
+        web_server,
+        "_save_ai_result",
+        lambda article_id, **kwargs: saved.append(kwargs["translation"]) or True,
+    )
+    monkeypatch.setattr(web_server, "_publish_translation_update", lambda _id: None)
+
+    assert web_server._translate_article_background(
+        {
+            "id": 9,
+            "title": "中文标题",
+            "body_html": "<p>long English body</p>",
+            "translation": json.dumps({"title": "旧标题", "html": "<p>短译文</p>"}),
+            "translation_stale": True,
+            "translate_content_needed": True,
+            "translate_title_needed": False,
+        },
+        {"api_key": "key", "endpoint": "https://example.test", "model": "model"},
+    )
+
+    assert translated == ["<p>long English body</p>"]
+    assert json.loads(saved[0]) == {"title": "旧标题", "html": "<p>完整译文</p>"}
+
+
+def test_auto_translation_uses_remaining_batch_capacity_for_history(monkeypatch):
+    scanned = []
+    translated = []
+    config = {"user_id": 7, "auto_translate_content": True}
+
+    monkeypatch.setattr(web_server, "AUTO_TRANSLATION_BATCH_LIMIT", 3)
+    monkeypatch.setattr(web_server, "_get_auto_translation_users", lambda: [config])
+    monkeypatch.setattr(
+        web_server,
+        "_fetch_untranslated_articles",
+        lambda received, limit: [{"id": 1, "title": "today"}],
+    )
+
+    def fetch_stale(limit):
+        scanned.append(limit)
+        return [{"id": 2, "title": "old-2"}, {"id": 3, "title": "old-3"}]
+
+    monkeypatch.setattr(web_server, "_fetch_stale_translation_articles", fetch_stale)
+    monkeypatch.setattr(
+        web_server,
+        "_translate_article_background",
+        lambda article, received: translated.append(article["id"]) or True,
+    )
+
+    web_server._run_auto_translation_once()
+
+    assert scanned == [2]
+    assert translated == [1, 2, 3]
+
+
+def test_auto_translation_does_not_scan_history_when_today_fills_batch(monkeypatch):
+    scanned = []
+    translated = []
+    config = {"user_id": 7, "auto_translate_content": True}
+
+    monkeypatch.setattr(web_server, "AUTO_TRANSLATION_BATCH_LIMIT", 3)
+    monkeypatch.setattr(web_server, "_get_auto_translation_users", lambda: [config])
+    monkeypatch.setattr(
+        web_server,
+        "_fetch_untranslated_articles",
+        lambda received, limit: [
+            {"id": 1, "title": "today-1"},
+            {"id": 2, "title": "today-2"},
+            {"id": 3, "title": "today-3"},
+        ],
+    )
+    monkeypatch.setattr(
+        web_server,
+        "_fetch_stale_translation_articles",
+        lambda limit: scanned.append(limit) or [],
+    )
+    monkeypatch.setattr(
+        web_server,
+        "_translate_article_background",
+        lambda article, received: translated.append(article["id"]) or True,
+    )
+
+    web_server._run_auto_translation_once()
+
+    assert scanned == []
+    assert translated == [1, 2, 3]
+
+
+def test_auto_translation_deduplicates_ids_and_never_exceeds_batch(monkeypatch):
+    scanned = []
+    translated = []
+    config = {"user_id": 7, "auto_translate_content": True}
+
+    monkeypatch.setattr(web_server, "AUTO_TRANSLATION_BATCH_LIMIT", 3)
+    monkeypatch.setattr(web_server, "_get_auto_translation_users", lambda: [config])
+    monkeypatch.setattr(
+        web_server,
+        "_fetch_untranslated_articles",
+        lambda received, limit: [
+            {"id": 1, "title": "today"},
+            {"id": 1, "title": "today duplicate"},
+        ],
+    )
+
+    def fetch_stale(limit):
+        scanned.append(limit)
+        return [
+            {"id": 1, "title": "history duplicate"},
+            {"id": 2, "title": "old-2"},
+            {"id": 3, "title": "old-3"},
+            {"id": 4, "title": "old-4"},
+        ]
+
+    monkeypatch.setattr(web_server, "_fetch_stale_translation_articles", fetch_stale)
+    monkeypatch.setattr(
+        web_server,
+        "_translate_article_background",
+        lambda article, received: translated.append(article["id"]) or True,
+    )
+
+    web_server._run_auto_translation_once()
+
+    assert scanned == [2]
+    assert translated == [1, 2, 3]
+
+
+def test_stale_scan_failure_does_not_skip_today_translations(monkeypatch):
+    translated = []
+    config = {"user_id": 7, "auto_translate_content": True}
+
+    monkeypatch.setattr(web_server, "AUTO_TRANSLATION_BATCH_LIMIT", 3)
+    monkeypatch.setattr(web_server, "_get_auto_translation_users", lambda: [config])
+    monkeypatch.setattr(
+        web_server,
+        "_fetch_untranslated_articles",
+        lambda received, limit: [{"id": 1, "title": "today"}],
+    )
+
+    def fail_stale_scan(limit):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(web_server, "_fetch_stale_translation_articles", fail_stale_scan)
+    monkeypatch.setattr(
+        web_server,
+        "_translate_article_background",
+        lambda article, received: translated.append(article["id"]) or True,
+    )
+
+    web_server._run_auto_translation_once()
+
+    assert translated == [1]

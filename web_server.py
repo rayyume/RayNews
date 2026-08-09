@@ -3724,7 +3724,7 @@ def _translate_article_background(article: dict, config: dict) -> bool:
 
     if article.get("translate_content_needed"):
         cached_title, cached_html = _cached_full_translation(article.get("translation"))
-        if cached_html:
+        if cached_html and not article.get("translation_stale"):
             translated_html = cached_html
             if article.get("translate_title_needed"):
                 translated_title = cached_title or None
@@ -3773,7 +3773,31 @@ def _run_auto_translation_once():
         if not users:
             return
         for config in users:
-            articles = _fetch_untranslated_articles(config, AUTO_TRANSLATION_BATCH_LIMIT)
+            today = _fetch_untranslated_articles(config, AUTO_TRANSLATION_BATCH_LIMIT)
+            articles = []
+            seen_ids = set()
+            for article in today:
+                if article["id"] in seen_ids:
+                    continue
+                seen_ids.add(article["id"])
+                articles.append(article)
+                if len(articles) >= AUTO_TRANSLATION_BATCH_LIMIT:
+                    break
+
+            remaining = AUTO_TRANSLATION_BATCH_LIMIT - len(articles)
+            if remaining and config.get("auto_translate_content"):
+                try:
+                    historical = _fetch_stale_translation_articles(remaining)
+                except Exception as exc:
+                    print(f"[auto-translate] stale scan failed: {exc}")
+                    historical = []
+                for article in historical:
+                    if article["id"] in seen_ids:
+                        continue
+                    seen_ids.add(article["id"])
+                    articles.append(article)
+                    if len(articles) >= AUTO_TRANSLATION_BATCH_LIMIT:
+                        break
             if not articles:
                 continue
             print(f"[auto-translate] User {config['user_id']}: translating {len(articles)} article(s)")
