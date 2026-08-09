@@ -1,7 +1,8 @@
 FROM python:3.12-slim
 
-# Install nginx and process supervision
-RUN apt-get update && apt-get install -y --no-install-recommends nginx supervisor util-linux && \
+# Install nginx, process supervision, and timezone data for log timestamps
+ENV TZ=Asia/Shanghai
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nginx supervisor util-linux tzdata && \
     rm -rf /var/lib/apt/lists/* && \
     rm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-available/default
 
@@ -10,7 +11,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 
-COPY fetcher.py refresh_server.py models.py auth.py auth_validation.py web_server.py ai_service.py source_categories.py news_schema.py image_cache.py image_validation.py notifier.py network_safety.py runtime_memory.py .
+COPY fetcher.py refresh_server.py models.py auth.py auth_validation.py web_server.py ai_service.py source_categories.py news_schema.py image_cache.py image_validation.py notifier.py network_safety.py runtime_memory.py timestamp_filter.py .
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY nginx-security-headers.conf /etc/nginx/snippets/raynews-security-headers.conf
 COPY supervisord.conf /app/supervisord.conf
