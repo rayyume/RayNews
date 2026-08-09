@@ -130,7 +130,9 @@ def test_scheduler_retries_only_when_the_interval_has_elapsed(news_db, clock, al
 
 
 def test_gives_up_after_three_retries_and_alerts_every_admin_once(
-        news_db, clock, alerts, monkeypatch):
+        isolated_app_db, news_db, clock, alerts, monkeypatch):
+    models.set_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY, "0")
+    assert models.get_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY) == "0"
     _fail_generation(monkeypatch, "系统 AI 未配置或未启用（管理员设置 → 服务端 API）")
 
     web_server._send_daily_summaries()
@@ -154,9 +156,17 @@ def test_gives_up_after_three_retries_and_alerts_every_admin_once(
 
 
 def test_undelivered_daily_summary_alert_releases_the_claim(
-        news_db, clock, alerts, monkeypatch):
+        isolated_app_db, news_db, clock, alerts, monkeypatch):
+    models.set_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY, "0")
+    assert models.get_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY) == "0"
     _fail_generation(monkeypatch)
-    monkeypatch.setattr(web_server, "_notify_admins", lambda *args, **kwargs: 0)
+    notification_attempts = []
+
+    def undelivered(*args, **kwargs):
+        notification_attempts.append((args, kwargs))
+        return 0
+
+    monkeypatch.setattr(web_server, "_notify_admins", undelivered)
 
     web_server._send_daily_summaries()
     for _ in range(web_server.DAILY_SUMMARY_MAX_RETRIES):
@@ -166,6 +176,7 @@ def test_undelivered_daily_summary_alert_releases_the_claim(
     state = web_server._get_daily_summary_failure(TODAY)
     assert state["given_up"] == 1
     assert state["alerted"] == 0
+    assert len(notification_attempts) == 1
     assert web_server._claim_daily_summary_alert(TODAY) is True
 
 
