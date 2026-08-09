@@ -61,6 +61,44 @@ def _empty_cgroup_memory() -> dict[str, str | int | None]:
     }
 
 
+def _kernel_breakdown(
+    stat: dict[str, int], prefix: str = ""
+) -> tuple[int | None, int | None]:
+    """Return aggregate kernel and slab values from one cgroup stat namespace.
+
+    A kernel aggregate already includes all kernel components, so it wins when
+    the kernel provides it.  Older cgroup layouts expose only non-overlapping
+    components instead.  In that case, count the slab aggregate once, or (only
+    when it is absent) its reclaimable and unreclaimable subcomponents.
+    """
+    slab = stat.get(f"{prefix}slab")
+    if slab is None:
+        slab_components = [
+            stat.get(f"{prefix}slab_reclaimable"),
+            stat.get(f"{prefix}slab_unreclaimable"),
+        ]
+        known_slab_components = [
+            value for value in slab_components if value is not None
+        ]
+        if known_slab_components:
+            slab = sum(known_slab_components)
+
+    aggregate = stat.get(f"{prefix}kernel")
+    if aggregate is not None:
+        return aggregate, slab
+
+    component_values = [
+        stat.get(f"{prefix}kernel_stack"),
+        stat.get(f"{prefix}pagetables"),
+        stat.get(f"{prefix}percpu"),
+        stat.get(f"{prefix}sock"),
+        stat.get(f"{prefix}vmalloc"),
+        slab,
+    ]
+    known_components = [value for value in component_values if value is not None]
+    return (sum(known_components) if known_components else None), slab
+
+
 def _v1_root(root: Path) -> Path:
     """Support callers passing either the memory controller or cgroup root."""
     if (root / "memory.usage_in_bytes").exists():
@@ -75,14 +113,15 @@ def read_cgroup_memory(root: str | Path = "/sys/fs/cgroup") -> dict[str, str | i
 
     if (root_path / "memory.current").exists():
         stat = _read_key_values(root_path / "memory.stat")
+        kernel_bytes, slab_bytes = _kernel_breakdown(stat)
         result.update(
             version="v2",
             current_bytes=_read_int(root_path / "memory.current"),
             max_bytes=_read_int(root_path / "memory.max"),
             anon_bytes=stat.get("anon"),
             file_bytes=stat.get("file"),
-            kernel_bytes=stat.get("kernel"),
-            slab_bytes=stat.get("slab"),
+            kernel_bytes=kernel_bytes,
+            slab_bytes=slab_bytes,
         )
         return result
 
@@ -91,14 +130,33 @@ def read_cgroup_memory(root: str | Path = "/sys/fs/cgroup") -> dict[str, str | i
         return result
 
     stat = _read_key_values(v1_root / "memory.stat")
+    has_total_kernel_data = any(
+        key.startswith("total_")
+        and key
+        in {
+            "total_kernel",
+            "total_kernel_stack",
+            "total_pagetables",
+            "total_percpu",
+            "total_sock",
+            "total_vmalloc",
+            "total_slab",
+            "total_slab_reclaimable",
+            "total_slab_unreclaimable",
+        }
+        for key in stat
+    )
+    kernel_bytes, slab_bytes = _kernel_breakdown(
+        stat, "total_" if has_total_kernel_data else ""
+    )
     result.update(
         version="v1",
         current_bytes=_read_int(v1_root / "memory.usage_in_bytes"),
         max_bytes=_read_int(v1_root / "memory.limit_in_bytes"),
         anon_bytes=stat.get("total_rss", stat.get("rss")),
         file_bytes=stat.get("total_cache", stat.get("cache")),
-        kernel_bytes=stat.get("total_kernel_stack", stat.get("kernel_stack")),
-        slab_bytes=stat.get("total_slab", stat.get("slab")),
+        kernel_bytes=kernel_bytes,
+        slab_bytes=slab_bytes,
     )
     return result
 

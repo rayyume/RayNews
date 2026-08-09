@@ -46,9 +46,87 @@ def test_read_cgroup_memory_falls_back_to_v1_stat_fields(tmp_path):
         "max_bytes": 4096,
         "anon_bytes": 1024,
         "file_bytes": 512,
-        "kernel_bytes": 128,
+        "kernel_bytes": 384,
         "slab_bytes": 256,
     }
+
+
+def test_read_cgroup_memory_derives_v2_kernel_from_non_overlapping_components(
+    tmp_path,
+):
+    _write(tmp_path / "memory.current", "1000\n")
+    _write(tmp_path / "memory.max", "2000\n")
+    _write(
+        tmp_path / "memory.stat",
+        "anon 500\n"
+        "file 300\n"
+        "kernel_stack 10\n"
+        "pagetables 20\n"
+        "percpu 30\n"
+        "sock 40\n"
+        "vmalloc 50\n"
+        "slab 60\n"
+        "slab_reclaimable 25\n"
+        "slab_unreclaimable 35\n",
+    )
+
+    memory = runtime_memory.read_cgroup_memory(tmp_path)
+
+    assert memory["kernel_bytes"] == 210
+    assert memory["slab_bytes"] == 60
+
+
+def test_read_cgroup_memory_uses_v1_total_kernel_components_before_local_ones(
+    tmp_path,
+):
+    _write(tmp_path / "memory.usage_in_bytes", "2048\n")
+    _write(tmp_path / "memory.limit_in_bytes", "4096\n")
+    _write(
+        tmp_path / "memory.stat",
+        "rss 999\n"
+        "cache 888\n"
+        "kernel_stack 777\n"
+        "pagetables 666\n"
+        "slab 555\n"
+        "total_rss 1024\n"
+        "total_cache 512\n"
+        "total_kernel_stack 128\n"
+        "total_pagetables 64\n"
+        "total_percpu 32\n"
+        "total_sock 16\n"
+        "total_vmalloc 8\n"
+        "total_slab 256\n"
+        "total_slab_reclaimable 100\n"
+        "total_slab_unreclaimable 156\n",
+    )
+
+    memory = runtime_memory.read_cgroup_memory(tmp_path)
+
+    assert memory["anon_bytes"] == 1024
+    assert memory["file_bytes"] == 512
+    assert memory["kernel_bytes"] == 504
+    assert memory["slab_bytes"] == 256
+
+
+def test_read_cgroup_memory_prefers_aggregate_kernel_counters(tmp_path):
+    v2_root = tmp_path / "v2"
+    _write(v2_root / "memory.current", "100\n")
+    _write(v2_root / "memory.max", "200\n")
+    _write(
+        v2_root / "memory.stat",
+        "kernel 900\nkernel_stack 10\npagetables 20\nslab 30\n",
+    )
+
+    v1_root = tmp_path / "v1"
+    _write(v1_root / "memory.usage_in_bytes", "100\n")
+    _write(v1_root / "memory.limit_in_bytes", "200\n")
+    _write(
+        v1_root / "memory.stat",
+        "total_kernel 800\ntotal_kernel_stack 10\ntotal_pagetables 20\ntotal_slab 30\n",
+    )
+
+    assert runtime_memory.read_cgroup_memory(v2_root)["kernel_bytes"] == 900
+    assert runtime_memory.read_cgroup_memory(v1_root)["kernel_bytes"] == 800
 
 
 def test_read_process_memory_skips_unreadable_or_disappeared_pids_and_sorts_rss(
