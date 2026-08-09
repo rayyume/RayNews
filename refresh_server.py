@@ -9,6 +9,7 @@ import logging
 import threading
 import urllib.parse
 import os
+import queue
 import sqlite3
 import re
 import signal
@@ -46,6 +47,10 @@ PROGRESS_FILE = DATA_DIR / "fetch_progress.json"
 FETCHER_COMMAND = ("python3", "/app/fetcher.py")
 FETCHER_TAIL_MAX_LINES = 50
 FETCHER_TAIL_MAX_BYTES = 16 * 1024
+FETCHER_LOG_QUEUE_MAX_LINES = 128
+FETCHER_LOG_JOIN_SECONDS = 0.1
+FETCHER_READER_JOIN_SECONDS = 0.25
+FETCHER_TERM_GRACE_SECONDS = 0.25
 LAST_FETCH_STATUS = {
     "status": "never",
     "returncode": None,
@@ -292,19 +297,95 @@ class _BoundedLineTail:
         return "\n".join(self._lines)
 
 
-def _read_fetcher_stream(pipe, stream: str, tail: _BoundedLineTail) -> None:
+class _FetcherLogQueue(queue.Queue):
+    """Bound queued logs while reserving each stream's newest line."""
+
+    def __init__(self, maxsize: int):
+        super().__init__(maxsize=maxsize)
+        self._latest = {}
+        self._latest_lock = threading.Lock()
+
+    def offer(self, stream: str, sequence: int, line: str) -> None:
+        with self._latest_lock:
+            self._latest[stream] = (sequence, line)
+        item = (stream, sequence, line)
+        try:
+            self.put_nowait(item)
+            return
+        except queue.Full:
+            pass
+        try:
+            self.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            self.put_nowait(item)
+        except queue.Full:
+            pass
+
+    def latest_items(self):
+        with self._latest_lock:
+            return list(self._latest.items())
+
+
+def _forward_fetcher_logs(
+    log_queue: _FetcherLogQueue,
+    stop_event: threading.Event,
+) -> None:
+    """Best-effort log forwarding isolated from the pipe-drain threads."""
+    forwarded_sequences = {}
+
+    def forward(item) -> None:
+        stream, sequence, line = item
+        try:
+            print(f"[fetcher:{stream}] {line}", flush=True)
+        except BaseException:
+            # Logging must never change the fetcher's exit status or stop drain.
+            pass
+        forwarded_sequences[stream] = max(
+            sequence,
+            forwarded_sequences.get(stream, -1),
+        )
+
+    while True:
+        try:
+            item = log_queue.get(timeout=0.05)
+        except queue.Empty:
+            if stop_event.is_set():
+                break
+            continue
+        if item is None:
+            break
+        forward(item)
+
+    # Queue eviction is allowed to keep pipe draining nonblocking, but make a
+    # final best-effort attempt for the newest line from each stream.
+    for stream, (sequence, line) in log_queue.latest_items():
+        if sequence > forwarded_sequences.get(stream, -1):
+            forward((stream, sequence, line))
+
+
+def _read_fetcher_stream(
+    pipe,
+    stream: str,
+    tail: _BoundedLineTail,
+    log_queue: _FetcherLogQueue,
+) -> None:
     """Drain one binary subprocess pipe without ever buffering an unbounded line."""
     line_tail = bytearray()
     has_pending_line = False
+    sequence = 0
 
     def emit_line() -> None:
+        nonlocal sequence
         raw_line = bytes(line_tail)
         if raw_line.endswith(b"\r"):
             raw_line = raw_line[:-1]
         line = raw_line.decode("utf-8", errors="replace")
         line = _truncate_utf8_tail(line, FETCHER_TAIL_MAX_BYTES)
-        print(f"[fetcher:{stream}] {line}", flush=True)
         tail.append(line)
+        log_queue.offer(stream, sequence, line)
+        sequence += 1
 
     try:
         while True:
@@ -332,79 +413,154 @@ def _read_fetcher_stream(pipe, stream: str, tail: _BoundedLineTail) -> None:
         pipe.close()
 
 
+def _fetcher_exited_without_reaping(process) -> bool:
+    """Return whether the direct child exited while leaving it waitable.
+
+    Keeping the session leader unreaped reserves its PID/PGID until all
+    process-group signals are complete, so a later killpg() cannot target a
+    group that reused the fetcher's numeric ID.
+    """
+    return os.waitid(
+        os.P_PID,
+        process.pid,
+        os.WEXITED | os.WNOHANG | os.WNOWAIT,
+    ) is not None
+
+
+def _wait_for_fetcher_exit_without_reaping(process, deadline: float) -> bool:
+    while True:
+        if _fetcher_exited_without_reaping(process):
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.01, remaining))
+
+
+def _terminate_fetcher_group_before_reap(process) -> None:
+    """Finish group termination before releasing the leader PID with wait()."""
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    time.sleep(FETCHER_TERM_GRACE_SECONDS)
+    try:
+        # Always follow TERM with KILL while the unreaped leader still protects
+        # the PGID. This also removes TERM-ignoring descendants after the direct
+        # child has already exited.
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait()
+
+
+def _close_fetcher_pipes(process) -> None:
+    for pipe in (process.stdout, process.stderr):
+        if pipe is not None and not pipe.closed:
+            pipe.close()
+
+
+def _join_fetcher_readers(readers) -> None:
+    """Bound cleanup even if a pipe reader fails to observe EOF promptly."""
+    for reader in readers:
+        reader.join(timeout=FETCHER_READER_JOIN_SECONDS)
+
+
 def _run_fetcher_process(env, timeout):
     """Stream a fetcher child process while retaining only a bounded output tail."""
-    process = subprocess.Popen(
-        FETCHER_COMMAND,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=env,
-        start_new_session=True,
-    )
-    stdout_tail = _BoundedLineTail(FETCHER_TAIL_MAX_LINES, FETCHER_TAIL_MAX_BYTES)
-    stderr_tail = _BoundedLineTail(FETCHER_TAIL_MAX_LINES, FETCHER_TAIL_MAX_BYTES)
-    readers = [
-        threading.Thread(
+    process = None
+    log_queue = None
+    log_stop = None
+    readers = []
+    started_readers = []
+    log_forwarder = None
+    log_forwarder_started = False
+    reaped = False
+    try:
+        process = subprocess.Popen(
+            FETCHER_COMMAND,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            start_new_session=True,
+        )
+        stdout_tail = _BoundedLineTail(
+            FETCHER_TAIL_MAX_LINES,
+            FETCHER_TAIL_MAX_BYTES,
+        )
+        stderr_tail = _BoundedLineTail(
+            FETCHER_TAIL_MAX_LINES,
+            FETCHER_TAIL_MAX_BYTES,
+        )
+        log_queue = _FetcherLogQueue(maxsize=FETCHER_LOG_QUEUE_MAX_LINES)
+        log_stop = threading.Event()
+        readers.append(threading.Thread(
             target=_read_fetcher_stream,
-            args=(process.stdout, "stdout", stdout_tail),
+            args=(process.stdout, "stdout", stdout_tail, log_queue),
             name="fetcher-stdout-reader",
             daemon=True,
-        ),
-        threading.Thread(
+        ))
+        readers.append(threading.Thread(
             target=_read_fetcher_stream,
-            args=(process.stderr, "stderr", stderr_tail),
+            args=(process.stderr, "stderr", stderr_tail, log_queue),
             name="fetcher-stderr-reader",
             daemon=True,
-        ),
-    ]
-    for reader in readers:
-        reader.start()
-    deadline = time.monotonic() + timeout
-    timed_out = False
-    try:
-        returncode = process.wait(timeout=max(0, deadline - time.monotonic()))
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        returncode = None
-
-    if not timed_out:
+        ))
+        log_forwarder = threading.Thread(
+            target=_forward_fetcher_logs,
+            args=(log_queue, log_stop),
+            name="fetcher-log-forwarder",
+            daemon=True,
+        )
+        log_forwarder.start()
+        log_forwarder_started = True
         for reader in readers:
-            reader.join(timeout=max(0, deadline - time.monotonic()))
-        if any(reader.is_alive() for reader in readers):
-            # A descendant can inherit stdout/stderr after the direct child has
-            # exited. Treat open pipes past the deadline as a process timeout,
-            # rather than blocking forever in reader.join().
-            timed_out = True
+            reader.start()
+            started_readers.append(reader)
+
+        deadline = time.monotonic() + timeout
+        timed_out = not _wait_for_fetcher_exit_without_reaping(process, deadline)
+        if not timed_out:
+            for reader in started_readers:
+                reader.join(timeout=max(0, deadline - time.monotonic()))
+            timed_out = any(reader.is_alive() for reader in started_readers)
+
+        if timed_out:
+            # Signal the entire session before wait() releases the leader PID.
+            _terminate_fetcher_group_before_reap(process)
+            reaped = True
             returncode = None
-
-    if timed_out:
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            process.wait(timeout=0.25)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait()
         else:
-            # The direct child may have exited on SIGTERM while a descendant in
-            # the same group ignored it. Kill any such holder of our pipe FDs.
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        for reader in readers:
-            reader.join()
-    return {
-        "returncode": returncode,
-        "stdout_tail": stdout_tail.value(),
-        "stderr_tail": stderr_tail.value(),
-        "timed_out": timed_out,
-    }
+            returncode = process.wait()
+            reaped = True
+
+        return {
+            "returncode": returncode,
+            "stdout_tail": stdout_tail.value(),
+            "stderr_tail": stderr_tail.value(),
+            "timed_out": timed_out,
+        }
+    except BaseException:
+        if process is not None and not reaped:
+            _terminate_fetcher_group_before_reap(process)
+            reaped = True
+        raise
+    finally:
+        if process is not None:
+            _join_fetcher_readers(started_readers)
+            _close_fetcher_pipes(process)
+            _join_fetcher_readers(
+                [reader for reader in started_readers if reader.is_alive()]
+            )
+            if log_stop is not None:
+                log_stop.set()
+            if log_queue is not None:
+                try:
+                    log_queue.put_nowait(None)
+                except queue.Full:
+                    pass
+            if log_forwarder_started:
+                log_forwarder.join(timeout=FETCHER_LOG_JOIN_SECONDS)
 
 
 def run_fetcher(existing_article_ids: set[int] | None = None):

@@ -139,6 +139,162 @@ def test_fetcher_process_returns_nonzero_exit_code_and_both_tails(monkeypatch):
     }
 
 
+def test_fetcher_process_sink_exception_does_not_stop_drain_or_tail(
+    monkeypatch,
+):
+    _use_python_fetcher(
+        monkeypatch,
+        'for number in range(5000): print(f"line-{number}", flush=True)',
+    )
+    sink_called = threading.Event()
+    thread_failures = []
+
+    def raising_sink(*args, **kwargs):
+        sink_called.set()
+        raise OSError("sink closed")
+
+    monkeypatch.setattr(refresh_server, "print", raising_sink, raising=False)
+    monkeypatch.setattr(
+        threading,
+        "excepthook",
+        lambda args: thread_failures.append(args.exc_value),
+    )
+
+    result = refresh_server._run_fetcher_process(os.environ.copy(), timeout=5)
+
+    assert sink_called.wait(timeout=1)
+    assert result["returncode"] == 0
+    assert result["timed_out"] is False
+    assert result["stdout_tail"].splitlines() == [
+        f"line-{number}" for number in range(4950, 5000)
+    ]
+    assert thread_failures == []
+
+
+def test_fetcher_process_timeout_does_not_wait_for_blocked_sink(monkeypatch):
+    _use_python_fetcher(
+        monkeypatch,
+        'import time; print("blocked", flush=True); time.sleep(30)',
+    )
+    sink_entered = threading.Event()
+    release_sink = threading.Event()
+    finished = threading.Event()
+    result_box = {}
+
+    def blocking_sink(*args, **kwargs):
+        sink_entered.set()
+        release_sink.wait(timeout=10)
+
+    monkeypatch.setattr(refresh_server, "print", blocking_sink, raising=False)
+
+    def run_helper():
+        try:
+            result_box["result"] = refresh_server._run_fetcher_process(
+                os.environ.copy(), timeout=0.3
+            )
+        finally:
+            finished.set()
+
+    worker = threading.Thread(target=run_helper, daemon=True)
+    worker.start()
+    assert sink_entered.wait(timeout=2)
+    try:
+        completed_without_sink = finished.wait(timeout=1.5)
+    finally:
+        release_sink.set()
+        worker.join(timeout=2)
+
+    assert completed_without_sink
+    assert result_box["result"] == {
+        "returncode": None,
+        "stdout_tail": "blocked",
+        "stderr_tail": "",
+        "timed_out": True,
+    }
+
+
+@pytest.mark.parametrize("failure_stage", ["construct", "start"])
+def test_fetcher_process_thread_setup_failure_kills_and_reaps_child(
+    failure_stage, tmp_path, monkeypatch
+):
+    survived_path = tmp_path / f"fetcher-survived-{failure_stage}"
+    _use_python_fetcher(
+        monkeypatch,
+        (
+            "import pathlib, signal, time; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "time.sleep(1); "
+            f"pathlib.Path({str(survived_path)!r}).write_text('alive')"
+        ),
+    )
+    monkeypatch.setattr(refresh_server, "print", lambda *args, **kwargs: None, raising=False)
+    real_popen = refresh_server.subprocess.Popen
+    real_thread = refresh_server.threading.Thread
+    children = []
+    created_threads = []
+    log_controls = []
+
+    def recording_popen(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        children.append(process)
+        return process
+
+    def failing_thread(*args, **kwargs):
+        name = kwargs.get("name")
+        if failure_stage == "construct" and name == "fetcher-stderr-reader":
+            raise RuntimeError("thread construct failed")
+        thread = real_thread(*args, **kwargs)
+        created_threads.append(thread)
+        if name == "fetcher-log-forwarder":
+            log_controls.append(kwargs["args"])
+        if failure_stage == "start" and name == "fetcher-stderr-reader":
+            def fail_start():
+                raise RuntimeError("thread start failed")
+
+            thread.start = fail_start
+        return thread
+
+    monkeypatch.setattr(refresh_server.subprocess, "Popen", recording_popen)
+    monkeypatch.setattr(refresh_server.threading, "Thread", failing_thread)
+    needed_test_cleanup = False
+
+    try:
+        with pytest.raises(RuntimeError, match=f"thread {failure_stage} failed"):
+            refresh_server._run_fetcher_process(os.environ.copy(), timeout=5)
+    finally:
+        if children and children[0].returncode is None:
+            needed_test_cleanup = True
+            try:
+                os.killpg(children[0].pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            children[0].wait()
+        for pipe_name in ("stdout", "stderr"):
+            if children:
+                pipe = getattr(children[0], pipe_name)
+                if pipe and not pipe.closed:
+                    pipe.close()
+        for log_queue, stop_event in log_controls:
+            stop_event.set()
+            try:
+                log_queue.put_nowait(None)
+            except Exception:
+                pass
+        for thread in created_threads:
+            if thread.ident is not None:
+                thread.join(timeout=1)
+
+    assert needed_test_cleanup is False
+    assert children[0].returncode is not None
+    assert children[0].stdout.closed
+    assert children[0].stderr.closed
+    with pytest.raises(ChildProcessError):
+        os.waitpid(children[0].pid, os.WNOHANG)
+    assert all(not thread.is_alive() for thread in created_threads)
+    time.sleep(1.1)
+    assert not survived_path.exists()
+
+
 def test_fetcher_process_timeout_kills_process_group_and_reaps_child(
     tmp_path, monkeypatch
 ):
@@ -230,14 +386,28 @@ os._exit(0)
     )
     monkeypatch.setattr(refresh_server, "print", lambda *args, **kwargs: None, raising=False)
     real_popen = refresh_server.subprocess.Popen
+    real_killpg = refresh_server.os.killpg
     children = []
+    lifecycle_events = []
 
     def recording_popen(*args, **kwargs):
         process = real_popen(*args, **kwargs)
+        real_wait = process.wait
+
+        def recording_wait(*wait_args, **wait_kwargs):
+            lifecycle_events.append("wait")
+            return real_wait(*wait_args, **wait_kwargs)
+
+        process.wait = recording_wait
         children.append(process)
         return process
 
+    def recording_killpg(pid, sig):
+        lifecycle_events.append(f"signal:{sig}")
+        return real_killpg(pid, sig)
+
     monkeypatch.setattr(refresh_server.subprocess, "Popen", recording_popen)
+    monkeypatch.setattr(refresh_server.os, "killpg", recording_killpg)
     finished = threading.Event()
     result_box = {}
 
@@ -257,7 +427,7 @@ os._exit(0)
     finally:
         for child in children:
             try:
-                os.killpg(child.pid, signal.SIGKILL)
+                real_killpg(child.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
         worker.join(timeout=2)
@@ -265,6 +435,9 @@ os._exit(0)
     assert completed_without_deadlock
     assert time.monotonic() - started_at < 3
     assert children[0].returncode == 0
+    assert lifecycle_events.index(f"signal:{signal.SIGTERM}") < lifecycle_events.index(
+        f"signal:{signal.SIGKILL}"
+    ) < lifecycle_events.index("wait")
     assert result_box["result"] == {
         "returncode": None,
         "stdout_tail": "parent-exit",
