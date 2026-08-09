@@ -20,7 +20,7 @@ services:
 
       # 核心运行配置
       - PYTHONUNBUFFERED=1
-      - TZ=Asia/Shanghai
+      - TZ=${TZ:-Asia/Shanghai}
       - DATA_DIR=/app/data
       - RAYNEWS_SECRET=${RAYNEWS_SECRET:-}
       - RAYNEWS_TOKEN_EXPIRY_SECONDS=${RAYNEWS_TOKEN_EXPIRY_SECONDS:-2592000}

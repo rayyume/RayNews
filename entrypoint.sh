@@ -1,8 +1,13 @@
 #!/bin/bash
 
-echo "=== Injecting custom HTML ==="
-python3 - <<'PY'
+log() {
+  printf '%s [entrypoint] %s\n' "$(date --iso-8601=seconds)" "$*"
+}
+
+log "=== Injecting custom HTML ==="
+if ! python3 - <<'PY'
 import os
+import sys
 from pathlib import Path
 
 path = Path("/usr/share/nginx/html/index.html")
@@ -23,31 +28,35 @@ try:
         html = html.replace(footer_start, "").replace(footer_end, "")
     path.write_text(html, encoding="utf-8")
 except Exception as exc:
-    print(f"[entrypoint] Custom HTML injection failed: {exc}")
+    print(f"[inject] Custom HTML injection failed: {exc}", file=sys.stderr)
+    raise SystemExit(1)
 PY
+then
+  log "ERROR: custom HTML injection failed." >&2
+fi
 
 # Prepare the bind-mounted data directory before supervisor drops the Python
 # services to the fixed application account. Never fall back to running them as
 # root when the host mount cannot be repaired.
 if ! install -d -o raynews -g raynews /app/data; then
-  echo "[entrypoint] ERROR: unable to create or set ownership on /app/data for raynews." >&2
+  log "ERROR: unable to create or set ownership on /app/data for raynews." >&2
   exit 1
 fi
 if ! chown -R raynews:raynews /app/data; then
-  echo "[entrypoint] ERROR: unable to grant raynews ownership of /app/data." >&2
+  log "ERROR: unable to grant raynews ownership of /app/data." >&2
   exit 1
 fi
 if ! /usr/sbin/runuser -u raynews -- /bin/sh -c '
   probe=$(/usr/bin/mktemp /app/data/.raynews-write-probe.XXXXXX) || exit 1
   /bin/rm -f -- "$probe"
 '; then
-  echo "[entrypoint] ERROR: /app/data is not writable by raynews after permission setup." >&2
+  log "ERROR: /app/data is not writable by raynews after permission setup." >&2
   exit 1
 fi
 
 # ─── Configuration warning ─────────────────────────────
 if [ -z "$TELEGRAM_CHANNEL_URL" ] && { [ -z "$TELEGRAM_CHANNEL" ] || [ "$TELEGRAM_CHANNEL" = "your_channel" ]; }; then
-  echo "[entrypoint] WARNING: TELEGRAM_CHANNEL_URL/TELEGRAM_CHANNEL is not configured; fetcher will not read the intended Telegram source."
+  log "WARNING: TELEGRAM_CHANNEL_URL/TELEGRAM_CHANNEL is not configured; fetcher will not read the intended Telegram source."
 fi
 
 # ─── Start services ────────────────────────────────────

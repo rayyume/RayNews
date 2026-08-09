@@ -1,4 +1,5 @@
 import configparser
+from datetime import datetime, timedelta
 import json
 import os
 from pathlib import Path
@@ -21,6 +22,16 @@ def _supervisor_config():
     config = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
     config.read(ROOT / "supervisord.conf", encoding="utf-8")
     return config
+
+
+def _extract_shell_function(path, name):
+    source = path.read_text(encoding="utf-8")
+    match = re.search(
+        rf"(?ms)^{re.escape(name)}\(\) \{{\n.*?^\}}$",
+        source,
+    )
+    assert match is not None, f"missing shell function: {name}"
+    return match.group(0)
 
 
 def _injected_wrapper_command(filter_command, producer_command, *, grace=0.1):
@@ -376,3 +387,74 @@ def test_nginx_logs_use_the_timestamp_filter_contract():
 
     assert "access_log /dev/stdout raynews;" in nginx_conf
     assert "error_log /dev/stderr warn;" in nginx_conf
+
+
+def test_compose_defaults_container_timezone_to_asia_shanghai():
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+
+    assert "- TZ=${TZ:-Asia/Shanghai}" in compose
+
+
+def test_entrypoint_log_uses_the_configured_timezone_offset():
+    log_function = _extract_shell_function(ROOT / "entrypoint.sh", "log")
+
+    for timezone, expected_offset in (
+        ("UTC", timedelta(0)),
+        ("Asia/Shanghai", timedelta(hours=8)),
+    ):
+        result = subprocess.run(
+            ["bash", "-c", f'{log_function}\nlog "timezone test"'],
+            cwd=ROOT,
+            env={**os.environ, "TZ": timezone},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        assert result.returncode == 0
+        timestamp, prefix, message = result.stdout.rstrip("\n").split(" ", 2)
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        assert parsed.utcoffset() == expected_offset
+        assert prefix == "[entrypoint]"
+        assert message == "timezone test"
+        assert result.stderr == ""
+
+
+def test_entrypoint_shell_messages_use_log_and_errors_stay_on_stderr():
+    entrypoint = (ROOT / "entrypoint.sh").read_text(encoding="utf-8")
+    shell_before_python = entrypoint.split("python3 - <<'PY'", 1)[0]
+    shell_after_python = entrypoint.split("\nPY\n", 1)[1]
+    shell_messages = shell_before_python + shell_after_python
+
+    assert not re.search(r"(?m)^\s*echo\b", shell_messages)
+    assert 'log "=== Injecting custom HTML ==="' in shell_messages
+    assert re.search(r'(?m)^\s*log "\[entrypoint\] WARNING:', shell_messages) is None
+    assert re.search(r'(?m)^\s*log "WARNING:', shell_messages)
+
+    error_lines = [
+        line.strip()
+        for line in shell_messages.splitlines()
+        if "ERROR:" in line
+    ]
+    assert error_lines
+    assert all(line.startswith('log "ERROR:') for line in error_lines)
+    assert all(line.endswith(">&2") for line in error_lines)
+
+
+def test_html_injection_failure_has_one_untimestamped_inject_message_and_outer_log():
+    entrypoint = (ROOT / "entrypoint.sh").read_text(encoding="utf-8")
+    python_block = entrypoint.split("python3 - <<'PY'", 1)[1].split("\nPY\n", 1)[0]
+
+    assert "if ! python3 - <<'PY'" in entrypoint
+    assert 'print(f"[inject] Custom HTML injection failed: {exc}"' in python_block
+    assert "file=sys.stderr" in python_block
+    assert "raise SystemExit(1)" in python_block
+    assert "date" not in python_block
+    assert "datetime" not in python_block
+    assert "[entrypoint]" not in python_block
+
+    shell_after_python = entrypoint.split("\nPY\n", 1)[1]
+    assert re.search(
+        r'(?m)^\s*log "ERROR: custom HTML injection failed\." >&2$',
+        shell_after_python,
+    )
