@@ -5462,6 +5462,12 @@ def _memory_monitor_loop(
 
 
 _memory_monitor_thread: threading.Thread | None = None
+_memory_monitor_thread_lock = threading.Lock()
+
+
+def _announce_memory_monitor_started() -> None:
+    """Keep lifecycle notices outside the reserved JSON sample prefix."""
+    print("[memory-monitor] Background memory monitor thread started")
 
 
 def _start_memory_monitor_thread(*, thread_factory=None):
@@ -5469,17 +5475,24 @@ def _start_memory_monitor_thread(*, thread_factory=None):
     global _memory_monitor_thread
     if not MEMORY_MONITOR_ENABLED:
         return None
-    if _memory_monitor_thread is not None:
-        return _memory_monitor_thread
-
     factory = thread_factory or threading.Thread
-    _memory_monitor_thread = factory(
-        target=_memory_monitor_loop,
-        daemon=True,
-        name="memory-monitor",
-    )
-    _memory_monitor_thread.start()
-    return _memory_monitor_thread
+    with _memory_monitor_thread_lock:
+        if (
+            _memory_monitor_thread is not None
+            and _memory_monitor_thread.is_alive()
+        ):
+            return _memory_monitor_thread
+
+        candidate = factory(
+            target=_memory_monitor_loop,
+            daemon=True,
+            name="memory-monitor",
+        )
+        # Publish only a successfully started thread. If start() raises, the
+        # previous None/dead registration remains retryable.
+        candidate.start()
+        _memory_monitor_thread = candidate
+        return candidate
 
 
 def _count_scalar(conn, sql: str) -> int:
@@ -6616,7 +6629,7 @@ if __name__ == "__main__":
     print("[source-classify] Background source classification thread started")
     print("[image-cache] Existing favorite image pinning thread started")
     if MEMORY_MONITOR_ENABLED:
-        print("[memory] Background memory monitor thread started")
+        _announce_memory_monitor_started()
     port = int(os.environ.get("WEB_PORT", 8082))
     print(f"[web] RayNews Web Server listening on {port}")
     # threaded=True is passed explicitly for clarity, but it's already Flask's default

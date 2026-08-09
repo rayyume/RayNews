@@ -1,5 +1,6 @@
 import json
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -365,6 +366,25 @@ def test_memory_monitor_loop_continues_after_sample_error_and_prints_compact_jso
     assert '"note":"中文 value"' in lines[1]
 
 
+def test_every_reserved_memory_log_line_has_a_json_payload(capsys):
+    with pytest.raises(StopIteration):
+        web_server._memory_monitor_loop(
+            sample_once=lambda: {"warning": False, "processes": []},
+            sleep_fn=lambda _interval: (_ for _ in ()).throw(StopIteration),
+            interval_seconds=10,
+        )
+    web_server._announce_memory_monitor_started()
+
+    lines = capsys.readouterr().out.splitlines()
+    memory_lines = [line for line in lines if line.startswith("[memory] ")]
+
+    assert len(memory_lines) == 1
+    assert [
+        json.loads(line.removeprefix("[memory] ")) for line in memory_lines
+    ] == [{"warning": False, "processes": []}]
+    assert "[memory-monitor] Background memory monitor thread started" in lines
+
+
 def test_memory_monitor_environment_defaults_and_invalid_values(monkeypatch):
     for name in (
         "MEMORY_MONITOR_ENABLED",
@@ -414,6 +434,9 @@ def test_memory_monitor_start_is_idempotent_and_creates_one_daemon(monkeypatch):
         def start(self):
             self.started = True
 
+        def is_alive(self):
+            return self.started
+
     monkeypatch.setattr(web_server, "MEMORY_MONITOR_ENABLED", True)
     monkeypatch.setattr(web_server, "_memory_monitor_thread", None)
 
@@ -441,3 +464,116 @@ def test_memory_monitor_start_does_nothing_when_disabled(monkeypatch):
         web_server._start_memory_monitor_thread(thread_factory=unexpected_thread)
         is None
     )
+
+
+def test_memory_monitor_concurrent_starters_create_and_start_only_one_daemon(
+    monkeypatch,
+):
+    callers_ready = threading.Barrier(3)
+    factories_ready = threading.Barrier(2)
+    created = []
+    started = []
+    results = []
+    errors = []
+
+    class FakeThread:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.alive = False
+            created.append(self)
+            try:
+                # Without a starter lock both factories arrive, making the old
+                # check-then-start race deterministic. With the lock, this times
+                # out once while the other caller waits outside the critical section.
+                factories_ready.wait(timeout=0.25)
+            except threading.BrokenBarrierError:
+                pass
+
+        def start(self):
+            self.alive = True
+            started.append(self)
+
+        def is_alive(self):
+            return self.alive
+
+    def start_monitor():
+        callers_ready.wait()
+        try:
+            results.append(
+                web_server._start_memory_monitor_thread(thread_factory=FakeThread)
+            )
+        except Exception as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr(web_server, "MEMORY_MONITOR_ENABLED", True)
+    monkeypatch.setattr(web_server, "_memory_monitor_thread", None)
+    callers = [threading.Thread(target=start_monitor) for _ in range(2)]
+    for caller in callers:
+        caller.start()
+    callers_ready.wait()
+    for caller in callers:
+        caller.join(timeout=2)
+
+    assert all(not caller.is_alive() for caller in callers)
+    assert errors == []
+    assert len(created) == 1
+    assert started == created
+    assert results == [created[0], created[0]]
+
+
+def test_memory_monitor_replaces_a_registered_thread_that_is_not_alive(monkeypatch):
+    class DeadThread:
+        def is_alive(self):
+            return False
+
+    class ReplacementThread:
+        def __init__(self, **_kwargs):
+            self.alive = False
+
+        def start(self):
+            self.alive = True
+
+        def is_alive(self):
+            return self.alive
+
+    dead = DeadThread()
+    monkeypatch.setattr(web_server, "MEMORY_MONITOR_ENABLED", True)
+    monkeypatch.setattr(web_server, "_memory_monitor_thread", dead)
+
+    replacement = web_server._start_memory_monitor_thread(
+        thread_factory=ReplacementThread
+    )
+
+    assert replacement is not dead
+    assert replacement.is_alive()
+    assert web_server._memory_monitor_thread is replacement
+
+
+def test_memory_monitor_start_failure_does_not_poison_registration(monkeypatch):
+    class FailingThread:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("cannot start")
+
+    class WorkingThread:
+        def __init__(self, **_kwargs):
+            self.alive = False
+
+        def start(self):
+            self.alive = True
+
+        def is_alive(self):
+            return self.alive
+
+    monkeypatch.setattr(web_server, "MEMORY_MONITOR_ENABLED", True)
+    monkeypatch.setattr(web_server, "_memory_monitor_thread", None)
+
+    with pytest.raises(RuntimeError, match="cannot start"):
+        web_server._start_memory_monitor_thread(thread_factory=FailingThread)
+
+    assert web_server._memory_monitor_thread is None
+    retry = web_server._start_memory_monitor_thread(thread_factory=WorkingThread)
+    assert retry.is_alive()
+    assert web_server._memory_monitor_thread is retry
