@@ -203,6 +203,56 @@ def test_wrapper_stays_alive_with_term_ignoring_members_until_group_kill(tmp_pat
                 os.kill(pid, signal.SIGKILL)
 
 
+def test_wrapper_does_not_kill_remaining_member_after_peer_exits_on_term(tmp_path):
+    producer_pid = tmp_path / "producer.pid"
+    filter_pid = tmp_path / "filter.pid"
+    producer = tmp_path / "producer.py"
+    producer.write_text(
+        "import os, pathlib, signal, sys, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+        "while True: time.sleep(1)\n",
+        encoding="utf-8",
+    )
+    cooperative_filter = tmp_path / "cooperative_filter.py"
+    cooperative_filter.write_text(
+        "import os, pathlib, sys\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+        "sys.stdin.buffer.read()\n",
+        encoding="utf-8",
+    )
+    process = subprocess.Popen(
+        _injected_wrapper_command(
+            [sys.executable, "-u", cooperative_filter, filter_pid],
+            [sys.executable, "-u", producer, producer_pid],
+        ),
+        cwd=ROOT,
+        start_new_session=True,
+    )
+
+    producer_process_id = None
+    try:
+        _wait_for_path(producer_pid, process)
+        _wait_for_path(filter_pid, process)
+        producer_process_id = int(producer_pid.read_text(encoding="utf-8"))
+
+        process.send_signal(signal.SIGTERM)
+        time.sleep(0.3)
+
+        assert process.poll() is None
+        assert _pid_is_running(producer_process_id)
+
+        os.killpg(process.pid, signal.SIGKILL)
+        assert process.wait(timeout=3) == -signal.SIGKILL
+        _wait_until_not_running(producer_process_id)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=3)
+        if producer_process_id is not None and _pid_is_running(producer_process_id):
+            os.kill(producer_process_id, signal.SIGKILL)
+
+
 def test_producer_nonzero_exit_wins_after_stdout_and_stderr_are_drained():
     producer = (
         "import sys; "

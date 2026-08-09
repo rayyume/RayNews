@@ -131,6 +131,13 @@ def run_pipeline(
                 return _finish_with_forwarded_signal(received_signal, result)
 
             if filter_returncode is not None:
+                if received_signal is not None:
+                    # During Supervisor shutdown, a peer exiting on the
+                    # forwarded signal must not trigger our fail-fast grace
+                    # timer. Keep owning any TERM-ignoring member so
+                    # Supervisor can reach its process-group SIGKILL path.
+                    time.sleep(_POLL_INTERVAL_SECONDS)
+                    continue
                 _terminate_and_reap(producer, term_grace)
                 return _finish_with_forwarded_signal(
                     received_signal, filter_returncode
