@@ -79,6 +79,44 @@ from source_categories import (
     update_source_category, extract_domains_from_html,
 )
 
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _env_int(name: str, default: int, *, minimum: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)).strip())
+    except (AttributeError, TypeError, ValueError):
+        value = default
+    return max(minimum, value)
+
+
+def _memory_monitor_config_from_env() -> dict[str, bool | int]:
+    """Parse monitor settings without allowing invalid values or a hot loop."""
+    return {
+        "enabled": _env_bool("MEMORY_MONITOR_ENABLED", True),
+        "interval_seconds": _env_int(
+            "MEMORY_MONITOR_INTERVAL_SECONDS", 60, minimum=10
+        ),
+        "warn_mb": _env_int("MEMORY_WARN_MB", 768, minimum=1),
+    }
+
+
+_MEMORY_MONITOR_CONFIG = _memory_monitor_config_from_env()
+MEMORY_MONITOR_ENABLED = bool(_MEMORY_MONITOR_CONFIG["enabled"])
+MEMORY_MONITOR_INTERVAL_SECONDS = int(_MEMORY_MONITOR_CONFIG["interval_seconds"])
+MEMORY_WARN_MB = int(_MEMORY_MONITOR_CONFIG["warn_mb"])
+MEMORY_WARN_BYTES = MEMORY_WARN_MB * 1024 * 1024
+
 AUTO_SUMMARY_BATCH_LIMIT = int(os.environ.get("AUTO_SUMMARY_BATCH_LIMIT", "20"))
 AUTO_SUMMARY_INTERVAL_SECONDS = int(os.environ.get("AUTO_SUMMARY_INTERVAL_SECONDS", "30"))
 AUTO_TRANSLATION_BATCH_LIMIT = int(os.environ.get("AUTO_TRANSLATION_BATCH_LIMIT", "5"))
@@ -5352,6 +5390,98 @@ def _refresh_runtime_stats(http_get=None) -> dict:
         return {"status": "unavailable"}
 
 
+def _memory_sample_once() -> dict:
+    """Collect one bounded memory sample without propagating reader failures."""
+    sampled_at = int(time.time())
+    try:
+        snapshot = runtime_memory_snapshot()
+        cgroup = snapshot["cgroup"]
+        processes = sorted(
+            snapshot["processes"],
+            key=lambda process: -(process.get("rss_bytes") or 0),
+        )[:5]
+        current_bytes = cgroup.get("current_bytes")
+        warning = (
+            isinstance(current_bytes, int)
+            and not isinstance(current_bytes, bool)
+            and current_bytes >= MEMORY_WARN_BYTES
+        )
+    except Exception as exc:
+        return {
+            "sampled_at": sampled_at,
+            "warning": False,
+            "error": f"snapshot unavailable: {exc}",
+        }
+
+    sample = {
+        "sampled_at": sampled_at,
+        "warning": warning,
+        "cgroup": cgroup,
+        "processes": processes,
+    }
+    try:
+        refresh_stats = _refresh_runtime_stats()
+        sample["application"] = {"refresh": refresh_stats}
+        if refresh_stats.get("status") == "unavailable":
+            sample["error"] = "refresh unavailable"
+    except Exception as exc:
+        sample["application"] = {"refresh": {"status": "unavailable"}}
+        sample["error"] = f"refresh unavailable: {exc}"
+    return sample
+
+
+def _memory_monitor_loop(
+    *,
+    sample_once=None,
+    sleep_fn=None,
+    interval_seconds: int | None = None,
+) -> None:
+    """Log compact memory samples forever from this single worker thread."""
+    sampler = sample_once or _memory_sample_once
+    sleeper = sleep_fn or time.sleep
+    interval = (
+        MEMORY_MONITOR_INTERVAL_SECONDS
+        if interval_seconds is None
+        else max(10, interval_seconds)
+    )
+    while True:
+        try:
+            sample = sampler()
+        except Exception as exc:
+            sample = {
+                "sampled_at": int(time.time()),
+                "warning": False,
+                "error": f"memory sample failed: {exc}",
+            }
+        print(
+            "[memory] "
+            + json.dumps(sample, separators=(",", ":"), ensure_ascii=False),
+            flush=True,
+        )
+        sleeper(interval)
+
+
+_memory_monitor_thread: threading.Thread | None = None
+
+
+def _start_memory_monitor_thread(*, thread_factory=None):
+    """Start at most one monitor daemon; importing this module never calls it."""
+    global _memory_monitor_thread
+    if not MEMORY_MONITOR_ENABLED:
+        return None
+    if _memory_monitor_thread is not None:
+        return _memory_monitor_thread
+
+    factory = thread_factory or threading.Thread
+    _memory_monitor_thread = factory(
+        target=_memory_monitor_loop,
+        daemon=True,
+        name="memory-monitor",
+    )
+    _memory_monitor_thread.start()
+    return _memory_monitor_thread
+
+
 def _count_scalar(conn, sql: str) -> int:
     try:
         row = conn.execute(sql).fetchone()
@@ -6478,12 +6608,15 @@ if __name__ == "__main__":
     _th.Thread(target=_auto_source_classification_loop, daemon=True).start()
     _th.Thread(target=_ai_share_revalidation_loop, daemon=True).start()
     _th.Thread(target=_pin_existing_favorite_images_on_startup, daemon=True).start()
+    _start_memory_monitor_thread()
     print("[scheduler] Daily summary background thread started")
     print("[auto-summary] Background summary thread started")
     print("[auto-translate] Background translation thread started")
     print("[auto-title] Background title processing thread started")
     print("[source-classify] Background source classification thread started")
     print("[image-cache] Existing favorite image pinning thread started")
+    if MEMORY_MONITOR_ENABLED:
+        print("[memory] Background memory monitor thread started")
     port = int(os.environ.get("WEB_PORT", 8082))
     print(f"[web] RayNews Web Server listening on {port}")
     # threaded=True is passed explicitly for clarity, but it's already Flask's default

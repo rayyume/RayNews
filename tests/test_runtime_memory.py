@@ -1,11 +1,15 @@
+import json
 import sys
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import runtime_memory
+import web_server
 
 
 def _write(path, value):
@@ -203,3 +207,237 @@ def test_runtime_memory_snapshot_combines_stable_cgroup_and_process_schemas(tmp_
             }
         ],
     }
+
+
+MIB = 1024 * 1024
+
+
+def _snapshot(current_bytes, rss_values=(70, 10, 60, 20, 50, 30, 40)):
+    return {
+        "cgroup": {
+            "version": "v2",
+            "current_bytes": current_bytes,
+            "max_bytes": 1024 * MIB,
+            "anon_bytes": 500 * MIB,
+            "file_bytes": 250 * MIB,
+            "kernel_bytes": 50 * MIB,
+            "slab_bytes": 10 * MIB,
+        },
+        "processes": [
+            {
+                "pid": pid,
+                "name": f"process-{pid}",
+                "cmdline": f"python process-{pid}.py",
+                "rss_bytes": rss * MIB,
+                "threads": pid,
+            }
+            for pid, rss in enumerate(rss_values, start=1)
+        ],
+    }
+
+
+def test_memory_sample_warns_at_threshold_and_keeps_only_five_largest_processes(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        web_server,
+        "runtime_memory_snapshot",
+        lambda: _snapshot(800 * MIB),
+    )
+    monkeypatch.setattr(
+        web_server,
+        "_refresh_runtime_stats",
+        lambda: {
+            "article_cache_items": 3,
+            "article_cache_bytes": 123456,
+            "article_cache_inflight": 1,
+        },
+    )
+    monkeypatch.setattr(web_server, "MEMORY_WARN_BYTES", 800 * MIB)
+
+    sample = web_server._memory_sample_once()
+
+    assert sample["warning"] is True
+    assert sample["cgroup"]["anon_bytes"] == 500 * MIB
+    assert sample["cgroup"]["file_bytes"] == 250 * MIB
+    assert [process["pid"] for process in sample["processes"]] == [1, 3, 5, 7, 6]
+    assert sample["application"]["refresh"]["article_cache_bytes"] == 123456
+
+
+def test_memory_sample_does_not_warn_below_threshold(monkeypatch):
+    monkeypatch.setattr(
+        web_server,
+        "runtime_memory_snapshot",
+        lambda: _snapshot(799 * MIB, rss_values=()),
+    )
+    monkeypatch.setattr(
+        web_server,
+        "_refresh_runtime_stats",
+        lambda: {"status": "unavailable"},
+    )
+    monkeypatch.setattr(web_server, "MEMORY_WARN_BYTES", 800 * MIB)
+
+    assert web_server._memory_sample_once()["warning"] is False
+
+
+def test_memory_sample_marks_unavailable_refresh_metrics_as_error(monkeypatch):
+    monkeypatch.setattr(
+        web_server,
+        "runtime_memory_snapshot",
+        lambda: _snapshot(100 * MIB, rss_values=()),
+    )
+    monkeypatch.setattr(
+        web_server,
+        "_refresh_runtime_stats",
+        lambda: {"status": "unavailable"},
+    )
+
+    sample = web_server._memory_sample_once()
+
+    assert sample["application"]["refresh"] == {"status": "unavailable"}
+    assert sample["error"] == "refresh unavailable"
+
+
+@pytest.mark.parametrize("failing_dependency", ["snapshot", "refresh"])
+def test_memory_sample_reports_dependency_errors(monkeypatch, failing_dependency):
+    monkeypatch.setattr(
+        web_server,
+        "runtime_memory_snapshot",
+        lambda: _snapshot(100 * MIB, rss_values=()),
+    )
+    monkeypatch.setattr(
+        web_server,
+        "_refresh_runtime_stats",
+        lambda: {
+            "article_cache_items": 0,
+            "article_cache_bytes": 0,
+            "article_cache_inflight": 0,
+        },
+    )
+
+    def fail():
+        raise RuntimeError(f"{failing_dependency} unavailable")
+
+    if failing_dependency == "snapshot":
+        monkeypatch.setattr(web_server, "runtime_memory_snapshot", fail)
+    else:
+        monkeypatch.setattr(web_server, "_refresh_runtime_stats", fail)
+
+    sample = web_server._memory_sample_once()
+
+    assert sample["warning"] is False
+    assert failing_dependency in sample["error"]
+    assert "unavailable" in sample["error"]
+
+
+def test_memory_monitor_loop_continues_after_sample_error_and_prints_compact_json(
+    capsys,
+):
+    calls = 0
+
+    def sample_once():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("first sample failed")
+        return {"warning": False, "processes": [], "note": "中文 value"}
+
+    def stop_after_second_sample(_interval):
+        if calls == 2:
+            raise StopIteration
+
+    with pytest.raises(StopIteration):
+        web_server._memory_monitor_loop(
+            sample_once=sample_once,
+            sleep_fn=stop_after_second_sample,
+            interval_seconds=10,
+        )
+
+    lines = capsys.readouterr().out.splitlines()
+    assert calls == 2
+    assert len(lines) == 2
+    assert all(line.startswith("[memory] ") for line in lines)
+    assert json.loads(lines[0].removeprefix("[memory] "))["error"] == (
+        "memory sample failed: first sample failed"
+    )
+    assert json.loads(lines[1].removeprefix("[memory] "))["note"] == "中文 value"
+    assert '"warning":false' in lines[1]
+    assert '"note":"中文 value"' in lines[1]
+
+
+def test_memory_monitor_environment_defaults_and_invalid_values(monkeypatch):
+    for name in (
+        "MEMORY_MONITOR_ENABLED",
+        "MEMORY_MONITOR_INTERVAL_SECONDS",
+        "MEMORY_WARN_MB",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    assert web_server._memory_monitor_config_from_env() == {
+        "enabled": True,
+        "interval_seconds": 60,
+        "warn_mb": 768,
+    }
+
+    monkeypatch.setenv("MEMORY_MONITOR_ENABLED", "not-a-bool")
+    monkeypatch.setenv("MEMORY_MONITOR_INTERVAL_SECONDS", "not-an-int")
+    monkeypatch.setenv("MEMORY_WARN_MB", "not-an-int")
+    assert web_server._memory_monitor_config_from_env() == {
+        "enabled": True,
+        "interval_seconds": 60,
+        "warn_mb": 768,
+    }
+
+
+def test_memory_monitor_environment_accepts_false_and_clamps_short_interval(
+    monkeypatch,
+):
+    monkeypatch.setenv("MEMORY_MONITOR_ENABLED", "OFF")
+    monkeypatch.setenv("MEMORY_MONITOR_INTERVAL_SECONDS", "1")
+    monkeypatch.setenv("MEMORY_WARN_MB", "512")
+
+    assert web_server._memory_monitor_config_from_env() == {
+        "enabled": False,
+        "interval_seconds": 10,
+        "warn_mb": 512,
+    }
+
+
+def test_memory_monitor_start_is_idempotent_and_creates_one_daemon(monkeypatch):
+    created = []
+
+    class FakeThread:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.started = False
+            created.append(self)
+
+        def start(self):
+            self.started = True
+
+    monkeypatch.setattr(web_server, "MEMORY_MONITOR_ENABLED", True)
+    monkeypatch.setattr(web_server, "_memory_monitor_thread", None)
+
+    first = web_server._start_memory_monitor_thread(thread_factory=FakeThread)
+    second = web_server._start_memory_monitor_thread(thread_factory=FakeThread)
+
+    assert first is second
+    assert len(created) == 1
+    assert created[0].started is True
+    assert created[0].kwargs == {
+        "target": web_server._memory_monitor_loop,
+        "daemon": True,
+        "name": "memory-monitor",
+    }
+
+
+def test_memory_monitor_start_does_nothing_when_disabled(monkeypatch):
+    def unexpected_thread(**_kwargs):
+        raise AssertionError("disabled monitor must not create a thread")
+
+    monkeypatch.setattr(web_server, "MEMORY_MONITOR_ENABLED", False)
+    monkeypatch.setattr(web_server, "_memory_monitor_thread", None)
+
+    assert (
+        web_server._start_memory_monitor_thread(thread_factory=unexpected_thread)
+        is None
+    )
