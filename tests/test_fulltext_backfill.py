@@ -1,4 +1,8 @@
+import sqlite3
+import threading
 import time
+
+import pytest
 
 import fetcher
 
@@ -28,6 +32,164 @@ def _insert(conn, **kw):
         cols,
     )
     conn.commit()
+
+
+class _CommitObserver:
+    """Delegate to a real SQLite connection and inspect only durable commits."""
+
+    def __init__(self, connection, observer):
+        self._connection = connection
+        self._observer = observer
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+    def commit(self):
+        self._connection.commit()
+        self._observer()
+
+
+def _fulltext_result(url):
+    return {
+        "body_html": f"<article>full body for {url}</article>",
+        "images": [],
+        "char_count": 20,
+        "detected_source": "",
+    }
+
+
+def test_backfill_publishes_each_article_before_the_next_update(tmp_path, monkeypatch):
+    _patch_paths(monkeypatch, tmp_path)
+    writer = fetcher.init_db()
+    now = int(time.time())
+    _insert(writer, id=31, timestamp=now, telegraph_url="https://telegra.ph/31")
+    _insert(writer, id=32, timestamp=now - 1, telegraph_url="https://telegra.ph/32")
+    reader = sqlite3.connect(fetcher.DB_FILE)
+    snapshots = []
+
+    monkeypatch.setattr(fetcher, "fetch_telegraph", _fulltext_result)
+
+    def observe_commit():
+        snapshots.append(
+            tuple(
+                row[0]
+                for row in reader.execute(
+                    "SELECT has_full_content FROM articles WHERE id IN (31, 32) ORDER BY id"
+                ).fetchall()
+            )
+        )
+
+    try:
+        assert fetcher.backfill_missing_fulltext(
+            _CommitObserver(writer, observe_commit)
+        ) == 2
+    finally:
+        reader.close()
+        writer.close()
+
+    assert len(snapshots) == 2
+    assert sum(snapshots[0]) == 1
+    assert sum(snapshots[1]) == 2
+
+
+def test_backfill_holds_no_write_transaction_while_waiting_for_network_future(
+    tmp_path, monkeypatch
+):
+    _patch_paths(monkeypatch, tmp_path)
+    setup = fetcher.init_db()
+    now = int(time.time())
+    _insert(setup, id=41, timestamp=now, telegraph_url="https://telegra.ph/fast")
+    _insert(setup, id=42, timestamp=now - 1, telegraph_url="https://telegra.ph/slow")
+    setup.close()
+
+    writer = sqlite3.connect(fetcher.DB_FILE, check_same_thread=False)
+    writer.row_factory = sqlite3.Row
+    reader = sqlite3.connect(fetcher.DB_FILE, timeout=0.1)
+    reader.execute("PRAGMA busy_timeout=100")
+    slow_started = threading.Event()
+    release_slow = threading.Event()
+    first_update_executed = threading.Event()
+    first_commit_finished = threading.Event()
+    errors = []
+
+    def fetch(url):
+        if url.endswith("/slow"):
+            slow_started.set()
+            assert release_slow.wait(5), "test did not release the slow network future"
+        return _fulltext_result(url)
+
+    class SignallingConnection(_CommitObserver):
+        def execute(self, sql, *args):
+            cursor = self._connection.execute(sql, *args)
+            if "UPDATE articles" in sql:
+                first_update_executed.set()
+            return cursor
+
+    monkeypatch.setattr(fetcher, "fetch_telegraph", fetch)
+    observed = SignallingConnection(writer, first_commit_finished.set)
+
+    def run_backfill():
+        try:
+            fetcher.backfill_missing_fulltext(observed)
+        except Exception as exc:  # surfaced below after the worker is joined
+            errors.append(exc)
+
+    worker = threading.Thread(target=run_backfill)
+    worker.start()
+    try:
+        assert slow_started.wait(2)
+        assert first_update_executed.wait(2)
+        committed_before_slow_future = first_commit_finished.wait(0.5)
+        try:
+            reader.execute("UPDATE articles SET title = 'reader write' WHERE id = 42")
+            reader.commit()
+            second_writer_succeeded = True
+        except sqlite3.OperationalError:
+            reader.rollback()
+            second_writer_succeeded = False
+
+        assert committed_before_slow_future
+        assert second_writer_succeeded
+        assert reader.execute(
+            "SELECT has_full_content FROM articles WHERE id = 41"
+        ).fetchone()[0] == 1
+        assert reader.execute(
+            "SELECT has_full_content FROM articles WHERE id = 42"
+        ).fetchone()[0] == 0
+    finally:
+        release_slow.set()
+        worker.join(5)
+        reader.close()
+        writer.close()
+
+    assert not worker.is_alive()
+    assert errors == []
+
+
+def test_backfill_rolls_back_a_failed_article_update(tmp_path, monkeypatch):
+    _patch_paths(monkeypatch, tmp_path)
+    writer = fetcher.init_db()
+    now = int(time.time())
+    _insert(writer, id=51, timestamp=now, telegraph_url="https://telegra.ph/fail")
+    writer.execute(
+        """CREATE TRIGGER reject_fulltext
+           BEFORE UPDATE OF has_full_content ON articles WHEN NEW.id = 51
+           BEGIN SELECT RAISE(ABORT, 'forced backfill failure'); END"""
+    )
+    writer.commit()
+    monkeypatch.setattr(fetcher, "fetch_telegraph", _fulltext_result)
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced backfill failure"):
+        fetcher.backfill_missing_fulltext(writer)
+
+    reader = sqlite3.connect(fetcher.DB_FILE, timeout=0.1)
+    try:
+        assert not writer.in_transaction
+        reader.execute("BEGIN IMMEDIATE")
+        reader.rollback()
+    finally:
+        reader.close()
+        writer.close()
 
 
 def test_backfill_upgrades_recent_downgraded_telegraph_article(tmp_path, monkeypatch):

@@ -328,37 +328,44 @@ def init_source_categories(conn: sqlite3.Connection) -> None:
 
 def ensure_article_sources(conn: sqlite3.Connection) -> int:
     """Insert pending source records for every distinct article source."""
-    init_source_categories(conn)
-    aliases = conn.execute("SELECT alias_source, target_source FROM source_aliases").fetchall()
-    for row in aliases:
-        alias = row["alias_source"] if isinstance(row, sqlite3.Row) else row[0]
-        target = row["target_source"] if isinstance(row, sqlite3.Row) else row[1]
-        conn.execute(
-            "UPDATE articles SET feed_source = ?, source = ? "
-            "WHERE feed_source = ? OR (TRIM(feed_source) = '' AND source = ?) OR source = ?",
-            (target, target, alias, alias, alias),
-        )
+    try:
+        init_source_categories(conn)
+        aliases = conn.execute(
+            "SELECT alias_source, target_source FROM source_aliases"
+        ).fetchall()
+        for row in aliases:
+            alias = row["alias_source"] if isinstance(row, sqlite3.Row) else row[0]
+            target = row["target_source"] if isinstance(row, sqlite3.Row) else row[1]
+            conn.execute(
+                "UPDATE articles SET feed_source = ?, source = ? "
+                "WHERE feed_source = ? OR (TRIM(feed_source) = '' AND source = ?) OR source = ?",
+                (target, target, alias, alias, alias),
+            )
+            conn.commit()
 
-    rows = conn.execute(
-        "SELECT DISTINCT COALESCE(NULLIF(feed_source, ''), source) AS source "
-        "FROM articles "
-        "WHERE COALESCE(NULLIF(feed_source, ''), source) IS NOT NULL "
-        "  AND TRIM(COALESCE(NULLIF(feed_source, ''), source)) != ''"
-    ).fetchall()
-    inserted = 0
-    for row in rows:
-        source = row["source"] if isinstance(row, sqlite3.Row) else row[0]
-        cur = conn.execute(
-            """
-            INSERT OR IGNORE INTO source_categories
-                (source, category, label, status, reason)
-            VALUES (?, 'Info', ?, 'pending', 'discovered')
-            """,
-            (source, local_short_source_name(source)),
-        )
-        inserted += cur.rowcount
-    conn.commit()
-    return inserted
+        rows = conn.execute(
+            "SELECT DISTINCT COALESCE(NULLIF(feed_source, ''), source) AS source "
+            "FROM articles "
+            "WHERE COALESCE(NULLIF(feed_source, ''), source) IS NOT NULL "
+            "  AND TRIM(COALESCE(NULLIF(feed_source, ''), source)) != ''"
+        ).fetchall()
+        inserted = 0
+        for row in rows:
+            source = row["source"] if isinstance(row, sqlite3.Row) else row[0]
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO source_categories
+                    (source, category, label, status, reason)
+                VALUES (?, 'Info', ?, 'pending', 'discovered')
+                """,
+                (source, local_short_source_name(source)),
+            )
+            inserted += cur.rowcount
+        conn.commit()
+        return inserted
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def _ensure_source_tables(conn: sqlite3.Connection) -> None:

@@ -6,10 +6,13 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import source_categories
 import web_server
 
 
@@ -37,6 +40,95 @@ def _make_db(tmp_path, monkeypatch):
     conn.close()
     monkeypatch.setattr(web_server, "NEWS_DB", str(db))
     return db
+
+
+class _CommitObserver:
+    """Delegate to a real SQLite connection and inspect only durable commits."""
+
+    def __init__(self, connection, observer):
+        self._connection = connection
+        self._observer = observer
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+    def commit(self):
+        self._connection.commit()
+        self._observer()
+
+
+def _make_source_maintenance_db(tmp_path):
+    db = tmp_path / "source-maintenance.db"
+    writer = sqlite3.connect(db)
+    writer.row_factory = sqlite3.Row
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute(ARTICLES_DDL)
+    source_categories.init_source_categories(writer)
+    return db, writer
+
+
+def test_ensure_article_sources_publishes_each_alias_before_starting_the_next(tmp_path):
+    """One large alias transaction must not hide all maintenance until the end."""
+    db, writer = _make_source_maintenance_db(tmp_path)
+    writer.executemany(
+        "INSERT INTO articles (id, source, feed_source) VALUES (?, ?, ?)",
+        [(1, "alias-a", "alias-a"), (2, "alias-b", "alias-b")],
+    )
+    writer.executemany(
+        "INSERT INTO source_aliases (alias_source, target_source) VALUES (?, ?)",
+        [("alias-a", "target-a"), ("alias-b", "target-b")],
+    )
+    writer.commit()
+
+    reader = sqlite3.connect(db)
+    snapshots = []
+
+    def observe_commit():
+        normalized = reader.execute(
+            "SELECT COUNT(*) FROM articles WHERE source LIKE 'target-%'"
+        ).fetchone()[0]
+        discovered = reader.execute(
+            "SELECT COUNT(*) FROM source_categories WHERE source LIKE 'target-%'"
+        ).fetchone()[0]
+        snapshots.append((normalized, discovered))
+
+    try:
+        source_categories.ensure_article_sources(_CommitObserver(writer, observe_commit))
+    finally:
+        reader.close()
+        writer.close()
+
+    # init_source_categories completes first, then each alias UPDATE is durable on
+    # its own. The DISTINCT discovery insert is published only after both aliases.
+    assert snapshots == [(0, 0), (1, 0), (2, 0), (2, 2)]
+
+
+def test_ensure_article_sources_rolls_back_a_failed_alias_transaction(tmp_path):
+    db, writer = _make_source_maintenance_db(tmp_path)
+    writer.execute(
+        "INSERT INTO articles (id, source, feed_source) VALUES (1, 'broken', 'broken')"
+    )
+    writer.execute(
+        "INSERT INTO source_aliases (alias_source, target_source) VALUES ('broken', 'target')"
+    )
+    writer.execute(
+        """CREATE TRIGGER reject_broken_alias
+           BEFORE UPDATE ON articles WHEN OLD.source = 'broken'
+           BEGIN SELECT RAISE(ABORT, 'forced alias failure'); END"""
+    )
+    writer.commit()
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced alias failure"):
+        source_categories.ensure_article_sources(writer)
+
+    reader = sqlite3.connect(db, timeout=0.1)
+    try:
+        assert not writer.in_transaction
+        reader.execute("BEGIN IMMEDIATE")
+        reader.rollback()
+    finally:
+        reader.close()
+        writer.close()
 
 
 def test_get_news_db_is_per_thread_not_shared(tmp_path, monkeypatch):

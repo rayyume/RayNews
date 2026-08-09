@@ -258,26 +258,30 @@ def backfill_missing_fulltext(conn: sqlite3.Connection) -> int:
             # source when one was found, else keep what we already had.
             new_thumb = row["thumb"] or (result["images"][0] if result["images"] else "")
             origin = result.get("detected_source", "") or row["origin_source"]
-            conn.execute(
-                """UPDATE articles
-                      SET has_full_content = 1,
-                          body_html = ?,
-                          original_body_html = ?,
-                          thumb = ?,
-                          origin_source = ?,
-                          summary = ''
-                    WHERE id = ?""",
-                (
-                    result["body_html"],
-                    result["body_html"],
-                    new_thumb,
-                    origin,
-                    row["id"],
-                ),
-            )
+            try:
+                conn.execute(
+                    """UPDATE articles
+                          SET has_full_content = 1,
+                              body_html = ?,
+                              original_body_html = ?,
+                              thumb = ?,
+                              origin_source = ?,
+                              summary = ''
+                        WHERE id = ?""",
+                    (
+                        result["body_html"],
+                        result["body_html"],
+                        new_thumb,
+                        origin,
+                        row["id"],
+                    ),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
             updated += 1
     if updated:
-        conn.commit()
         log.info(f"Backfilled full text for {updated}/{len(rows)} article(s)")
     return updated
 
