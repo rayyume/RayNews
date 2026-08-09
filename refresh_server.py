@@ -147,7 +147,17 @@ def _warm_news_schema() -> bool:
 _article_cache: OrderedDict[int, bytes] = OrderedDict()
 _article_cache_bytes = 0
 _article_cache_lock = threading.RLock()
-_article_cache_inflight: dict[int, threading.Event] = {}
+
+
+class _ArticleCacheFlight:
+    """One producer's completion signal and response for all current waiters."""
+
+    def __init__(self):
+        self.event = threading.Event()
+        self.result: bytes | None = None
+
+
+_article_cache_inflight: dict[int, _ArticleCacheFlight] = {}
 
 
 def _get_cached_article(article_id: int) -> bytes | None:
@@ -961,16 +971,19 @@ def api_news_detail(article_id: int) -> bytes:
         cached = _get_cached_article(article_id)
         if cached is not None:
             return cached
-        event = _article_cache_inflight.get(article_id)
-        if event is None:
-            event = threading.Event()
-            _article_cache_inflight[article_id] = event
+        flight = _article_cache_inflight.get(article_id)
+        if flight is None:
+            flight = _ArticleCacheFlight()
+            _article_cache_inflight[article_id] = flight
             producer = True
         else:
             producer = False
+        event = flight.event
 
     if not producer:
         event.wait()
+        if flight.result is not None:
+            return flight.result
         cached = _get_cached_article(article_id)
         if cached is not None:
             return cached
@@ -987,6 +1000,7 @@ def api_news_detail(article_id: int) -> bytes:
                 _store_cached_article(article_id, result)
             else:
                 _evict_cached_article(article_id)
+            flight.result = result
             _article_cache_inflight.pop(article_id, None)
             event.set()
         return result

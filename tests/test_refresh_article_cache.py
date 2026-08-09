@@ -203,3 +203,51 @@ def test_concurrent_article_detail_requests_keep_single_flight_and_byte_stats(mo
         "article_cache_bytes": 10,
         "article_cache_inflight": 0,
     }
+
+
+@pytest.mark.parametrize(
+    ("max_items", "max_bytes"),
+    [(10, 5), (0, 100)],
+)
+def test_concurrent_uncacheable_article_detail_requests_still_share_one_result(
+    monkeypatch, max_items, max_bytes
+):
+    started = threading.Event()
+    waiter_joined = threading.Event()
+    release = threading.Event()
+    calls = []
+    payload = b'{"id": 42}'
+
+    class TrackingInflight(dict):
+        def get(self, key, default=None):
+            event = super().get(key, default)
+            if event is not None:
+                waiter_joined.set()
+            return event
+
+    def build(article_id):
+        calls.append(article_id)
+        started.set()
+        assert release.wait(timeout=2)
+        return payload
+
+    monkeypatch.setattr(refresh_server, "ARTICLE_DETAIL_CACHE_MAX_ITEMS", max_items)
+    monkeypatch.setattr(refresh_server, "ARTICLE_DETAIL_CACHE_MAX_BYTES", max_bytes)
+    monkeypatch.setattr(refresh_server, "_article_cache_inflight", TrackingInflight())
+    monkeypatch.setattr(refresh_server, "_build_news_detail_response", build)
+
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        first = workers.submit(refresh_server.api_news_detail, 42)
+        assert started.wait(timeout=2)
+        second = workers.submit(refresh_server.api_news_detail, 42)
+        assert waiter_joined.wait(timeout=2)
+        release.set()
+        assert first.result(timeout=2) == payload
+        assert second.result(timeout=2) == payload
+
+    assert calls == [42]
+    assert refresh_server.refresh_runtime_stats() == {
+        "article_cache_items": 0,
+        "article_cache_bytes": 0,
+        "article_cache_inflight": 0,
+    }
