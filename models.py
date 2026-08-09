@@ -1126,6 +1126,31 @@ def set_app_state_values(values: dict[str, str]) -> None:
         raise
 
 
+def advance_app_state_epoch(key: str, epoch: float) -> None:
+    """Atomically raise an epoch-valued app-state key, never lower it."""
+    target = float(epoch)
+    db = get_db()
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute("SELECT value FROM app_state WHERE key = ?", (key,)).fetchone()
+        try:
+            current = float(row["value"]) if row else 0.0
+        except (TypeError, ValueError):
+            current = 0.0
+        if current >= target:
+            db.rollback()
+            return
+        db.execute(
+            "INSERT INTO app_state (key, value, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            (key, str(target), datetime.now().isoformat(timespec="seconds")),
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+
 def claim_app_state_flag(key: str) -> bool:
     """Set a flag to '1' and report whether this caller is the one that set it.
 

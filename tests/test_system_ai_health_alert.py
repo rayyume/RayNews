@@ -28,6 +28,12 @@ def isolated_app_state_db(tmp_path, monkeypatch):
     """Run persisted incident assertions against an isolated app-state DB."""
     models.close_db()
     monkeypatch.setattr(models, "DB_FILE", tmp_path / "system-ai-health.db")
+    monkeypatch.setattr(
+        web_server,
+        "SYSTEM_AI_LAST_FAILURE_MARKER_FILE",
+        tmp_path / "system-ai-last-failure.marker",
+        raising=False,
+    )
     models.get_db()
     try:
         yield
@@ -51,7 +57,6 @@ def restart_system_ai_health_process():
                     "last_failure_at": 0.0,
                     "last_success_at": 0.0,
                     "failure_timestamp_dirty": False,
-                    "stable_recovery_armed": False,
                 }
             )
 
@@ -180,8 +185,14 @@ def test_atomic_app_state_reset_rolls_back_all_keys_on_write_failure(
 
 
 @pytest.fixture
-def alerts(monkeypatch):
+def alerts(monkeypatch, tmp_path):
     sent = []
+    monkeypatch.setattr(
+        web_server,
+        "SYSTEM_AI_LAST_FAILURE_MARKER_FILE",
+        tmp_path / "system-ai-last-failure.marker",
+        raising=False,
+    )
     monkeypatch.setattr(web_server, "list_users", lambda: [
         {"id": 1, "role": "admin"}, {"id": 2, "role": "user"}, {"id": 3, "role": "admin"},
     ])
@@ -364,6 +375,85 @@ def test_dirty_failure_remains_fail_closed_after_process_restart(
     assert alerts == []
 
 
+def test_dirty_failure_restart_and_fresh_success_waits_full_real_window(
+    isolated_app_state_db, alerts, monkeypatch, restart_system_ai_health_process
+):
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
+    _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
+    alerts.clear()
+    clock["now"] = 1_001.0
+    web_server._note_system_ai_success()
+    real_set_app_state = web_server.set_app_state
+    failed_once = {"value": False}
+
+    def fail_latest_failure(key, value):
+        if key == web_server.SYSTEM_AI_LAST_FAILURE_STATE_KEY and not failed_once["value"]:
+            failed_once["value"] = True
+            raise sqlite3.OperationalError("one-shot timestamp write failure")
+        return real_set_app_state(key, value)
+
+    monkeypatch.setattr(web_server, "set_app_state", fail_latest_failure)
+    clock["now"] = 4_000.0
+    web_server._note_system_ai_failure("自动翻译", "503")
+    restart_system_ai_health_process()
+    clock["now"] = 4_001.0
+    web_server._note_system_ai_success()
+
+    clock["now"] = 4_601.0
+    assert web_server._maybe_recover_stale_system_ai_incident() is False
+    assert web_server.get_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY) == "1"
+    assert alerts == []
+
+
+def test_peer_process_observes_failure_whose_db_timestamp_write_was_lost(
+    isolated_app_state_db, alerts, monkeypatch, restart_system_ai_health_process
+):
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
+    _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
+    alerts.clear()
+    clock["now"] = 1_001.0
+    web_server._note_system_ai_success()
+    process_a_health = dict(web_server._system_ai_health)
+
+    restart_system_ai_health_process()
+    real_set_app_state = web_server.set_app_state
+    failed_once = {"value": False}
+
+    def fail_peer_db_timestamp(key, value):
+        if key == web_server.SYSTEM_AI_LAST_FAILURE_STATE_KEY and not failed_once["value"]:
+            failed_once["value"] = True
+            raise sqlite3.OperationalError("peer timestamp write failure")
+        return real_set_app_state(key, value)
+
+    monkeypatch.setattr(web_server, "set_app_state", fail_peer_db_timestamp)
+    clock["now"] = 4_000.0
+    web_server._note_system_ai_failure("自动翻译", "503")
+    monkeypatch.setattr(web_server, "_system_ai_health", process_a_health)
+
+    clock["now"] = 4_601.0
+    assert web_server._maybe_recover_stale_system_ai_incident() is False
+    assert web_server.get_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY) == "1"
+    assert alerts == []
+
+
+def test_clean_persisted_success_recovers_after_restart_at_window_expiry(
+    isolated_app_state_db, alerts, monkeypatch, restart_system_ai_health_process
+):
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
+    _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
+    alerts.clear()
+    clock["now"] = 1_001.0
+    web_server._note_system_ai_success()
+    restart_system_ai_health_process()
+
+    clock["now"] = 4_601.0
+    assert web_server._maybe_recover_stale_system_ai_incident() is True
+    assert [item["type"] for item in alerts] == ["system_ai_recovered"] * 2
+
+
 def test_real_success_after_clean_restart_arms_stable_recovery(
     isolated_app_state_db, alerts, monkeypatch, restart_system_ai_health_process
 ):
@@ -435,7 +525,6 @@ def test_stable_recovery_serializes_memory_reset_with_new_failures(
                 "failures": 3,
                 "successes": 1,
                 "alerted": True,
-                "stable_recovery_armed": True,
             }
         )
 
@@ -562,7 +651,7 @@ def test_reset_holds_health_lock_until_durable_state_is_cleared(
     alerts.clear()
     with web_server._system_ai_health_lock:
         web_server._system_ai_health.update(
-            {"failure_timestamp_dirty": True, "stable_recovery_armed": True}
+            {"failure_timestamp_dirty": True}
         )
 
     reset_write_entered = threading.Event()
@@ -660,7 +749,7 @@ def test_failed_durable_reset_remains_fail_closed(
     web_server.set_app_state(web_server.SYSTEM_AI_LAST_SUCCESS_STATE_KEY, "1001")
     with web_server._system_ai_health_lock:
         web_server._system_ai_health.update(
-            {"failure_timestamp_dirty": True, "stable_recovery_armed": True}
+            {"failure_timestamp_dirty": True}
         )
     alerts.clear()
 
@@ -694,7 +783,6 @@ def test_failed_durable_reset_remains_fail_closed(
 
     assert failed_once["value"] is True
     assert web_server._system_ai_health["failure_timestamp_dirty"] is True
-    assert web_server._system_ai_health["stable_recovery_armed"] is False
     assert web_server._maybe_recover_stale_system_ai_incident() is False
     assert web_server.get_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY) == "1"
     assert alerts == []
@@ -721,7 +809,6 @@ def test_reset_system_ai_health_clears_stability_timestamps(
     assert web_server._system_ai_health["last_failure_at"] == 0.0
     assert web_server._system_ai_health["last_success_at"] == 0.0
     assert web_server._system_ai_health["failure_timestamp_dirty"] is False
-    assert web_server._system_ai_health["stable_recovery_armed"] is False
 
 
 def test_daily_loop_runs_stable_recovery_in_its_own_try(monkeypatch):

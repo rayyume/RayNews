@@ -10,11 +10,13 @@ import sqlite3
 import threading
 import time
 import calendar
+import fcntl
 import ipaddress
 import uuid
 import requests
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from bs4 import BeautifulSoup
@@ -43,7 +45,8 @@ from models import (
     record_share_revalidation_failure,
     get_users_with_share_enabled,
     get_daily_summary_inapp_user_ids,
-    get_app_state, set_app_state, set_app_state_values, claim_app_state_flag,
+    get_app_state, set_app_state, set_app_state_values, advance_app_state_epoch,
+    claim_app_state_flag,
     claim_app_state_incident,
     complete_app_state_incident,
     complete_app_state_incident_if_stable,
@@ -1645,7 +1648,6 @@ _system_ai_health = {
     "last_failure_at": 0.0,
     "last_success_at": 0.0,
     "failure_timestamp_dirty": False,
-    "stable_recovery_armed": False,
 }
 _system_ai_health_lock = threading.Lock()
 
@@ -1658,6 +1660,67 @@ SYSTEM_AI_ALERTED_STATE_KEY = "system_ai_failure_alerted"
 SYSTEM_AI_ALERT_LAST_NOTIFIED_STATE_KEY = "system_ai_alert_last_notified_at"
 SYSTEM_AI_LAST_FAILURE_STATE_KEY = "system_ai_last_failure_at"
 SYSTEM_AI_LAST_SUCCESS_STATE_KEY = "system_ai_last_success_at"
+SYSTEM_AI_LAST_FAILURE_MARKER_FILE = Path(DATA_DIR) / "system-ai-last-failure.marker"
+
+
+@contextmanager
+def _system_ai_failure_fence():
+    """Serialize failure markers and stable completion across processes."""
+    lock_path = Path(f"{SYSTEM_AI_LAST_FAILURE_MARKER_FILE}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _read_system_ai_failure_marker() -> float:
+    path = Path(SYSTEM_AI_LAST_FAILURE_MARKER_FILE)
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return 0.0
+    value = float(raw)
+    if value < 0:
+        raise ValueError("negative system AI failure marker")
+    return value
+
+
+def _write_system_ai_failure_marker(epoch: float) -> None:
+    path = Path(SYSTEM_AI_LAST_FAILURE_MARKER_FILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as marker_file:
+            marker_file.write(str(float(epoch)))
+            marker_file.flush()
+            os.fsync(marker_file.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _clear_system_ai_failure_marker() -> None:
+    path = Path(SYSTEM_AI_LAST_FAILURE_MARKER_FILE)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
 def _system_ai_incident_is_active() -> bool:
@@ -1721,17 +1784,20 @@ def _reset_system_ai_health() -> None:
     with _system_ai_health_lock:
         # Disarm first and keep the health lock through the durable reset. A
         # failed or partial reset must never expose old timestamps as trusted.
-        _system_ai_health["stable_recovery_armed"] = False
         _system_ai_health["failure_timestamp_dirty"] = True
         try:
-            set_app_state_values(
-                {
-                    SYSTEM_AI_ALERTED_STATE_KEY: "0",
-                    SYSTEM_AI_ALERT_LAST_NOTIFIED_STATE_KEY: "0",
-                    SYSTEM_AI_LAST_FAILURE_STATE_KEY: "0",
-                    SYSTEM_AI_LAST_SUCCESS_STATE_KEY: "0",
-                }
-            )
+            with _system_ai_failure_fence():
+                reset_floor = max(_read_system_ai_failure_marker(), time.time())
+                _write_system_ai_failure_marker(reset_floor)
+                set_app_state_values(
+                    {
+                        SYSTEM_AI_ALERTED_STATE_KEY: "0",
+                        SYSTEM_AI_ALERT_LAST_NOTIFIED_STATE_KEY: "0",
+                        SYSTEM_AI_LAST_FAILURE_STATE_KEY: "0",
+                        SYSTEM_AI_LAST_SUCCESS_STATE_KEY: "0",
+                    }
+                )
+                _clear_system_ai_failure_marker()
         except Exception as exc:
             print(f"[system-ai] alert state reset failed: {exc}")
             return
@@ -1745,7 +1811,6 @@ def _reset_system_ai_health() -> None:
                 "last_failure_at": 0.0,
                 "last_success_at": 0.0,
                 "failure_timestamp_dirty": False,
-                "stable_recovery_armed": False,
             }
         )
 
@@ -1759,12 +1824,7 @@ def _note_system_ai_success() -> None:
         _system_ai_health["last_success_at"] = current
         try:
             set_app_state(SYSTEM_AI_LAST_SUCCESS_STATE_KEY, str(current))
-            # A process must observe and durably record a fresh success before
-            # it may trust persisted timestamps for time-based recovery. This
-            # process-local epoch gate starts closed after every restart.
-            _system_ai_health["stable_recovery_armed"] = True
         except Exception as exc:
-            _system_ai_health["stable_recovery_armed"] = False
             print(f"[system-ai] success timestamp write failed: {exc}")
         persisted_active = _system_ai_incident_is_active()
         alerted_here = _system_ai_health["alerted"]
@@ -1789,7 +1849,6 @@ def _note_system_ai_success() -> None:
                 "last_error": "",
                 "jobs": [],
                 "failure_timestamp_dirty": False,
-                "stable_recovery_armed": False,
             }
         )
     if prior_state == "1":
@@ -1819,16 +1878,16 @@ def _note_system_ai_failure(job: str, error) -> None:
     with _system_ai_health_lock:
         current = time.time()
         _system_ai_health["last_failure_at"] = current
-        _system_ai_health["stable_recovery_armed"] = False
+        marker_ok = db_ok = False
         try:
-            set_app_state(SYSTEM_AI_LAST_FAILURE_STATE_KEY, str(current))
-            _system_ai_health["failure_timestamp_dirty"] = False
+            with _system_ai_failure_fence():
+                _write_system_ai_failure_marker(current)
+                marker_ok = True
+                set_app_state(SYSTEM_AI_LAST_FAILURE_STATE_KEY, str(current))
+                db_ok = True
         except Exception as exc:
-            # A stale durable failure time could otherwise make the periodic
-            # recovery path close this incident too early. Preserve service
-            # availability, but fail that recovery path closed in-process.
-            _system_ai_health["failure_timestamp_dirty"] = True
             print(f"[system-ai] failure timestamp write failed: {exc}")
+        _system_ai_health["failure_timestamp_dirty"] = not (marker_ok and db_ok)
         _system_ai_health["successes"] = 0
         _system_ai_health["failures"] += 1
         _system_ai_health["last_error"] = reason
@@ -1873,19 +1932,29 @@ def _maybe_recover_stale_system_ai_incident() -> bool:
         # the health lock before touching SQLite and no lock-order inversion is
         # introduced.
         with _system_ai_health_lock:
-            if (
-                _system_ai_health["failure_timestamp_dirty"]
-                or not _system_ai_health["stable_recovery_armed"]
-            ):
-                return False
-            prior_state = complete_app_state_incident_if_stable(
-                SYSTEM_AI_ALERTED_STATE_KEY,
-                SYSTEM_AI_ALERT_LAST_NOTIFIED_STATE_KEY,
-                SYSTEM_AI_LAST_FAILURE_STATE_KEY,
-                SYSTEM_AI_LAST_SUCCESS_STATE_KEY,
-                SYSTEM_AI_RECOVERY_STABILITY_SECONDS,
-                now=time.time(),
-            )
+            with _system_ai_failure_fence():
+                marker_failure = _read_system_ai_failure_marker()
+                effective_failure = max(
+                    marker_failure,
+                    float(_system_ai_health.get("last_failure_at") or 0.0)
+                    if _system_ai_health["failure_timestamp_dirty"]
+                    else 0.0,
+                )
+                if _system_ai_health["failure_timestamp_dirty"]:
+                    _write_system_ai_failure_marker(effective_failure)
+                if effective_failure > 0:
+                    advance_app_state_epoch(
+                        SYSTEM_AI_LAST_FAILURE_STATE_KEY, effective_failure
+                    )
+                _system_ai_health["failure_timestamp_dirty"] = False
+                prior_state = complete_app_state_incident_if_stable(
+                    SYSTEM_AI_ALERTED_STATE_KEY,
+                    SYSTEM_AI_ALERT_LAST_NOTIFIED_STATE_KEY,
+                    SYSTEM_AI_LAST_FAILURE_STATE_KEY,
+                    SYSTEM_AI_LAST_SUCCESS_STATE_KEY,
+                    SYSTEM_AI_RECOVERY_STABILITY_SECONDS,
+                    now=time.time(),
+                )
             if prior_state not in {"1", "2"}:
                 return False
             _system_ai_health.update(
@@ -1895,7 +1964,6 @@ def _maybe_recover_stale_system_ai_incident() -> bool:
                     "alerted": False,
                     "last_error": "",
                     "jobs": [],
-                    "stable_recovery_armed": False,
                 }
             )
     except Exception as exc:
