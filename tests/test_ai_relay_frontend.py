@@ -201,6 +201,38 @@ def test_search_changing_query_cancels_and_guards_the_old_retry():
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def test_stale_retry_callback_cannot_detach_replacement_timer_from_close():
+    result = _run_search_vm(
+        """
+  let attempts = 0;
+  context.fetch = async () => { attempts++; throw new TypeError('temporary'); };
+
+  elements.articleSearchInput.value = 'old';
+  await context.fetchServerSearchResults('old', 1);
+  const oldRetry = timers.find(timer => !timer.cleared && timer.delay === context.SEARCH_RETRY_DELAY_MS);
+  assert.ok(oldRetry);
+
+  elements.articleSearchInput.value = 'new';
+  context.scheduleSearchRender();
+  await context.fetchServerSearchResults('new', 1);
+  const newRetry = timers.find(timer => timer !== oldRetry && !timer.cleared && timer.delay === context.SEARCH_RETRY_DELAY_MS);
+  assert.ok(newRetry);
+  assert.strictEqual(context.searchRetryTimer, newRetry);
+
+  oldRetry.fn(); // Simulate a cleared callback that was already queued.
+  await flush();
+  assert.strictEqual(context.searchRetryTimer, newRetry);
+
+  context.closeSearch();
+  assert.equal(newRetry.cleared, true);
+  newRetry.fn(); // Even a queued replacement callback must remain network-inert after close.
+  await flush();
+  assert.equal(attempts, 2);
+"""
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def test_search_retry_exhaustion_keeps_local_results_and_offers_manual_retry():
     result = _run_search_vm(
         """

@@ -626,6 +626,16 @@ def test_search_recovery_has_retry_lifecycle_and_request_local_timeout_contracts
     assert 'onclick="retryServerSearch()"' in html
 
 
+def test_search_recovery_status_is_announced_as_a_polite_atomic_live_region():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    start = html.index('<div class="search-status" id="searchStatus"')
+    status_tag = html[start:html.index(">", start)]
+
+    assert 'role="status"' in status_tag
+    assert 'aria-live="polite"' in status_tag
+    assert 'aria-atomic="true"' in status_tag
+
+
 def test_paged_list_mutations_keep_server_total_and_new_article_prompt():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     delete_start = html.index("async function deleteArticlesByIds(ids)")

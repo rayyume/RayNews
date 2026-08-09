@@ -637,7 +637,7 @@ body.body-scroll-lock{overflow:hidden!important}
   </div>
   <div class="search-body" id="searchBody">
     <div class="search-content">
-      <div class="search-status" id="searchStatus"></div>
+      <div class="search-status" id="searchStatus" role="status" aria-live="polite" aria-atomic="true"></div>
       <div id="searchResults"></div>
     </div>
   </div>
@@ -7476,12 +7476,13 @@ function scheduleSearchRetry(query, page, { append = false, requestSeq = searchR
   cancelSearchRetry({ resetCount: false });
   if (searchRetryCount >= SEARCH_MAX_AUTO_RETRIES) return false;
   searchRetryCount++;
-  searchRetryTimer = setTimeout(() => {
-    searchRetryTimer = null;
+  const retryTimer = setTimeout(() => {
+    if (searchRetryTimer === retryTimer) searchRetryTimer = null;
     const activeQuery = (document.getElementById('articleSearchInput').value || '').trim();
     if (activeQuery !== query || searchRequestSeq !== requestSeq) return;
     return fetchServerSearchResults(query, page, { append });
   }, SEARCH_RETRY_DELAY_MS);
+  searchRetryTimer = retryTimer;
   return true;
 }
 
