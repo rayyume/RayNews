@@ -48,7 +48,6 @@ FETCHER_COMMAND = ("python3", "/app/fetcher.py")
 FETCHER_TAIL_MAX_LINES = 50
 FETCHER_TAIL_MAX_BYTES = 16 * 1024
 FETCHER_LOG_QUEUE_MAX_LINES = 128
-FETCHER_LOG_JOIN_SECONDS = 0.1
 FETCHER_READER_JOIN_SECONDS = 0.25
 FETCHER_TERM_GRACE_SECONDS = 0.25
 LAST_FETCH_STATUS = {
@@ -304,9 +303,12 @@ class _FetcherLogQueue(queue.Queue):
         super().__init__(maxsize=maxsize)
         self._latest = {}
         self._latest_lock = threading.Lock()
+        self._sequence = 0
 
-    def offer(self, stream: str, sequence: int, line: str) -> None:
+    def offer(self, stream: str, line: str) -> None:
         with self._latest_lock:
+            sequence = self._sequence
+            self._sequence += 1
             self._latest[stream] = (sequence, line)
         item = (stream, sequence, line)
         try:
@@ -330,7 +332,6 @@ class _FetcherLogQueue(queue.Queue):
 
 def _forward_fetcher_logs(
     log_queue: _FetcherLogQueue,
-    stop_event: threading.Event,
 ) -> None:
     """Best-effort log forwarding isolated from the pipe-drain threads."""
     forwarded_sequences = {}
@@ -351,8 +352,9 @@ def _forward_fetcher_logs(
         try:
             item = log_queue.get(timeout=0.05)
         except queue.Empty:
-            if stop_event.is_set():
-                break
+            for stream, (sequence, line) in log_queue.latest_items():
+                if sequence > forwarded_sequences.get(stream, -1):
+                    forward((stream, sequence, line))
             continue
         if item is None:
             break
@@ -365,6 +367,29 @@ def _forward_fetcher_logs(
             forward((stream, sequence, line))
 
 
+_FETCHER_LOG_QUEUE = _FetcherLogQueue(maxsize=FETCHER_LOG_QUEUE_MAX_LINES)
+_FETCHER_LOG_DISPATCHER_LOCK = threading.Lock()
+_FETCHER_LOG_DISPATCHER_THREAD = None
+
+
+def _ensure_fetcher_log_dispatcher() -> _FetcherLogQueue:
+    """Start the single process-lifetime log dispatcher exactly once."""
+    global _FETCHER_LOG_DISPATCHER_THREAD
+    if _FETCHER_LOG_DISPATCHER_THREAD is not None:
+        return _FETCHER_LOG_QUEUE
+    with _FETCHER_LOG_DISPATCHER_LOCK:
+        if _FETCHER_LOG_DISPATCHER_THREAD is None:
+            dispatcher = threading.Thread(
+                target=_forward_fetcher_logs,
+                args=(_FETCHER_LOG_QUEUE,),
+                name="fetcher-log-forwarder",
+                daemon=True,
+            )
+            dispatcher.start()
+            _FETCHER_LOG_DISPATCHER_THREAD = dispatcher
+    return _FETCHER_LOG_QUEUE
+
+
 def _read_fetcher_stream(
     pipe,
     stream: str,
@@ -374,18 +399,15 @@ def _read_fetcher_stream(
     """Drain one binary subprocess pipe without ever buffering an unbounded line."""
     line_tail = bytearray()
     has_pending_line = False
-    sequence = 0
 
     def emit_line() -> None:
-        nonlocal sequence
         raw_line = bytes(line_tail)
         if raw_line.endswith(b"\r"):
             raw_line = raw_line[:-1]
         line = raw_line.decode("utf-8", errors="replace")
         line = _truncate_utf8_tail(line, FETCHER_TAIL_MAX_BYTES)
         tail.append(line)
-        log_queue.offer(stream, sequence, line)
-        sequence += 1
+        log_queue.offer(stream, line)
 
     try:
         while True:
@@ -469,12 +491,8 @@ def _join_fetcher_readers(readers) -> None:
 def _run_fetcher_process(env, timeout):
     """Stream a fetcher child process while retaining only a bounded output tail."""
     process = None
-    log_queue = None
-    log_stop = None
     readers = []
     started_readers = []
-    log_forwarder = None
-    log_forwarder_started = False
     reaped = False
     try:
         process = subprocess.Popen(
@@ -492,8 +510,7 @@ def _run_fetcher_process(env, timeout):
             FETCHER_TAIL_MAX_LINES,
             FETCHER_TAIL_MAX_BYTES,
         )
-        log_queue = _FetcherLogQueue(maxsize=FETCHER_LOG_QUEUE_MAX_LINES)
-        log_stop = threading.Event()
+        log_queue = _ensure_fetcher_log_dispatcher()
         readers.append(threading.Thread(
             target=_read_fetcher_stream,
             args=(process.stdout, "stdout", stdout_tail, log_queue),
@@ -506,14 +523,6 @@ def _run_fetcher_process(env, timeout):
             name="fetcher-stderr-reader",
             daemon=True,
         ))
-        log_forwarder = threading.Thread(
-            target=_forward_fetcher_logs,
-            args=(log_queue, log_stop),
-            name="fetcher-log-forwarder",
-            daemon=True,
-        )
-        log_forwarder.start()
-        log_forwarder_started = True
         for reader in readers:
             reader.start()
             started_readers.append(reader)
@@ -534,12 +543,6 @@ def _run_fetcher_process(env, timeout):
             returncode = process.wait()
             reaped = True
 
-        return {
-            "returncode": returncode,
-            "stdout_tail": stdout_tail.value(),
-            "stderr_tail": stderr_tail.value(),
-            "timed_out": timed_out,
-        }
     except BaseException:
         if process is not None and not reaped:
             _terminate_fetcher_group_before_reap(process)
@@ -552,15 +555,12 @@ def _run_fetcher_process(env, timeout):
             _join_fetcher_readers(
                 [reader for reader in started_readers if reader.is_alive()]
             )
-            if log_stop is not None:
-                log_stop.set()
-            if log_queue is not None:
-                try:
-                    log_queue.put_nowait(None)
-                except queue.Full:
-                    pass
-            if log_forwarder_started:
-                log_forwarder.join(timeout=FETCHER_LOG_JOIN_SECONDS)
+    return {
+        "returncode": returncode,
+        "stdout_tail": stdout_tail.value(),
+        "stderr_tail": stderr_tail.value(),
+        "timed_out": timed_out,
+    }
 
 
 def run_fetcher(existing_article_ids: set[int] | None = None):

@@ -18,6 +18,44 @@ import fetcher
 import refresh_server
 
 
+@pytest.fixture(autouse=True)
+def _isolated_fetcher_log_dispatcher(monkeypatch):
+    """Give each test a stoppable dispatcher without leaking daemon threads."""
+    log_queue = refresh_server._FetcherLogQueue(
+        maxsize=refresh_server.FETCHER_LOG_QUEUE_MAX_LINES
+    )
+    monkeypatch.setattr(
+        refresh_server,
+        "_FETCHER_LOG_QUEUE",
+        log_queue,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        refresh_server,
+        "_FETCHER_LOG_DISPATCHER_LOCK",
+        threading.Lock(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        refresh_server,
+        "_FETCHER_LOG_DISPATCHER_THREAD",
+        None,
+        raising=False,
+    )
+
+    yield log_queue
+
+    dispatcher = refresh_server._FETCHER_LOG_DISPATCHER_THREAD
+    if dispatcher is not None and dispatcher.is_alive():
+        try:
+            log_queue.put_nowait(None)
+        except refresh_server.queue.Full:
+            log_queue.get_nowait()
+            log_queue.put_nowait(None)
+        dispatcher.join(timeout=2)
+        assert not dispatcher.is_alive()
+
+
 def _use_python_fetcher(monkeypatch, source):
     monkeypatch.setattr(
         refresh_server,
@@ -49,6 +87,8 @@ for number in range(5000):
     )
     ready = threading.Event()
     stderr_ready = threading.Event()
+    stdout_finished = threading.Event()
+    stderr_finished = threading.Event()
     sink_lines = []
 
     def sink(message, flush=False):
@@ -58,6 +98,10 @@ for number in range(5000):
             ready.set()
         if message == "[fetcher:stderr] err-ready":
             stderr_ready.set()
+        if message == "[fetcher:stdout] stdout-4999":
+            stdout_finished.set()
+        if message == "[fetcher:stderr] stderr-4999":
+            stderr_finished.set()
 
     monkeypatch.setattr(refresh_server, "print", sink, raising=False)
 
@@ -85,6 +129,8 @@ for number in range(5000):
     ]
     assert len(result["stdout_tail"].encode("utf-8")) <= 16 * 1024
     assert len(result["stderr_tail"].encode("utf-8")) <= 16 * 1024
+    assert stdout_finished.wait(timeout=2)
+    assert stderr_finished.wait(timeout=2)
     assert "[fetcher:stdout] stdout-4999" in sink_lines
     assert "[fetcher:stderr] stderr-4999" in sink_lines
 
@@ -213,6 +259,112 @@ def test_fetcher_process_timeout_does_not_wait_for_blocked_sink(monkeypatch):
     }
 
 
+def test_fetcher_processes_share_one_bounded_dispatcher_when_sink_blocks(
+    monkeypatch,
+    _isolated_fetcher_log_dispatcher,
+):
+    _use_python_fetcher(
+        monkeypatch,
+        'for number in range(1000): print(f"blocked-{number}", flush=True)',
+    )
+    sink_entered = threading.Event()
+    release_sink = threading.Event()
+    baseline_threads = set(threading.enumerate())
+
+    def permanently_blocking_sink(*args, **kwargs):
+        sink_entered.set()
+        release_sink.wait()
+
+    monkeypatch.setattr(
+        refresh_server,
+        "print",
+        permanently_blocking_sink,
+        raising=False,
+    )
+
+    try:
+        results = [
+            refresh_server._run_fetcher_process(os.environ.copy(), timeout=2)
+            for _ in range(5)
+        ]
+        assert sink_entered.wait(timeout=2)
+        dispatcher_threads = [
+            thread
+            for thread in threading.enumerate()
+            if thread not in baseline_threads
+            and thread.name == "fetcher-log-forwarder"
+        ]
+        assert len(dispatcher_threads) <= 1
+        assert refresh_server._FETCHER_LOG_DISPATCHER_THREAD in dispatcher_threads
+        assert _isolated_fetcher_log_dispatcher.qsize() == (
+            refresh_server.FETCHER_LOG_QUEUE_MAX_LINES
+        )
+        assert all(
+            result["returncode"] == 0 and result["timed_out"] is False
+            for result in results
+        )
+    finally:
+        release_sink.set()
+
+
+def test_fetcher_log_dispatcher_start_is_idempotent_under_concurrency(
+    _isolated_fetcher_log_dispatcher,
+):
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        queues = list(
+            executor.map(
+                lambda _: refresh_server._ensure_fetcher_log_dispatcher(),
+                range(32),
+            )
+        )
+
+    assert all(log_queue is _isolated_fetcher_log_dispatcher for log_queue in queues)
+    dispatchers = [
+        thread
+        for thread in threading.enumerate()
+        if thread.name == "fetcher-log-forwarder"
+    ]
+    assert dispatchers == [refresh_server._FETCHER_LOG_DISPATCHER_THREAD]
+
+
+def test_fetcher_timeout_tail_is_snapshotted_after_final_reader_drain(monkeypatch):
+    _use_python_fetcher(
+        monkeypatch,
+        """
+import signal
+import time
+
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+number = 0
+while True:
+    print(f"line-{number}", flush=True)
+    number += 1
+    time.sleep(0.001)
+""",
+    )
+    monkeypatch.setattr(refresh_server, "print", lambda *args, **kwargs: None, raising=False)
+    monkeypatch.setattr(refresh_server, "FETCHER_READER_JOIN_SECONDS", 2.0)
+    real_tail = refresh_server._BoundedLineTail
+    tails = []
+
+    class SlowRecordingTail(real_tail):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            tails.append(self)
+
+        def append(self, line):
+            super().append(line)
+            time.sleep(0.002)
+
+    monkeypatch.setattr(refresh_server, "_BoundedLineTail", SlowRecordingTail)
+
+    result = refresh_server._run_fetcher_process(os.environ.copy(), timeout=0.5)
+
+    assert result["timed_out"] is True
+    assert result["stdout_tail"] == tails[0].value()
+    assert result["stdout_tail"].splitlines()[-1].startswith("line-")
+
+
 @pytest.mark.parametrize("failure_stage", ["construct", "start"])
 def test_fetcher_process_thread_setup_failure_kills_and_reaps_child(
     failure_stage, tmp_path, monkeypatch
@@ -232,7 +384,6 @@ def test_fetcher_process_thread_setup_failure_kills_and_reaps_child(
     real_thread = refresh_server.threading.Thread
     children = []
     created_threads = []
-    log_controls = []
 
     def recording_popen(*args, **kwargs):
         process = real_popen(*args, **kwargs)
@@ -245,8 +396,6 @@ def test_fetcher_process_thread_setup_failure_kills_and_reaps_child(
             raise RuntimeError("thread construct failed")
         thread = real_thread(*args, **kwargs)
         created_threads.append(thread)
-        if name == "fetcher-log-forwarder":
-            log_controls.append(kwargs["args"])
         if failure_stage == "start" and name == "fetcher-stderr-reader":
             def fail_start():
                 raise RuntimeError("thread start failed")
@@ -274,14 +423,8 @@ def test_fetcher_process_thread_setup_failure_kills_and_reaps_child(
                 pipe = getattr(children[0], pipe_name)
                 if pipe and not pipe.closed:
                     pipe.close()
-        for log_queue, stop_event in log_controls:
-            stop_event.set()
-            try:
-                log_queue.put_nowait(None)
-            except Exception:
-                pass
         for thread in created_threads:
-            if thread.ident is not None:
+            if thread.ident is not None and thread.name != "fetcher-log-forwarder":
                 thread.join(timeout=1)
 
     assert needed_test_cleanup is False
@@ -290,7 +433,11 @@ def test_fetcher_process_thread_setup_failure_kills_and_reaps_child(
     assert children[0].stderr.closed
     with pytest.raises(ChildProcessError):
         os.waitpid(children[0].pid, os.WNOHANG)
-    assert all(not thread.is_alive() for thread in created_threads)
+    assert all(
+        not thread.is_alive()
+        for thread in created_threads
+        if thread.name != "fetcher-log-forwarder"
+    )
     time.sleep(1.1)
     assert not survived_path.exists()
 
