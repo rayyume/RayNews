@@ -439,6 +439,153 @@ def test_auto_translation_uses_remaining_batch_capacity_for_history(monkeypatch)
     assert translated == [1, 2, 3]
 
 
+def test_content_only_historical_repair_does_not_translate_or_save_title(
+    news_db, monkeypatch
+):
+    today = dt.datetime.now().strftime("%Y-%m-%d")
+    source = "<p>" + ("Long English article body. " * 30) + "</p>"
+    _insert_article(
+        news_db,
+        id=11,
+        date=today,
+        timestamp=110,
+        title="English title",
+        body_html=source,
+        has_full_content=1,
+    )
+    _insert_translations(
+        news_db,
+        [(11, json.dumps({"title": "缓存标题", "html": "<p>短译文</p>"}))],
+    )
+
+    full_calls = []
+    saved_titles = []
+    saved_translations = []
+
+    class TranslationService:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def translate_full(self, html, *_args, title="", **_kwargs):
+            full_calls.append((html, title))
+            return {"html": "<p>完整译文</p>", "title": ""}
+
+        def translate_title(self, *_args, **_kwargs):
+            raise AssertionError("content-only repair must not translate the title")
+
+    config = {
+        "user_id": 7,
+        "api_key": "key",
+        "endpoint": "https://example.test",
+        "model": "model",
+        "auto_translate_title": False,
+        "auto_translate_content": True,
+    }
+    monkeypatch.setattr(web_server, "AUTO_TRANSLATION_BATCH_LIMIT", 1)
+    monkeypatch.setattr(web_server, "_get_auto_translation_users", lambda: [config])
+    monkeypatch.setattr(web_server, "_SystemAIService", TranslationService)
+    monkeypatch.setattr(
+        web_server,
+        "_save_article_translation",
+        lambda article_id, title=None, body_html=None: saved_titles.append(title) or False,
+    )
+    monkeypatch.setattr(
+        web_server,
+        "_save_ai_result",
+        lambda article_id, **kwargs: saved_translations.append(kwargs["translation"]) or True,
+    )
+    monkeypatch.setattr(web_server, "_publish_translation_update", lambda _id: None)
+
+    web_server._run_auto_translation_once()
+
+    assert full_calls == [(source, "")]
+    assert saved_titles == [None]
+    assert json.loads(saved_translations[0]) == {
+        "title": "缓存标题",
+        "html": "<p>完整译文</p>",
+    }
+
+
+def test_today_title_candidate_merges_duplicate_historical_content_repair(
+    news_db, monkeypatch
+):
+    today = dt.datetime.now().strftime("%Y-%m-%d")
+    source = "<p>" + ("Complete English article body. " * 30) + "</p>"
+    _insert_article(
+        news_db,
+        id=12,
+        date=today,
+        timestamp=120,
+        title="English title",
+        body_html=source,
+        has_full_content=1,
+    )
+    _insert_translations(
+        news_db,
+        [(12, json.dumps({"title": "缓存标题", "html": "<p>短译文</p>"}))],
+    )
+
+    candidates = []
+    full_calls = []
+    title_calls = []
+
+    class TranslationService:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def translate_full(self, html, *_args, title="", **_kwargs):
+            full_calls.append((html, title))
+            return {"html": "<p>完整译文</p>", "title": "新标题"}
+
+        def translate_title(self, title, *_args, **_kwargs):
+            title_calls.append(title)
+            return "仅标题译文"
+
+    config = {
+        "user_id": 7,
+        "api_key": "key",
+        "endpoint": "https://example.test",
+        "model": "model",
+        "auto_translate_title": True,
+        "auto_translate_content": True,
+    }
+    fetch_today = web_server._fetch_untranslated_articles
+    translate_background = web_server._translate_article_background
+
+    def marked_today(received, limit):
+        rows = fetch_today(received, limit)
+        assert [(row["id"], row["translate_title_needed"], row["translate_content_needed"])
+                for row in rows] == [(12, True, False)]
+        rows[0]["today_marker"] = "preserved"
+        return rows
+
+    def capture_background(article, received):
+        candidates.append(dict(article))
+        return translate_background(article, received)
+
+    monkeypatch.setattr(web_server, "AUTO_TRANSLATION_BATCH_LIMIT", 2)
+    monkeypatch.setattr(web_server, "_get_auto_translation_users", lambda: [config])
+    monkeypatch.setattr(web_server, "_fetch_untranslated_articles", marked_today)
+    monkeypatch.setattr(web_server, "_translate_article_background", capture_background)
+    monkeypatch.setattr(web_server, "_SystemAIService", TranslationService)
+    monkeypatch.setattr(web_server, "_save_article_translation", lambda *_a, **_k: True)
+    monkeypatch.setattr(web_server, "_save_ai_result", lambda *_a, **_k: True)
+    monkeypatch.setattr(web_server, "_publish_translation_update", lambda _id: None)
+
+    web_server._run_auto_translation_once()
+
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate["id"] == 12
+    assert candidate["today_marker"] == "preserved"
+    assert candidate["translation_stale"] is True
+    assert candidate["translate_content_needed"] is True
+    assert candidate["translate_title_needed"] is True
+    assert web_server._translation_repair_cursor == (120, 12)
+    assert full_calls == [(source, "English title")]
+    assert title_calls == []
+
+
 def test_auto_translation_does_not_scan_history_when_today_fills_batch(monkeypatch):
     scanned = []
     translated = []

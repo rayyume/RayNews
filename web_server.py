@@ -3776,10 +3776,12 @@ def _run_auto_translation_once():
             today = _fetch_untranslated_articles(config, AUTO_TRANSLATION_BATCH_LIMIT)
             articles = []
             seen_ids = set()
+            articles_by_id = {}
             for article in today:
                 if article["id"] in seen_ids:
                     continue
                 seen_ids.add(article["id"])
+                articles_by_id[article["id"]] = article
                 articles.append(article)
                 if len(articles) >= AUTO_TRANSLATION_BATCH_LIMIT:
                     break
@@ -3792,9 +3794,37 @@ def _run_auto_translation_once():
                     print(f"[auto-translate] stale scan failed: {exc}")
                     historical = []
                 for article in historical:
+                    article = dict(article)
+                    article["translate_title_needed"] = bool(
+                        config.get("auto_translate_title")
+                        and article.get("translate_title_needed")
+                    )
                     if article["id"] in seen_ids:
+                        existing = articles_by_id[article["id"]]
+                        title_needed = bool(
+                            config.get("auto_translate_title")
+                            and (
+                                existing.get("translate_title_needed")
+                                or article.get("translate_title_needed")
+                            )
+                        )
+                        content_needed = bool(
+                            existing.get("translate_content_needed")
+                            or article.get("translate_content_needed")
+                        )
+                        translation_stale = bool(
+                            existing.get("translation_stale")
+                            or article.get("translation_stale")
+                        )
+                        for key, value in article.items():
+                            existing.setdefault(key, value)
+                        existing["translate_title_needed"] = title_needed
+                        existing["translate_content_needed"] = content_needed
+                        if translation_stale:
+                            existing["translation_stale"] = True
                         continue
                     seen_ids.add(article["id"])
+                    articles_by_id[article["id"]] = article
                     articles.append(article)
                     if len(articles) >= AUTO_TRANSLATION_BATCH_LIMIT:
                         break
