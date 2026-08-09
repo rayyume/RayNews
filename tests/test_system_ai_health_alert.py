@@ -7,7 +7,10 @@ Consecutive failures across all of those jobs now raise one alert, and the next
 success raises one recovery notice.
 """
 
+import sqlite3
 import sys
+import threading
+import time as stdlib_time
 from pathlib import Path
 
 import pytest
@@ -17,13 +20,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import web_server
+import models
 
 
 @pytest.fixture
 def isolated_app_state_db(tmp_path, monkeypatch):
     """Run persisted incident assertions against an isolated app-state DB."""
-    import models
-
     models.close_db()
     monkeypatch.setattr(models, "DB_FILE", tmp_path / "system-ai-health.db")
     models.get_db()
@@ -31,6 +33,101 @@ def isolated_app_state_db(tmp_path, monkeypatch):
         yield
     finally:
         models.close_db()
+
+
+def test_stable_complete_is_disabled_when_window_is_zero(isolated_app_state_db):
+    models.set_app_state("incident", "1")
+    models.set_app_state("failed", "100")
+    models.set_app_state("succeeded", "101")
+
+    assert models.complete_app_state_incident_if_stable(
+        "incident", "notified", "failed", "succeeded", 0, now=10_000
+    ) == "0"
+    assert models.get_app_state("incident") == "1"
+
+
+def test_stable_complete_rechecks_timestamps_in_transaction(isolated_app_state_db):
+    models.set_app_state("incident", "1")
+    models.set_app_state("failed", "100")
+    models.set_app_state("succeeded", "101")
+
+    assert models.complete_app_state_incident_if_stable(
+        "incident", "notified", "failed", "succeeded", 60, now=161
+    ) == "1"
+    assert models.get_app_state("incident") == "0"
+    assert models.get_app_state("notified") == "161.0"
+
+
+def test_stable_complete_waits_for_writer_before_reading_timestamps(
+    isolated_app_state_db, monkeypatch
+):
+    """A failure committed by the current writer must prevent stale closure.
+
+    Holding SQLite's write lock before the helper starts makes the ordering
+    observable: the helper must wait, acquire ``BEGIN IMMEDIATE``, and only
+    then read the timestamps. Reading before the lock would close this event
+    from the stale ``failed=100`` snapshot.
+    """
+    models.set_app_state("incident", "1")
+    models.set_app_state("failed", "100")
+    models.set_app_state("succeeded", "101")
+    writer = sqlite3.connect(models.DB_FILE, timeout=30)
+    writer.execute("PRAGMA busy_timeout=30000")
+    writer.execute("BEGIN IMMEDIATE")
+    writer.execute("UPDATE app_state SET value = '160' WHERE key = 'failed'")
+    outcome = {}
+    beginning_transaction = threading.Event()
+    real_get_db = models.get_db
+
+    class SignalingConnection:
+        def __init__(self, connection):
+            self._connection = connection
+
+        def execute(self, sql, *args):
+            if sql == "BEGIN IMMEDIATE":
+                beginning_transaction.set()
+            return self._connection.execute(sql, *args)
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+    def get_signaling_db():
+        connection = real_get_db()
+        if threading.current_thread().name == "stable-completion-worker":
+            return SignalingConnection(connection)
+        return connection
+
+    monkeypatch.setattr(models, "get_db", get_signaling_db)
+
+    def complete_after_writer():
+        try:
+            outcome["result"] = models.complete_app_state_incident_if_stable(
+                "incident", "notified", "failed", "succeeded", 60, now=161
+            )
+        except Exception as exc:  # Surface worker failures in the test thread.
+            outcome["error"] = exc
+        finally:
+            models.close_db()
+
+    worker = threading.Thread(
+        target=complete_after_writer, name="stable-completion-worker"
+    )
+    try:
+        worker.start()
+        assert beginning_transaction.wait(timeout=2)
+        assert worker.is_alive()
+        writer.commit()
+        worker.join(timeout=2)
+    finally:
+        if writer.in_transaction:
+            writer.rollback()
+        writer.close()
+        worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert "error" not in outcome
+    assert outcome["result"] == "0"
+    assert models.get_app_state("incident") == "1"
 
 
 @pytest.fixture
@@ -56,6 +153,188 @@ def _fail(times, job="自动摘要", error="401 invalid api key"):
 def _success(times):
     for _ in range(times):
         web_server._note_system_ai_success()
+
+
+def test_quiet_day_recovers_after_one_success_and_stability_window(
+    isolated_app_state_db, alerts, monkeypatch
+):
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
+    _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
+    alerts.clear()
+
+    clock["now"] += 1
+    web_server._note_system_ai_success()
+    clock["now"] += web_server.SYSTEM_AI_RECOVERY_STABILITY_SECONDS + 1
+
+    assert web_server._maybe_recover_stale_system_ai_incident() is True
+    assert [item["type"] for item in alerts] == ["system_ai_recovered"] * 2
+
+
+def test_failure_after_success_prevents_stable_recovery(
+    isolated_app_state_db, alerts, monkeypatch
+):
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
+    _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
+    clock["now"] += 1
+    web_server._note_system_ai_success()
+    clock["now"] += 10
+    web_server._note_system_ai_failure("自动翻译", "503")
+    clock["now"] += web_server.SYSTEM_AI_RECOVERY_STABILITY_SECONDS + 1
+
+    assert web_server._maybe_recover_stale_system_ai_incident() is False
+    assert web_server.get_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY) == "1"
+
+
+def test_stable_recovery_silently_closes_a_cooldown_incident(
+    isolated_app_state_db, alerts, monkeypatch
+):
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
+    _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
+    _success(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD)
+    alerts.clear()
+
+    _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
+    assert web_server.get_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY) == "2"
+    clock["now"] += 1
+    web_server._note_system_ai_success()
+    clock["now"] += web_server.SYSTEM_AI_RECOVERY_STABILITY_SECONDS + 1
+
+    assert web_server._maybe_recover_stale_system_ai_incident() is True
+    assert web_server.get_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY) == "0"
+    assert alerts == []
+
+
+def test_health_timestamps_are_written_under_lock_before_early_returns(
+    alerts, monkeypatch
+):
+    clock = {"now": 1_000.0}
+    writes = []
+    monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
+
+    def record_locked_write(key, value):
+        if key in {
+            web_server.SYSTEM_AI_LAST_FAILURE_STATE_KEY,
+            web_server.SYSTEM_AI_LAST_SUCCESS_STATE_KEY,
+        } and value != "0":
+            assert web_server._system_ai_health_lock.locked()
+            writes.append((key, value))
+
+    monkeypatch.setattr(web_server, "set_app_state", record_locked_write)
+    with web_server._system_ai_health_lock:
+        web_server._system_ai_health["alerted"] = True
+
+    # This takes the existing ``alerted`` early return, but the new failure is
+    # still the timestamp that the stable-recovery transaction must observe.
+    web_server._note_system_ai_failure("自动翻译", "503")
+    assert writes == [(web_server.SYSTEM_AI_LAST_FAILURE_STATE_KEY, "1000.0")]
+    assert web_server._system_ai_health["last_failure_at"] == 1_000.0
+
+    clock["now"] += 1
+    with web_server._system_ai_health_lock:
+        web_server._system_ai_health["alerted"] = False
+    monkeypatch.setattr(web_server, "_system_ai_incident_is_active", lambda: False)
+    web_server._note_system_ai_success()
+    assert writes[-1] == (web_server.SYSTEM_AI_LAST_SUCCESS_STATE_KEY, "1001.0")
+    assert web_server._system_ai_health["last_success_at"] == 1_001.0
+
+
+def test_stable_recovery_serializes_memory_reset_with_new_failures(
+    isolated_app_state_db, alerts, monkeypatch
+):
+    transaction_entered = threading.Event()
+    release_transaction = threading.Event()
+
+    def blocked_stable_complete(*args, **kwargs):
+        transaction_entered.set()
+        assert release_transaction.wait(timeout=2)
+        return "1"
+
+    monkeypatch.setattr(
+        web_server,
+        "complete_app_state_incident_if_stable",
+        blocked_stable_complete,
+        raising=False,
+    )
+    with web_server._system_ai_health_lock:
+        web_server._system_ai_health.update(
+            {"failures": 3, "successes": 1, "alerted": True}
+        )
+
+    recovery = threading.Thread(
+        target=web_server._maybe_recover_stale_system_ai_incident
+    )
+    failure = threading.Thread(
+        target=web_server._note_system_ai_failure,
+        args=("自动翻译", "503"),
+    )
+    recovery.start()
+    assert transaction_entered.wait(timeout=2)
+    failure.start()
+    stdlib_time.sleep(0.05)
+    assert failure.is_alive()
+    release_transaction.set()
+    recovery.join(timeout=2)
+    failure.join(timeout=2)
+
+    assert not recovery.is_alive()
+    assert not failure.is_alive()
+    assert web_server._system_ai_health["failures"] == 1
+
+
+def test_reset_system_ai_health_clears_stability_timestamps(
+    isolated_app_state_db, alerts
+):
+    web_server.set_app_state(web_server.SYSTEM_AI_LAST_FAILURE_STATE_KEY, "100")
+    web_server.set_app_state(web_server.SYSTEM_AI_LAST_SUCCESS_STATE_KEY, "101")
+    with web_server._system_ai_health_lock:
+        web_server._system_ai_health.update(
+            {"last_failure_at": 100.0, "last_success_at": 101.0}
+        )
+
+    web_server._reset_system_ai_health()
+
+    assert web_server.get_app_state(web_server.SYSTEM_AI_LAST_FAILURE_STATE_KEY) == "0"
+    assert web_server.get_app_state(web_server.SYSTEM_AI_LAST_SUCCESS_STATE_KEY) == "0"
+    assert web_server._system_ai_health["last_failure_at"] == 0.0
+    assert web_server._system_ai_health["last_success_at"] == 0.0
+
+
+def test_daily_loop_runs_stable_recovery_in_its_own_try(monkeypatch):
+    events = []
+    sleeps = []
+
+    class StopLoop(RuntimeError):
+        pass
+
+    def fail_summary():
+        events.append("summary")
+        raise RuntimeError("summary failed")
+
+    def fail_recovery():
+        events.append("recovery")
+        raise RuntimeError("recovery failed")
+
+    def stop_after_one_tick(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 2:
+            raise StopLoop
+
+    monkeypatch.setattr(web_server, "_send_daily_summaries", fail_summary)
+    monkeypatch.setattr(
+        web_server, "_maybe_recover_stale_system_ai_incident", fail_recovery,
+        raising=False,
+    )
+    monkeypatch.setattr(web_server, "prune_access_log", lambda: events.append("prune"))
+    monkeypatch.setattr(web_server.time, "sleep", stop_after_one_tick)
+
+    with pytest.raises(StopLoop):
+        web_server._daily_summary_loop()
+
+    assert events == ["summary", "recovery", "prune"]
+    assert sleeps == [15, 60]
 
 
 def test_a_few_failures_stay_quiet(alerts):

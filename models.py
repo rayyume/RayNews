@@ -1213,6 +1213,68 @@ def complete_app_state_incident(
         raise
 
 
+def complete_app_state_incident_if_stable(
+    key: str,
+    last_notified_key: str,
+    last_failure_key: str,
+    last_success_key: str,
+    stability_seconds: float,
+    now: float | None = None,
+) -> str:
+    """Atomically close an incident after a quiet, successful interval.
+
+    The write transaction begins before any incident or timestamp read so a
+    concurrent failure cannot be committed between the eligibility check and
+    the close. A zero stability window explicitly disables this recovery path.
+    """
+    window = max(0.0, float(stability_seconds))
+    if window == 0:
+        return "0"
+
+    db = get_db()
+    current = time.time() if now is None else float(now)
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        rows = db.execute(
+            "SELECT key, value FROM app_state WHERE key IN (?, ?, ?, ?)",
+            (key, last_notified_key, last_failure_key, last_success_key),
+        ).fetchall()
+        values = {str(row["key"]): str(row["value"]) for row in rows}
+        prior = values.get(key, "0")
+        try:
+            last_failure = float(values.get(last_failure_key, "0"))
+            last_success = float(values.get(last_success_key, "0"))
+        except (TypeError, ValueError):
+            last_failure = last_success = 0.0
+
+        if not (
+            prior in {"1", "2"}
+            and last_failure > 0
+            and last_success > last_failure
+            and current - last_failure >= window
+        ):
+            db.rollback()
+            return "0"
+
+        updated_at = datetime.now().isoformat(timespec="seconds")
+        db.execute(
+            "INSERT INTO app_state (key, value, updated_at) VALUES (?, '0', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = '0', updated_at = excluded.updated_at",
+            (key, updated_at),
+        )
+        if prior == "1":
+            db.execute(
+                "INSERT INTO app_state (key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                (last_notified_key, str(current), updated_at),
+            )
+        db.commit()
+        return prior
+    except Exception:
+        db.rollback()
+        raise
+
+
 def get_daily_summary_inapp_user_ids() -> list[int]:
     """User ids that should receive the in-app copy of the daily summary.
 

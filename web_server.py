@@ -46,6 +46,7 @@ from models import (
     get_app_state, set_app_state, claim_app_state_flag,
     claim_app_state_incident,
     complete_app_state_incident,
+    complete_app_state_incident_if_stable,
     get_system_ai_config, set_system_ai_config,
     create_invitation_code,
     list_pending_invitations, delete_invitation_code, delete_invitation_code_by_code,
@@ -1629,11 +1630,20 @@ SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD = max(
 SYSTEM_AI_ALERT_COOLDOWN_SECONDS = max(
     0, int(os.environ.get("SYSTEM_AI_ALERT_COOLDOWN_SECONDS", "1800"))
 )
+SYSTEM_AI_RECOVERY_STABILITY_SECONDS = max(
+    0.0, float(os.environ.get("SYSTEM_AI_RECOVERY_STABILITY_SECONDS", "3600"))
+)
 SYSTEM_AI_FAILURE_TITLE = "服务端 AI 调用连续失败"
 SYSTEM_AI_RECOVERED_TITLE = "服务端 AI 已恢复"
 
 _system_ai_health = {
-    "failures": 0, "successes": 0, "alerted": False, "last_error": "", "jobs": [],
+    "failures": 0,
+    "successes": 0,
+    "alerted": False,
+    "last_error": "",
+    "jobs": [],
+    "last_failure_at": 0.0,
+    "last_success_at": 0.0,
 }
 _system_ai_health_lock = threading.Lock()
 
@@ -1644,6 +1654,8 @@ _system_ai_health_lock = threading.Lock()
 # same rule the user-side share suspension gets from its share_suspended column.
 SYSTEM_AI_ALERTED_STATE_KEY = "system_ai_failure_alerted"
 SYSTEM_AI_ALERT_LAST_NOTIFIED_STATE_KEY = "system_ai_alert_last_notified_at"
+SYSTEM_AI_LAST_FAILURE_STATE_KEY = "system_ai_last_failure_at"
+SYSTEM_AI_LAST_SUCCESS_STATE_KEY = "system_ai_last_success_at"
 
 
 def _system_ai_incident_is_active() -> bool:
@@ -1706,11 +1718,21 @@ def _reset_system_ai_health() -> None:
     broken, instead of being muted by the previous config's flag)."""
     with _system_ai_health_lock:
         _system_ai_health.update(
-            {"failures": 0, "successes": 0, "alerted": False, "last_error": "", "jobs": []}
+            {
+                "failures": 0,
+                "successes": 0,
+                "alerted": False,
+                "last_error": "",
+                "jobs": [],
+                "last_failure_at": 0.0,
+                "last_success_at": 0.0,
+            }
         )
     try:
         set_app_state(SYSTEM_AI_ALERTED_STATE_KEY, "0")
         set_app_state(SYSTEM_AI_ALERT_LAST_NOTIFIED_STATE_KEY, "0")
+        set_app_state(SYSTEM_AI_LAST_FAILURE_STATE_KEY, "0")
+        set_app_state(SYSTEM_AI_LAST_SUCCESS_STATE_KEY, "0")
     except Exception as exc:
         print(f"[system-ai] alert state reset failed: {exc}")
 
@@ -1719,8 +1741,14 @@ def _note_system_ai_success() -> None:
     """A system-AI call came back. Ends the streak, and if admins were told the
     AI was down, tells them it is back — matching the share_suspended /
     share_restored pair users already get."""
-    persisted_active = _system_ai_incident_is_active()
     with _system_ai_health_lock:
+        current = time.time()
+        _system_ai_health["last_success_at"] = current
+        try:
+            set_app_state(SYSTEM_AI_LAST_SUCCESS_STATE_KEY, str(current))
+        except Exception as exc:
+            print(f"[system-ai] success timestamp write failed: {exc}")
+        persisted_active = _system_ai_incident_is_active()
         alerted_here = _system_ai_health["alerted"]
         if not (alerted_here or persisted_active):
             # A success before an alert still breaks a failure streak, but is
@@ -1764,6 +1792,12 @@ def _note_system_ai_failure(job: str, error) -> None:
     that fails every 30 seconds can't turn into a stream of notifications."""
     reason = _redact_secrets(error).strip()[:300]
     with _system_ai_health_lock:
+        current = time.time()
+        _system_ai_health["last_failure_at"] = current
+        try:
+            set_app_state(SYSTEM_AI_LAST_FAILURE_STATE_KEY, str(current))
+        except Exception as exc:
+            print(f"[system-ai] failure timestamp write failed: {exc}")
         _system_ai_health["successes"] = 0
         _system_ai_health["failures"] += 1
         _system_ai_health["last_error"] = reason
@@ -1798,6 +1832,40 @@ def _note_system_ai_failure(job: str, error) -> None:
         _release_system_ai_alert()
     else:
         _record_system_ai_notification_time()
+
+
+def _maybe_recover_stale_system_ai_incident() -> bool:
+    """Close a quiet incident after one success and the stability window."""
+    try:
+        # Keep the in-memory state transition serialized with timestamp writes.
+        # The transaction helper commits before returning, so every path takes
+        # the health lock before touching SQLite and no lock-order inversion is
+        # introduced.
+        with _system_ai_health_lock:
+            prior_state = complete_app_state_incident_if_stable(
+                SYSTEM_AI_ALERTED_STATE_KEY,
+                SYSTEM_AI_ALERT_LAST_NOTIFIED_STATE_KEY,
+                SYSTEM_AI_LAST_FAILURE_STATE_KEY,
+                SYSTEM_AI_LAST_SUCCESS_STATE_KEY,
+                SYSTEM_AI_RECOVERY_STABILITY_SECONDS,
+                now=time.time(),
+            )
+            if prior_state not in {"1", "2"}:
+                return False
+            _system_ai_health.update(
+                {"failures": 0, "successes": 0, "alerted": False, "last_error": "", "jobs": []}
+            )
+    except Exception as exc:
+        print(f"[system-ai] stable recovery failed: {exc}")
+        return False
+
+    if prior_state == "1":
+        _notify_admins(
+            "system_ai_recovered",
+            SYSTEM_AI_RECOVERED_TITLE,
+            "服务端 AI 调用已恢复正常，自动摘要、翻译、标题精简和每日摘要等后台任务会继续运行。",
+        )
+    return True
 
 
 def _compact_share_error(value: str) -> str:
@@ -2714,6 +2782,10 @@ def _daily_summary_loop():
             _send_daily_summaries()
         except Exception as e:
             print(f"[scheduler] Error in loop: {e}")
+        try:
+            _maybe_recover_stale_system_ai_incident()
+        except Exception as e:
+            print(f"[scheduler] System AI stable recovery failed: {e}")
         try:
             prune_access_log()
         except Exception as e:
