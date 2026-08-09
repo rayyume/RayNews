@@ -788,6 +788,77 @@ def test_failed_durable_reset_remains_fail_closed(
     assert alerts == []
 
 
+def test_reset_marker_floor_write_failure_keeps_current_floor_fail_closed(
+    isolated_app_state_db, alerts, monkeypatch
+):
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
+    _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
+    alerts.clear()
+    clock["now"] = 1_001.0
+    web_server._note_system_ai_success()
+    real_write_marker = web_server._write_system_ai_failure_marker
+    failed_once = {"value": False}
+
+    def fail_reset_floor_once(epoch):
+        if not failed_once["value"]:
+            failed_once["value"] = True
+            raise OSError("one-shot reset marker write failure")
+        return real_write_marker(epoch)
+
+    monkeypatch.setattr(web_server, "_write_system_ai_failure_marker", fail_reset_floor_once)
+    clock["now"] = 4_601.0
+    web_server._reset_system_ai_health()
+
+    assert web_server._maybe_recover_stale_system_ai_incident() is False
+    assert web_server.get_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY) == "1"
+    assert alerts == []
+
+
+def test_marker_clear_failure_after_db_reset_does_not_mute_new_incident(
+    isolated_app_state_db, alerts, monkeypatch
+):
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
+    _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
+    alerts.clear()
+    real_clear_marker = web_server._clear_system_ai_failure_marker
+    failed_once = {"value": False}
+
+    def fail_clear_once():
+        if not failed_once["value"]:
+            failed_once["value"] = True
+            raise OSError("one-shot marker clear failure")
+        return real_clear_marker()
+
+    monkeypatch.setattr(web_server, "_clear_system_ai_failure_marker", fail_clear_once)
+    clock["now"] = 2_000.0
+    web_server._reset_system_ai_health()
+    assert web_server.get_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY) == "0"
+
+    clock["now"] = 2_001.0
+    _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
+    assert [item["type"] for item in alerts] == ["system_ai_failed"] * 2
+    assert web_server.get_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY) == "1"
+
+
+def test_non_finite_failure_marker_fails_closed(
+    isolated_app_state_db, alerts, monkeypatch
+):
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
+    _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
+    alerts.clear()
+    clock["now"] = 1_001.0
+    web_server._note_system_ai_success()
+    Path(web_server.SYSTEM_AI_LAST_FAILURE_MARKER_FILE).write_text("nan", encoding="utf-8")
+
+    clock["now"] = 4_601.0
+    assert web_server._maybe_recover_stale_system_ai_incident() is False
+    assert web_server.get_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY) == "1"
+    assert alerts == []
+
+
 def test_reset_system_ai_health_clears_stability_timestamps(
     isolated_app_state_db, alerts
 ):

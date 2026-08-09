@@ -1129,6 +1129,8 @@ def set_app_state_values(values: dict[str, str]) -> None:
 def advance_app_state_epoch(key: str, epoch: float) -> None:
     """Atomically raise an epoch-valued app-state key, never lower it."""
     target = float(epoch)
+    if not math.isfinite(target) or target < 0:
+        raise ValueError("epoch must be finite and non-negative")
     db = get_db()
     try:
         db.execute("BEGIN IMMEDIATE")

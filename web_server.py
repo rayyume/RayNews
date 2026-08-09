@@ -5,6 +5,7 @@ import os
 import re
 import sys
 import json
+import math
 import shutil
 import sqlite3
 import threading
@@ -1683,18 +1684,21 @@ def _read_system_ai_failure_marker() -> float:
     except FileNotFoundError:
         return 0.0
     value = float(raw)
-    if value < 0:
-        raise ValueError("negative system AI failure marker")
+    if not math.isfinite(value) or value < 0:
+        raise ValueError("invalid system AI failure marker")
     return value
 
 
 def _write_system_ai_failure_marker(epoch: float) -> None:
+    value = float(epoch)
+    if not math.isfinite(value) or value < 0:
+        raise ValueError("invalid system AI failure marker")
     path = Path(SYSTEM_AI_LAST_FAILURE_MARKER_FILE)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         with temporary.open("w", encoding="utf-8") as marker_file:
-            marker_file.write(str(float(epoch)))
+            marker_file.write(str(value))
             marker_file.flush()
             os.fsync(marker_file.fileno())
         os.replace(temporary, path)
@@ -1782,12 +1786,20 @@ def _reset_system_ai_health() -> None:
     config, so a fresh key starts from zero (and can alert again if it is also
     broken, instead of being muted by the previous config's flag)."""
     with _system_ai_health_lock:
-        # Disarm first and keep the health lock through the durable reset. A
-        # failed or partial reset must never expose old timestamps as trusted.
+        # Raise the in-memory floor before any fallible I/O. If persisting the
+        # reset fence fails, a later stable check still repairs from this floor.
+        reset_now = time.time()
+        reset_floor = max(
+            float(_system_ai_health.get("last_failure_at") or 0.0), reset_now
+        )
+        _system_ai_health["last_failure_at"] = reset_floor
         _system_ai_health["failure_timestamp_dirty"] = True
+        db_reset_committed = False
+        marker_cleanup_failed = False
         try:
             with _system_ai_failure_fence():
-                reset_floor = max(_read_system_ai_failure_marker(), time.time())
+                reset_floor = max(_read_system_ai_failure_marker(), reset_floor)
+                _system_ai_health["last_failure_at"] = reset_floor
                 _write_system_ai_failure_marker(reset_floor)
                 set_app_state_values(
                     {
@@ -1797,10 +1809,20 @@ def _reset_system_ai_health() -> None:
                         SYSTEM_AI_LAST_SUCCESS_STATE_KEY: "0",
                     }
                 )
-                _clear_system_ai_failure_marker()
+                db_reset_committed = True
+                try:
+                    _clear_system_ai_failure_marker()
+                except Exception as exc:
+                    marker_cleanup_failed = True
+                    print(f"[system-ai] alert marker cleanup failed: {exc}")
         except Exception as exc:
             print(f"[system-ai] alert state reset failed: {exc}")
+        if not db_reset_committed:
             return
+
+        # The four-key DB reset is already committed. Clear the old incident
+        # counters even if sidecar cleanup failed, while retaining a conservative
+        # floor/dirty bit until a later failure or stable reconciliation.
         _system_ai_health.update(
             {
                 "failures": 0,
@@ -1808,9 +1830,9 @@ def _reset_system_ai_health() -> None:
                 "alerted": False,
                 "last_error": "",
                 "jobs": [],
-                "last_failure_at": 0.0,
+                "last_failure_at": reset_floor if marker_cleanup_failed else 0.0,
                 "last_success_at": 0.0,
-                "failure_timestamp_dirty": False,
+                "failure_timestamp_dirty": marker_cleanup_failed,
             }
         )
 
