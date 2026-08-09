@@ -2,6 +2,7 @@ import configparser
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import signal
 import subprocess
@@ -348,3 +349,30 @@ def test_wrapper_returns_sigterm_after_reaping_cooperative_members(tmp_path):
 def test_container_image_copies_pipeline_wrapper():
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert "supervised_pipeline.py" in dockerfile
+
+
+def test_nginx_logs_use_the_timestamp_filter_contract():
+    nginx_conf = (ROOT / "nginx.conf").read_text(encoding="utf-8")
+    log_format = re.search(
+        r"(?ms)^\s*log_format\s+raynews\s+(.+?);",
+        nginx_conf,
+    )
+
+    assert log_format is not None
+    assert log_format.start() < nginx_conf.index("server {")
+
+    format_body = log_format.group(1)
+    for variable in (
+        "$remote_addr",
+        "$request",
+        "$status",
+        "$body_bytes_sent",
+        "$request_time",
+        "$http_user_agent",
+    ):
+        assert variable in format_body
+    assert "$time_local" not in format_body
+    assert "$time_iso8601" not in format_body
+
+    assert "access_log /dev/stdout raynews;" in nginx_conf
+    assert "error_log /dev/stderr warn;" in nginx_conf
