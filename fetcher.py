@@ -152,8 +152,9 @@ def upsert_articles(
     """
     sql = """INSERT INTO articles
         (id, title, source, feed_source, origin_source, time, date, timestamp, thumb,
-         has_full_content, telegraph_url, body_html, original_body_html, summary)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         has_full_content, telegraph_url, body_html, original_body_html, summary,
+         original_title, title_updated_at, title_source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             title = excluded.title,
             source = excluded.source,
@@ -173,7 +174,13 @@ def upsert_articles(
                 WHEN articles.original_body_html IS NULL OR articles.original_body_html = ''
                 THEN excluded.original_body_html ELSE articles.original_body_html END,
             summary = CASE WHEN excluded.summary != ''
-                THEN excluded.summary ELSE articles.summary END"""
+                THEN excluded.summary ELSE articles.summary END,
+            original_title = CASE WHEN excluded.original_title IS NOT NULL
+                THEN excluded.original_title ELSE articles.original_title END,
+            title_updated_at = CASE WHEN excluded.title_updated_at IS NOT NULL
+                THEN excluded.title_updated_at ELSE articles.title_updated_at END,
+            title_source = CASE WHEN excluded.title_source IS NOT NULL
+                THEN excluded.title_source ELSE articles.title_source END"""
     rows = []
     deleted_ids = {
         int(row[0])
@@ -196,16 +203,26 @@ def upsert_articles(
             1 if e.get("has_full_content") else 0,
             e.get("telegraph_url", ""),
             e.get("body_html", ""),
-            e.get("body_html", ""),
+            e.get("original_body_html", e.get("body_html", "")),
             e.get("summary", ""),
+            e.get("original_title"),
+            e.get("title_updated_at"),
+            e.get("title_source"),
         ))
     conn.executemany(sql, rows)
     if sync_sources:
         ensure_article_sources(conn)
+    persisted_ids = sorted({int(row[0]) for row in rows if int(row[0]) > 0})
+    total_count = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
+    log_message = f"SQLite: upserted {len(rows)} articles (total: {total_count})"
     conn.commit()
-    log.info(f"SQLite: upserted {len(rows)} articles"
-             f" (total: {conn.execute('SELECT COUNT(*) FROM articles').fetchone()[0]})")
-    return sorted({int(row[0]) for row in rows if int(row[0]) > 0})
+    # The commit is the final fallible batch operation. Logging is observational:
+    # a broken sink must not make a durable batch look uncommitted and retry it.
+    try:
+        log.info(log_message)
+    except Exception:
+        pass
+    return persisted_ids
 
 
 # A Telegraph full-text fetch that fails on the cycle an article first arrives (e.g.
@@ -364,6 +381,39 @@ def _commit_stream_batch(
     del committed_ids
     write_fetch_progress(len(set(inserted_ids)), total_messages, inserted_ids)
     return batch_size
+
+
+def _rollback_best_effort(conn: sqlite3.Connection) -> None:
+    """Rollback a failed stream write without allowing cleanup to be bypassed."""
+    try:
+        conn.rollback()
+    except Exception as exc:
+        try:
+            log.error(f"Streaming SQLite rollback failed: {exc}")
+        except Exception:
+            pass
+
+
+def _shutdown_stream_executor(executor, futures: dict) -> None:
+    """Cancel pending work, wait out running work, then release Future results."""
+    try:
+        for owned_future in tuple(futures):
+            if not owned_future.done():
+                owned_future.cancel()
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
+    finally:
+        futures.clear()
+
+
+def _clear_stream_payloads(
+    stream_batch: list[dict], failed_batches: list[list[dict]]
+) -> None:
+    """Release every uncommitted entry owned by the streaming lifecycle."""
+    stream_batch.clear()
+    for failed_batch in failed_batches:
+        failed_batch.clear()
+    failed_batches.clear()
 
 
 def migrate_news_json(conn: sqlite3.Connection):
@@ -1285,6 +1335,8 @@ def run():
     stream_conn = None
     stream_batch = []
     failed_batches: list[list[dict]] = []
+    executor = None
+    futures: dict = {}
     inserted_total = 0
     inserted_ids: list[int] = []
     last_commit_at = time.monotonic()
@@ -1292,44 +1344,43 @@ def run():
     try:
         stream_conn = init_db()
         stream_conn.execute("PRAGMA busy_timeout=30000")
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = {
-                executor.submit(process_message, msg, msg["id"]): int(msg["id"])
-                for msg in messages
-            }
-            for future in as_completed(futures):
-                msg_id = futures.pop(future)
+        executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+        futures = {
+            executor.submit(process_message, msg, msg["id"]): int(msg["id"])
+            for msg in messages
+        }
+        for future in as_completed(futures):
+            msg_id = futures.pop(future)
+            try:
+                entry = future.result()
+                stream_batch.append(entry)
+            except Exception as e:
+                failed_count += 1
+                log.error(f"Message processing failed (ID={msg_id}): {e}")
+            finally:
+                # A completed Future owns its result. Removing both the mapping
+                # entry and loop-local Future lets a committed batch's full body
+                # become unreachable as soon as the batch list is cleared.
+                entry = None
+                future = None
+                msg_id = None
+            if stream_batch and (
+                len(stream_batch) >= STREAM_BATCH_SIZE
+                or time.monotonic() - last_commit_at >= STREAM_BATCH_SECONDS
+            ):
                 try:
-                    entry = future.result()
-                    stream_batch.append(entry)
-                    del entry
+                    inserted_total += _commit_stream_batch(
+                        stream_conn,
+                        stream_batch,
+                        inserted_ids,
+                        len(messages),
+                    )
                 except Exception as e:
-                    failed_count += 1
-                    log.error(f"Message processing failed (ID={msg_id}): {e}")
-                finally:
-                    # A completed Future owns its result. Removing both the mapping
-                    # entry and loop-local Future lets a committed batch's full body
-                    # become unreachable as soon as the batch list is cleared.
-                    del future
-                    del msg_id
-                if stream_batch and (
-                    len(stream_batch) >= STREAM_BATCH_SIZE
-                    or time.monotonic() - last_commit_at >= STREAM_BATCH_SECONDS
-                ):
-                    try:
-                        inserted_total += _commit_stream_batch(
-                            stream_conn,
-                            stream_batch,
-                            inserted_ids,
-                            len(messages),
-                        )
-                    except Exception as e:
-                        stream_conn.rollback()
-                        failed_batches.append(stream_batch)
-                        stream_batch = []
-                        log.error(f"Streaming SQLite batch ingest failed: {e}")
-                    last_commit_at = time.monotonic()
-            del futures
+                    _rollback_best_effort(stream_conn)
+                    failed_batches.append(stream_batch)
+                    stream_batch = []
+                    log.error(f"Streaming SQLite batch ingest failed: {e}")
+                last_commit_at = time.monotonic()
         if stream_batch:
             try:
                 inserted_total += _commit_stream_batch(
@@ -1339,7 +1390,7 @@ def run():
                     len(messages),
                 )
             except Exception as e:
-                stream_conn.rollback()
+                _rollback_best_effort(stream_conn)
                 failed_batches.append(stream_batch)
                 stream_batch = []
                 log.error(f"Streaming SQLite trailing batch ingest failed: {e}")
@@ -1355,17 +1406,26 @@ def run():
                     len(messages),
                 )
             except Exception as e:
-                stream_conn.rollback()
+                _rollback_best_effort(stream_conn)
+                failed_count += len(failed_batch)
                 log.error(f"Streaming SQLite batch retry failed: {e}")
                 failed_batch.clear()
             finally:
                 del failed_batch
         failed_batches.clear()
     except Exception as e:
+        failed_count = max(failed_count, len(messages) - inserted_total)
         log.error(f"Streaming SQLite ingest failed: {e}")
     finally:
-        if stream_conn:
-            stream_conn.close()
+        try:
+            _shutdown_stream_executor(executor, futures)
+        finally:
+            _clear_stream_payloads(stream_batch, failed_batches)
+            entry = None
+            future = None
+            msg_id = None
+            if stream_conn:
+                stream_conn.close()
     log.info(
         f"[timing] Full-text fetch + streaming ingest: "
         f"{time.monotonic() - fulltext_started_at:.2f}s ({len(messages)} messages, "
@@ -1451,13 +1511,17 @@ def _load_recent_articles_for_mirror(
     rows = conn.execute(
         """SELECT id, title, source, feed_source, origin_source, time, date,
                   timestamp, thumb, has_full_content, telegraph_url, body_html,
-                  original_body_html, summary
+                  original_body_html, summary, original_title, title_updated_at,
+                  title_source
              FROM articles
             ORDER BY timestamp DESC, id DESC
             LIMIT ?""",
         (max(0, int(limit)),),
     ).fetchall()
-    return [dict(row) for row in rows]
+    entries = [dict(row) for row in rows]
+    for entry in entries:
+        entry["has_full_content"] = bool(entry["has_full_content"])
+    return entries
 
 
 def write_news_json_mirror(recent_entries: list[dict]) -> None:

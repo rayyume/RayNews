@@ -1,6 +1,8 @@
 import json
+import logging
 import sqlite3
 import time
+import weakref
 from collections import Counter
 
 import fetcher
@@ -285,6 +287,343 @@ def test_run_retries_only_failed_stream_batch_once_without_refetching_provider(
     assert progress["inserted_ids"] == [1, 2, 3, 4, 5, 6]
 
 
+def test_terminal_batch_failure_keeps_cursor_for_next_cycle_and_reports_only_commits(
+    tmp_path, monkeypatch, caplog
+):
+    """Missing persistence must fail the cycle cursor, not lose provider messages."""
+    _patch_fetcher_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(fetcher, "STREAM_BATCH_SIZE", 2)
+    monkeypatch.setattr(fetcher, "STREAM_BATCH_SECONDS", 100.0)
+    fetcher.save_state({"last_seen_id": 0})
+
+    all_messages = [{"id": article_id} for article_id in range(1, 5)]
+    fetch_states = []
+
+    def fetch_messages(state):
+        fetch_states.append(state["last_seen_id"])
+        return (
+            [message for message in all_messages if message["id"] > state["last_seen_id"]],
+            4,
+        )
+
+    monkeypatch.setattr(fetcher, "fetch_all_new_messages", fetch_messages)
+    provider_calls = []
+
+    def process_message(msg, orig_id):
+        provider_calls.append(orig_id)
+        return {
+            "id": orig_id,
+            "title": f"t{orig_id}",
+            "source": "s",
+            "feed_source": "s",
+            "timestamp": orig_id,
+            "has_full_content": True,
+            "body_html": f"body {orig_id}",
+        }
+
+    monkeypatch.setattr(fetcher, "process_message", process_message)
+
+    original_upsert = fetcher.upsert_articles
+    failed_ids = None
+    failed_attempts = 0
+    first_cycle_calls = []
+    first_cycle = True
+
+    def persistently_flaky_upsert(conn, entries, sync_sources=True):
+        nonlocal failed_ids, failed_attempts
+        ids = tuple(sorted(entry["id"] for entry in entries))
+        if not sync_sources and first_cycle:
+            first_cycle_calls.append(ids)
+            if failed_ids is None:
+                failed_ids = ids
+            if ids == failed_ids:
+                failed_attempts += 1
+                raise sqlite3.OperationalError("persistent batch failure")
+        return original_upsert(conn, entries, sync_sources=sync_sources)
+
+    monkeypatch.setattr(fetcher, "upsert_articles", persistently_flaky_upsert)
+
+    fetcher.run()
+
+    assert failed_ids is not None
+    assert failed_attempts == 2
+    assert first_cycle_calls.count(failed_ids) == 2
+    assert fetcher.load_state()["last_seen_id"] == 0
+    assert f"{len(failed_ids)} message(s) failed" in caplog.text
+
+    successful_ids = sorted(set(range(1, 5)) - set(failed_ids))
+    conn = sqlite3.connect(fetcher.DB_FILE)
+    first_cycle_db_ids = [
+        row[0] for row in conn.execute("SELECT id FROM articles ORDER BY id")
+    ]
+    conn.close()
+    assert first_cycle_db_ids == successful_ids
+    first_progress = json.loads(fetcher.PROGRESS_FILE.read_text(encoding="utf-8"))
+    assert first_progress["inserted"] == len(successful_ids)
+    assert first_progress["inserted_ids"] == successful_ids
+
+    # The provider honors last_seen_id. A preserved cursor makes the missing IDs
+    # eligible next cycle; committed IDs may be idempotently observed again.
+    first_cycle = False
+    fetcher.run()
+
+    assert fetch_states == [0, 0]
+    assert Counter(provider_calls) == Counter(
+        {article_id: 2 for article_id in range(1, 5)}
+    )
+    conn = sqlite3.connect(fetcher.DB_FILE)
+    final_ids = [row[0] for row in conn.execute("SELECT id FROM articles ORDER BY id")]
+    conn.close()
+    assert final_ids == [1, 2, 3, 4]
+    assert fetcher.load_state()["last_seen_id"] == 4
+
+
+def test_rollback_exception_releases_all_future_results_before_backfill(
+    tmp_path, monkeypatch
+):
+    """A rollback failure must not retain completed Future payloads for the cycle."""
+    _patch_fetcher_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(fetcher, "STREAM_BATCH_SIZE", 1)
+    monkeypatch.setattr(fetcher, "STREAM_BATCH_SECONDS", 100.0)
+    fetcher.save_state({"last_seen_id": 0})
+
+    messages = [{"id": article_id} for article_id in range(1, 21)]
+    monkeypatch.setattr(fetcher, "fetch_all_new_messages", lambda state: (messages, 20))
+    entry_refs = []
+
+    class WeakEntry(dict):
+        pass
+
+    def process_message(msg, orig_id):
+        entry = WeakEntry(
+            id=orig_id,
+            title=f"t{orig_id}",
+            source="s",
+            feed_source="s",
+            timestamp=orig_id,
+            has_full_content=True,
+            body_html=f"body-{orig_id}-" + "x" * (256 * 1024),
+        )
+        entry_refs.append(weakref.ref(entry))
+        return entry
+
+    monkeypatch.setattr(fetcher, "process_message", process_message)
+
+    real_init_db = fetcher.init_db
+    init_calls = 0
+    rollback_calls = 0
+    stream_connection = None
+
+    class RollbackRaisingConnection:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+        def rollback(self):
+            nonlocal rollback_calls
+            rollback_calls += 1
+            raise sqlite3.OperationalError("rollback also failed")
+
+    def init_db():
+        nonlocal init_calls, stream_connection
+        init_calls += 1
+        connection = real_init_db()
+        if init_calls == 2:
+            stream_connection = RollbackRaisingConnection(connection)
+            return stream_connection
+        return connection
+
+    monkeypatch.setattr(fetcher, "init_db", init_db)
+    real_upsert = fetcher.upsert_articles
+    failed_once = False
+
+    def fail_first_stream_write(conn, entries, sync_sources=True):
+        nonlocal failed_once
+        if conn is stream_connection and not sync_sources and not failed_once:
+            failed_once = True
+            raise sqlite3.OperationalError("stream write failed")
+        return real_upsert(conn, entries, sync_sources=sync_sources)
+
+    monkeypatch.setattr(fetcher, "upsert_articles", fail_first_stream_write)
+    released_before_backfill = []
+
+    def observe_backfill(conn):
+        released_before_backfill.append(sum(ref() is None for ref in entry_refs))
+        return 0
+
+    monkeypatch.setattr(fetcher, "backfill_missing_fulltext", observe_backfill)
+
+    fetcher.run()
+
+    assert rollback_calls == 1
+    assert entry_refs
+    assert released_before_backfill == [len(entry_refs)]
+
+
+def test_outer_completion_loop_exception_cancels_and_releases_future_results(
+    tmp_path, monkeypatch
+):
+    """Unexpected as_completed failure must clean every owned result before sync."""
+    _patch_fetcher_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(fetcher, "STREAM_BATCH_SIZE", 100)
+    monkeypatch.setattr(fetcher, "STREAM_BATCH_SECONDS", 100.0)
+    fetcher.save_state({"last_seen_id": 0})
+
+    messages = [{"id": article_id} for article_id in range(1, 21)]
+    monkeypatch.setattr(fetcher, "fetch_all_new_messages", lambda state: (messages, 20))
+    entry_refs = []
+
+    class WeakEntry(dict):
+        pass
+
+    def process_message(msg, orig_id):
+        entry = WeakEntry(
+            id=orig_id,
+            title=f"t{orig_id}",
+            source="s",
+            feed_source="s",
+            timestamp=orig_id,
+            has_full_content=True,
+            body_html=f"body-{orig_id}-" + "x" * (256 * 1024),
+        )
+        entry_refs.append(weakref.ref(entry))
+        return entry
+
+    monkeypatch.setattr(fetcher, "process_message", process_message)
+    real_as_completed = fetcher.as_completed
+
+    def raising_as_completed(futures):
+        iterator = real_as_completed(tuple(futures))
+        yield next(iterator)
+        raise RuntimeError("completion iterator failed")
+
+    monkeypatch.setattr(fetcher, "as_completed", raising_as_completed)
+    released_before_backfill = []
+
+    def observe_backfill(conn):
+        released_before_backfill.append(sum(ref() is None for ref in entry_refs))
+        return 0
+
+    monkeypatch.setattr(fetcher, "backfill_missing_fulltext", observe_backfill)
+
+    fetcher.run()
+
+    # Futures that had not started may be cancelled and therefore create no entry.
+    # Every large result that was created must be unreachable before backfill.
+    assert entry_refs
+    assert released_before_backfill == [len(entry_refs)]
+    assert fetcher.load_state()["last_seen_id"] == 0
+
+
+def test_post_commit_logging_failure_does_not_retry_committed_batch(
+    tmp_path, monkeypatch
+):
+    """A sink failure after commit cannot reclassify a durable batch as fallback."""
+    _patch_fetcher_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(fetcher, "STREAM_BATCH_SIZE", 2)
+    monkeypatch.setattr(fetcher, "STREAM_BATCH_SECONDS", 100.0)
+    messages = [{"id": article_id} for article_id in range(1, 5)]
+    monkeypatch.setattr(fetcher, "fetch_all_new_messages", lambda state: (messages, 4))
+    monkeypatch.setattr(
+        fetcher,
+        "process_message",
+        lambda msg, orig_id: {
+            "id": orig_id,
+            "title": f"t{orig_id}",
+            "source": "s",
+            "feed_source": "s",
+            "timestamp": orig_id,
+        },
+    )
+
+    original_upsert = fetcher.upsert_articles
+    streamed_batches = []
+
+    def tracking_upsert(conn, entries, sync_sources=True):
+        if not sync_sources:
+            streamed_batches.append(tuple(sorted(entry["id"] for entry in entries)))
+        return original_upsert(conn, entries, sync_sources=sync_sources)
+
+    monkeypatch.setattr(fetcher, "upsert_articles", tracking_upsert)
+
+    class RaiseFirstSqliteInfo(logging.Handler):
+        def __init__(self):
+            super().__init__()
+            self.raised = False
+
+        def emit(self, record):
+            if not self.raised and record.getMessage().startswith("SQLite: upserted"):
+                self.raised = True
+                raise RuntimeError("post-commit log sink failed")
+
+    handler = RaiseFirstSqliteInfo()
+    old_level = fetcher.log.level
+    fetcher.log.setLevel(logging.INFO)
+    fetcher.log.addHandler(handler)
+    try:
+        fetcher.run()
+    finally:
+        fetcher.log.removeHandler(handler)
+        fetcher.log.setLevel(old_level)
+
+    assert handler.raised is True
+    assert len(streamed_batches) == 2
+    assert sorted(article_id for batch in streamed_batches for article_id in batch) == [
+        1,
+        2,
+        3,
+        4,
+    ]
+
+
+def test_upsert_has_no_fallible_query_after_successful_commit(tmp_path, monkeypatch):
+    """The durable commit is the final fallible database operation for a batch."""
+    _patch_fetcher_paths(monkeypatch, tmp_path)
+    raw_connection = fetcher.init_db()
+
+    class RejectPostCommitQuery:
+        def __init__(self, connection):
+            self.connection = connection
+            self.committed = False
+            self.commit_calls = 0
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+        def execute(self, sql, *args):
+            if self.committed:
+                raise RuntimeError("query attempted after commit")
+            return self.connection.execute(sql, *args)
+
+        def commit(self):
+            self.connection.commit()
+            self.commit_calls += 1
+            self.committed = True
+
+    connection = RejectPostCommitQuery(raw_connection)
+    try:
+        persisted_ids = fetcher.upsert_articles(
+            connection,
+            [
+                {
+                    "id": 7,
+                    "title": "t7",
+                    "source": "s",
+                    "feed_source": "s",
+                    "timestamp": 7,
+                }
+            ],
+            sync_sources=False,
+        )
+    finally:
+        raw_connection.close()
+
+    assert persisted_ids == [7]
+    assert connection.commit_calls == 1
+
+
 def test_load_recent_articles_for_mirror_has_stable_order_and_limit(
     tmp_path, monkeypatch
 ):
@@ -312,6 +651,101 @@ def test_load_recent_articles_for_mirror_has_stable_order_and_limit(
 
     assert [row["id"] for row in rows] == [3, 2, 1, 5]
     assert rows[0]["body_html"] == "body 3"
+
+
+def test_news_json_mirror_round_trip_preserves_wire_types_and_title_metadata(
+    tmp_path, monkeypatch
+):
+    """SQLite snapshot JSON must remain a lossless legacy recovery payload."""
+    _patch_fetcher_paths(monkeypatch, tmp_path)
+    conn = fetcher.init_db()
+    fetcher.upsert_articles(
+        conn,
+        [
+            {
+                "id": 77,
+                "title": "Shared title",
+                "source": "Feed",
+                "feed_source": "Feed",
+                "origin_source": "Origin",
+                "time": "09:30",
+                "date": "2026-08-10",
+                "timestamp": 177,
+                "thumb": "https://img/77.jpg",
+                "has_full_content": True,
+                "telegraph_url": "https://telegra.ph/77",
+                "body_html": "<article>original body</article>",
+                "summary": "summary",
+            },
+            {
+                "id": 76,
+                "title": "Default fields",
+                "timestamp": 176,
+                "has_full_content": False,
+            },
+        ],
+    )
+    conn.execute(
+        "UPDATE articles SET body_html = ?, original_title = ?, "
+        "title_updated_at = ?, title_source = ? WHERE id = ?",
+        (
+            "<article>current translated body</article>",
+            "Original title",
+            "2026-08-10 09:31:00",
+            "title_summary",
+            77,
+        ),
+    )
+    conn.commit()
+
+    snapshot = fetcher._load_recent_articles_for_mirror(conn, limit=10)
+    by_id = {entry["id"]: entry for entry in snapshot}
+    assert by_id[77]["has_full_content"] is True
+    assert by_id[76]["has_full_content"] is False
+    assert by_id[77]["original_title"] == "Original title"
+    assert by_id[77]["title_updated_at"] == "2026-08-10 09:31:00"
+    assert by_id[77]["title_source"] == "title_summary"
+    assert by_id[76]["original_title"] is None
+    assert by_id[76]["title_updated_at"] is None
+    assert by_id[76]["title_source"] is None
+    assert by_id[76]["source"] == ""
+    assert by_id[76]["body_html"] == ""
+    assert by_id[76]["original_body_html"] == ""
+
+    fetcher.write_news_json_mirror(snapshot)
+    wire_items = json.loads(fetcher.OUTPUT_FILE.read_text(encoding="utf-8"))["items"]
+    wire_by_id = {entry["id"]: entry for entry in wire_items}
+    assert wire_by_id[77]["has_full_content"] is True
+    assert wire_by_id[76]["has_full_content"] is False
+    assert wire_by_id[77]["original_title"] == "Original title"
+    assert wire_by_id[76]["original_title"] is None
+
+    # Recreate articles solely through the existing legacy migration entry point.
+    conn.execute("DELETE FROM articles")
+    conn.commit()
+    fetcher.migrate_news_json(conn)
+    restored = conn.execute(
+        "SELECT title, has_full_content, body_html, original_body_html, "
+        "original_title, title_updated_at, title_source "
+        "FROM articles WHERE id = 77"
+    ).fetchone()
+    defaults = conn.execute(
+        "SELECT has_full_content, source, body_html, original_body_html, "
+        "original_title, title_updated_at, title_source "
+        "FROM articles WHERE id = 76"
+    ).fetchone()
+    conn.close()
+
+    assert tuple(restored) == (
+        "Shared title",
+        1,
+        "<article>current translated body</article>",
+        "<article>original body</article>",
+        "Original title",
+        "2026-08-10 09:31:00",
+        "title_summary",
+    )
+    assert tuple(defaults) == (0, "", "", "", None, None, None)
 
 
 def test_news_json_mirror_is_truncated_and_unindented(tmp_path, monkeypatch):
