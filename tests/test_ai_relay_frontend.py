@@ -853,6 +853,130 @@ vm.runInContext({json.dumps(_article_detail_block() + _translation_update_block(
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def test_article_detail_starts_after_bounded_baseline_wait():
+    script = rf"""
+const assert = require('assert');
+const vm = require('vm');
+let resolveBaseline;
+let detailStartedAt = 0;
+const startedAt = Date.now();
+const context = {{
+  console,
+  authToken: 'tok',
+  translationUpdateCursor: '',
+  translationUpdateBaselineUncertain: false,
+  translationUpdatePolling: false,
+  translationUpdatePollPromise: null,
+  articleBodyCache: {{}},
+  articleBodyPromises: {{}},
+  articleBodyControllers: {{}},
+  articleBodyRequestGenerations: {{}},
+  document: {{ getElementById: () => null }},
+  setTimeout,
+  clearTimeout,
+  AbortController,
+  TRANSLATION_UPDATES_POLL_TIMEOUT_MS: 5000,
+  TRANSLATION_UPDATES_BASELINE_WAIT_MS: 30,
+}};
+context.fetch = url => {{
+  if (url.startsWith('/ai/translation-updates')) {{
+    return new Promise(resolve => {{ resolveBaseline = resolve; }});
+  }}
+  detailStartedAt = Date.now();
+  return Promise.resolve({{ ok: true, json: async () => ({{ body_html: '<p>current</p>' }}) }});
+}};
+vm.createContext(context);
+vm.runInContext({json.dumps(_article_detail_block() + _translation_update_block())}, context);
+(async () => {{
+  let watchdog;
+  let baselineSettled = false;
+  try {{
+    const detail = await Promise.race([
+      context.fetchArticleDetail(42),
+      new Promise((_resolve, reject) => {{ watchdog = setTimeout(() => reject(new Error('detail did not start after bounded wait')), 500); }}),
+    ]);
+    const elapsed = detailStartedAt - startedAt;
+    assert.deepEqual(detail, {{ body_html: '<p>current</p>' }});
+    assert.ok(elapsed >= 20 && elapsed <= 500, `detail started after ${{elapsed}}ms`);
+    resolveBaseline({{ ok: true, json: async () => ({{ items: [], cursor: 'baseline|0' }}) }});
+    baselineSettled = true;
+    await context.translationUpdatePollPromise;
+  }} finally {{
+    clearTimeout(watchdog);
+    if (!baselineSettled && resolveBaseline) {{
+      resolveBaseline({{ ok: true, json: async () => ({{ items: [], cursor: 'cleanup|0' }}) }});
+      await context.translationUpdatePollPromise;
+    }}
+  }}
+}})().catch(error => {{ console.error(error && error.stack ? error.stack : error); process.exitCode = 1; }});
+"""
+    result = subprocess.run(["node", "-e", script], cwd=ROOT,
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_late_successful_baseline_invalidates_detail_cached_after_wait_timeout():
+    script = rf"""
+const assert = require('assert');
+const vm = require('vm');
+let resolveBaseline;
+const overlay = {{ dataset: {{}}, classList: {{ contains: () => false }} }};
+const context = {{
+  console,
+  authToken: 'tok',
+  translationUpdateCursor: '',
+  translationUpdateBaselineUncertain: false,
+  translationUpdatePolling: false,
+  translationUpdatePollPromise: null,
+  articleBodyCache: {{}},
+  articleBodyPromises: {{}},
+  articleBodyControllers: {{}},
+  articleBodyRequestGenerations: {{}},
+  document: {{ getElementById: id => id === 'overlay' ? overlay : null }},
+  setTimeout,
+  clearTimeout,
+  AbortController,
+  TRANSLATION_UPDATES_POLL_TIMEOUT_MS: 5000,
+  TRANSLATION_UPDATES_BASELINE_WAIT_MS: 20,
+}};
+context.fetch = url => {{
+  if (url.startsWith('/ai/translation-updates')) {{
+    return new Promise(resolve => {{ resolveBaseline = resolve; }});
+  }}
+  return Promise.resolve({{ ok: true, json: async () => ({{ body_html: '<p>English cached</p>' }}) }});
+}};
+vm.createContext(context);
+vm.runInContext({json.dumps(_article_detail_block() + _translation_update_block())}, context);
+(async () => {{
+  let watchdog;
+  let baselineSettled = false;
+  try {{
+    await Promise.race([
+      context.fetchArticleDetail(42),
+      new Promise((_resolve, reject) => {{ watchdog = setTimeout(() => reject(new Error('detail cache was blocked by baseline')), 500); }}),
+    ]);
+    assert.deepEqual(context.articleBodyCache[42], {{ body_html: '<p>English cached</p>' }});
+    assert.equal(context.translationUpdateBaselineUncertain, true);
+    resolveBaseline({{ ok: true, json: async () => ({{ items: [], cursor: 'late|0' }}) }});
+    baselineSettled = true;
+    await context.translationUpdatePollPromise;
+    assert.equal(context.translationUpdateBaselineUncertain, false);
+    assert.equal(context.translationUpdateCursor, 'late|0');
+    assert.equal(context.articleBodyCache[42], undefined);
+  }} finally {{
+    clearTimeout(watchdog);
+    if (!baselineSettled && resolveBaseline) {{
+      resolveBaseline({{ ok: true, json: async () => ({{ items: [], cursor: 'cleanup|0' }}) }});
+      await context.translationUpdatePollPromise;
+    }}
+  }}
+}})().catch(error => {{ console.error(error && error.stack ? error.stack : error); process.exitCode = 1; }});
+"""
+    result = subprocess.run(["node", "-e", script], cwd=ROOT,
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def test_successful_baseline_after_a_failed_initial_poll_invalidates_english_detail_cache():
     script = rf"""
 const assert = require('assert');

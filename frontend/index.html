@@ -8071,7 +8071,7 @@ function fetchArticleDetail(id, timeoutMs = 8000) {
     // An empty cursor means the server would establish its baseline at the
     // current instant. Do that before the first detail request so a completed
     // translation cannot be skipped between list load and the first poll.
-    if (authToken && !translationUpdateCursor) await pollTranslationUpdates();
+    if (authToken && !translationUpdateCursor) await waitForTranslationBaseline();
     if ((articleBodyRequestGenerations[id] || 0) !== generation) {
       throw new Error('article detail request superseded');
     }
@@ -8095,6 +8095,23 @@ function fetchArticleDetail(id, timeoutMs = 8000) {
     });
   articleBodyPromises[id] = promise;
   return promise;
+}
+
+async function waitForTranslationBaseline() {
+  if (!authToken || translationUpdateCursor) return;
+  let timer = null;
+  const timedOut = await Promise.race([
+    Promise.resolve(pollTranslationUpdates()).then(() => false, () => false),
+    new Promise(resolve => {
+      timer = setTimeout(() => resolve(true), TRANSLATION_UPDATES_BASELINE_WAIT_MS);
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+  if (timedOut && !translationUpdateCursor) {
+    // The detail request is about to cross an unestablished baseline. Mark it
+    // uncertain so a late successful baseline invalidates any body cached now.
+    translationUpdateBaselineUncertain = true;
+  }
 }
 
 function renderArticleBody(wrap, data, id) {
