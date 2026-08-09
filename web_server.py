@@ -69,6 +69,7 @@ from image_cache import (
     cache_stats, evict_article_images, evict_unreferenced_images, collect_image_urls, open_cache_connection, _url_hash,
 )
 from news_schema import ensure_article_schema, ensure_article_title_columns
+from runtime_memory import runtime_memory_snapshot
 from source_categories import (
     CATEGORY_NAMES, CATEGORY_ORDER, cleanup_stale_source_categories,
     clamp_weighted, ensure_article_source_columns, ensure_article_sources,
@@ -5262,12 +5263,32 @@ def _host_memory_total_bytes() -> int | None:
 
 
 def _container_resource_stats() -> dict:
-    """Container memory/CPU from cgroup files (v2 preferred, v1 fallback).
+    """Container memory/CPU with cgroup breakdown and per-process RSS.
 
     Fields that can't be read are returned as None so the UI shows N/A rather
     than erroring; there is no psutil dependency."""
     stats = {"mem_used_bytes": None, "mem_limit_bytes": None,
-             "cpu_percent": 0.0, "cpu_count": None}
+             "cpu_percent": 0.0, "cpu_count": None,
+             "memory_breakdown": {}, "processes": []}
+    try:
+        memory = runtime_memory_snapshot()
+        cgroup = memory.get("cgroup") or {}
+        processes = memory.get("processes") or []
+    except Exception:
+        app.logger.exception("Failed to read runtime memory snapshot")
+        cgroup = {}
+        processes = []
+    stats["memory_breakdown"] = cgroup
+    stats["processes"] = processes
+    stats["mem_used_bytes"] = cgroup.get("current_bytes")
+    limit = cgroup.get("max_bytes")
+    if limit is not None and not (
+        cgroup.get("version") == "v1" and limit >= (1 << 62)
+    ):
+        stats["mem_limit_bytes"] = limit
+    elif stats["mem_used_bytes"] is not None:
+        stats["mem_limit_bytes"] = _host_memory_total_bytes()
+
     try:
         stats["cpu_count"] = len(os.sched_getaffinity(0))
     except (AttributeError, OSError):
@@ -5288,23 +5309,6 @@ def _container_resource_stats() -> dict:
         ns = _read_int_file("/sys/fs/cgroup/cpuacct/cpuacct.usage")
         return ns // 1000 if ns is not None else None
 
-    if cgroup_v2:
-        stats["mem_used_bytes"] = _read_int_file("/sys/fs/cgroup/memory.current")
-        try:
-            with open("/sys/fs/cgroup/memory.max") as fh:
-                raw = fh.read().strip()
-            stats["mem_limit_bytes"] = _host_memory_total_bytes() if raw == "max" else int(raw)
-        except (OSError, ValueError):
-            stats["mem_limit_bytes"] = None
-    else:
-        stats["mem_used_bytes"] = _read_int_file("/sys/fs/cgroup/memory/memory.usage_in_bytes")
-        limit = _read_int_file("/sys/fs/cgroup/memory/memory.limit_in_bytes")
-        # cgroup v1 reports an absurd sentinel when unlimited.
-        if limit is not None and limit < (1 << 62):
-            stats["mem_limit_bytes"] = limit
-        elif stats["mem_used_bytes"] is not None:
-            stats["mem_limit_bytes"] = _host_memory_total_bytes()
-
     usage = cpu_usage_usec()
     now = time.monotonic()
     if usage is not None:
@@ -5321,6 +5325,23 @@ def _container_resource_stats() -> dict:
     return stats
 
 
+def _refresh_runtime_stats(http_get=None) -> dict:
+    """Read refresh-process metrics without coupling tests to a real socket."""
+    get = http_get or requests.get
+    try:
+        response = get(
+            "http://127.0.0.1:8081/internal/runtime-stats",
+            timeout=1,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("refresh runtime stats must be an object")
+        return payload
+    except (requests.RequestException, AttributeError, TypeError, ValueError):
+        return {"status": "unavailable"}
+
+
 def _count_scalar(conn, sql: str) -> int:
     try:
         row = conn.execute(sql).fetchone()
@@ -5332,6 +5353,9 @@ def _count_scalar(conn, sql: str) -> int:
 @app.route("/admin/server-stats", methods=["GET"])
 @require_role("admin")
 def admin_server_stats():
+    # Sample the sibling process before opening/using any SQLite connection in
+    # this view; a one-second local network timeout must never extend a DB lock.
+    refresh_stats = _refresh_runtime_stats()
     news_db = _path_size(NEWS_DB)
     app_db = _path_size(os.path.join(DATA_DIR, "raynews.db"))
     image_cache_db = _path_size(os.path.join(DATA_DIR, "image_cache", "cache.db"))
@@ -5382,6 +5406,7 @@ def admin_server_stats():
             "cached_images": cached_images,
         },
         "container": _container_resource_stats(),
+        "application": {"refresh": refresh_stats},
         # Same date.today() the purge endpoint's "not after today" validation uses
         # (_parse_purge_before_date), which respects the process's TZ env var. The
         # admin UI's date picker uses this instead of the browser's own UTC/local

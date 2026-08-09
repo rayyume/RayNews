@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,115 @@ if str(ROOT) not in sys.path:
 
 import fetcher
 import refresh_server
+
+
+class _TrackingLock:
+    def __init__(self):
+        self.held = False
+
+    def __enter__(self):
+        assert not self.held
+        self.held = True
+
+    def __exit__(self, exc_type, exc, traceback):
+        self.held = False
+
+
+class _LockGuardedDict(dict):
+    def __init__(self, lock, *args, **kwargs):
+        self._lock = lock
+        super().__init__(*args, **kwargs)
+
+    def __len__(self):
+        assert self._lock.held
+        return super().__len__()
+
+    def values(self):
+        assert self._lock.held
+        return super().values()
+
+
+def test_refresh_runtime_stats_reads_cache_bytes_items_and_inflight_under_lock(
+    monkeypatch,
+):
+    lock = _TrackingLock()
+    monkeypatch.setattr(refresh_server, "_article_cache_lock", lock)
+    monkeypatch.setattr(
+        refresh_server,
+        "_article_cache",
+        _LockGuardedDict(lock, {10: b"abc", 11: b"12345"}),
+    )
+    monkeypatch.setattr(
+        refresh_server,
+        "_article_cache_inflight",
+        _LockGuardedDict(lock, {12: threading.Event()}),
+    )
+
+    stats = refresh_server.refresh_runtime_stats()
+
+    assert stats == {
+        "article_cache_items": 2,
+        "article_cache_bytes": 8,
+        "article_cache_inflight": 1,
+    }
+
+
+@pytest.mark.parametrize("remote_ip", ["127.0.0.1", "::1"])
+def test_internal_runtime_stats_allows_immediate_loopback_peers(
+    remote_ip, monkeypatch
+):
+    calls = []
+    payload = {
+        "article_cache_items": 2,
+        "article_cache_bytes": 8,
+        "article_cache_inflight": 1,
+    }
+    monkeypatch.setattr(
+        refresh_server, "refresh_runtime_stats", lambda: payload
+    )
+    monkeypatch.setattr(
+        refresh_server,
+        "send_json",
+        lambda handler, body, status=200: calls.append((json.loads(body), status)),
+    )
+    monkeypatch.setattr(
+        refresh_server,
+        "send_text",
+        lambda handler, body, status=200: calls.append((body, status)),
+    )
+    handler = refresh_server.Handler.__new__(refresh_server.Handler)
+    handler.path = "/internal/runtime-stats"
+    handler.client_address = (remote_ip, 54321)
+    handler.headers = {"X-Forwarded-For": "198.51.100.10"}
+
+    refresh_server.Handler.do_GET(handler)
+
+    assert calls == [(payload, 200)]
+
+
+@pytest.mark.parametrize("remote_ip", ["198.51.100.10", "2001:db8::10"])
+def test_internal_runtime_stats_rejects_non_loopback_even_with_spoofed_forwarding(
+    remote_ip, monkeypatch
+):
+    calls = []
+    monkeypatch.setattr(
+        refresh_server,
+        "send_json",
+        lambda handler, body, status=200: calls.append((json.loads(body), status)),
+    )
+    monkeypatch.setattr(
+        refresh_server,
+        "send_text",
+        lambda handler, body, status=200: calls.append((body, status)),
+    )
+    handler = refresh_server.Handler.__new__(refresh_server.Handler)
+    handler.path = "/internal/runtime-stats"
+    handler.client_address = (remote_ip, 54321)
+    handler.headers = {"X-Forwarded-For": "127.0.0.1", "X-Real-IP": "::1"}
+
+    refresh_server.Handler.do_GET(handler)
+
+    assert calls == [({"error": "forbidden"}, 403)]
 
 
 def test_parse_datetime_falls_back_to_current_beijing_time(monkeypatch):

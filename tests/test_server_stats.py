@@ -398,6 +398,9 @@ def test_server_stats_reports_server_date_matching_purge_validation_today(monkey
     monkeypatch.setattr(web_server, "count_users", lambda: 0)
     monkeypatch.setattr(web_server, "_container_resource_stats", lambda: {})
     monkeypatch.setattr(
+        web_server, "_refresh_runtime_stats", lambda: {"status": "unavailable"}
+    )
+    monkeypatch.setattr(
         web_server, "date",
         type("Today", (), {"today": staticmethod(lambda: date(2026, 7, 16))}),
     )
@@ -411,6 +414,161 @@ def test_server_stats_reports_server_date_matching_purge_validation_today(monkey
 
     assert resp.status_code == 200
     assert resp.get_json()["server_date"] == "2026-07-16"
+
+
+def _patch_admin_stats_dependencies(monkeypatch, refresh_request_started):
+    monkeypatch.setattr(
+        models,
+        "get_user",
+        lambda user_id: {"id": user_id, "role": "admin", "token_version": 0},
+    )
+    monkeypatch.setattr(models, "record_access", lambda user_id: None)
+    monkeypatch.setattr(web_server, "_path_size", lambda path: 0)
+    monkeypatch.setattr(web_server, "_dir_size", lambda path: 0)
+    monkeypatch.setattr(
+        web_server,
+        "cache_stats",
+        lambda: {"enabled": True, "count": 0, "used_bytes": 0, "max_bytes": 0},
+    )
+    monkeypatch.setattr(
+        web_server.shutil,
+        "disk_usage",
+        lambda path: type("Usage", (), {"total": 0, "used": 0, "free": 0})(),
+    )
+
+    def get_news_db_after_refresh_request():
+        assert refresh_request_started.is_set()
+        return None
+
+    monkeypatch.setattr(web_server, "_get_news_db", get_news_db_after_refresh_request)
+
+    class FakeCursor:
+        def fetchone(self):
+            return (0,)
+
+    class FakeConn:
+        def execute(self, *args, **kwargs):
+            return FakeCursor()
+
+    monkeypatch.setattr(web_server, "get_db", lambda: FakeConn())
+    monkeypatch.setattr(web_server, "count_users", lambda: 0)
+    monkeypatch.setattr(web_server.os, "sched_getaffinity", lambda pid: {0, 1})
+    monkeypatch.setattr(web_server, "_container_cpu_sample", [None])
+
+
+def test_server_stats_adds_memory_breakdown_processes_and_refresh_metrics(
+    monkeypatch,
+):
+    refresh_request_started = threading.Event()
+    _patch_admin_stats_dependencies(monkeypatch, refresh_request_started)
+    cgroup = {
+        "version": "v2",
+        "current_bytes": 111,
+        "max_bytes": 222,
+        "anon_bytes": 60,
+        "file_bytes": 40,
+        "kernel_bytes": 11,
+        "slab_bytes": 5,
+    }
+    processes = [
+        {
+            "pid": 7,
+            "name": "web",
+            "cmdline": "python web_server.py",
+            "rss_bytes": 80,
+            "threads": 4,
+        }
+    ]
+    monkeypatch.setattr(
+        web_server,
+        "runtime_memory_snapshot",
+        lambda: {"cgroup": cgroup, "processes": processes},
+    )
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "article_cache_items": 2,
+                "article_cache_bytes": 8,
+                "article_cache_inflight": 1,
+            }
+
+    def get_refresh_stats(url, *, timeout):
+        assert url == "http://127.0.0.1:8081/internal/runtime-stats"
+        assert timeout == 1
+        refresh_request_started.set()
+        return FakeResponse()
+
+    monkeypatch.setattr(web_server.requests, "get", get_refresh_stats)
+
+    client = web_server.app.test_client()
+    token = web_server.create_token(202, "admin")
+    response = client.get(
+        "/admin/server-stats",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["container"] == {
+        "mem_used_bytes": 111,
+        "mem_limit_bytes": 222,
+        "cpu_percent": 0.0,
+        "cpu_count": 2,
+        "memory_breakdown": cgroup,
+        "processes": processes,
+    }
+    assert data["application"]["refresh"] == {
+        "article_cache_items": 2,
+        "article_cache_bytes": 8,
+        "article_cache_inflight": 1,
+    }
+
+
+def test_server_stats_reports_refresh_unavailable_on_one_second_timeout(
+    monkeypatch,
+):
+    refresh_request_started = threading.Event()
+    _patch_admin_stats_dependencies(monkeypatch, refresh_request_started)
+    monkeypatch.setattr(
+        web_server,
+        "runtime_memory_snapshot",
+        lambda: {
+            "cgroup": {
+                "version": "unknown",
+                "current_bytes": None,
+                "max_bytes": None,
+                "anon_bytes": None,
+                "file_bytes": None,
+                "kernel_bytes": None,
+                "slab_bytes": None,
+            },
+            "processes": [],
+        },
+    )
+
+    def timeout(url, *, timeout):
+        assert url == "http://127.0.0.1:8081/internal/runtime-stats"
+        assert timeout == 1
+        refresh_request_started.set()
+        raise web_server.requests.Timeout("refresh unavailable")
+
+    monkeypatch.setattr(web_server.requests, "get", timeout)
+
+    client = web_server.app.test_client()
+    token = web_server.create_token(202, "admin")
+    response = client.get(
+        "/admin/server-stats",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["application"]["refresh"] == {
+        "status": "unavailable"
+    }
 
 
 def test_purge_date_parser_rejects_invalid_and_future_dates(monkeypatch):

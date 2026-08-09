@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tiny HTTP server: runs fetcher.py on GET /refresh, periodic auto-refresh, and serves SQLite-backed API."""
 import http.server
+import ipaddress
 import subprocess
 import json
 import sys
@@ -123,6 +124,24 @@ def _warm_news_schema() -> bool:
 _article_cache: dict[int, bytes] = {}
 _article_cache_lock = threading.Lock()
 _article_cache_inflight: dict[int, threading.Event] = {}
+
+
+def refresh_runtime_stats() -> dict[str, int]:
+    """Return one consistent snapshot of the private article cache state."""
+    with _article_cache_lock:
+        return {
+            "article_cache_items": len(_article_cache),
+            "article_cache_bytes": sum(len(payload) for payload in _article_cache.values()),
+            "article_cache_inflight": len(_article_cache_inflight),
+        }
+
+
+def _is_loopback_peer(handler: http.server.BaseHTTPRequestHandler) -> bool:
+    """Trust only the TCP peer address, never client-supplied forwarding headers."""
+    try:
+        return ipaddress.ip_address(handler.client_address[0]).is_loopback
+    except (AttributeError, IndexError, TypeError, ValueError):
+        return False
 
 
 def clear_article_cache():
@@ -1002,6 +1021,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         # ── Internal (loopback-only via nginx routing; not exposed under /api/) ──
+        if path == "/internal/runtime-stats":
+            if not _is_loopback_peer(self):
+                send_json(self, json.dumps({"error": "forbidden"}).encode(), 403)
+                return
+            send_json(self, json.dumps(refresh_runtime_stats()).encode())
+            return
+
         if path == "/internal/cache-evict":
             body, status = api_cache_evict(params)
             send_json(self, body, status)
