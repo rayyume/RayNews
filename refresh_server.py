@@ -83,8 +83,12 @@ def ensure_schema_once(conn: sqlite3.Connection) -> None:
         if _schema_ready_event.is_set() and _schema_ready:
             return
         ensure_article_schema(conn)
-        globals()["_schema_ready"] = True
-        _schema_ready_event.set()
+        has_articles = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'articles'"
+        ).fetchone()
+        if has_articles:
+            globals()["_schema_ready"] = True
+            _schema_ready_event.set()
 
 
 def ensure_article_title_columns(conn: sqlite3.Connection) -> None:
@@ -100,6 +104,19 @@ def get_db() -> sqlite3.Connection:
     enable_wal_mode(conn)
     conn.execute("PRAGMA synchronous=NORMAL")
     return conn
+
+
+def _warm_news_schema() -> bool:
+    conn = None
+    try:
+        conn = get_db()
+        return bool(_schema_ready_event.is_set() and _schema_ready)
+    except Exception:
+        log.exception("Schema warmup failed; migration remains lazy")
+        return False
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 # In-memory cache for article detail responses — invalidated on fetcher run
@@ -1061,6 +1078,7 @@ if __name__ == "__main__":
     if diag["telegram_channel_default"]:
         log.warning("TELEGRAM_CHANNEL is not configured or still equals your_channel")
     server = RayNewsThreadingHTTPServer(("127.0.0.1", port), Handler)
+    _warm_news_schema()
     start_refresh_job("startup")
     # Start periodic refresh in background
     threading.Timer(REFRESH_INTERVAL, periodic_refresh).start()

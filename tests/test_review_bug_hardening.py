@@ -3,6 +3,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -246,6 +248,42 @@ def test_schema_ready_is_guarded_by_event_instead_of_unsynchronized_fast_path():
     assert "_schema_ready_event" in source
     assert "_schema_ready_event.is_set()" in block
     assert "_schema_ready =" not in block
+
+
+def test_schema_once_does_not_latch_before_articles_exists(tmp_path, monkeypatch):
+    conn = sqlite3.connect(tmp_path / "news.db")
+    monkeypatch.setattr(refresh_server, "_schema_ready", False)
+    refresh_server._schema_ready_event.clear()
+    try:
+        refresh_server.ensure_schema_once(conn)
+
+        assert refresh_server._schema_ready is False
+        assert not refresh_server._schema_ready_event.is_set()
+    finally:
+        conn.close()
+
+
+def test_warmup_runs_before_startup_fetch():
+    source = Path(refresh_server.__file__).read_text(encoding="utf-8")
+    main = source[source.index('if __name__ == "__main__":'):]
+
+    assert main.index("_warm_news_schema()") < main.index('start_refresh_job("startup")')
+
+
+def test_warm_news_schema_returns_readiness_and_closes_connection(tmp_path, monkeypatch):
+    conn = sqlite3.connect(tmp_path / "news.db")
+    previous_event_state = refresh_server._schema_ready_event.is_set()
+    monkeypatch.setattr(refresh_server, "get_db", lambda: conn)
+    monkeypatch.setattr(refresh_server, "_schema_ready", True)
+    refresh_server._schema_ready_event.set()
+    try:
+        assert refresh_server._warm_news_schema() is True
+        with pytest.raises(sqlite3.ProgrammingError):
+            conn.execute("SELECT 1")
+    finally:
+        refresh_server._schema_ready_event.clear()
+        if previous_event_state:
+            refresh_server._schema_ready_event.set()
 
 
 def test_sanitize_strips_telegraph_spacer_brs_but_keeps_intext_breaks():
