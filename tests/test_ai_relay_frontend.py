@@ -460,6 +460,11 @@ const context = {{
   translationUpdateBaselineUncertain: false,
   translationUpdatePolling: false,
   translationUpdatePollPromise: null,
+  setTimeout,
+  clearTimeout,
+  AbortController,
+  TRANSLATION_UPDATES_POLL_TIMEOUT_MS: 8000,
+  TRANSLATION_UPDATES_BASELINE_WAIT_MS: 2000,
   document: {{
     getElementById: id => id === 'overlay' ? overlay : (id === 'articleWrap' ? articleWrap : null),
   }},
@@ -760,6 +765,51 @@ assert.equal(context.translationUpdateCursor, '2026-07-19 10:00:00.000|9');
 """)
 
 
+def test_translation_update_poll_times_out_and_can_retry():
+    script = f"""
+const assert = require('assert');
+const vm = require('vm');
+let calls = 0;
+const context = {{
+  console, authToken: 'tok', translationUpdateCursor: '',
+  translationUpdateBaselineUncertain: false,
+  translationUpdatePolling: false, translationUpdatePollPromise: null,
+  articleBodyCache: {{}}, articleBodyPromises: {{}},
+  articleBodyControllers: {{}}, articleBodyRequestGenerations: {{}},
+  document: {{ getElementById: () => null }},
+  setTimeout, clearTimeout, AbortController,
+  TRANSLATION_UPDATES_POLL_TIMEOUT_MS: 30,
+  TRANSLATION_UPDATES_BASELINE_WAIT_MS: 2000,
+}};
+context.fetch = (_url, options) => new Promise((_resolve, reject) => {{
+  calls += 1;
+  if (options.signal) options.signal.addEventListener('abort', () => reject(new Error('aborted')));
+}});
+vm.createContext(context);
+vm.runInContext({json.dumps(_translation_update_block())}, context);
+(async () => {{
+  let watchdog;
+  try {{
+    await Promise.race([
+      context.pollTranslationUpdates(),
+      new Promise((_resolve, reject) => {{ watchdog = setTimeout(() => reject(new Error('poll did not settle')), 100); }}),
+    ]);
+  }} finally {{
+    clearTimeout(watchdog);
+  }}
+  assert.equal(context.translationUpdatePolling, false);
+  assert.equal(context.translationUpdateBaselineUncertain, true);
+  context.fetch = async () => ({{ok: true, json: async () => ({{items: [], cursor: 'c|0'}})}});
+  await context.pollTranslationUpdates();
+  assert.equal(calls, 1);
+  assert.equal(context.translationUpdateCursor, 'c|0');
+}})().catch(e => {{ console.error(e.stack || e); process.exitCode = 1; }});
+"""
+    result = subprocess.run(["node", "-e", script], cwd=ROOT, capture_output=True,
+                            text=True, timeout=5)
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def test_first_detail_waits_for_translation_cursor_baseline():
     script = rf"""
 const assert = require('assert');
@@ -780,6 +830,8 @@ const context = {{
   setTimeout,
   clearTimeout,
   AbortController,
+  TRANSLATION_UPDATES_POLL_TIMEOUT_MS: 8000,
+  TRANSLATION_UPDATES_BASELINE_WAIT_MS: 2000,
 }};
 context.fetch = async (url, options) => {{
   calls.push({{ url, options }});
@@ -819,6 +871,11 @@ const context = {{
   articleBodyControllers: {{}},
   articleBodyRequestGenerations: {{}},
   document: {{ getElementById: id => id === 'overlay' ? overlay : (id === 'articleWrap' ? {{ id }} : null) }},
+  setTimeout,
+  clearTimeout,
+  AbortController,
+  TRANSLATION_UPDATES_POLL_TIMEOUT_MS: 8000,
+  TRANSLATION_UPDATES_BASELINE_WAIT_MS: 2000,
   fetchArticleDetail: async id => {{ calls.push(['detail', id]); return {{ body_html: '<p>Chinese current</p>' }}; }},
   renderArticleBody: (wrap, data, id) => calls.push(['render', id, data.body_html]),
   autoDisplaySummary: id => calls.push(['summary', id]),
@@ -869,6 +926,8 @@ const context = {{
   setTimeout,
   clearTimeout,
   AbortController,
+  TRANSLATION_UPDATES_POLL_TIMEOUT_MS: 8000,
+  TRANSLATION_UPDATES_BASELINE_WAIT_MS: 2000,
   renderArticleBody: (wrap, data, id) => {{ rendered = {{ data, id }}; }},
   autoDisplaySummary: () => {{}},
 }};

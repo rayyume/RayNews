@@ -1144,6 +1144,8 @@ let translationUpdateCursor = '';
 let translationUpdateBaselineUncertain = false;
 let translationUpdatePolling = false;
 let translationUpdatePollPromise = null;
+const TRANSLATION_UPDATES_POLL_TIMEOUT_MS = 8000;
+const TRANSLATION_UPDATES_BASELINE_WAIT_MS = 2000;
 let searchRequestController = null;
 let searchRequestSeq = 0;
 let searchPage = 1;
@@ -7285,9 +7287,15 @@ async function pollTranslationUpdates() {
   translationUpdatePolling = true;
   const pollPromise = (async () => {
     const establishingBaseline = !translationUpdateCursor;
+    const pollController = new AbortController();
+    const pollTimer = setTimeout(
+      () => pollController.abort(),
+      TRANSLATION_UPDATES_POLL_TIMEOUT_MS,
+    );
     try {
       const resp = await fetch('/ai/translation-updates?since=' + encodeURIComponent(translationUpdateCursor) + '&t=' + Date.now(), {
         headers: { 'Authorization': 'Bearer ' + authToken },
+        signal: pollController.signal,
       });
       if (!resp.ok) {
         if (establishingBaseline) translationUpdateBaselineUncertain = true;
@@ -7312,6 +7320,7 @@ async function pollTranslationUpdates() {
       // Translation updates are opportunistic; never disturb reading.
       if (establishingBaseline) translationUpdateBaselineUncertain = true;
     } finally {
+      clearTimeout(pollTimer);
       translationUpdatePolling = false;
       translationUpdatePollPromise = null;
     }
