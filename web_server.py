@@ -2462,6 +2462,9 @@ def _generate_daily_summary_global(date_str: str) -> dict | None:
 
 _auto_summary_lock = threading.Lock()
 _auto_translation_lock = threading.Lock()
+_translation_repair_lock = threading.Lock()
+_translation_repair_cursor: tuple[int, int] | None = None
+_translation_repair_cursor_db_path: str | None = None
 _auto_title_process_lock = threading.Lock()
 _auto_source_classify_lock = threading.Lock()
 _legacy_admin_source_settings_lock = threading.Lock()
@@ -3517,6 +3520,108 @@ def _save_article_title_update(article_id: int, title: str | None,
 def _translation_pending_fulltext(article: dict) -> bool:
     """Whether a Telegraph article still has only its Telegram excerpt."""
     return bool(article.get("telegraph_url")) and not bool(article.get("has_full_content"))
+
+
+def _translation_looks_truncated(
+    article: dict, cached_html: str, source_html: str
+) -> bool:
+    """Conservatively identify a cached translation made from an excerpt."""
+    if not bool(article.get("has_full_content")) or not cached_html:
+        return False
+    source = _plain_text(source_html or "")
+    translated = _plain_text(cached_html)
+    return (
+        len(source) >= 400
+        and _has_latin(source)
+        and len(translated) < len(source) * 0.30
+    )
+
+
+def _fetch_stale_translation_articles(
+    limit: int = AUTO_TRANSLATION_BATCH_LIMIT,
+) -> list[dict]:
+    """Scan one historical keyset page for conservatively stale translations.
+
+    ``limit`` bounds rows inspected, not stale rows returned. Advancing by the
+    last inspected row ensures that full pages without candidates cannot pin
+    every future scan to the newest history forever.
+    """
+    global _translation_repair_cursor, _translation_repair_cursor_db_path
+
+    if limit <= 0:
+        return []
+
+    db_path = os.path.abspath(NEWS_DB)
+    with _translation_repair_lock:
+        if _translation_repair_cursor_db_path != db_path:
+            _translation_repair_cursor = None
+            _translation_repair_cursor_db_path = db_path
+        if not os.path.exists(db_path):
+            _translation_repair_cursor = None
+            return []
+
+        try:
+            if not _init_ai_results_table():
+                _translation_repair_cursor = None
+                return []
+
+            cursor = _translation_repair_cursor
+            where_cursor = ""
+            params: list[int] = []
+            if cursor is not None:
+                cursor_timestamp, cursor_id = cursor
+                where_cursor = (
+                    "AND (a.timestamp < ? OR "
+                    "(a.timestamp = ? AND a.id < ?)) "
+                )
+                params.extend((cursor_timestamp, cursor_timestamp, cursor_id))
+            params.append(limit)
+
+            with _news_db_conn() as conn:
+                ensure_article_source_columns(conn)
+                rows = conn.execute(
+                    "SELECT a.id, a.title, "
+                    "       COALESCE(NULLIF(a.feed_source, ''), a.source) AS source, "
+                    "       a.origin_source, a.summary, a.body_html, a.timestamp, "
+                    "       a.has_full_content, a.telegraph_url, r.translation "
+                    "FROM articles a "
+                    "JOIN ai_results r ON r.article_id = a.id "
+                    "WHERE a.has_full_content = 1 "
+                    "  AND r.translation IS NOT NULL "
+                    "  AND TRIM(r.translation) <> '' "
+                    f"{where_cursor}"
+                    "ORDER BY a.timestamp DESC, a.id DESC "
+                    "LIMIT ?",
+                    params,
+                ).fetchall()
+        except Exception as exc:
+            print(f"[auto-translate] stale scan failed: {exc}")
+            return []
+
+        if rows and len(rows) == limit:
+            last_row = rows[-1]
+            _translation_repair_cursor = (
+                int(last_row["timestamp"]),
+                int(last_row["id"]),
+            )
+        else:
+            _translation_repair_cursor = None
+
+        selected = []
+        for row in rows:
+            article = dict(row)
+            _, cached_html = _cached_full_translation(article.get("translation"))
+            if not _translation_looks_truncated(
+                article, cached_html, article.get("body_html") or ""
+            ):
+                continue
+            article["translation_stale"] = True
+            article["translate_content_needed"] = True
+            article["translate_title_needed"] = _needs_translation(
+                article.get("title", "")
+            )
+            selected.append(article)
+        return selected
 
 
 def _fetch_untranslated_articles(config: dict, limit: int = AUTO_TRANSLATION_BATCH_LIMIT) -> list[dict]:
