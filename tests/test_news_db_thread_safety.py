@@ -3,6 +3,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -465,3 +466,146 @@ def test_get_news_db_keeps_thread_local_connection_open_between_queries(tmp_path
     assert first is second is connection
     assert connection.queries == 2
     assert not connection.closed
+
+
+def _reset_ai_results_schema_latch(monkeypatch):
+    """Give a test an empty per-process ai_results schema latch."""
+    monkeypatch.setattr(web_server, "_ai_results_schema_ready_paths", set(), raising=False)
+
+
+def test_init_ai_results_table_opens_one_connection_after_success(tmp_path, monkeypatch):
+    """A warmed database must not repeat ai_results DDL on later callers."""
+    db = tmp_path / "news.db"
+    sqlite3.connect(db).close()
+    monkeypatch.setattr(web_server, "NEWS_DB", str(db))
+    _reset_ai_results_schema_latch(monkeypatch)
+    real = web_server._news_db_conn
+    calls = []
+
+    @contextmanager
+    def counted():
+        calls.append(1)
+        with real() as conn:
+            yield conn
+
+    monkeypatch.setattr(web_server, "_news_db_conn", counted)
+
+    assert web_server._init_ai_results_table() is True
+    assert web_server._init_ai_results_table() is True
+    assert len(calls) == 1
+
+
+def test_init_ai_results_latch_is_scoped_by_database_path(tmp_path, monkeypatch):
+    """Initializing one database must not skip another database's table setup."""
+    first, second = tmp_path / "a.db", tmp_path / "b.db"
+    sqlite3.connect(first).close()
+    sqlite3.connect(second).close()
+    _reset_ai_results_schema_latch(monkeypatch)
+
+    monkeypatch.setattr(web_server, "NEWS_DB", str(first))
+    assert web_server._init_ai_results_table() is True
+    monkeypatch.setattr(web_server, "NEWS_DB", str(second))
+    assert web_server._init_ai_results_table() is True
+
+    assert {str(first.resolve()), str(second.resolve())} == web_server._ai_results_schema_ready_paths
+
+
+def test_init_ai_results_table_single_flights_concurrent_first_use(tmp_path, monkeypatch):
+    """Simultaneous first callers share one initialization connection."""
+    db = tmp_path / "news.db"
+    sqlite3.connect(db).close()
+    monkeypatch.setattr(web_server, "NEWS_DB", str(db))
+    _reset_ai_results_schema_latch(monkeypatch)
+    real = web_server._news_db_conn
+    calls = []
+    start = threading.Barrier(2)
+    results = []
+
+    @contextmanager
+    def slow_counted():
+        calls.append(1)
+        # Keep the first initializer inside its connection long enough that a
+        # missing process lock would allow the other caller to open its own.
+        time.sleep(0.05)
+        with real() as conn:
+            yield conn
+
+    monkeypatch.setattr(web_server, "_news_db_conn", slow_counted)
+
+    def initialize():
+        start.wait()
+        results.append(web_server._init_ai_results_table())
+
+    first = threading.Thread(target=initialize)
+    second = threading.Thread(target=initialize)
+    first.start(); second.start()
+    first.join(); second.join()
+
+    assert results == [True, True]
+    assert len(calls) == 1
+
+
+def test_init_ai_results_table_does_not_latch_a_failed_initialization(tmp_path, monkeypatch, caplog):
+    """A transient schema error returns false and leaves the path retryable."""
+    db = tmp_path / "news.db"
+    sqlite3.connect(db).close()
+    monkeypatch.setattr(web_server, "NEWS_DB", str(db))
+    _reset_ai_results_schema_latch(monkeypatch)
+    real = web_server._news_db_conn
+    attempts = 0
+
+    @contextmanager
+    def fail_once():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise sqlite3.OperationalError("forced initialization failure")
+        with real() as conn:
+            yield conn
+
+    monkeypatch.setattr(web_server, "_news_db_conn", fail_once)
+
+    assert web_server._init_ai_results_table() is False
+    assert str(db.resolve()) not in web_server._ai_results_schema_ready_paths
+    assert "schema initialization failed" in caplog.text
+    assert web_server._init_ai_results_table() is True
+    assert str(db.resolve()) in web_server._ai_results_schema_ready_paths
+
+
+def test_init_ai_results_table_does_not_latch_when_commit_fails(tmp_path, monkeypatch):
+    """A failed commit cannot make a partially initialized schema ready."""
+    db = tmp_path / "news.db"
+    sqlite3.connect(db).close()
+    monkeypatch.setattr(web_server, "NEWS_DB", str(db))
+    _reset_ai_results_schema_latch(monkeypatch)
+    real = web_server._news_db_conn
+
+    class CommitFailingConnection:
+        def __init__(self, connection):
+            self._connection = connection
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+        def commit(self):
+            raise sqlite3.OperationalError("forced commit failure")
+
+    @contextmanager
+    def commit_fails():
+        with real() as conn:
+            yield CommitFailingConnection(conn)
+
+    monkeypatch.setattr(web_server, "_news_db_conn", commit_fails)
+
+    assert web_server._init_ai_results_table() is False
+    assert str(db.resolve()) not in web_server._ai_results_schema_ready_paths
+
+
+def test_init_ai_results_table_returns_false_for_a_missing_database(tmp_path, monkeypatch):
+    """A nonexistent news database cannot be considered schema-ready."""
+    missing = tmp_path / "missing.db"
+    monkeypatch.setattr(web_server, "NEWS_DB", str(missing))
+    _reset_ai_results_schema_latch(monkeypatch)
+
+    assert web_server._init_ai_results_table() is False
+    assert web_server._ai_results_schema_ready_paths == set()

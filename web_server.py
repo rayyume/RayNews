@@ -4357,89 +4357,108 @@ def _fetch_article_body(article_id: int) -> dict | None:
 
 # ─── AI Results Cache (prevent duplicate generation) ────────
 
+# ai_results migrations can issue CREATE/ALTER statements.  They need the
+# same single-flight protection as the article-schema migration, but callers
+# can point NEWS_DB at a different file during tests or runtime maintenance.
+_ai_results_schema_lock = threading.RLock()
+_ai_results_schema_ready_paths: set[str] = set()
 
-def _init_ai_results_table():
-    """Create ai_results table in news.db if not exists."""
+
+def _init_ai_results_table() -> bool:
+    """Create and latch the ai_results schema for the current news database."""
     import sqlite3
-    if not os.path.exists(NEWS_DB):
-        return
-    try:
-        with _news_db_conn() as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS ai_results (
-                    article_id   INTEGER PRIMARY KEY,
-                    summary      TEXT,
-                    translation  TEXT,
-                    translation_updated_at TEXT,
-                    title_summary TEXT,
-                    title_summary_error TEXT,
-                    title_summary_error_at TEXT,
-                    title_translation_error TEXT,
-                    title_translation_error_at TEXT,
-                    title_summary_provider TEXT,
-                    title_summary_model TEXT,
-                    title_summary_by_user_id INTEGER,
-                    summary_provider TEXT,
-                    summary_model TEXT,
-                    summary_by_user_id INTEGER,
-                    summary_generated_at TEXT,
-                    translation_provider TEXT,
-                    translation_model TEXT,
-                    translation_by_user_id INTEGER,
-                    translation_generated_at TEXT,
-                    summary_error TEXT,
-                    summary_error_at TEXT,
-                    updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
-                )
-            """)
-            cols = {
-                row[1]
-                for row in conn.execute("PRAGMA table_info(ai_results)").fetchall()
-            }
-            if "summary_error" not in cols:
-                conn.execute("ALTER TABLE ai_results ADD COLUMN summary_error TEXT")
-            if "summary_error_at" not in cols:
-                conn.execute("ALTER TABLE ai_results ADD COLUMN summary_error_at TEXT")
-            if "translation_updated_at" not in cols:
-                conn.execute("ALTER TABLE ai_results ADD COLUMN translation_updated_at TEXT")
-            if "title_summary" not in cols:
-                conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary TEXT")
-            if "title_summary_error" not in cols:
-                conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_error TEXT")
-            if "title_summary_error_at" not in cols:
-                conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_error_at TEXT")
-            if "title_translation_error" not in cols:
-                conn.execute("ALTER TABLE ai_results ADD COLUMN title_translation_error TEXT")
-            if "title_translation_error_at" not in cols:
-                conn.execute("ALTER TABLE ai_results ADD COLUMN title_translation_error_at TEXT")
-            if "title_summary_provider" not in cols:
-                conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_provider TEXT")
-            if "title_summary_model" not in cols:
-                conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_model TEXT")
-            if "title_summary_by_user_id" not in cols:
-                conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_by_user_id INTEGER")
-            if "summary_provider" not in cols:
-                conn.execute("ALTER TABLE ai_results ADD COLUMN summary_provider TEXT")
-            if "summary_model" not in cols:
-                conn.execute("ALTER TABLE ai_results ADD COLUMN summary_model TEXT")
-            if "summary_by_user_id" not in cols:
-                conn.execute("ALTER TABLE ai_results ADD COLUMN summary_by_user_id INTEGER")
-            if "summary_generated_at" not in cols:
-                conn.execute("ALTER TABLE ai_results ADD COLUMN summary_generated_at TEXT")
-            if "translation_provider" not in cols:
-                conn.execute("ALTER TABLE ai_results ADD COLUMN translation_provider TEXT")
-            if "translation_model" not in cols:
-                conn.execute("ALTER TABLE ai_results ADD COLUMN translation_model TEXT")
-            if "translation_by_user_id" not in cols:
-                conn.execute("ALTER TABLE ai_results ADD COLUMN translation_by_user_id INTEGER")
-            if "translation_generated_at" not in cols:
-                conn.execute("ALTER TABLE ai_results ADD COLUMN translation_generated_at TEXT")
-            if "updated_at" not in cols:
-                conn.execute("ALTER TABLE ai_results ADD COLUMN updated_at TEXT")
-                conn.execute("UPDATE ai_results SET updated_at = datetime('now') WHERE updated_at IS NULL")
-            conn.commit()
-    except Exception:
-        pass
+    db_path = os.path.abspath(NEWS_DB)
+    if not os.path.exists(db_path):
+        return False
+    with _ai_results_schema_lock:
+        # Recheck under the lock: a database can disappear between the initial
+        # fast-path check and acquiring the process-wide initializer lock.
+        if not os.path.exists(db_path):
+            return False
+        if db_path in _ai_results_schema_ready_paths:
+            return True
+        try:
+            with _news_db_conn() as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS ai_results (
+                        article_id   INTEGER PRIMARY KEY,
+                        summary      TEXT,
+                        translation  TEXT,
+                        translation_updated_at TEXT,
+                        title_summary TEXT,
+                        title_summary_error TEXT,
+                        title_summary_error_at TEXT,
+                        title_translation_error TEXT,
+                        title_translation_error_at TEXT,
+                        title_summary_provider TEXT,
+                        title_summary_model TEXT,
+                        title_summary_by_user_id INTEGER,
+                        summary_provider TEXT,
+                        summary_model TEXT,
+                        summary_by_user_id INTEGER,
+                        summary_generated_at TEXT,
+                        translation_provider TEXT,
+                        translation_model TEXT,
+                        translation_by_user_id INTEGER,
+                        translation_generated_at TEXT,
+                        summary_error TEXT,
+                        summary_error_at TEXT,
+                        updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+                    )
+                """)
+                cols = {
+                    row[1]
+                    for row in conn.execute("PRAGMA table_info(ai_results)").fetchall()
+                }
+                if "summary_error" not in cols:
+                    conn.execute("ALTER TABLE ai_results ADD COLUMN summary_error TEXT")
+                if "summary_error_at" not in cols:
+                    conn.execute("ALTER TABLE ai_results ADD COLUMN summary_error_at TEXT")
+                if "translation_updated_at" not in cols:
+                    conn.execute("ALTER TABLE ai_results ADD COLUMN translation_updated_at TEXT")
+                if "title_summary" not in cols:
+                    conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary TEXT")
+                if "title_summary_error" not in cols:
+                    conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_error TEXT")
+                if "title_summary_error_at" not in cols:
+                    conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_error_at TEXT")
+                if "title_translation_error" not in cols:
+                    conn.execute("ALTER TABLE ai_results ADD COLUMN title_translation_error TEXT")
+                if "title_translation_error_at" not in cols:
+                    conn.execute("ALTER TABLE ai_results ADD COLUMN title_translation_error_at TEXT")
+                if "title_summary_provider" not in cols:
+                    conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_provider TEXT")
+                if "title_summary_model" not in cols:
+                    conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_model TEXT")
+                if "title_summary_by_user_id" not in cols:
+                    conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_by_user_id INTEGER")
+                if "summary_provider" not in cols:
+                    conn.execute("ALTER TABLE ai_results ADD COLUMN summary_provider TEXT")
+                if "summary_model" not in cols:
+                    conn.execute("ALTER TABLE ai_results ADD COLUMN summary_model TEXT")
+                if "summary_by_user_id" not in cols:
+                    conn.execute("ALTER TABLE ai_results ADD COLUMN summary_by_user_id INTEGER")
+                if "summary_generated_at" not in cols:
+                    conn.execute("ALTER TABLE ai_results ADD COLUMN summary_generated_at TEXT")
+                if "translation_provider" not in cols:
+                    conn.execute("ALTER TABLE ai_results ADD COLUMN translation_provider TEXT")
+                if "translation_model" not in cols:
+                    conn.execute("ALTER TABLE ai_results ADD COLUMN translation_model TEXT")
+                if "translation_by_user_id" not in cols:
+                    conn.execute("ALTER TABLE ai_results ADD COLUMN translation_by_user_id INTEGER")
+                if "translation_generated_at" not in cols:
+                    conn.execute("ALTER TABLE ai_results ADD COLUMN translation_generated_at TEXT")
+                if "updated_at" not in cols:
+                    conn.execute("ALTER TABLE ai_results ADD COLUMN updated_at TEXT")
+                    conn.execute("UPDATE ai_results SET updated_at = datetime('now') WHERE updated_at IS NULL")
+                conn.commit()
+            # Do not latch until commit completed and the connection context
+            # closed successfully. A failed initializer must remain retryable.
+            _ai_results_schema_ready_paths.add(db_path)
+            return True
+        except Exception as exc:
+            app.logger.exception("[ai-results] schema initialization failed: %s", exc)
+            return False
 
 
 def _get_ai_result(article_id: int) -> dict | None:
