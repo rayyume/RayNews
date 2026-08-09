@@ -7275,7 +7275,6 @@ function applyTranslationUpdate(item) {
 function recoverUncertainTranslationBaseline() {
   const cachedIds = new Set([
     ...Object.keys(articleBodyCache),
-    ...Object.keys(articleBodyPromises),
     ...Object.keys(articleBodyControllers),
   ]);
   cachedIds.forEach(id => applyTranslationUpdate({ id }));

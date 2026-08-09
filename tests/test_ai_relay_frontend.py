@@ -977,6 +977,87 @@ vm.runInContext({json.dumps(_article_detail_block() + _translation_update_block(
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def test_late_baseline_invalidates_only_details_that_crossed_it():
+    script = rf"""
+const assert = require('assert');
+const vm = require('vm');
+let resolveBaseline;
+const detailRequests = [];
+const overlay = {{ dataset: {{}}, classList: {{ contains: () => false }} }};
+const context = {{
+  console,
+  authToken: 'tok',
+  translationUpdateCursor: '',
+  translationUpdateBaselineUncertain: false,
+  translationUpdatePolling: false,
+  translationUpdatePollPromise: null,
+  articleBodyCache: {{}},
+  articleBodyPromises: {{}},
+  articleBodyControllers: {{}},
+  articleBodyRequestGenerations: {{}},
+  document: {{ getElementById: id => id === 'overlay' ? overlay : null }},
+  setTimeout,
+  clearTimeout,
+  AbortController,
+  TRANSLATION_UPDATES_POLL_TIMEOUT_MS: 5000,
+  TRANSLATION_UPDATES_BASELINE_WAIT_MS: 30,
+}};
+context.fetch = url => {{
+  if (url.startsWith('/ai/translation-updates')) {{
+    return new Promise(resolve => {{ resolveBaseline = resolve; }});
+  }}
+  detailRequests.push(url);
+  const id = url.includes('/api/news/1?') ? 1 : 2;
+  return Promise.resolve({{ ok: true, json: async () => ({{ body_html: `<p>detail ${{id}}</p>` }}) }});
+}};
+vm.createContext(context);
+vm.runInContext({json.dumps(_article_detail_block() + _translation_update_block())}, context);
+(async () => {{
+  let baselineSettled = false;
+  let watchdog;
+  try {{
+    const first = await Promise.race([
+      context.fetchArticleDetail(1),
+      new Promise((_resolve, reject) => {{ watchdog = setTimeout(() => reject(new Error('first detail did not cross bounded wait')), 500); }}),
+    ]);
+    clearTimeout(watchdog);
+    assert.deepEqual(first, {{ body_html: '<p>detail 1</p>' }});
+    assert.equal(context.translationUpdateBaselineUncertain, true);
+    assert.deepEqual(context.articleBodyCache[1], {{ body_html: '<p>detail 1</p>' }});
+
+    const second = context.fetchArticleDetail(2);
+    assert.ok(context.articleBodyPromises[2]);
+    assert.equal(context.articleBodyControllers[2], undefined);
+    resolveBaseline({{ ok: true, json: async () => ({{ items: [], cursor: 'shared|0' }}) }});
+    baselineSettled = true;
+    await context.translationUpdatePollPromise;
+
+    const secondData = await Promise.race([
+      second,
+      new Promise((_resolve, reject) => {{ watchdog = setTimeout(() => reject(new Error('second detail was superseded after baseline success')), 500); }}),
+    ]);
+    clearTimeout(watchdog);
+    assert.deepEqual(secondData, {{ body_html: '<p>detail 2</p>' }});
+    assert.equal(context.translationUpdateCursor, 'shared|0');
+    assert.equal(context.translationUpdateBaselineUncertain, false);
+    assert.equal(context.articleBodyCache[1], undefined);
+    assert.deepEqual(context.articleBodyCache[2], {{ body_html: '<p>detail 2</p>' }});
+    assert.equal(detailRequests.filter(url => url.startsWith('/api/news/1?')).length, 1);
+    assert.equal(detailRequests.filter(url => url.startsWith('/api/news/2?')).length, 1);
+  }} finally {{
+    clearTimeout(watchdog);
+    if (!baselineSettled && resolveBaseline) {{
+      resolveBaseline({{ ok: true, json: async () => ({{ items: [], cursor: 'cleanup|0' }}) }});
+      await context.translationUpdatePollPromise;
+    }}
+  }}
+}})().catch(error => {{ console.error(error && error.stack ? error.stack : error); process.exitCode = 1; }});
+"""
+    result = subprocess.run(["node", "-e", script], cwd=ROOT,
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def test_successful_baseline_after_a_failed_initial_poll_invalidates_english_detail_cache():
     script = rf"""
 const assert = require('assert');
