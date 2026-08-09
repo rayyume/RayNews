@@ -19,6 +19,84 @@ def _table_count(conn: sqlite3.Connection, table: str) -> int:
     return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
 
 
+def _current_schema_without_feed_source_index(tmp_path):
+    conn = sqlite3.connect(tmp_path / "news.db")
+    conn.execute("CREATE TABLE deleted_articles (article_id INTEGER PRIMARY KEY)")
+    conn.execute(
+        "CREATE TABLE articles (id INTEGER PRIMARY KEY, body_html TEXT, "
+        "original_body_html TEXT, feed_source TEXT NOT NULL DEFAULT '', "
+        "origin_source TEXT NOT NULL DEFAULT '', original_title TEXT, "
+        "title_updated_at TEXT, title_source TEXT)"
+    )
+    conn.commit()
+    return conn
+
+
+def test_current_article_schema_skips_begin_and_ddl(tmp_path):
+    conn = _current_schema_without_feed_source_index(tmp_path)
+    conn.execute("CREATE INDEX idx_feed_source ON articles(feed_source)")
+    conn.commit()
+
+    class Spy:
+        def __init__(self, real):
+            self.real = real
+            self.writes = []
+
+        def __getattr__(self, name):
+            return getattr(self.real, name)
+
+        def execute(self, sql, *args):
+            normalized = " ".join(sql.split()).upper()
+            if normalized.startswith(("BEGIN", "CREATE", "ALTER", "UPDATE")):
+                self.writes.append(normalized)
+            return self.real.execute(sql, *args)
+
+    spy = Spy(conn)
+
+    ensure_article_schema(spy)
+
+    assert spy.writes == []
+
+
+def test_missing_feed_source_index_uses_migration_slow_path(tmp_path):
+    conn = _current_schema_without_feed_source_index(tmp_path)
+
+    ensure_article_schema(conn)
+
+    assert conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_feed_source'"
+    ).fetchone()
+
+
+def test_deleted_articles_only_fast_path_ignores_unrequested_article_columns(tmp_path):
+    conn = sqlite3.connect(tmp_path / "news.db")
+    conn.execute("CREATE TABLE deleted_articles (article_id INTEGER PRIMARY KEY)")
+    conn.execute(
+        "CREATE TABLE articles (id INTEGER PRIMARY KEY, body_html TEXT, original_body_html TEXT)"
+    )
+    conn.commit()
+
+    class Spy:
+        def __init__(self, real):
+            self.real = real
+            self.writes = []
+
+        def __getattr__(self, name):
+            return getattr(self.real, name)
+
+        def execute(self, sql, *args):
+            normalized = " ".join(sql.split()).upper()
+            if normalized.startswith(("BEGIN", "CREATE", "ALTER", "UPDATE")):
+                self.writes.append(normalized)
+            return self.real.execute(sql, *args)
+
+    spy = Spy(conn)
+
+    ensure_deleted_articles_table(spy)
+
+    assert spy.writes == []
+
+
 def test_deleted_articles_table_is_created_by_shared_helper():
     conn = sqlite3.connect(":memory:")
 

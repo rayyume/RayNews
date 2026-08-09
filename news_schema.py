@@ -43,6 +43,40 @@ def _article_columns(conn: sqlite3.Connection) -> set[str]:
     return {row[1] for row in conn.execute("PRAGMA table_info(articles)").fetchall()}
 
 
+def _schema_already_current(
+    conn: sqlite3.Connection,
+    *,
+    include_source_columns: bool,
+    include_title_columns: bool,
+) -> bool:
+    """Return whether the requested schema is ready without taking a write lock."""
+    deleted = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'deleted_articles'"
+    ).fetchone()
+    if not deleted:
+        return False
+
+    articles = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'articles'"
+    ).fetchone()
+    if not articles:
+        return True
+
+    columns = _article_columns(conn)
+    if "body_html" in columns and "original_body_html" not in columns:
+        return False
+    if include_source_columns:
+        if not {"feed_source", "origin_source"}.issubset(columns):
+            return False
+        if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_feed_source'"
+        ).fetchone():
+            return False
+    if include_title_columns and not set(_TITLE_COLUMNS).issubset(columns):
+        return False
+    return True
+
+
 def _add_column_if_missing(
     conn: sqlite3.Connection, columns: set[str], name: str, definition: str
 ) -> None:
@@ -78,6 +112,12 @@ def ensure_article_schema(
     exact duplicate-column/recheck guard above is their safe fallback.
     """
     owns_transaction = not conn.in_transaction
+    if owns_transaction and _schema_already_current(
+        conn,
+        include_source_columns=include_source_columns,
+        include_title_columns=include_title_columns,
+    ):
+        return
     if owns_transaction:
         conn.execute("BEGIN IMMEDIATE")
     try:
