@@ -289,9 +289,18 @@ def test_container_supervises_services_without_blocking_on_initial_fetch():
     assert config["supervisord"]["nodaemon"] == "true"
     assert config["supervisord"]["pidfile"] == "/run/supervisord.pid"
     expected_commands = {
-        "program:refresh": "python3 /app/refresh_server.py",
-        "program:web": "python3 /app/web_server.py",
-        "program:nginx": 'nginx -g "daemon off;"',
+        "program:refresh": (
+            "/bin/bash -o pipefail -c 'python3 -u /app/refresh_server.py 2>&1 | "
+            "python3 -u /app/timestamp_filter.py refresh'"
+        ),
+        "program:web": (
+            "/bin/bash -o pipefail -c 'python3 -u /app/web_server.py 2>&1 | "
+            "python3 -u /app/timestamp_filter.py web'"
+        ),
+        "program:nginx": (
+            "/bin/bash -o pipefail -c 'nginx -g \"daemon off;\" 2>&1 | "
+            "python3 -u /app/timestamp_filter.py nginx'"
+        ),
     }
     for section, command in expected_commands.items():
         program = config[section]
