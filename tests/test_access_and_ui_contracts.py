@@ -355,10 +355,19 @@ def test_supervisor_only_drops_python_service_privileges():
 
 def test_entrypoint_fails_clearly_when_data_directory_cannot_be_prepared():
     entrypoint = (ROOT / "entrypoint.sh").read_text(encoding="utf-8")
-    assert "if ! install -d -o raynews -g raynews /app/data; then" in entrypoint
-    assert "if ! chown -R raynews:raynews /app/data; then" in entrypoint
+    assert (
+        "if ! run_setup_command install install -d -o raynews -g raynews /app/data; then"
+        in entrypoint
+    )
+    assert (
+        "if ! run_setup_command chown chown -R raynews:raynews /app/data; then"
+        in entrypoint
+    )
     assert "if ! test -w /app/data; then" not in entrypoint
-    assert "/usr/sbin/runuser -u raynews -- /bin/sh" in entrypoint
+    assert (
+        "run_setup_command runuser /usr/sbin/runuser -u raynews -- /bin/sh"
+        in entrypoint
+    )
     assert ".raynews-write-probe-$$" not in entrypoint
     assert "/usr/bin/mktemp /app/data/.raynews-write-probe.XXXXXX" in entrypoint
     assert '/bin/rm -f -- "$probe"' in entrypoint
@@ -390,8 +399,11 @@ def test_compose_healthcheck_covers_all_three_service_surfaces():
 def test_nginx_sends_access_and_error_logs_to_container_streams():
     config = (ROOT / "nginx.conf").read_text(encoding="utf-8")
     server = config.split("server {", 1)[1]
-    assert "access_log /dev/stdout;" in server
+    log_format = config.split("log_format raynews", 1)[1].split(";", 1)[0]
+    assert "access_log /dev/stdout raynews;" in server
     assert "error_log /dev/stderr warn;" in server
+    assert "$time_local" not in log_format
+    assert "$time_iso8601" not in log_format
 
 
 def test_admin_source_overrides_promote_to_shared_settings():

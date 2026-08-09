@@ -10,6 +10,8 @@ import subprocess
 import sys
 import time
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 WRAPPER = ROOT / "supervised_pipeline.py"
@@ -32,6 +34,33 @@ def _extract_shell_function(path, name):
     )
     assert match is not None, f"missing shell function: {name}"
     return match.group(0)
+
+
+def _entrypoint_setup_script(fake_command_body):
+    entrypoint_path = ROOT / "entrypoint.sh"
+    entrypoint = entrypoint_path.read_text(encoding="utf-8")
+    setup_start = entrypoint.index(
+        "# Prepare the bind-mounted data directory before supervisor"
+    )
+    setup_end = entrypoint.index(
+        "\n# ─── Configuration warning",
+        setup_start,
+    )
+    functions = "\n\n".join(
+        _extract_shell_function(entrypoint_path, name)
+        for name in ("log", "capture_setup_output", "run_setup_command")
+    )
+    fakes = f"""
+fake_setup_command() {{
+  name="$1"
+  shift
+  {fake_command_body}
+}}
+install() {{ fake_setup_command install "$@"; }}
+chown() {{ fake_setup_command chown "$@"; }}
+function /usr/sbin/runuser {{ fake_setup_command runuser "$@"; }}
+"""
+    return functions + "\n\n" + fakes + "\n" + entrypoint[setup_start:setup_end]
 
 
 def _injected_wrapper_command(filter_command, producer_command, *, grace=0.1):
@@ -484,3 +513,202 @@ def test_html_injection_failure_timestamps_every_emitted_line(tmp_path):
     assert "[inject] Custom HTML injection failed:" in result.stderr
     assert str(missing_html) in result.stderr
     assert "exit status 1" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("failed_command", "command_status", "summary"),
+    [
+        (
+            "install",
+            23,
+            "ERROR: unable to create or set ownership on /app/data for raynews.",
+        ),
+        (
+            "chown",
+            37,
+            "ERROR: unable to grant raynews ownership of /app/data.",
+        ),
+        (
+            "runuser",
+            49,
+            "ERROR: /app/data is not writable by raynews after permission setup.",
+        ),
+    ],
+)
+def test_entrypoint_setup_failures_timestamp_multiline_command_diagnostics(
+    failed_command,
+    command_status,
+    summary,
+):
+    script = _entrypoint_setup_script(
+        """
+printf '%s\n' "$name first diagnostic" "$name second diagnostic" >&2
+printf '%s\n' "$name combined stdout diagnostic"
+if [ "$name" = "$FAKE_FAILURE" ]; then
+  return "$FAKE_STATUS"
+fi
+return 0
+""".strip()
+    )
+
+    result = subprocess.run(
+        ["bash", "-eu", "-c", script],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "TZ": "UTC",
+            "FAKE_FAILURE": failed_command,
+            "FAKE_STATUS": str(command_status),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    lines = [line for line in result.stderr.splitlines() if line]
+    timestamped = re.compile(
+        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00 \[entrypoint\] .+$"
+    )
+    assert lines
+    assert all(timestamped.fullmatch(line) for line in lines), lines
+    assert [line.split("[entrypoint] ", 1)[1] for line in lines[:-1]] == [
+        f"[setup:{failed_command}] {failed_command} first diagnostic",
+        f"[setup:{failed_command}] {failed_command} second diagnostic",
+        f"[setup:{failed_command}] {failed_command} combined stdout diagnostic",
+    ]
+    assert summary in lines[-1]
+
+
+@pytest.mark.parametrize(
+    ("setup_name", "command_status"),
+    [("install", 23), ("chown", 37), ("runuser", 49)],
+)
+def test_setup_diagnostic_wrapper_preserves_the_command_status(
+    setup_name,
+    command_status,
+):
+    entrypoint_path = ROOT / "entrypoint.sh"
+    functions = "\n\n".join(
+        _extract_shell_function(entrypoint_path, name)
+        for name in ("log", "capture_setup_output", "run_setup_command")
+    )
+    script = f"""{functions}
+fake_failure() {{
+  printf '%s\n' 'first diagnostic' 'second diagnostic' >&2
+  return "$FAKE_STATUS"
+}}
+run_setup_command {setup_name} fake_failure
+"""
+
+    result = subprocess.run(
+        ["bash", "-u", "-c", script],
+        cwd=ROOT,
+        env={**os.environ, "TZ": "UTC", "FAKE_STATUS": str(command_status)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == command_status
+    assert result.stdout == ""
+    assert f"[setup:{setup_name}] first diagnostic" in result.stderr
+    assert f"[setup:{setup_name}] second diagnostic" in result.stderr
+
+
+def test_entrypoint_setup_success_discards_captured_command_output():
+    script = _entrypoint_setup_script(
+        """
+printf '%s\n' "$name successful detail one" "$name successful detail two" >&2
+printf '%s\n' "$name successful stdout detail"
+return 0
+""".strip()
+    )
+
+    result = subprocess.run(
+        ["bash", "-eu", "-c", script],
+        cwd=ROOT,
+        env={**os.environ, "TZ": "UTC"},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert result.stderr == ""
+
+
+def test_setup_wrapper_replays_retained_output_when_the_collector_fails():
+    entrypoint_path = ROOT / "entrypoint.sh"
+    functions = "\n\n".join(
+        _extract_shell_function(entrypoint_path, name)
+        for name in ("log", "capture_setup_output", "run_setup_command")
+    )
+    script = f"""{functions}
+capture_setup_output() {{
+  printf '%s\n' 'partial retained diagnostic'
+  return 67
+}}
+successful_command() {{ return 0; }}
+run_setup_command chown successful_command
+"""
+
+    result = subprocess.run(
+        ["bash", "-u", "-c", script],
+        cwd=ROOT,
+        env={**os.environ, "TZ": "UTC"},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 67
+    assert result.stdout == ""
+    lines = result.stderr.splitlines()
+    assert len(lines) == 2
+    assert all(
+        re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00 \[entrypoint\] .+",
+            line,
+        )
+        for line in lines
+    )
+    assert lines[0].endswith("[setup:chown] partial retained diagnostic")
+    assert lines[1].endswith(
+        "ERROR: unable to capture diagnostic output for setup command 'chown'."
+    )
+
+
+def test_setup_failure_diagnostics_are_bounded_by_line_count_and_line_size():
+    entrypoint_path = ROOT / "entrypoint.sh"
+    functions = "\n\n".join(
+        _extract_shell_function(entrypoint_path, name)
+        for name in ("log", "capture_setup_output", "run_setup_command")
+    )
+    script = f"""{functions}
+noisy_failure() {{
+  python3 -c 'import sys; print("x" * 5000, file=sys.stderr); [print(f"line {{number}}", file=sys.stderr) for number in range(30)]'
+  return 61
+}}
+run_setup_command install noisy_failure
+"""
+
+    result = subprocess.run(
+        ["bash", "-u", "-c", script],
+        cwd=ROOT,
+        env={**os.environ, "TZ": "UTC"},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    setup_lines = [
+        line for line in result.stderr.splitlines() if "[setup:install]" in line
+    ]
+    assert result.returncode == 61
+    assert result.stdout == ""
+    assert len(setup_lines) == 21
+    assert max(map(len, setup_lines)) < 2200
+    assert setup_lines[-1].endswith("diagnostic output truncated after 20 lines")
