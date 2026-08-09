@@ -3514,6 +3514,11 @@ def _save_article_title_update(article_id: int, title: str | None,
         conn.close()
 
 
+def _translation_pending_fulltext(article: dict) -> bool:
+    """Whether a Telegraph article still has only its Telegram excerpt."""
+    return bool(article.get("telegraph_url")) and not bool(article.get("has_full_content"))
+
+
 def _fetch_untranslated_articles(config: dict, limit: int = AUTO_TRANSLATION_BATCH_LIMIT) -> list[dict]:
     """Fetch recent today articles that need background title/body translation."""
     import datetime as _dt
@@ -3532,7 +3537,8 @@ def _fetch_untranslated_articles(config: dict, limit: int = AUTO_TRANSLATION_BAT
             ensure_article_source_columns(conn)
             rows = conn.execute(
                 "SELECT a.id, a.title, COALESCE(NULLIF(a.feed_source, ''), a.source) AS source, "
-                "       a.origin_source, a.summary, a.body_html, r.translation "
+                "       a.origin_source, a.summary, a.body_html, a.has_full_content, "
+                "       a.telegraph_url, r.translation "
                 "FROM articles a "
                 "LEFT JOIN ai_results r ON r.article_id = a.id "
                 "WHERE a.date = ? "
@@ -3558,6 +3564,7 @@ def _fetch_untranslated_articles(config: dict, limit: int = AUTO_TRANSLATION_BAT
             translate_content
             and bool(article.get("body_html"))
             and not cached_html
+            and not _translation_pending_fulltext(article)
             and _needs_translation(article.get("body_html") or article.get("summary") or "")
         )
         if title_needed or content_needed:
