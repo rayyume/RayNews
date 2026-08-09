@@ -1107,6 +1107,25 @@ def set_app_state(key: str, value: str) -> None:
     db.commit()
 
 
+def set_app_state_values(values: dict[str, str]) -> None:
+    """Atomically update a group of app-state values."""
+    if not values:
+        return
+    db = get_db()
+    updated_at = datetime.now().isoformat(timespec="seconds")
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        db.executemany(
+            "INSERT INTO app_state (key, value, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            [(key, str(value), updated_at) for key, value in values.items()],
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+
 def claim_app_state_flag(key: str) -> bool:
     """Set a flag to '1' and report whether this caller is the one that set it.
 

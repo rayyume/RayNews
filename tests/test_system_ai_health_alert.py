@@ -35,6 +35,29 @@ def isolated_app_state_db(tmp_path, monkeypatch):
         models.close_db()
 
 
+@pytest.fixture
+def restart_system_ai_health_process():
+    """Rebuild only module-local health state, preserving the durable DB."""
+    def restart():
+        with web_server._system_ai_health_lock:
+            web_server._system_ai_health.clear()
+            web_server._system_ai_health.update(
+                {
+                    "failures": 0,
+                    "successes": 0,
+                    "alerted": False,
+                    "last_error": "",
+                    "jobs": [],
+                    "last_failure_at": 0.0,
+                    "last_success_at": 0.0,
+                    "failure_timestamp_dirty": False,
+                    "stable_recovery_armed": False,
+                }
+            )
+
+    return restart
+
+
 def test_stable_complete_is_disabled_when_window_is_zero(isolated_app_state_db):
     models.set_app_state("incident", "1")
     models.set_app_state("failed", "100")
@@ -128,6 +151,32 @@ def test_stable_complete_waits_for_writer_before_reading_timestamps(
     assert "error" not in outcome
     assert outcome["result"] == "0"
     assert models.get_app_state("incident") == "1"
+
+
+def test_atomic_app_state_reset_rolls_back_all_keys_on_write_failure(
+    isolated_app_state_db,
+):
+    values = {
+        "incident": "1",
+        "notified": "900",
+        "failed": "1000",
+        "succeeded": "1001",
+    }
+    for key, value in values.items():
+        models.set_app_state(key, value)
+    db = models.get_db()
+    db.execute(
+        "CREATE TEMP TRIGGER fail_app_state_reset "
+        "BEFORE UPDATE ON app_state "
+        "WHEN NEW.key = 'notified' AND NEW.value = '0' "
+        "BEGIN SELECT RAISE(ABORT, 'reset failed'); END"
+    )
+    db.commit()
+
+    with pytest.raises(sqlite3.IntegrityError, match="reset failed"):
+        models.set_app_state_values({key: "0" for key in values})
+
+    assert {key: models.get_app_state(key) for key in values} == values
 
 
 @pytest.fixture
@@ -282,6 +331,87 @@ def test_failed_failure_timestamp_write_blocks_stable_recovery(
     assert alerts == []
 
 
+def test_dirty_failure_remains_fail_closed_after_process_restart(
+    isolated_app_state_db, alerts, monkeypatch, restart_system_ai_health_process
+):
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
+    _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
+    alerts.clear()
+    clock["now"] = 1_001.0
+    web_server._note_system_ai_success()
+
+    real_set_app_state = web_server.set_app_state
+    failed_once = {"value": False}
+
+    def fail_next_failure_timestamp(key, value):
+        if (
+            key == web_server.SYSTEM_AI_LAST_FAILURE_STATE_KEY
+            and not failed_once["value"]
+        ):
+            failed_once["value"] = True
+            raise sqlite3.OperationalError("one-shot timestamp write failure")
+        return real_set_app_state(key, value)
+
+    monkeypatch.setattr(web_server, "set_app_state", fail_next_failure_timestamp)
+    clock["now"] = 4_000.0
+    web_server._note_system_ai_failure("自动翻译", "503")
+    restart_system_ai_health_process()
+
+    clock["now"] = 4_601.0
+    assert web_server._maybe_recover_stale_system_ai_incident() is False
+    assert web_server.get_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY) == "1"
+    assert alerts == []
+
+
+def test_real_success_after_clean_restart_arms_stable_recovery(
+    isolated_app_state_db, alerts, monkeypatch, restart_system_ai_health_process
+):
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
+    _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
+    alerts.clear()
+    restart_system_ai_health_process()
+
+    clock["now"] = 1_001.0
+    web_server._note_system_ai_success()
+    clock["now"] = 4_601.0
+
+    assert web_server._maybe_recover_stale_system_ai_incident() is True
+    assert [item["type"] for item in alerts] == ["system_ai_recovered"] * 2
+
+
+def test_later_successful_failure_write_clears_dirty_state(
+    isolated_app_state_db, alerts, monkeypatch
+):
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
+    _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
+    real_set_app_state = web_server.set_app_state
+    failed_once = {"value": False}
+
+    def fail_next_failure_timestamp(key, value):
+        if (
+            key == web_server.SYSTEM_AI_LAST_FAILURE_STATE_KEY
+            and not failed_once["value"]
+        ):
+            failed_once["value"] = True
+            raise sqlite3.OperationalError("one-shot timestamp write failure")
+        return real_set_app_state(key, value)
+
+    monkeypatch.setattr(web_server, "set_app_state", fail_next_failure_timestamp)
+    clock["now"] = 4_000.0
+    web_server._note_system_ai_failure("自动翻译", "503")
+    assert web_server._system_ai_health["failure_timestamp_dirty"] is True
+
+    clock["now"] = 4_001.0
+    web_server._note_system_ai_failure("自动翻译", "503")
+    assert web_server._system_ai_health["failure_timestamp_dirty"] is False
+    assert web_server.get_app_state(
+        web_server.SYSTEM_AI_LAST_FAILURE_STATE_KEY
+    ) == "4001.0"
+
+
 def test_stable_recovery_serializes_memory_reset_with_new_failures(
     isolated_app_state_db, alerts, monkeypatch
 ):
@@ -301,7 +431,12 @@ def test_stable_recovery_serializes_memory_reset_with_new_failures(
     )
     with web_server._system_ai_health_lock:
         web_server._system_ai_health.update(
-            {"failures": 3, "successes": 1, "alerted": True}
+            {
+                "failures": 3,
+                "successes": 1,
+                "alerted": True,
+                "stable_recovery_armed": True,
+            }
         )
 
     recovery = threading.Thread(
@@ -416,6 +551,155 @@ def test_counted_and_stable_recovery_emit_only_one_notice(
     assert [item["type"] for item in alerts] == ["system_ai_recovered"] * 2
 
 
+def test_reset_holds_health_lock_until_durable_state_is_cleared(
+    isolated_app_state_db, alerts, monkeypatch
+):
+    clock = {"now": 4_601.0}
+    monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
+    web_server.set_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY, "1")
+    web_server.set_app_state(web_server.SYSTEM_AI_LAST_FAILURE_STATE_KEY, "1000")
+    web_server.set_app_state(web_server.SYSTEM_AI_LAST_SUCCESS_STATE_KEY, "1001")
+    alerts.clear()
+    with web_server._system_ai_health_lock:
+        web_server._system_ai_health.update(
+            {"failure_timestamp_dirty": True, "stable_recovery_armed": True}
+        )
+
+    reset_write_entered = threading.Event()
+    release_reset_write = threading.Event()
+    stable_lock_state_ready = threading.Event()
+    stable_lock_blocked = threading.Event()
+    stable_finished = threading.Event()
+    original_health_lock = web_server._system_ai_health_lock
+    real_set_app_state = web_server.set_app_state
+    real_atomic_set = getattr(models, "set_app_state_values", None)
+    blocked_once = {"value": False}
+    errors = []
+
+    class TrackingLock:
+        def __enter__(self):
+            if threading.current_thread().name == "stable-during-reset":
+                if original_health_lock.acquire(blocking=False):
+                    stable_lock_state_ready.set()
+                    return self
+                stable_lock_blocked.set()
+                stable_lock_state_ready.set()
+            original_health_lock.acquire()
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            original_health_lock.release()
+
+        def locked(self):
+            return original_health_lock.locked()
+
+    def pause_first_reset_write():
+        if not blocked_once["value"]:
+            blocked_once["value"] = True
+            reset_write_entered.set()
+            assert release_reset_write.wait(timeout=2)
+
+    def blocked_single_set(key, value):
+        pause_first_reset_write()
+        return real_set_app_state(key, value)
+
+    def blocked_atomic_set(values):
+        pause_first_reset_write()
+        if real_atomic_set is not None:
+            return real_atomic_set(values)
+        for key, value in values.items():
+            real_set_app_state(key, value)
+
+    def run_reset():
+        try:
+            web_server._reset_system_ai_health()
+        except Exception as exc:
+            errors.append(exc)
+
+    def run_stable_recovery():
+        try:
+            web_server._maybe_recover_stale_system_ai_incident()
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            stable_finished.set()
+
+    monkeypatch.setattr(web_server, "_system_ai_health_lock", TrackingLock())
+    monkeypatch.setattr(web_server, "set_app_state", blocked_single_set)
+    monkeypatch.setattr(
+        web_server, "set_app_state_values", blocked_atomic_set, raising=False
+    )
+    reset = threading.Thread(target=run_reset, name="health-reset")
+    stable = threading.Thread(target=run_stable_recovery, name="stable-during-reset")
+
+    reset.start()
+    assert reset_write_entered.wait(timeout=2)
+    stable.start()
+    assert stable_lock_state_ready.wait(timeout=2)
+    if not stable_lock_blocked.is_set():
+        assert stable_finished.wait(timeout=2)
+    release_reset_write.set()
+    reset.join(timeout=2)
+    stable.join(timeout=2)
+
+    assert stable_lock_blocked.is_set()
+    assert not reset.is_alive()
+    assert not stable.is_alive()
+    assert errors == []
+    assert alerts == []
+    assert web_server.get_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY) == "0"
+
+
+def test_failed_durable_reset_remains_fail_closed(
+    isolated_app_state_db, alerts, monkeypatch
+):
+    clock = {"now": 4_601.0}
+    monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
+    web_server.set_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY, "1")
+    web_server.set_app_state(web_server.SYSTEM_AI_LAST_FAILURE_STATE_KEY, "1000")
+    web_server.set_app_state(web_server.SYSTEM_AI_LAST_SUCCESS_STATE_KEY, "1001")
+    with web_server._system_ai_health_lock:
+        web_server._system_ai_health.update(
+            {"failure_timestamp_dirty": True, "stable_recovery_armed": True}
+        )
+    alerts.clear()
+
+    real_set_app_state = web_server.set_app_state
+    real_atomic_set = getattr(models, "set_app_state_values", None)
+    failed_once = {"value": False}
+
+    def fail_once_then(call):
+        if not failed_once["value"]:
+            failed_once["value"] = True
+            raise sqlite3.OperationalError("one-shot reset failure")
+        return call()
+
+    monkeypatch.setattr(
+        web_server,
+        "set_app_state",
+        lambda key, value: fail_once_then(lambda: real_set_app_state(key, value)),
+    )
+    monkeypatch.setattr(
+        web_server,
+        "set_app_state_values",
+        lambda values: fail_once_then(
+            lambda: real_atomic_set(values)
+            if real_atomic_set is not None
+            else [real_set_app_state(key, value) for key, value in values.items()]
+        ),
+        raising=False,
+    )
+
+    web_server._reset_system_ai_health()
+
+    assert failed_once["value"] is True
+    assert web_server._system_ai_health["failure_timestamp_dirty"] is True
+    assert web_server._system_ai_health["stable_recovery_armed"] is False
+    assert web_server._maybe_recover_stale_system_ai_incident() is False
+    assert web_server.get_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY) == "1"
+    assert alerts == []
+
+
 def test_reset_system_ai_health_clears_stability_timestamps(
     isolated_app_state_db, alerts
 ):
@@ -437,6 +721,7 @@ def test_reset_system_ai_health_clears_stability_timestamps(
     assert web_server._system_ai_health["last_failure_at"] == 0.0
     assert web_server._system_ai_health["last_success_at"] == 0.0
     assert web_server._system_ai_health["failure_timestamp_dirty"] is False
+    assert web_server._system_ai_health["stable_recovery_armed"] is False
 
 
 def test_daily_loop_runs_stable_recovery_in_its_own_try(monkeypatch):

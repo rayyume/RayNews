@@ -43,7 +43,7 @@ from models import (
     record_share_revalidation_failure,
     get_users_with_share_enabled,
     get_daily_summary_inapp_user_ids,
-    get_app_state, set_app_state, claim_app_state_flag,
+    get_app_state, set_app_state, set_app_state_values, claim_app_state_flag,
     claim_app_state_incident,
     complete_app_state_incident,
     complete_app_state_incident_if_stable,
@@ -1645,6 +1645,7 @@ _system_ai_health = {
     "last_failure_at": 0.0,
     "last_success_at": 0.0,
     "failure_timestamp_dirty": False,
+    "stable_recovery_armed": False,
 }
 _system_ai_health_lock = threading.Lock()
 
@@ -1718,6 +1719,22 @@ def _reset_system_ai_health() -> None:
     config, so a fresh key starts from zero (and can alert again if it is also
     broken, instead of being muted by the previous config's flag)."""
     with _system_ai_health_lock:
+        # Disarm first and keep the health lock through the durable reset. A
+        # failed or partial reset must never expose old timestamps as trusted.
+        _system_ai_health["stable_recovery_armed"] = False
+        _system_ai_health["failure_timestamp_dirty"] = True
+        try:
+            set_app_state_values(
+                {
+                    SYSTEM_AI_ALERTED_STATE_KEY: "0",
+                    SYSTEM_AI_ALERT_LAST_NOTIFIED_STATE_KEY: "0",
+                    SYSTEM_AI_LAST_FAILURE_STATE_KEY: "0",
+                    SYSTEM_AI_LAST_SUCCESS_STATE_KEY: "0",
+                }
+            )
+        except Exception as exc:
+            print(f"[system-ai] alert state reset failed: {exc}")
+            return
         _system_ai_health.update(
             {
                 "failures": 0,
@@ -1728,15 +1745,9 @@ def _reset_system_ai_health() -> None:
                 "last_failure_at": 0.0,
                 "last_success_at": 0.0,
                 "failure_timestamp_dirty": False,
+                "stable_recovery_armed": False,
             }
         )
-    try:
-        set_app_state(SYSTEM_AI_ALERTED_STATE_KEY, "0")
-        set_app_state(SYSTEM_AI_ALERT_LAST_NOTIFIED_STATE_KEY, "0")
-        set_app_state(SYSTEM_AI_LAST_FAILURE_STATE_KEY, "0")
-        set_app_state(SYSTEM_AI_LAST_SUCCESS_STATE_KEY, "0")
-    except Exception as exc:
-        print(f"[system-ai] alert state reset failed: {exc}")
 
 
 def _note_system_ai_success() -> None:
@@ -1748,7 +1759,12 @@ def _note_system_ai_success() -> None:
         _system_ai_health["last_success_at"] = current
         try:
             set_app_state(SYSTEM_AI_LAST_SUCCESS_STATE_KEY, str(current))
+            # A process must observe and durably record a fresh success before
+            # it may trust persisted timestamps for time-based recovery. This
+            # process-local epoch gate starts closed after every restart.
+            _system_ai_health["stable_recovery_armed"] = True
         except Exception as exc:
+            _system_ai_health["stable_recovery_armed"] = False
             print(f"[system-ai] success timestamp write failed: {exc}")
         persisted_active = _system_ai_incident_is_active()
         alerted_here = _system_ai_health["alerted"]
@@ -1766,7 +1782,15 @@ def _note_system_ai_success() -> None:
         # the sole ownership token for a recovery notification.
         prior_state = _complete_system_ai_alert()
         _system_ai_health.update(
-            {"failures": 0, "successes": 0, "alerted": False, "last_error": "", "jobs": []}
+            {
+                "failures": 0,
+                "successes": 0,
+                "alerted": False,
+                "last_error": "",
+                "jobs": [],
+                "failure_timestamp_dirty": False,
+                "stable_recovery_armed": False,
+            }
         )
     if prior_state == "1":
         _notify_admins(
@@ -1795,6 +1819,7 @@ def _note_system_ai_failure(job: str, error) -> None:
     with _system_ai_health_lock:
         current = time.time()
         _system_ai_health["last_failure_at"] = current
+        _system_ai_health["stable_recovery_armed"] = False
         try:
             set_app_state(SYSTEM_AI_LAST_FAILURE_STATE_KEY, str(current))
             _system_ai_health["failure_timestamp_dirty"] = False
@@ -1848,7 +1873,10 @@ def _maybe_recover_stale_system_ai_incident() -> bool:
         # the health lock before touching SQLite and no lock-order inversion is
         # introduced.
         with _system_ai_health_lock:
-            if _system_ai_health["failure_timestamp_dirty"]:
+            if (
+                _system_ai_health["failure_timestamp_dirty"]
+                or not _system_ai_health["stable_recovery_armed"]
+            ):
                 return False
             prior_state = complete_app_state_incident_if_stable(
                 SYSTEM_AI_ALERTED_STATE_KEY,
@@ -1861,7 +1889,14 @@ def _maybe_recover_stale_system_ai_incident() -> bool:
             if prior_state not in {"1", "2"}:
                 return False
             _system_ai_health.update(
-                {"failures": 0, "successes": 0, "alerted": False, "last_error": "", "jobs": []}
+                {
+                    "failures": 0,
+                    "successes": 0,
+                    "alerted": False,
+                    "last_error": "",
+                    "jobs": [],
+                    "stable_recovery_armed": False,
+                }
             )
     except Exception as exc:
         print(f"[system-ai] stable recovery failed: {exc}")
