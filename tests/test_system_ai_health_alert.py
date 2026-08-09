@@ -241,6 +241,47 @@ def test_health_timestamps_are_written_under_lock_before_early_returns(
     assert web_server._system_ai_health["last_success_at"] == 1_001.0
 
 
+def test_failed_failure_timestamp_write_blocks_stable_recovery(
+    isolated_app_state_db, alerts, monkeypatch
+):
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
+    _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
+    alerts.clear()
+    clock["now"] = 1_001.0
+    web_server._note_system_ai_success()
+
+    real_set_app_state = web_server.set_app_state
+    failed_once = {"value": False}
+
+    def fail_next_failure_timestamp(key, value):
+        if (
+            key == web_server.SYSTEM_AI_LAST_FAILURE_STATE_KEY
+            and not failed_once["value"]
+        ):
+            failed_once["value"] = True
+            raise sqlite3.OperationalError("one-shot timestamp write failure")
+        return real_set_app_state(key, value)
+
+    monkeypatch.setattr(web_server, "set_app_state", fail_next_failure_timestamp)
+    clock["now"] = 4_000.0
+    # Alert bookkeeping remains best-effort and must not break the provider's
+    # caller even though this latest timestamp cannot be made durable.
+    web_server._note_system_ai_failure("自动翻译", "503")
+    assert failed_once["value"] is True
+    assert web_server.get_app_state(
+        web_server.SYSTEM_AI_LAST_FAILURE_STATE_KEY
+    ) == "1000.0"
+
+    # The durable snapshot looks stable (1001 > 1000 and 3601 seconds quiet),
+    # but the real latest failure was only 601 seconds ago. Fail closed rather
+    # than letting the periodic helper close the incident from stale data.
+    clock["now"] = 4_601.0
+    assert web_server._maybe_recover_stale_system_ai_incident() is False
+    assert web_server.get_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY) == "1"
+    assert alerts == []
+
+
 def test_stable_recovery_serializes_memory_reset_with_new_failures(
     isolated_app_state_db, alerts, monkeypatch
 ):
@@ -284,6 +325,97 @@ def test_stable_recovery_serializes_memory_reset_with_new_failures(
     assert web_server._system_ai_health["failures"] == 1
 
 
+def test_counted_and_stable_recovery_emit_only_one_notice(
+    isolated_app_state_db, alerts, monkeypatch
+):
+    """The two recovery paths must share one linearized notification edge."""
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
+    _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
+    alerts.clear()
+    clock["now"] += 1
+    _success(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD - 1)
+    clock["now"] += web_server.SYSTEM_AI_RECOVERY_STABILITY_SECONDS + 1
+
+    counted_at_completion = threading.Event()
+    release_counted_completion = threading.Event()
+    stable_lock_attempted = threading.Event()
+    stable_lock_state_ready = threading.Event()
+    stable_lock_acquired = threading.Event()
+    stable_lock_blocked = threading.Event()
+    stable_finished = threading.Event()
+    original_complete = web_server._complete_system_ai_alert
+    original_health_lock = web_server._system_ai_health_lock
+    errors = []
+
+    class TrackingLock:
+        def __enter__(self):
+            if threading.current_thread().name == "stable-recovery":
+                stable_lock_attempted.set()
+                if original_health_lock.acquire(blocking=False):
+                    stable_lock_acquired.set()
+                    stable_lock_state_ready.set()
+                    return self
+                stable_lock_blocked.set()
+                stable_lock_state_ready.set()
+            original_health_lock.acquire()
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            original_health_lock.release()
+
+        def locked(self):
+            return original_health_lock.locked()
+
+    def block_counted_completion():
+        counted_at_completion.set()
+        assert release_counted_completion.wait(timeout=2)
+        return original_complete()
+
+    def run_counted_recovery():
+        try:
+            web_server._note_system_ai_success()
+        except Exception as exc:
+            errors.append(exc)
+
+    def run_stable_recovery():
+        try:
+            web_server._maybe_recover_stale_system_ai_incident()
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            stable_finished.set()
+
+    monkeypatch.setattr(web_server, "_system_ai_health_lock", TrackingLock())
+    monkeypatch.setattr(
+        web_server, "_complete_system_ai_alert", block_counted_completion
+    )
+    counted = threading.Thread(target=run_counted_recovery, name="counted-recovery")
+    stable = threading.Thread(target=run_stable_recovery, name="stable-recovery")
+
+    counted.start()
+    assert counted_at_completion.wait(timeout=2)
+    stable.start()
+    assert stable_lock_attempted.wait(timeout=2)
+    assert stable_lock_state_ready.wait(timeout=2)
+    if stable_lock_acquired.is_set():
+        # With the buggy lock gap the stable path owns and finishes the durable
+        # transition while counted completion is paused.
+        assert stable_finished.wait(timeout=2)
+    else:
+        # With linearization it is deterministically blocked on the same lock.
+        assert stable_lock_blocked.is_set()
+    release_counted_completion.set()
+    counted.join(timeout=2)
+    stable.join(timeout=2)
+
+    assert not counted.is_alive()
+    assert not stable.is_alive()
+    assert errors == []
+    assert web_server.get_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY) == "0"
+    assert [item["type"] for item in alerts] == ["system_ai_recovered"] * 2
+
+
 def test_reset_system_ai_health_clears_stability_timestamps(
     isolated_app_state_db, alerts
 ):
@@ -291,7 +423,11 @@ def test_reset_system_ai_health_clears_stability_timestamps(
     web_server.set_app_state(web_server.SYSTEM_AI_LAST_SUCCESS_STATE_KEY, "101")
     with web_server._system_ai_health_lock:
         web_server._system_ai_health.update(
-            {"last_failure_at": 100.0, "last_success_at": 101.0}
+            {
+                "last_failure_at": 100.0,
+                "last_success_at": 101.0,
+                "failure_timestamp_dirty": True,
+            }
         )
 
     web_server._reset_system_ai_health()
@@ -300,6 +436,7 @@ def test_reset_system_ai_health_clears_stability_timestamps(
     assert web_server.get_app_state(web_server.SYSTEM_AI_LAST_SUCCESS_STATE_KEY) == "0"
     assert web_server._system_ai_health["last_failure_at"] == 0.0
     assert web_server._system_ai_health["last_success_at"] == 0.0
+    assert web_server._system_ai_health["failure_timestamp_dirty"] is False
 
 
 def test_daily_loop_runs_stable_recovery_in_its_own_try(monkeypatch):

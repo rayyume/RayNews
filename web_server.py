@@ -1644,6 +1644,7 @@ _system_ai_health = {
     "jobs": [],
     "last_failure_at": 0.0,
     "last_success_at": 0.0,
+    "failure_timestamp_dirty": False,
 }
 _system_ai_health_lock = threading.Lock()
 
@@ -1726,6 +1727,7 @@ def _reset_system_ai_health() -> None:
                 "jobs": [],
                 "last_failure_at": 0.0,
                 "last_success_at": 0.0,
+                "failure_timestamp_dirty": False,
             }
         )
     try:
@@ -1759,15 +1761,14 @@ def _note_system_ai_success() -> None:
         _system_ai_health["successes"] += 1
         if _system_ai_health["successes"] < SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD:
             return
+        # Complete the durable incident while still holding the same health
+        # lock used by the time-based path. The transaction's prior state is
+        # the sole ownership token for a recovery notification.
+        prior_state = _complete_system_ai_alert()
         _system_ai_health.update(
             {"failures": 0, "successes": 0, "alerted": False, "last_error": "", "jobs": []}
         )
-    # Either signal means admins are owed a recovery notice: the persisted flag
-    # covers an outage that started before a restart, the in-memory one covers a
-    # deployment whose state table is momentarily unreadable.
-    prior_state = _complete_system_ai_alert()
-    recovered = prior_state == "1" or (alerted_here and prior_state != "2")
-    if recovered:
+    if prior_state == "1":
         _notify_admins(
             "system_ai_recovered",
             SYSTEM_AI_RECOVERED_TITLE,
@@ -1796,7 +1797,12 @@ def _note_system_ai_failure(job: str, error) -> None:
         _system_ai_health["last_failure_at"] = current
         try:
             set_app_state(SYSTEM_AI_LAST_FAILURE_STATE_KEY, str(current))
+            _system_ai_health["failure_timestamp_dirty"] = False
         except Exception as exc:
+            # A stale durable failure time could otherwise make the periodic
+            # recovery path close this incident too early. Preserve service
+            # availability, but fail that recovery path closed in-process.
+            _system_ai_health["failure_timestamp_dirty"] = True
             print(f"[system-ai] failure timestamp write failed: {exc}")
         _system_ai_health["successes"] = 0
         _system_ai_health["failures"] += 1
@@ -1842,6 +1848,8 @@ def _maybe_recover_stale_system_ai_incident() -> bool:
         # the health lock before touching SQLite and no lock-order inversion is
         # introduced.
         with _system_ai_health_lock:
+            if _system_ai_health["failure_timestamp_dirty"]:
+                return False
             prior_state = complete_app_state_incident_if_stable(
                 SYSTEM_AI_ALERTED_STATE_KEY,
                 SYSTEM_AI_ALERT_LAST_NOTIFIED_STATE_KEY,
