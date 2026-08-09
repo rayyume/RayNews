@@ -290,16 +290,16 @@ def test_container_supervises_services_without_blocking_on_initial_fetch():
     assert config["supervisord"]["pidfile"] == "/run/supervisord.pid"
     expected_commands = {
         "program:refresh": (
-            "/bin/bash -o pipefail -c 'python3 -u /app/refresh_server.py 2>&1 | "
-            "python3 -u /app/timestamp_filter.py refresh'"
+            "/bin/bash -o pipefail -c 'exec python3 -u /app/supervised_pipeline.py "
+            "refresh -- python3 -u /app/refresh_server.py'"
         ),
         "program:web": (
-            "/bin/bash -o pipefail -c 'python3 -u /app/web_server.py 2>&1 | "
-            "python3 -u /app/timestamp_filter.py web'"
+            "/bin/bash -o pipefail -c 'exec python3 -u /app/supervised_pipeline.py "
+            "web -- python3 -u /app/web_server.py'"
         ),
         "program:nginx": (
-            "/bin/bash -o pipefail -c 'nginx -g \"daemon off;\" 2>&1 | "
-            "python3 -u /app/timestamp_filter.py nginx'"
+            "/bin/bash -o pipefail -c 'exec python3 -u /app/supervised_pipeline.py "
+            "nginx -- nginx -g \"daemon off;\"'"
         ),
     }
     for section, command in expected_commands.items():
