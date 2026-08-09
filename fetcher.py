@@ -221,6 +221,35 @@ BACKFILL_MAX_AGE_DAYS = 3
 BACKFILL_LIMIT = 40
 
 
+def _invalidate_stale_translation(
+    conn: sqlite3.Connection, article_id: int
+) -> bool:
+    """Clear a cached excerpt translation after the original body is upgraded."""
+    table_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ai_results'"
+    ).fetchone()
+    if table_exists is None:
+        return False
+
+    columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(ai_results)").fetchall()
+    }
+    if "translation" not in columns:
+        raise sqlite3.OperationalError(
+            "ai_results table is missing required translation column"
+        )
+
+    assignments = ["translation = NULL"]
+    if "translation_updated_at" in columns:
+        assignments.append("translation_updated_at = NULL")
+    cursor = conn.execute(
+        f"UPDATE ai_results SET {', '.join(assignments)} "
+        "WHERE article_id = ? AND translation IS NOT NULL",
+        (article_id,),
+    )
+    return cursor.rowcount > 0
+
+
 def backfill_missing_fulltext(conn: sqlite3.Connection) -> int:
     """Retry Telegraph full-text for recent articles still stuck on the excerpt fallback.
 
@@ -276,6 +305,7 @@ def backfill_missing_fulltext(conn: sqlite3.Connection) -> int:
                         row["id"],
                     ),
                 )
+                _invalidate_stale_translation(conn, row["id"])
                 conn.commit()
             except Exception:
                 conn.rollback()

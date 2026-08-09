@@ -192,6 +192,123 @@ def test_backfill_rolls_back_a_failed_article_update(tmp_path, monkeypatch):
         writer.close()
 
 
+def test_backfill_invalidates_excerpt_translation(tmp_path, monkeypatch):
+    _patch_paths(monkeypatch, tmp_path)
+    conn = fetcher.init_db()
+    _insert(
+        conn,
+        id=61,
+        timestamp=int(time.time()),
+        telegraph_url="https://telegra.ph/translated-excerpt",
+        has_full_content=0,
+        body_html="excerpt",
+    )
+    conn.execute(
+        "CREATE TABLE ai_results ("
+        "article_id INTEGER PRIMARY KEY, translation TEXT, translation_updated_at TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO ai_results VALUES (?, ?, ?)",
+        (61, "<p>short translation</p>", "2026-08-01 12:00:00"),
+    )
+    conn.commit()
+    monkeypatch.setattr(fetcher, "fetch_telegraph", _fulltext_result)
+
+    assert fetcher.backfill_missing_fulltext(conn) == 1
+
+    article = conn.execute(
+        "SELECT has_full_content, body_html FROM articles WHERE id = 61"
+    ).fetchone()
+    cached = conn.execute(
+        "SELECT translation, translation_updated_at FROM ai_results WHERE article_id = 61"
+    ).fetchone()
+    assert tuple(article) == (
+        1,
+        "<article>full body for https://telegra.ph/translated-excerpt</article>",
+    )
+    assert tuple(cached) == (None, None)
+    conn.close()
+
+
+def test_translation_invalidation_is_noop_when_table_is_absent(tmp_path):
+    conn = sqlite3.connect(tmp_path / "news.db")
+    try:
+        assert fetcher._invalidate_stale_translation(conn, 1) is False
+    finally:
+        conn.close()
+
+
+def test_translation_invalidation_supports_table_with_only_translation_column(tmp_path):
+    conn = sqlite3.connect(tmp_path / "news.db")
+    conn.execute(
+        "CREATE TABLE ai_results (article_id INTEGER PRIMARY KEY, translation TEXT)"
+    )
+    conn.execute("INSERT INTO ai_results VALUES (1, '<p>stale</p>')")
+    conn.commit()
+    try:
+        assert fetcher._invalidate_stale_translation(conn, 1) is True
+        assert conn.execute(
+            "SELECT translation FROM ai_results WHERE article_id = 1"
+        ).fetchone()[0] is None
+    finally:
+        conn.close()
+
+
+def test_translation_invalidation_surfaces_malformed_ai_results_schema(tmp_path):
+    conn = sqlite3.connect(tmp_path / "news.db")
+    conn.execute("CREATE TABLE ai_results (article_id INTEGER PRIMARY KEY)")
+    conn.execute("INSERT INTO ai_results VALUES (1)")
+    conn.commit()
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="translation"):
+            fetcher._invalidate_stale_translation(conn, 1)
+    finally:
+        conn.close()
+
+
+def test_backfill_rolls_back_article_upgrade_when_translation_invalidation_fails(
+    tmp_path, monkeypatch
+):
+    _patch_paths(monkeypatch, tmp_path)
+    conn = fetcher.init_db()
+    _insert(
+        conn,
+        id=62,
+        timestamp=int(time.time()),
+        telegraph_url="https://telegra.ph/invalidation-fails",
+        has_full_content=0,
+        body_html="excerpt",
+    )
+    conn.execute(
+        "CREATE TABLE ai_results ("
+        "article_id INTEGER PRIMARY KEY, translation TEXT, translation_updated_at TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO ai_results VALUES (62, '<p>stale</p>', '2026-08-01 12:00:00')"
+    )
+    conn.execute(
+        """CREATE TRIGGER reject_translation_invalidation
+           BEFORE UPDATE OF translation ON ai_results WHEN OLD.article_id = 62
+           BEGIN SELECT RAISE(ABORT, 'forced invalidation failure'); END"""
+    )
+    conn.commit()
+    monkeypatch.setattr(fetcher, "fetch_telegraph", _fulltext_result)
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced invalidation failure"):
+        fetcher.backfill_missing_fulltext(conn)
+
+    assert not conn.in_transaction
+    article = conn.execute(
+        "SELECT has_full_content, body_html FROM articles WHERE id = 62"
+    ).fetchone()
+    cached = conn.execute(
+        "SELECT translation, translation_updated_at FROM ai_results WHERE article_id = 62"
+    ).fetchone()
+    assert tuple(article) == (0, "excerpt")
+    assert tuple(cached) == ("<p>stale</p>", "2026-08-01 12:00:00")
+    conn.close()
+
+
 def test_backfill_upgrades_recent_downgraded_telegraph_article(tmp_path, monkeypatch):
     _patch_paths(monkeypatch, tmp_path)
     conn = fetcher.init_db()
