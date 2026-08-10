@@ -349,6 +349,9 @@ def test_memory_monitor_loop_continues_after_sample_error_and_prints_compact_jso
 ):
     calls = 0
 
+    class _StopLoop(Exception):
+        pass
+
     def sample_once():
         nonlocal calls
         calls += 1
@@ -358,9 +361,9 @@ def test_memory_monitor_loop_continues_after_sample_error_and_prints_compact_jso
 
     def stop_after_second_sample(_interval):
         if calls == 2:
-            raise StopIteration
+            raise _StopLoop
 
-    with pytest.raises(StopIteration):
+    with pytest.raises(_StopLoop):
         web_server._memory_monitor_loop(
             sample_once=sample_once,
             sleep_fn=stop_after_second_sample,
@@ -380,10 +383,16 @@ def test_memory_monitor_loop_continues_after_sample_error_and_prints_compact_jso
 
 
 def test_every_reserved_memory_log_line_has_a_json_payload(capsys):
-    with pytest.raises(StopIteration):
+    class _StopLoop(Exception):
+        pass
+
+    def stop_immediately(_interval):
+        raise _StopLoop
+
+    with pytest.raises(_StopLoop):
         web_server._memory_monitor_loop(
             sample_once=lambda: {"warning": False, "processes": []},
-            sleep_fn=lambda _interval: (_ for _ in ()).throw(StopIteration),
+            sleep_fn=stop_immediately,
             interval_seconds=10,
         )
     web_server._announce_memory_monitor_started()
