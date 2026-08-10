@@ -8,7 +8,7 @@ from collections import defaultdict
 from typing import Optional
 from urllib.parse import urlsplit
 
-from network_safety import safe_post
+from network_safety import _ALLOW_PRIVATE_AI_ENDPOINTS, safe_post
 from source_categories import CATEGORY_NAMES, CATEGORY_ORDER, clamp_weighted, local_short_source_name
 
 
@@ -271,6 +271,7 @@ class AIService:
                 },
                 json=body,
                 timeout=(30, self.request_timeout),
+                allow_private=_ALLOW_PRIVATE_AI_ENDPOINTS,
             )
         except requests.exceptions.ReadTimeout as e:
             raise TimeoutError(
@@ -333,6 +334,7 @@ class AIService:
                 },
                 json=body,
                 timeout=(30, self.request_timeout),
+                allow_private=_ALLOW_PRIVATE_AI_ENDPOINTS,
             )
         except requests.exceptions.ReadTimeout as e:
             raise TimeoutError(

@@ -63,7 +63,7 @@ from auth import init_auth, create_token, require_auth, require_role
 from auth_validation import is_valid_email
 from image_validation import detect_image_content_type
 from ai_service import AIService, _redact_api_error, validate_ai_endpoint_base_url
-from network_safety import UnsafeUrlError, assert_public_http_url
+from network_safety import UnsafeUrlError, assert_ai_endpoint_url, assert_public_http_url
 from image_cache import (
     enqueue_article_image_prefetch, unpin_article_images,
     cache_stats, evict_article_images, evict_unreferenced_images, collect_image_urls, open_cache_connection, _url_hash,
@@ -663,7 +663,7 @@ def admin_set_system_ai_config():
             effective_endpoint = data.get(
                 "endpoint", existing.get("endpoint", "https://api.openai.com/v1")
             )
-            assert_public_http_url(effective_endpoint)
+            assert_ai_endpoint_url(effective_endpoint)
             validate_ai_endpoint_base_url(effective_endpoint)
         except (UnsafeUrlError, ValueError):
             return jsonify({"error": "AI endpoint must be a public HTTP(S) URL"}), 400
@@ -1101,7 +1101,7 @@ def set_ai_config_route():
             (existing or {}).get("endpoint", "https://api.openai.com/v1"),
         )
         try:
-            assert_public_http_url(effective_endpoint)
+            assert_ai_endpoint_url(effective_endpoint)
             validate_ai_endpoint_base_url(effective_endpoint)
         except (UnsafeUrlError, ValueError):
             return jsonify({"error": "AI endpoint must be a public HTTP(S) URL"}), 400

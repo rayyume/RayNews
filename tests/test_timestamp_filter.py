@@ -97,25 +97,29 @@ def test_dockerfile_installs_timezone_data_and_copies_filter():
     assert "timestamp_filter.py" in dockerfile
 
 
-class _ReconfigurableStream(io.StringIO):
-    def __init__(self, text: str) -> None:
-        super().__init__(text)
-        self.reconfigure_kwargs: dict | None = None
-
-    def reconfigure(self, **kwargs):
-        self.reconfigure_kwargs = kwargs
-
-
-def test_main_reconfigures_stdin_to_replace_errors():
-    stream = _ReconfigurableStream("hello\n")
-    assert main(["web"], stdin=stream, stdout=io.StringIO()) == 0
-    assert stream.reconfigure_kwargs == {"errors": "replace"}
-
-
 def test_main_tolerates_replacement_char_from_bad_bytes():
     out = io.StringIO()
     assert main(["web"], stdin=io.StringIO("bad byte \ufffd here\n"), stdout=out) == 0
     assert "\ufffd" in out.getvalue()
+
+
+def test_main_tolerates_non_utf8_bytes_via_chunk_decoder():
+    class _BinaryStdin:
+        def __init__(self, data: bytes) -> None:
+            self._buf = io.BytesIO(data)
+
+        @property
+        def buffer(self):
+            return self._buf
+
+    class _CapturingStdout(io.StringIO):
+        pass
+
+    out = _CapturingStdout()
+    stdin = _BinaryStdin(b"before:\xff:after\n")
+    assert main(["web"], stdin=stdin, stdout=out) == 0
+    assert "before:" in out.getvalue()
+    assert "after" in out.getvalue()
 
 
 def test_truncate_line_caps_long_lines_and_keeps_newline():

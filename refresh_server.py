@@ -674,16 +674,6 @@ def run_fetcher(existing_article_ids: set[int] | None = None):
                 daemon=True,
             ).start()
         return body, 200 if is_ok else 500
-    except subprocess.TimeoutExpired:
-        LAST_FETCH_STATUS.update({
-            "status": "error",
-            "returncode": None,
-            "stdout": "",
-            "stderr": "timeout",
-            "updated_at": int(time.time()),
-        })
-        body = json.dumps({"status": "error", "error": "timeout"}).encode()
-        return body, 500
     except Exception as e:
         LAST_FETCH_STATUS.update({
             "status": "error",
@@ -963,10 +953,16 @@ def enqueue_today_wsrv_article_images() -> dict[str, int]:
     return result
 
 
+def _start_periodic_refresh_timer():
+    timer = threading.Timer(REFRESH_INTERVAL, periodic_refresh)
+    timer.daemon = True
+    timer.start()
+
+
 def periodic_refresh():
     """Run fetcher periodically in the background."""
     start_refresh_job("periodic")
-    threading.Timer(REFRESH_INTERVAL, periodic_refresh).start()
+    _start_periodic_refresh_timer()
 
 
 # ─── API Handlers ─────────────────────────────────────────
@@ -1550,7 +1546,7 @@ if __name__ == "__main__":
     _warm_news_schema()
     start_refresh_job("startup")
     # Start periodic refresh in background
-    threading.Timer(REFRESH_INTERVAL, periodic_refresh).start()
+    _start_periodic_refresh_timer()
     log.info(f"Refresh + API server listening on {port} (auto-refresh every {REFRESH_INTERVAL}s)")
     threading.Thread(
         target=enqueue_today_wsrv_article_images,

@@ -20,6 +20,10 @@ from urllib3.exceptions import ConnectTimeoutError, NewConnectionError
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 _DEFAULT_MAX_REDIRECTS = 5
 
+_ALLOW_PRIVATE_AI_ENDPOINTS = os.environ.get(
+    "AI_ALLOW_PRIVATE_ENDPOINTS", ""
+).strip().lower() in {"1", "true", "yes", "on"}
+
 
 @dataclass(frozen=True)
 class _TrustedProxy:
@@ -39,6 +43,18 @@ def _unsafe(message: str = "URL target is not allowed") -> UnsafeUrlError:
 
 def _resolve_public_http_url(url: str) -> tuple[str, tuple[tuple, ...]]:
     """Return a safe URL and the exact public socket addresses it resolved to."""
+    return _resolve_http_url(url, allow_private=False)
+
+
+def _resolve_http_url(
+    url: str, *, allow_private: bool = False
+) -> tuple[str, tuple[tuple, ...]]:
+    """Return a safe URL and the exact socket addresses it resolved to.
+
+    When ``allow_private`` is False, every resolved address must be global
+    (public). When True, loopback/private addresses are permitted so locally
+    self-hosted AI gateways (Ollama, one-api) remain usable behind an opt-in.
+    """
     if not isinstance(url, str):
         raise _unsafe("A valid public HTTP(S) URL is required")
 
@@ -60,6 +76,13 @@ def _resolve_public_http_url(url: str) -> tuple[str, tuple[tuple, ...]]:
     ):
         raise _unsafe("A valid public HTTP(S) URL is required")
 
+    def _addr_ok(addr: "ip_address") -> bool:
+        if addr.is_multicast:
+            return False
+        if allow_private:
+            return True
+        return addr.is_global
+
     hostname = parsed.hostname
     if "%" in hostname:
         raise _unsafe()
@@ -70,7 +93,7 @@ def _resolve_public_http_url(url: str) -> tuple[str, tuple[tuple, ...]]:
         literal_address = None
 
     if literal_address is not None:
-        if not literal_address.is_global or literal_address.is_multicast:
+        if not _addr_ok(literal_address):
             raise _unsafe()
         family = socket.AF_INET6 if literal_address.version == 6 else socket.AF_INET
         sockaddr = (
@@ -102,7 +125,7 @@ def _resolve_public_http_url(url: str) -> tuple[str, tuple[tuple, ...]]:
             if family not in {socket.AF_INET, socket.AF_INET6}:
                 raise ValueError
             resolved = ip_address(sockaddr[0])
-            if not resolved.is_global or resolved.is_multicast:
+            if not _addr_ok(resolved):
                 raise UnsafeUrlError
             normalized_sockaddr = (
                 (str(resolved), target_port, sockaddr[2], sockaddr[3])
@@ -131,6 +154,17 @@ def _resolve_public_http_url(url: str) -> tuple[str, tuple[tuple, ...]]:
 def assert_public_http_url(url: str) -> str:
     """Validate that *url* is HTTP(S) and every resolved address is public."""
     candidate, _ = _resolve_public_http_url(url)
+    return candidate
+
+
+def assert_ai_endpoint_url(url: str) -> str:
+    """Validate an AI endpoint URL.
+
+    Defaults to public-only (SSRF guard). When ``AI_ALLOW_PRIVATE_ENDPOINTS``
+    is set to a truthy value, loopback/private addresses are permitted so
+    self-hosted LLM gateways (Ollama, one-api) remain usable behind an opt-in.
+    """
+    candidate, _ = _resolve_http_url(url, allow_private=_ALLOW_PRIVATE_AI_ENDPOINTS)
     return candidate
 
 
@@ -352,12 +386,27 @@ def _send_bound_request(
         if trusted_proxy is not None
         else {}
     )
-    with requests.Session() as session:
-        session.trust_env = False
-        adapter = _BoundAddressAdapter(resolved_addresses, trusted_proxy=trusted_proxy)
-        session.mount("http://", adapter)
-        session.mount("https://", adapter)
-        return session.request(method, url, proxies=proxies, **kwargs)
+    session = requests.Session()
+    session.trust_env = False
+    adapter = _BoundAddressAdapter(resolved_addresses, trusted_proxy=trusted_proxy)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    try:
+        response = session.request(method, url, proxies=proxies, **kwargs)
+    except BaseException:
+        session.close()
+        raise
+    if kwargs.get("stream"):
+        original_close = response.close
+        def _close_and_release_session(*a, **kw):
+            try:
+                return original_close(*a, **kw)
+            finally:
+                session.close()
+        response.close = _close_and_release_session
+    else:
+        session.close()
+    return response
 
 
 def _origin(url: str) -> tuple[str, str, int | None]:
@@ -386,13 +435,7 @@ def _without_body_headers(headers: dict | None) -> dict | None:
     return {key: value for key, value in headers.items() if key.lower() not in body_headers}
 
 
-def _safe_request(
-    method: str,
-    url: str,
-    *,
-    max_redirects: int = _DEFAULT_MAX_REDIRECTS,
-    **kwargs,
-) -> requests.Response:
+def _safe_request(method, url, *, max_redirects=_DEFAULT_MAX_REDIRECTS, allow_private=False, **kwargs):
     """Send a GET or POST after validating every redirect hop."""
     if method not in {"GET", "POST"}:
         raise ValueError("safe requests support GET and POST only")
@@ -401,7 +444,7 @@ def _safe_request(
     if "proxies" in kwargs:
         raise _unsafe("Explicit proxy routing is not allowed for safe requests")
 
-    current_url, resolved_addresses = _resolve_public_http_url(url)
+    current_url, resolved_addresses = _resolve_http_url(url, allow_private=allow_private)
     current_method = method
     request_kwargs = dict(kwargs)
     request_kwargs["allow_redirects"] = False
@@ -425,8 +468,8 @@ def _safe_request(
             raise _unsafe("Too many redirects")
 
         try:
-            next_url, next_addresses = _resolve_public_http_url(
-                urljoin(current_url, location)
+            next_url, next_addresses = _resolve_http_url(
+                urljoin(current_url, location), allow_private=allow_private,
             )
         except (UnsafeUrlError, TypeError, ValueError):
             response.close()
@@ -455,17 +498,19 @@ def safe_get(
     url: str,
     *,
     max_redirects: int = _DEFAULT_MAX_REDIRECTS,
+    allow_private: bool = False,
     **kwargs,
 ) -> requests.Response:
     """GET a public URL while validating every redirect target."""
-    return _safe_request("GET", url, max_redirects=max_redirects, **kwargs)
+    return _safe_request("GET", url, max_redirects=max_redirects, allow_private=allow_private, **kwargs)
 
 
 def safe_post(
     url: str,
     *,
     max_redirects: int = _DEFAULT_MAX_REDIRECTS,
+    allow_private: bool = False,
     **kwargs,
 ) -> requests.Response:
     """POST to a public URL while validating every redirect target."""
-    return _safe_request("POST", url, max_redirects=max_redirects, **kwargs)
+    return _safe_request("POST", url, max_redirects=max_redirects, allow_private=allow_private, **kwargs)

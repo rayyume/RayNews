@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import re
 import sys
 from datetime import datetime
@@ -11,6 +12,7 @@ from typing import TextIO
 _SERVICE_RE = re.compile(r"[A-Za-z0-9_-]{1,32}\Z")
 
 _MAX_LINE_CHARS = 8192
+_READ_CHUNK = 65536
 
 _TRUNCATE_MARKER = " ... [line truncated]"
 
@@ -60,6 +62,38 @@ def _truncate_line(line: str) -> str:
     return body + newline
 
 
+def _iter_lines(stream):
+    """Yield decoded lines without buffering an entire unbounded line in memory.
+
+    Reads in fixed chunks and decodes incrementally with ``errors="replace"``,
+    capping accumulation at ``_MAX_LINE_CHARS`` plus the truncation marker so a
+    single multi-MB line never dominates memory. Accepts either a binary stream
+    (``.buffer``) or a text stream (tests).
+    """
+    use_decoder = isinstance(stream.read(0), (bytes, bytearray))
+    decoder = codecs.getincrementaldecoder("utf-8")("replace") if use_decoder else None
+    buffer = ""
+    while True:
+        chunk = stream.read(_READ_CHUNK)
+        if not chunk:
+            if buffer:
+                yield buffer
+            return
+        if decoder is not None:
+            buffer += decoder.decode(chunk)
+        else:
+            buffer += chunk
+        while True:
+            newline = buffer.find("\n")
+            if newline < 0:
+                if len(buffer) > _MAX_LINE_CHARS + len(_TRUNCATE_MARKER):
+                    yield buffer[:_MAX_LINE_CHARS] + _TRUNCATE_MARKER
+                    buffer = ""
+                break
+            yield buffer[: newline + 1]
+            buffer = buffer[newline + 1 :]
+
+
 def main(
     argv: list[str] | None = None,
     *,
@@ -77,15 +111,9 @@ def main(
         return 2
 
     service = args[0]
-    # stdin may be binary-backed; never let one bad byte kill the long-running
-    # filter. Test streams may not support reconfigure.
+    stdin_binary = getattr(stdin, "buffer", None) or stdin
     try:
-        stdin.reconfigure(errors="replace")
-    except (AttributeError, ValueError):
-        pass
-
-    try:
-        for line in stdin:
+        for line in _iter_lines(stdin_binary):
             line = _strip_existing_prefix(line)
             line = _truncate_line(line)
             stdout.write(format_timestamped_line(service, line))
