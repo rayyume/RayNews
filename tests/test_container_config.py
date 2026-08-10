@@ -712,3 +712,77 @@ run_setup_command install noisy_failure
     assert len(setup_lines) == 21
     assert max(map(len, setup_lines)) < 2200
     assert setup_lines[-1].endswith("diagnostic output truncated after 20 lines")
+
+
+def test_setup_diagnostic_truncation_preserves_utf8_at_a_multibyte_boundary():
+    entrypoint_path = ROOT / "entrypoint.sh"
+    functions = "\n\n".join(
+        _extract_shell_function(entrypoint_path, name)
+        for name in ("log", "capture_setup_output", "run_setup_command")
+    )
+    script = f"""{functions}
+unicode_failure() {{
+  python3 -c 'import sys; sys.stderr.buffer.write(("中" * 683).encode("utf-8") + b"\\n")'
+  return 61
+}}
+run_setup_command install unicode_failure
+"""
+
+    result = subprocess.run(
+        ["bash", "-u", "-c", script],
+        cwd=ROOT,
+        env={**os.environ, "TZ": "UTC"},
+        capture_output=True,
+        check=False,
+    )
+
+    stderr = result.stderr.decode("utf-8", errors="strict")
+    lines = stderr.splitlines()
+    marker = "... [line truncated]"
+    assert result.returncode == 61
+    assert result.stdout == b""
+    assert len(lines) == 1
+    assert re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00 "
+        r"\[entrypoint\] \[setup:install\] .+",
+        lines[0],
+    )
+    payload = lines[0].split("[setup:install] ", 1)[1]
+    assert payload == "中" * 682 + marker
+    retained = payload.removesuffix(marker)
+    assert len(retained.encode("utf-8")) <= 2048
+    assert len(payload.encode("utf-8")) <= 2048 + len(marker.encode("ascii"))
+
+
+def test_setup_diagnostic_replaces_internal_invalid_utf8_without_hiding_suffix():
+    entrypoint_path = ROOT / "entrypoint.sh"
+    functions = "\n\n".join(
+        _extract_shell_function(entrypoint_path, name)
+        for name in ("log", "capture_setup_output", "run_setup_command")
+    )
+    script = f"""{functions}
+invalid_utf8_failure() {{
+  python3 -c 'import sys; sys.stderr.buffer.write(b"before:\\xff:after\\n")'
+  return 62
+}}
+run_setup_command runuser invalid_utf8_failure
+"""
+
+    result = subprocess.run(
+        ["bash", "-u", "-c", script],
+        cwd=ROOT,
+        env={**os.environ, "TZ": "UTC"},
+        capture_output=True,
+        check=False,
+    )
+
+    stderr = result.stderr.decode("utf-8", errors="strict")
+    lines = stderr.splitlines()
+    assert result.returncode == 62
+    assert result.stdout == b""
+    assert len(lines) == 1
+    assert re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00 "
+        r"\[entrypoint\] \[setup:runuser\] before:\ufffd:after",
+        lines[0],
+    )

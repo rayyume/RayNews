@@ -122,6 +122,9 @@ AUTO_SUMMARY_INTERVAL_SECONDS = int(os.environ.get("AUTO_SUMMARY_INTERVAL_SECOND
 AUTO_TRANSLATION_BATCH_LIMIT = int(os.environ.get("AUTO_TRANSLATION_BATCH_LIMIT", "5"))
 AUTO_TRANSLATION_INTERVAL_SECONDS = int(os.environ.get("AUTO_TRANSLATION_INTERVAL_SECONDS", "30"))
 AUTO_TRANSLATION_SCAN_LIMIT = int(os.environ.get("AUTO_TRANSLATION_SCAN_LIMIT", "1000"))
+TRANSLATION_REPAIR_WINDOW_SECONDS = int(os.environ.get("TRANSLATION_REPAIR_WINDOW_SECONDS", str(6 * 3600)))
+STALE_TRANSLATION_SCAN_HORIZON_DAYS = int(os.environ.get("STALE_TRANSLATION_SCAN_HORIZON_DAYS", "30"))
+RECENT_FULLTEXT_UPGRADE_DAYS = int(os.environ.get("RECENT_FULLTEXT_UPGRADE_DAYS", "3"))
 AUTO_TITLE_PROCESS_BATCH_LIMIT = int(os.environ.get("AUTO_TITLE_PROCESS_BATCH_LIMIT", "20"))
 AUTO_TITLE_PROCESS_INTERVAL_SECONDS = int(os.environ.get("AUTO_TITLE_PROCESS_INTERVAL_SECONDS", "10"))
 AUTO_TITLE_PROCESS_SCAN_LIMIT = int(os.environ.get("AUTO_TITLE_PROCESS_SCAN_LIMIT", "1000"))
@@ -1785,14 +1788,53 @@ def _system_ai_incident_is_notified() -> bool:
 
 
 def _claim_system_ai_alert() -> str:
-    """Atomically start a notified or cooldown-suppressed AI incident."""
+    """Atomically start a notified or cooldown-suppressed AI incident.
+
+    The notification timestamp is persisted in the same ``BEGIN IMMEDIATE``
+    transaction as the incident state, so a crash between claiming and recording
+    the notification cannot leave ``last_notified`` at zero. ``claim_app_state_incident``
+    in models.py does not accept a timestamp parameter and cannot be edited here,
+    so the claim logic is mirrored in this transaction to set both keys together.
+    """
+    current = time.time()
+    cooldown = max(0.0, float(SYSTEM_AI_ALERT_COOLDOWN_SECONDS))
     try:
-        return claim_app_state_incident(
-            SYSTEM_AI_ALERTED_STATE_KEY,
-            SYSTEM_AI_ALERT_LAST_NOTIFIED_STATE_KEY,
-            SYSTEM_AI_ALERT_COOLDOWN_SECONDS,
-            now=time.time(),
+        db = get_db()
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute(
+            "SELECT value FROM app_state WHERE key = ?",
+            (SYSTEM_AI_ALERTED_STATE_KEY,),
+        ).fetchone()
+        if row and row["value"] in {"1", "2"}:
+            db.rollback()
+            return "active"
+        last_row = db.execute(
+            "SELECT value FROM app_state WHERE key = ?",
+            (SYSTEM_AI_ALERT_LAST_NOTIFIED_STATE_KEY,),
+        ).fetchone()
+        try:
+            last_notified = float(last_row["value"]) if last_row else 0.0
+        except (TypeError, ValueError):
+            last_notified = 0.0
+        in_cooldown = bool(last_notified) and current - last_notified < cooldown
+        if in_cooldown:
+            state, result = "2", "suppressed"
+        else:
+            state, result = "1", "notify"
+        updated_at = datetime.now().isoformat(timespec="seconds")
+        db.execute(
+            "INSERT INTO app_state (key, value, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            (SYSTEM_AI_ALERTED_STATE_KEY, state, updated_at),
         )
+        if state == "1":
+            db.execute(
+                "INSERT INTO app_state (key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                (SYSTEM_AI_ALERT_LAST_NOTIFIED_STATE_KEY, str(current), updated_at),
+            )
+        db.commit()
+        return result
     except Exception as exc:
         # A DB hiccup must not turn into a silent outage; alerting twice is the
         # safer failure mode than never alerting.
@@ -1805,7 +1847,15 @@ def _release_system_ai_alert() -> None:
     with _system_ai_health_lock:
         _system_ai_health["alerted"] = False
     try:
-        set_app_state(SYSTEM_AI_ALERTED_STATE_KEY, "0")
+        # Reset the notification timestamp together with the incident state so a
+        # released (undelivered) claim does not arm the cooldown and mute the
+        # retry that _note_system_ai_failure owes the next failure.
+        set_app_state_values(
+            {
+                SYSTEM_AI_ALERTED_STATE_KEY: "0",
+                SYSTEM_AI_ALERT_LAST_NOTIFIED_STATE_KEY: "0",
+            }
+        )
     except Exception as exc:
         print(f"[system-ai] alert state release failed: {exc}")
 
@@ -1894,7 +1944,12 @@ def _note_system_ai_success() -> None:
         current = time.time()
         _system_ai_health["last_success_at"] = current
         try:
-            set_app_state(SYSTEM_AI_LAST_SUCCESS_STATE_KEY, str(current))
+            # Routed through the same cross-process fence as the failure marker
+            # so both timestamps are written under the shared lock. The health
+            # lock is already held here, and every other fence user acquires it
+            # first too — health-lock then fence is the consistent order.
+            with _system_ai_failure_fence():
+                set_app_state(SYSTEM_AI_LAST_SUCCESS_STATE_KEY, str(current))
         except Exception as exc:
             print(f"[system-ai] success timestamp write failed: {exc}")
         persisted_active = _system_ai_incident_is_active()
@@ -1991,8 +2046,8 @@ def _note_system_ai_failure(job: str, error) -> None:
         # than cooldown so a later provider failure can retry delivery; an
         # email-only failure remains deduplicated by its separate alert path.
         _release_system_ai_alert()
-    else:
-        _record_system_ai_notification_time()
+    # The notification timestamp was persisted atomically with the claim, so no
+    # separate post-delivery write is needed (see _claim_system_ai_alert).
 
 
 def _maybe_recover_stale_system_ai_incident() -> bool:
@@ -2026,8 +2081,11 @@ def _maybe_recover_stale_system_ai_incident() -> bool:
                     SYSTEM_AI_RECOVERY_STABILITY_SECONDS,
                     now=time.time(),
                 )
-            if prior_state not in {"1", "2"}:
-                return False
+            # Always sync in-memory state to the durable verdict. When another
+            # process already closed the incident (prior_state == "0") this
+            # process would otherwise keep a stale alerted=True and mute the next
+            # real outage; clearing failures/last_error/jobs matches the durable
+            # truth whether this helper closed the incident or found it closed.
             _system_ai_health.update(
                 {
                     "failures": 0,
@@ -2037,6 +2095,8 @@ def _maybe_recover_stale_system_ai_incident() -> bool:
                     "jobs": [],
                 }
             )
+            if prior_state not in {"1", "2"}:
+                return False
     except Exception as exc:
         print(f"[system-ai] stable recovery failed: {exc}")
         return False
@@ -2860,15 +2920,21 @@ def _broadcast_daily_summary(force: bool = False, bypass_window: bool = False) -
                 return {"status": "error", "reason": reason}
             state = _record_daily_summary_failure(today_str, reason)
             if int(state.get("given_up") or 0):
-                if _system_ai_incident_is_notified():
+                # Claim the daily alert FIRST: it is the atomic gate on news.db.
+                # Checking the system-AI incident before claiming left a
+                # read+claim TOCTOU across two DBs — a concurrent system-AI
+                # claim between them sent both alerts to the same admins.
+                if not _claim_daily_summary_alert(today_str):
+                    pass  # another tick already owns today's daily alert
+                elif _system_ai_incident_is_notified():
+                    _release_daily_summary_alert(today_str)
                     print(
                         f"[daily-summary] {today_str} gave up after "
                         f"{int(state.get('attempts') or 0)} attempt(s); suppressed "
                         "because the system-AI incident is already notified"
                     )
-                elif _claim_daily_summary_alert(today_str):
-                    if _alert_admins_daily_summary_failure(today_str, state) == 0:
-                        _release_daily_summary_alert(today_str)
+                elif _alert_admins_daily_summary_failure(today_str, state) == 0:
+                    _release_daily_summary_alert(today_str)
             return {"status": "error", "reason": reason,
                     "attempts": state.get("attempts"),
                     "given_up": bool(state.get("given_up"))}
@@ -3556,9 +3622,26 @@ def _save_article_title_update(article_id: int, title: str | None,
         conn.close()
 
 
+def _article_age_days(article: dict) -> float:
+    ts = article.get("timestamp")
+    if ts is None:
+        return 0.0
+    try:
+        return max(0.0, (time.time() - float(ts)) / 86400.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _translation_pending_fulltext(article: dict) -> bool:
-    """Whether a Telegraph article still has only its Telegram excerpt."""
-    return bool(article.get("telegraph_url")) and not bool(article.get("has_full_content"))
+    """Whether a Telegraph article still has only its Telegram excerpt.
+
+    After the backfill window elapses, a still-excerpt-only article is allowed
+    to translate its excerpt rather than waiting indefinitely for full text
+    that may never arrive.
+    """
+    if not bool(article.get("telegraph_url")) or bool(article.get("has_full_content")):
+        return False
+    return _article_age_days(article) < RECENT_FULLTEXT_UPGRADE_DAYS
 
 
 def _translation_looks_truncated(
@@ -3569,11 +3652,12 @@ def _translation_looks_truncated(
         return False
     source = _plain_text(source_html or "")
     translated = _plain_text(cached_html)
-    return (
-        len(source) >= 400
-        and _has_latin(source)
-        and len(translated) < len(source) * 0.30
-    )
+    if not (len(source) >= 400 and _has_latin(source)):
+        return False
+    if len(translated) < len(source) * 0.30:
+        return True
+    original = _plain_text(article.get("original_body_html") or "")
+    return len(original) >= 400 and len(translated) < len(original) * 0.30
 
 
 def _fetch_stale_translation_articles(
@@ -3606,7 +3690,7 @@ def _fetch_stale_translation_articles(
 
             cursor = _translation_repair_cursor
             where_cursor = ""
-            params: list[int] = []
+            params: list = []
             if cursor is not None:
                 cursor_timestamp, cursor_id = cursor
                 where_cursor = (
@@ -3614,7 +3698,9 @@ def _fetch_stale_translation_articles(
                     "(a.timestamp = ? AND a.id < ?)) "
                 )
                 params.extend((cursor_timestamp, cursor_timestamp, cursor_id))
-            params.append(limit)
+            horizon_cutoff = time.time() - STALE_TRANSLATION_SCAN_HORIZON_DAYS * 86400
+            repair_cutoff = time.time() - TRANSLATION_REPAIR_WINDOW_SECONDS
+            params.extend((horizon_cutoff, repair_cutoff, limit))
 
             with _news_db_conn() as conn:
                 ensure_article_source_columns(conn)
@@ -3622,13 +3708,18 @@ def _fetch_stale_translation_articles(
                     "SELECT a.id, a.title, "
                     "       COALESCE(NULLIF(a.feed_source, ''), a.source) AS source, "
                     "       a.origin_source, a.summary, a.body_html, a.timestamp, "
-                    "       a.has_full_content, a.telegraph_url, r.translation "
+                    "       a.has_full_content, a.telegraph_url, "
+                    "       a.original_body_html, r.translation, "
+                    "       r.translation_updated_at "
                     "FROM articles a "
                     "JOIN ai_results r ON r.article_id = a.id "
                     "WHERE a.has_full_content = 1 "
                     "  AND r.translation IS NOT NULL "
                     "  AND TRIM(r.translation) <> '' "
                     f"{where_cursor}"
+                    "  AND a.timestamp >= ? "
+                    "  AND (r.translation_updated_at IS NULL "
+                    "       OR r.translation_updated_at <= ?) "
                     "ORDER BY a.timestamp DESC, a.id DESC "
                     "LIMIT ?",
                     params,
@@ -3676,6 +3767,7 @@ def _fetch_untranslated_articles(config: dict, limit: int = AUTO_TRANSLATION_BAT
     try:
         _init_ai_results_table()
         today_str = _dt.datetime.now().strftime("%Y-%m-%d")
+        upgrade_cutoff = time.time() - RECENT_FULLTEXT_UPGRADE_DAYS * 86400
         with _news_db_conn() as conn:
             conn.row_factory = sqlite3.Row
             ensure_article_source_columns(conn)
@@ -3695,11 +3787,26 @@ def _fetch_untranslated_articles(config: dict, limit: int = AUTO_TRANSLATION_BAT
                 "ORDER BY a.timestamp DESC LIMIT ?",
                 (today_str, max(limit * 8, AUTO_TRANSLATION_SCAN_LIMIT)),
             ).fetchall()
+            # P2.9: also catch articles upgraded to full content after their
+            # ``date`` left the today window (backfill succeeded on day >= 2).
+            upgraded_rows = conn.execute(
+                "SELECT a.id, a.title, COALESCE(NULLIF(a.feed_source, ''), a.source) AS source, "
+                "       a.origin_source, a.summary, a.body_html, a.has_full_content, "
+                "       a.telegraph_url, r.translation "
+                "FROM articles a "
+                "LEFT JOIN ai_results r ON r.article_id = a.id "
+                "WHERE a.has_full_content = 1 "
+                "  AND (r.translation IS NULL OR TRIM(r.translation) = '') "
+                "  AND a.timestamp >= ? "
+                "ORDER BY a.timestamp DESC LIMIT ?",
+                (upgrade_cutoff, max(limit * 4, AUTO_TRANSLATION_SCAN_LIMIT // 2)),
+            ).fetchall()
     except Exception as e:
         print(f"[auto-translate] fetch failed: {e}")
         return []
 
     selected = []
+    seen_ids = set()
     for row in rows:
         article = dict(row)
         _, cached_html = _cached_full_translation(article.get("translation"))
@@ -3715,8 +3822,32 @@ def _fetch_untranslated_articles(config: dict, limit: int = AUTO_TRANSLATION_BAT
             article["translate_title_needed"] = title_needed
             article["translate_content_needed"] = content_needed
             selected.append(article)
+            seen_ids.add(article["id"])
         if len(selected) >= limit:
             break
+    # P2.9: backfill-upgraded articles that lost their "today" date.
+    if len(selected) < limit:
+        for row in upgraded_rows:
+            article = dict(row)
+            if article["id"] in seen_ids:
+                continue
+            _, cached_html = _cached_full_translation(article.get("translation"))
+            if cached_html:
+                continue
+            title_needed = translate_title and _needs_translation(article.get("title", ""))
+            content_needed = (
+                translate_content
+                and bool(article.get("body_html"))
+                and not _translation_pending_fulltext(article)
+                and _needs_translation(article.get("body_html") or article.get("summary") or "")
+            )
+            if title_needed or content_needed:
+                article["translate_title_needed"] = title_needed
+                article["translate_content_needed"] = content_needed
+                selected.append(article)
+                seen_ids.add(article["id"])
+                if len(selected) >= limit:
+                    break
     return selected
 
 
@@ -4569,6 +4700,12 @@ _ai_results_schema_lock = threading.RLock()
 _ai_results_schema_ready_paths: set[str] = set()
 
 
+def _add_ai_results_column_if_missing(conn, cols: set[str], name: str, col_type: str) -> None:
+    if name not in cols:
+        conn.execute(f"ALTER TABLE ai_results ADD COLUMN {name} {col_type}")
+        cols.add(name)
+
+
 def _init_ai_results_table() -> bool:
     """Create and latch the ai_results schema for the current news database."""
     import sqlite3
@@ -4584,6 +4721,7 @@ def _init_ai_results_table() -> bool:
             return True
         try:
             with _news_db_conn() as conn:
+                conn.execute("BEGIN IMMEDIATE")
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS ai_results (
                         article_id   INTEGER PRIMARY KEY,
@@ -4615,44 +4753,25 @@ def _init_ai_results_table() -> bool:
                     row[1]
                     for row in conn.execute("PRAGMA table_info(ai_results)").fetchall()
                 }
-                if "summary_error" not in cols:
-                    conn.execute("ALTER TABLE ai_results ADD COLUMN summary_error TEXT")
-                if "summary_error_at" not in cols:
-                    conn.execute("ALTER TABLE ai_results ADD COLUMN summary_error_at TEXT")
-                if "translation_updated_at" not in cols:
-                    conn.execute("ALTER TABLE ai_results ADD COLUMN translation_updated_at TEXT")
-                if "title_summary" not in cols:
-                    conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary TEXT")
-                if "title_summary_error" not in cols:
-                    conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_error TEXT")
-                if "title_summary_error_at" not in cols:
-                    conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_error_at TEXT")
-                if "title_translation_error" not in cols:
-                    conn.execute("ALTER TABLE ai_results ADD COLUMN title_translation_error TEXT")
-                if "title_translation_error_at" not in cols:
-                    conn.execute("ALTER TABLE ai_results ADD COLUMN title_translation_error_at TEXT")
-                if "title_summary_provider" not in cols:
-                    conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_provider TEXT")
-                if "title_summary_model" not in cols:
-                    conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_model TEXT")
-                if "title_summary_by_user_id" not in cols:
-                    conn.execute("ALTER TABLE ai_results ADD COLUMN title_summary_by_user_id INTEGER")
-                if "summary_provider" not in cols:
-                    conn.execute("ALTER TABLE ai_results ADD COLUMN summary_provider TEXT")
-                if "summary_model" not in cols:
-                    conn.execute("ALTER TABLE ai_results ADD COLUMN summary_model TEXT")
-                if "summary_by_user_id" not in cols:
-                    conn.execute("ALTER TABLE ai_results ADD COLUMN summary_by_user_id INTEGER")
-                if "summary_generated_at" not in cols:
-                    conn.execute("ALTER TABLE ai_results ADD COLUMN summary_generated_at TEXT")
-                if "translation_provider" not in cols:
-                    conn.execute("ALTER TABLE ai_results ADD COLUMN translation_provider TEXT")
-                if "translation_model" not in cols:
-                    conn.execute("ALTER TABLE ai_results ADD COLUMN translation_model TEXT")
-                if "translation_by_user_id" not in cols:
-                    conn.execute("ALTER TABLE ai_results ADD COLUMN translation_by_user_id INTEGER")
-                if "translation_generated_at" not in cols:
-                    conn.execute("ALTER TABLE ai_results ADD COLUMN translation_generated_at TEXT")
+                _add_ai_results_column_if_missing(conn, cols, "summary_error", "TEXT")
+                _add_ai_results_column_if_missing(conn, cols, "summary_error_at", "TEXT")
+                _add_ai_results_column_if_missing(conn, cols, "translation_updated_at", "TEXT")
+                _add_ai_results_column_if_missing(conn, cols, "title_summary", "TEXT")
+                _add_ai_results_column_if_missing(conn, cols, "title_summary_error", "TEXT")
+                _add_ai_results_column_if_missing(conn, cols, "title_summary_error_at", "TEXT")
+                _add_ai_results_column_if_missing(conn, cols, "title_translation_error", "TEXT")
+                _add_ai_results_column_if_missing(conn, cols, "title_translation_error_at", "TEXT")
+                _add_ai_results_column_if_missing(conn, cols, "title_summary_provider", "TEXT")
+                _add_ai_results_column_if_missing(conn, cols, "title_summary_model", "TEXT")
+                _add_ai_results_column_if_missing(conn, cols, "title_summary_by_user_id", "INTEGER")
+                _add_ai_results_column_if_missing(conn, cols, "summary_provider", "TEXT")
+                _add_ai_results_column_if_missing(conn, cols, "summary_model", "TEXT")
+                _add_ai_results_column_if_missing(conn, cols, "summary_by_user_id", "INTEGER")
+                _add_ai_results_column_if_missing(conn, cols, "summary_generated_at", "TEXT")
+                _add_ai_results_column_if_missing(conn, cols, "translation_provider", "TEXT")
+                _add_ai_results_column_if_missing(conn, cols, "translation_model", "TEXT")
+                _add_ai_results_column_if_missing(conn, cols, "translation_by_user_id", "INTEGER")
+                _add_ai_results_column_if_missing(conn, cols, "translation_generated_at", "TEXT")
                 if "updated_at" not in cols:
                     conn.execute("ALTER TABLE ai_results ADD COLUMN updated_at TEXT")
                     conn.execute("UPDATE ai_results SET updated_at = datetime('now') WHERE updated_at IS NULL")
@@ -4661,6 +4780,33 @@ def _init_ai_results_table() -> bool:
             # closed successfully. A failed initializer must remain retryable.
             _ai_results_schema_ready_paths.add(db_path)
             return True
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" in str(exc).lower():
+                # Another process added the column while we waited for the
+                # write lock. The schema is now current; latch so we skip
+                # the PRAGMA+ALTER on the next call.
+                with _news_db_conn() as conn:
+                    current = {
+                        row[1]
+                        for row in conn.execute("PRAGMA table_info(ai_results)").fetchall()
+                    }
+                expected = {
+                    "summary_error", "summary_error_at", "translation_updated_at",
+                    "title_summary", "title_summary_error", "title_summary_error_at",
+                    "title_translation_error", "title_translation_error_at",
+                    "title_summary_provider", "title_summary_model",
+                    "title_summary_by_user_id", "summary_provider", "summary_model",
+                    "summary_by_user_id", "summary_generated_at",
+                    "translation_provider", "translation_model",
+                    "translation_by_user_id", "translation_generated_at", "updated_at",
+                }
+                if expected.issubset(current):
+                    _ai_results_schema_ready_paths.add(db_path)
+                    return True
+                app.logger.warning("[ai-results] schema init raced but still incomplete: %s", exc)
+                return False
+            app.logger.exception("[ai-results] schema initialization failed: %s", exc)
+            return False
         except Exception as exc:
             app.logger.exception("[ai-results] schema initialization failed: %s", exc)
             return False
@@ -4826,6 +4972,10 @@ def _save_ai_result(article_id: int, summary: str | None = None,
             ON CONFLICT(article_id) DO UPDATE SET
                 summary = COALESCE(excluded.summary, summary),
                 translation = COALESCE(excluded.translation, translation),
+                translation_updated_at = CASE
+                    WHEN excluded.translation IS NOT NULL THEN datetime('now')
+                    ELSE translation_updated_at
+                END,
                 summary_error = CASE
                     WHEN excluded.summary IS NOT NULL THEN NULL
                     WHEN excluded.summary_error IS NOT NULL THEN excluded.summary_error
@@ -5341,7 +5491,7 @@ def _container_resource_stats() -> dict:
                     for line in fh:
                         if line.startswith("usage_usec"):
                             return int(line.split()[1])
-            except (OSError, ValueError):
+            except (OSError, ValueError, IndexError):
                 return None
             return None
         ns = _read_int_file("/sys/fs/cgroup/cpuacct/cpuacct.usage")
@@ -6056,6 +6206,7 @@ def _redetect_article_sources_work(limit: int, network_limit: int, force_telegra
             "UPDATE articles SET source = ?, feed_source = ?, origin_source = ? WHERE id = ?",
             (next_feed, next_feed, next_origin, row["id"]),
         )
+        conn.commit()
         changed.append({
             "id": row["id"],
             "title": row["title"],

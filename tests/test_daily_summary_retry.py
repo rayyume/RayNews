@@ -199,6 +199,52 @@ def test_same_daily_outage_sends_only_system_ai_alert(
     assert web_server._get_daily_summary_failure(TODAY)["given_up"] == 1
 
 
+def test_system_ai_claim_racing_daily_summary_claim_only_alerts_once(
+        isolated_app_db, news_db, clock, alerts, monkeypatch):
+    """A system-AI claim landing between the old read and the daily claim must
+    not let one outage fire both alerts.
+
+    The race: the daily-summary give-up path used to read
+    ``_system_ai_incident_is_notified()`` then, only on False, call
+    ``_claim_daily_summary_alert``. Those are separate transactions on two
+    DBs, so a concurrent system-AI claim between them sent both
+    ``system_ai_failed`` and ``daily_summary_failed`` to the same admins.
+
+    The fix makes the daily claim the atomic gate. This test injects the
+    system-AI claim at the moment the daily path touches its alert gate —
+    after the old read point but before/inside the claim — and confirms only
+    the system-AI alert fires (the daily claim is released as a duplicate).
+    """
+    models.set_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY, "0")
+
+    def failing(_date):
+        web_server._set_daily_summary_error("AI 生成失败")
+        return None
+
+    monkeypatch.setattr(web_server, "_generate_daily_summary_global", failing)
+
+    real_claim = web_server._claim_daily_summary_alert
+
+    def racing_daily_claim(date_str):
+        # The system-AI alert is claimed the moment the daily path touches its
+        # alert gate — the same window the old read-then-claim ordering left
+        # open between the read and the claim.
+        models.set_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY, "1")
+        models.set_app_state(
+            web_server.SYSTEM_AI_ALERT_LAST_NOTIFIED_STATE_KEY, str(clock["now"])
+        )
+        return real_claim(date_str)
+
+    monkeypatch.setattr(web_server, "_claim_daily_summary_alert", racing_daily_claim)
+
+    for _ in range(1 + web_server.DAILY_SUMMARY_MAX_RETRIES):
+        web_server._broadcast_daily_summary(force=False, bypass_window=True)
+
+    types = [alert["type"] for alert in alerts]
+    assert "daily_summary_failed" not in types
+    assert web_server._get_daily_summary_failure(TODAY)["given_up"] == 1
+
+
 def test_daily_alert_remains_when_system_incident_was_cooldown_suppressed(
         isolated_app_db, news_db, clock, alerts, monkeypatch):
     """A muted cooldown incident must not suppress the daily-summary signal."""

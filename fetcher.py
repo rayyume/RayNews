@@ -16,7 +16,7 @@ import html as html_mod
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from email.utils import parsedate_to_datetime
 from datetime import timezone as dt_timezone, timedelta
 from urllib.parse import urljoin
@@ -91,6 +91,7 @@ MAX_HISTORY_PAGES = 200
 # than waiting for the whole fetch cycle (all pages + all full-text fetches) to finish.
 STREAM_BATCH_SIZE = 5
 STREAM_BATCH_SECONDS = 2.0
+STREAM_EXECUTOR_SHUTDOWN_SECONDS = 3.0
 CST = dt_timezone(timedelta(hours=8))
 
 logging.basicConfig(
@@ -238,8 +239,21 @@ BACKFILL_MAX_AGE_DAYS = 3
 BACKFILL_LIMIT = 40
 
 
+def _snapshot_translation_updated_at(conn, article_id: int):
+    try:
+        row = conn.execute(
+            "SELECT translation_updated_at FROM ai_results WHERE article_id = ?",
+            (article_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return row[0] if row is not None else None
+
+
 def _invalidate_stale_translation(
-    conn: sqlite3.Connection, article_id: int
+    conn: sqlite3.Connection,
+    article_id: int,
+    before_translation_updated_at: str | None = None,
 ) -> bool:
     """Clear a cached excerpt translation after the original body is upgraded."""
     table_exists = conn.execute(
@@ -259,10 +273,19 @@ def _invalidate_stale_translation(
     assignments = ["translation = NULL"]
     if "translation_updated_at" in columns:
         assignments.append("translation_updated_at = NULL")
+    stale_guard = ""
+    params: list = [article_id]
+    if (
+        "translation_updated_at" in columns
+        and before_translation_updated_at is not None
+    ):
+        stale_guard = " AND (translation_updated_at IS NULL OR translation_updated_at <= ?)"
+        params.append(before_translation_updated_at)
     cursor = conn.execute(
         f"UPDATE ai_results SET {', '.join(assignments)} "
-        "WHERE article_id = ? AND translation IS NOT NULL",
-        (article_id,),
+        "WHERE article_id = ? AND translation IS NOT NULL"
+        f"{stale_guard}",
+        params,
     )
     return cursor.rowcount > 0
 
@@ -291,7 +314,7 @@ def backfill_missing_fulltext(conn: sqlite3.Connection) -> int:
             executor.submit(fetch_telegraph, row["telegraph_url"]): row for row in rows
         }
         for future in as_completed(futures):
-            row = futures[future]
+            row = futures.pop(future)
             try:
                 result = future.result()
             except Exception as e:
@@ -305,6 +328,9 @@ def backfill_missing_fulltext(conn: sqlite3.Connection) -> int:
             new_thumb = row["thumb"] or (result["images"][0] if result["images"] else "")
             origin = result.get("detected_source", "") or row["origin_source"]
             try:
+                prior_translation_updated_at = _snapshot_translation_updated_at(
+                    conn, row["id"]
+                )
                 conn.execute(
                     """UPDATE articles
                           SET has_full_content = 1,
@@ -322,7 +348,9 @@ def backfill_missing_fulltext(conn: sqlite3.Connection) -> int:
                         row["id"],
                     ),
                 )
-                _invalidate_stale_translation(conn, row["id"])
+                _invalidate_stale_translation(
+                    conn, row["id"], prior_translation_updated_at
+                )
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -370,16 +398,16 @@ def write_fetch_progress(
 def _commit_stream_batch(
     conn: sqlite3.Connection,
     batch: list[dict],
-    inserted_ids: list[int],
+    inserted_ids: dict[int, None],
     total_messages: int,
 ) -> int:
     """Commit one completed batch and immediately release its article payloads."""
     batch_size = len(batch)
     committed_ids = upsert_articles(conn, batch, sync_sources=False)
     batch.clear()
-    inserted_ids.extend(committed_ids)
+    inserted_ids.update(dict.fromkeys(committed_ids))
     del committed_ids
-    write_fetch_progress(len(set(inserted_ids)), total_messages, inserted_ids)
+    write_fetch_progress(len(inserted_ids), total_messages, list(inserted_ids))
     return batch_size
 
 
@@ -395,13 +423,23 @@ def _rollback_best_effort(conn: sqlite3.Connection) -> None:
 
 
 def _shutdown_stream_executor(executor, futures: dict) -> None:
-    """Cancel pending work, wait out running work, then release Future results."""
+    """Cancel pending work, bound the wait for running work, then release results."""
     try:
         for owned_future in tuple(futures):
             if not owned_future.done():
                 owned_future.cancel()
         if executor is not None:
-            executor.shutdown(wait=True, cancel_futures=True)
+            pending = tuple(futures)
+            if pending:
+                _done, not_done = wait(
+                    pending, timeout=STREAM_EXECUTOR_SHUTDOWN_SECONDS
+                )
+                if not_done:
+                    log.warning(
+                        f"{len(not_done)} stream worker(s) still running after "
+                        f"{STREAM_EXECUTOR_SHUTDOWN_SECONDS}s shutdown cap"
+                    )
+            executor.shutdown(wait=False, cancel_futures=True)
     finally:
         futures.clear()
 
@@ -1338,7 +1376,7 @@ def run():
     executor = None
     futures: dict = {}
     inserted_total = 0
-    inserted_ids: list[int] = []
+    inserted_ids: dict[int, None] = {}
     last_commit_at = time.monotonic()
     fulltext_started_at = time.monotonic()
     try:
@@ -1349,6 +1387,9 @@ def run():
             executor.submit(process_message, msg, msg["id"]): int(msg["id"])
             for msg in messages
         }
+        # Provider work is owned by the futures; reduce to id-only so the raw
+        # html/text/images blobs are released before the full-text/backfill window.
+        messages = [m["id"] for m in messages]
         for future in as_completed(futures):
             msg_id = futures.pop(future)
             try:
@@ -1443,8 +1484,9 @@ def run():
     else:
         # highest_observed_id already covers every id seen this cycle (kept or
         # discarded as pre-today); max() with the kept messages is defensive in case
-        # a future change ever decouples the two.
-        max_id = max(highest_observed_id, max(m["id"] for m in messages))
+        # a future change ever decouples the two. messages is id-only here (reduced
+        # after the futures were submitted).
+        max_id = max(highest_observed_id, max(messages))
         state["last_seen_id"] = max(state.get("last_seen_id", 0), max_id)
         save_state(state)
         log.info(f"Updated state: last_seen_id = {state['last_seen_id']}")

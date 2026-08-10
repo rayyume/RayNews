@@ -341,7 +341,6 @@ def ensure_article_sources(conn: sqlite3.Connection) -> int:
                 "WHERE feed_source = ? OR (TRIM(feed_source) = '' AND source = ?) OR source = ?",
                 (target, target, alias, alias, alias),
             )
-            conn.commit()
 
         rows = conn.execute(
             "SELECT DISTINCT COALESCE(NULLIF(feed_source, ''), source) AS source "

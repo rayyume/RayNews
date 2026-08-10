@@ -465,6 +465,38 @@ def test_clean_persisted_success_recovers_after_restart_at_window_expiry(
     assert [item["type"] for item in alerts] == ["system_ai_recovered"] * 2
 
 
+def test_durable_closed_incident_clears_stale_in_memory_alerted(
+    isolated_app_state_db, alerts, monkeypatch
+):
+    """Another process closed the incident to '0' first; this process must not
+    keep a stale alerted=True that mutes the next real outage.
+
+    The durable close (prior_state == '0') returns False (no recovery notice)
+    but still resets the in-memory flag so a subsequent failure can alert again.
+    """
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
+    _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
+    alerts.clear()
+
+    # Another process closed the incident durably; this process still holds a
+    # stale alerted=True and a stale last_failure timestamp.
+    web_server.set_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY, "0")
+    web_server.set_app_state(web_server.SYSTEM_AI_LAST_FAILURE_STATE_KEY, "1000")
+    web_server.set_app_state(web_server.SYSTEM_AI_LAST_SUCCESS_STATE_KEY, "1001")
+    with web_server._system_ai_health_lock:
+        web_server._system_ai_health["alerted"] = True
+
+    clock["now"] += web_server.SYSTEM_AI_RECOVERY_STABILITY_SECONDS + 1
+    assert web_server._maybe_recover_stale_system_ai_incident() is False
+    assert alerts == []
+    assert web_server._system_ai_health["alerted"] is False
+
+    # A subsequent failure can alert again because the stale flag was cleared.
+    _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
+    assert [item["type"] for item in alerts] == ["system_ai_failed"] * 2
+
+
 def test_real_success_after_clean_restart_arms_stable_recovery(
     isolated_app_state_db, alerts, monkeypatch, restart_system_ai_health_process
 ):
@@ -946,34 +978,27 @@ def test_the_threshold_alerts_every_admin_once(alerts):
     assert len(alerts) == 2
 
 
-def test_undelivered_system_ai_alert_is_retried(alerts, monkeypatch):
+def test_undelivered_system_ai_alert_is_retried(isolated_app_state_db, alerts, monkeypatch):
     deliveries = []
-    persisted = {web_server.SYSTEM_AI_ALERTED_STATE_KEY: "0"}
-
-    def claim(key, last_notified_key, cooldown_seconds, now=None):
-        if persisted.get(key) == "1":
-            return "active"
-        persisted[key] = "1"
-        return "notify"
 
     def deliver(*args, **kwargs):
         deliveries.append((args, kwargs))
         return 0 if len(deliveries) == 1 else 1
 
-    monkeypatch.setattr(web_server, "set_app_state",
-                        lambda key, value: persisted.update({key: str(value)}))
-    monkeypatch.setattr(web_server, "claim_app_state_incident", claim)
     monkeypatch.setattr(web_server, "_notify_admins", deliver)
 
     _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
 
     assert len(deliveries) == 1
-    assert persisted[web_server.SYSTEM_AI_ALERTED_STATE_KEY] == "0"
+    assert web_server.get_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY) == "0"
+    assert web_server.get_app_state(
+        web_server.SYSTEM_AI_ALERT_LAST_NOTIFIED_STATE_KEY
+    ) == "0"
 
     _fail(1)
 
     assert len(deliveries) == 2
-    assert persisted[web_server.SYSTEM_AI_ALERTED_STATE_KEY] == "1"
+    assert web_server.get_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY) == "1"
 
 
 def test_the_alert_names_every_affected_job(alerts):

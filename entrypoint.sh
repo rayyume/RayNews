@@ -9,6 +9,7 @@ log() {
 # or being expanded into an unbounded shell variable.
 capture_setup_output() {
   python3 -c '
+import codecs
 import sys
 
 max_lines = 20
@@ -29,11 +30,20 @@ def append(fragment):
         line_truncated = True
 
 
+def _safe_utf8(raw, final=False):
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    return decoder.decode(raw, final=final).encode("utf-8")
+
+
 def finish_line():
     global line, line_truncated, line_count, lines_omitted
     line_count += 1
     if line_count <= max_lines:
-        output.write(line)
+        encoded = _safe_utf8(bytes(line), final=False)
+        if len(encoded) > max_line_bytes:
+            encoded = _safe_utf8(encoded[:max_line_bytes], final=False)
+            line_truncated = True
+        output.write(encoded)
         if line_truncated:
             output.write(b"... [line truncated]")
         output.write(b"\n")

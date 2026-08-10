@@ -2,6 +2,7 @@
 """Tiny HTTP server: runs fetcher.py on GET /refresh, periodic auto-refresh, and serves SQLite-backed API."""
 import http.server
 import ipaddress
+import atexit
 import subprocess
 import json
 import sys
@@ -76,6 +77,11 @@ REFRESH_JOB_HISTORY = OrderedDict()
 # heuristic. Safe as a bare global: REFRESH_JOB_LOCK already ensures only one fetch job
 # runs (and thus one subprocess is spawned) at a time.
 CURRENT_FETCH_JOB_ID = ""
+# Thread-safe handle to the currently running fetcher subprocess so an atexit
+# handler / SIGTERM reaper can terminate it when the daemon refresh-job thread
+# is abandoned on shutdown (otherwise start_new_session=True orphans the child).
+_LIVE_FETCHER_LOCK = threading.Lock()
+_LIVE_FETCHER_PROCESS = None
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [refresh] %(message)s")
 log = logging.getLogger("refresh")
@@ -482,6 +488,27 @@ def _close_fetcher_pipes(process) -> None:
             pipe.close()
 
 
+def _terminate_live_fetcher_process() -> None:
+    """Terminate the in-flight fetcher subprocess if one is still running.
+
+    Used by the atexit handler and the SIGTERM reaper so a server shutdown does
+    not orphan the fetcher child + log pipes when the daemon refresh-job thread
+    is abandoned mid-run.
+    """
+    global _LIVE_FETCHER_PROCESS
+    with _LIVE_FETCHER_LOCK:
+        process = _LIVE_FETCHER_PROCESS
+        _LIVE_FETCHER_PROCESS = None
+    if process is None:
+        return
+    if process.poll() is not None:
+        return
+    _terminate_fetcher_group_before_reap(process)
+
+
+atexit.register(_terminate_live_fetcher_process)
+
+
 def _join_fetcher_readers(readers) -> None:
     """Bound cleanup even if a pipe reader fails to observe EOF promptly."""
     for reader in readers:
@@ -490,6 +517,7 @@ def _join_fetcher_readers(readers) -> None:
 
 def _run_fetcher_process(env, timeout):
     """Stream a fetcher child process while retaining only a bounded output tail."""
+    global _LIVE_FETCHER_PROCESS
     process = None
     readers = []
     started_readers = []
@@ -502,6 +530,8 @@ def _run_fetcher_process(env, timeout):
             env=env,
             start_new_session=True,
         )
+        with _LIVE_FETCHER_LOCK:
+            _LIVE_FETCHER_PROCESS = process
         stdout_tail = _BoundedLineTail(
             FETCHER_TAIL_MAX_LINES,
             FETCHER_TAIL_MAX_BYTES,
@@ -549,6 +579,8 @@ def _run_fetcher_process(env, timeout):
             reaped = True
         raise
     finally:
+        with _LIVE_FETCHER_LOCK:
+            _LIVE_FETCHER_PROCESS = None
         if process is not None:
             _join_fetcher_readers(started_readers)
             _close_fetcher_pipes(process)
@@ -1496,8 +1528,14 @@ class RayNewsThreadingHTTPServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
 
 
+def _handle_refresh_server_sigterm(signum, frame):
+    _terminate_live_fetcher_process()
+    raise SystemExit(128 + signum)
+
+
 if __name__ == "__main__":
     port = 8081
+    signal.signal(signal.SIGTERM, _handle_refresh_server_sigterm)
     diag = _diagnostics(None)
     log.info(
         "Startup diagnostics: data_dir=%s db_exists=%s db_size=%s telegram_configured=%s",

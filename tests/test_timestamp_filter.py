@@ -8,7 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from timestamp_filter import format_timestamped_line, main
+from timestamp_filter import (
+    _MAX_LINE_CHARS,
+    _strip_existing_prefix,
+    _truncate_line,
+    format_timestamped_line,
+    main,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -89,3 +95,79 @@ def test_dockerfile_installs_timezone_data_and_copies_filter():
     assert "tzdata" in dockerfile
     assert "ENV TZ=Asia/Shanghai" in dockerfile
     assert "timestamp_filter.py" in dockerfile
+
+
+class _ReconfigurableStream(io.StringIO):
+    def __init__(self, text: str) -> None:
+        super().__init__(text)
+        self.reconfigure_kwargs: dict | None = None
+
+    def reconfigure(self, **kwargs):
+        self.reconfigure_kwargs = kwargs
+
+
+def test_main_reconfigures_stdin_to_replace_errors():
+    stream = _ReconfigurableStream("hello\n")
+    assert main(["web"], stdin=stream, stdout=io.StringIO()) == 0
+    assert stream.reconfigure_kwargs == {"errors": "replace"}
+
+
+def test_main_tolerates_replacement_char_from_bad_bytes():
+    out = io.StringIO()
+    assert main(["web"], stdin=io.StringIO("bad byte \ufffd here\n"), stdout=out) == 0
+    assert "\ufffd" in out.getvalue()
+
+
+def test_truncate_line_caps_long_lines_and_keeps_newline():
+    body = "x" * (_MAX_LINE_CHARS + 10)
+    out = _truncate_line(body + "\n")
+
+    assert out.endswith(" ... [line truncated]\n")
+    assert out[:_MAX_LINE_CHARS] == "x" * _MAX_LINE_CHARS
+    assert len(out) == _MAX_LINE_CHARS + len(" ... [line truncated]") + 1
+
+
+def test_truncate_line_leaves_budget_sized_line_untouched():
+    body = "y" * _MAX_LINE_CHARS
+    assert _truncate_line(body + "\n") == body + "\n"
+    assert _truncate_line(body) == body
+
+
+@pytest.mark.parametrize(
+    "line,expected",
+    [
+        ("2026-08-10 12:34:56,789 [refresh] hello\n", "hello\n"),
+        ("2026-08-10T12:34:56+08:00 [refresh] hello\n", "hello\n"),
+        ("2026-08-10 12:34:56,789 hello\n", "hello\n"),
+        ("2026-08-10T12:34:56+08:00 hello\n", "hello\n"),
+        ("2026-08-10T12:34:56Z [web] boom\n", "boom\n"),
+        ("plain line\n", "plain line\n"),
+        ("no newline 2026-08-10T12:34:56+08:00", "no newline 2026-08-10T12:34:56+08:00"),
+    ],
+)
+def test_strip_existing_prefix(line, expected):
+    assert _strip_existing_prefix(line) == expected
+
+
+def test_main_applies_single_prefix_to_self_decorated_lines():
+    out = io.StringIO()
+    main(
+        ["refresh"],
+        stdin=io.StringIO(
+            "2026-08-10 12:34:56,789 [refresh] doing thing\n"
+            "2026-08-10T12:34:56+08:00 bare\n"
+            "plain\n"
+        ),
+        stdout=out,
+    )
+    lines = out.getvalue().splitlines()
+    assert len(lines) == 3
+    for line in lines:
+        assert line.startswith("20") and re.match(
+            r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d \[refresh\] ", line
+        )
+        # No doubled timestamp or tag survives.
+        assert not re.search(r"\] 20\d\d-\d\d-\d\d", line)
+    assert lines[0].endswith("[refresh] doing thing")
+    assert lines[1].endswith("[refresh] bare")
+    assert lines[2].endswith("[refresh] plain")

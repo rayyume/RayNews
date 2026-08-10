@@ -266,6 +266,75 @@ def test_translation_invalidation_surfaces_malformed_ai_results_schema(tmp_path)
         conn.close()
 
 
+def test_backfill_preserves_concurrent_web_translation_save(tmp_path, monkeypatch):
+    """A web-side translation saved with a newer translation_updated_at between the
+    backfill snapshot and the invalidation must NOT be clobbered."""
+    _patch_paths(monkeypatch, tmp_path)
+    conn = fetcher.init_db()
+    _insert(
+        conn,
+        id=71,
+        timestamp=int(time.time()),
+        telegraph_url="https://telegra.ph/concurrent-translation",
+        has_full_content=0,
+        body_html="excerpt",
+    )
+    conn.execute(
+        "CREATE TABLE ai_results ("
+        "article_id INTEGER PRIMARY KEY, translation TEXT, translation_updated_at TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO ai_results VALUES (?, ?, ?)",
+        (71, "<p>stale excerpt translation</p>", "2026-08-01 12:00:00"),
+    )
+    conn.commit()
+    monkeypatch.setattr(fetcher, "fetch_telegraph", _fulltext_result)
+
+    concurrent = sqlite3.connect(fetcher.DB_FILE, timeout=5)
+
+    class ConcurrentSaveConnection(_CommitObserver):
+        def __init__(self, connection, observer):
+            super().__init__(connection, observer)
+            self._web_saved = False
+
+        def execute(self, sql, *args):
+            if "UPDATE articles" in sql and not self._web_saved:
+                self._web_saved = True
+                concurrent.execute(
+                    "UPDATE ai_results SET translation = ?, translation_updated_at = ? "
+                    "WHERE article_id = ?",
+                    (
+                        "<p>user translation saved mid-backfill</p>",
+                        "2026-08-10 09:00:00",
+                        71,
+                    ),
+                )
+                concurrent.commit()
+            return self._connection.execute(sql, *args)
+
+    observed = ConcurrentSaveConnection(conn, lambda: None)
+
+    try:
+        assert fetcher.backfill_missing_fulltext(observed) == 1
+        article = conn.execute(
+            "SELECT has_full_content, body_html FROM articles WHERE id = 71"
+        ).fetchone()
+        cached = conn.execute(
+            "SELECT translation, translation_updated_at FROM ai_results WHERE article_id = 71"
+        ).fetchone()
+        assert tuple(article) == (
+            1,
+            "<article>full body for https://telegra.ph/concurrent-translation</article>",
+        )
+        assert tuple(cached) == (
+            "<p>user translation saved mid-backfill</p>",
+            "2026-08-10 09:00:00",
+        )
+    finally:
+        concurrent.close()
+        conn.close()
+
+
 def test_backfill_rolls_back_article_upgrade_when_translation_invalidation_fails(
     tmp_path, monkeypatch
 ):

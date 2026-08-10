@@ -35,7 +35,7 @@ def _read_key_values(path: Path) -> dict[str, int]:
     result: dict[str, int] = {}
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return result
 
     for line in lines:

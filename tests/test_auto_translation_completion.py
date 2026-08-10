@@ -42,6 +42,7 @@ def news_db(tmp_path, monkeypatch):
     db_path = tmp_path / "news.db"
     _create_news_db(db_path)
     monkeypatch.setattr(web_server, "NEWS_DB", str(db_path))
+    monkeypatch.setattr(web_server, "STALE_TRANSLATION_SCAN_HORIZON_DAYS", 36500)
     return db_path
 
 

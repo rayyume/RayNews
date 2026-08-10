@@ -113,6 +113,19 @@ def test_read_cgroup_memory_uses_v1_total_kernel_components_before_local_ones(
     assert memory["slab_bytes"] == 256
 
 
+def test_read_cgroup_memory_tolerates_non_utf8_stat_file(tmp_path):
+    _write(tmp_path / "memory.current", "104857600\n")
+    _write(tmp_path / "memory.max", "max\n")
+    (tmp_path / "memory.stat").write_bytes(b"anon \xff\xfe garbage\n")
+
+    memory = runtime_memory.read_cgroup_memory(tmp_path)
+
+    assert memory["version"] == "v2"
+    assert memory["current_bytes"] == 104857600
+    assert memory["max_bytes"] is None
+    assert memory["anon_bytes"] is None
+
+
 def test_read_cgroup_memory_prefers_aggregate_kernel_counters(tmp_path):
     v2_root = tmp_path / "v2"
     _write(v2_root / "memory.current", "100\n")

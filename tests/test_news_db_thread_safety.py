@@ -67,8 +67,8 @@ def _make_source_maintenance_db(tmp_path):
     return db, writer
 
 
-def test_ensure_article_sources_publishes_each_alias_before_starting_the_next(tmp_path):
-    """One large alias transaction must not hide all maintenance until the end."""
+def test_ensure_article_sources_publishes_alias_normalization_atomically(tmp_path):
+    """The alias normalization phase is one transaction: no partial namespace."""
     db, writer = _make_source_maintenance_db(tmp_path)
     writer.executemany(
         "INSERT INTO articles (id, source, feed_source) VALUES (?, ?, ?)",
@@ -98,18 +98,20 @@ def test_ensure_article_sources_publishes_each_alias_before_starting_the_next(tm
         reader.close()
         writer.close()
 
-    # init_source_categories completes first, then each alias UPDATE is durable on
-    # its own. The DISTINCT discovery insert is published only after both aliases.
-    assert snapshots == [(0, 0), (1, 0), (2, 0), (2, 2)]
+    # init_source_categories commits first (nothing discovered yet), then the alias
+    # UPDATEs and the DISTINCT discovery inserts publish together in one commit.
+    assert snapshots == [(0, 0), (2, 2)]
 
 
-def test_ensure_article_sources_rolls_back_a_failed_alias_transaction(tmp_path):
+def test_ensure_article_sources_rolls_back_all_aliases_on_mid_loop_failure(tmp_path):
     db, writer = _make_source_maintenance_db(tmp_path)
-    writer.execute(
-        "INSERT INTO articles (id, source, feed_source) VALUES (1, 'broken', 'broken')"
+    writer.executemany(
+        "INSERT INTO articles (id, source, feed_source) VALUES (?, ?, ?)",
+        [(1, "alias-a", "alias-a"), (2, "broken", "broken")],
     )
-    writer.execute(
-        "INSERT INTO source_aliases (alias_source, target_source) VALUES ('broken', 'target')"
+    writer.executemany(
+        "INSERT INTO source_aliases (alias_source, target_source) VALUES (?, ?)",
+        [("alias-a", "target-a"), ("broken", "target")],
     )
     writer.execute(
         """CREATE TRIGGER reject_broken_alias
@@ -126,6 +128,12 @@ def test_ensure_article_sources_rolls_back_a_failed_alias_transaction(tmp_path):
         assert not writer.in_transaction
         reader.execute("BEGIN IMMEDIATE")
         reader.rollback()
+        # The alias phase is atomic: the alias that normalized before the failure
+        # is rolled back too, so the namespace is not observed half-normalized.
+        rolled_back = reader.execute(
+            "SELECT COUNT(*) FROM articles WHERE source = 'target-a'"
+        ).fetchone()[0]
+        assert rolled_back == 0
     finally:
         reader.close()
         writer.close()
