@@ -4,7 +4,7 @@
 
 # RayNews 📡 🤖
 
-RayNews is a self-hosted news aggregator that uses a public Telegram channel as its content entry point. It incrementally fetches channel messages, extracts full articles from Telegraph, WeChat, and other pages, and provides AI summaries, translation, daily digests, source management, favorites, and persistent image caching.
+RayNews is a self-hosted news aggregator that uses a public Telegram channel as its content entry point. It incrementally fetches channel messages, extracts full articles from Telegraph ~~,WeChat no longer support~~, and other pages, and provides AI summaries, translation, daily digests, source management, favorites, and persistent image caching.
 
 The responsive PWA supports system, light, and dark themes.
 
