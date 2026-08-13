@@ -464,6 +464,189 @@ vm.runInContext({json.dumps(source)}, context);
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def select_filter_source():
+    return source_between("function applyFilterSelectionState(", "function filteredNews()")
+
+
+def select_filter_runtime_setup():
+    return """
+context.filter = 'cat:Old';
+context.currentPage = 1;
+context.pageNavigationSequence = 0;
+context.programmaticScrollUntil = 0;
+context.CATEGORY_ORDER = [];
+context.sourceFilterGroups = {};
+context.localStorage = { setItem: () => {} };
+context.document = {
+  documentElement: { scrollTop: 0 },
+  getElementById: () => ({
+    querySelectorAll: () => [],
+    querySelector: () => null,
+  }),
+};
+context.window = {
+  scrollY: 480,
+  scrollTo: (_x, y) => { context.window.scrollY = y; context.scrollPositions.push(y); },
+  matchMedia: () => ({ matches: false }),
+};
+context.scrollPositions = [];
+context.cancelViewBoundRefreshWork = () => {};
+context.rememberCurrentListHistory = () => { context.rememberCalls++; };
+context.rememberCalls = 0;
+context.renderTopCatBar = () => {};
+context.renderFilters = () => { context.renderFilterCalls++; };
+context.renderFilterCalls = 0;
+context.loadNewsPage = async () => { context.legacyLoadCalls++; return true; };
+context.legacyLoadCalls = 0;
+context.consumePendingNewArticles = value => context.consumed.push(value);
+context.consumed = [];
+context.syncListUrl = options => context.synced.push(options);
+context.synced = [];
+context.closeSidebar = () => { context.closeCalls++; };
+context.closeCalls = 0;
+context.setPageNavigationPending = value => context.pendingStates.push(value);
+context.pendingStates = [];
+context.stabilizePageTop = () => { context.stabilizeCalls++; };
+context.stabilizeCalls = 0;
+context.scheduleAdjacentPagePrefetch = (...args) => context.prefetchCalls.push(args);
+context.prefetchCalls = [];
+context.applyPageDuringScroll = (data, page, activeFilter) => {
+  context.applied.push([data.marker, page, activeFilter]);
+  return { marker: 'transition-list' };
+};
+context.applied = [];
+context.releasePageTransitionLock = list => context.released.push(list && list.marker);
+context.released = [];
+"""
+
+
+def test_top_category_bar_enables_scroll_navigation_mode():
+    top_bar = source_between("function renderTopCatBar()", "function toggleCategoryExpansion")
+    assert "selectFilter(btn.dataset.f, { scrollToTop: true });" in top_bar
+
+
+def test_active_top_category_on_first_page_only_scrolls_without_loading():
+    run_node(
+        select_filter_source(),
+        select_filter_runtime_setup()
+        + """
+context.scrollCalls = 0;
+context.scrollPageToTop = async () => { context.scrollCalls++; context.window.scrollY = 0; return true; };
+context.prepareCalls = 0;
+context.preparePageNavigation = async () => { context.prepareCalls++; return { marker: 'unexpected' }; };
+
+await context.selectFilter('cat:Old', { scrollToTop: true });
+
+assert.equal(context.scrollCalls, 1);
+assert.equal(context.prepareCalls, 0);
+assert.equal(context.legacyLoadCalls, 0);
+assert.deepEqual(context.applied, []);
+assert.equal(context.filter, 'cat:Old');
+assert.equal(context.currentPage, 1);
+assert.equal(context.stabilizeCalls, 1);
+assert.deepEqual(context.synced, [{ replace: true }]);
+""",
+    )
+
+
+def test_top_category_change_prepares_and_scrolls_in_parallel_then_applies_near_top():
+    run_node(
+        select_filter_source(),
+        select_filter_runtime_setup()
+        + """
+let resolveData;
+context.prepareStarted = false;
+context.preparePageNavigation = (page, activeFilter) => {
+  context.prepareStarted = true;
+  assert.equal(page, 1);
+  assert.equal(activeFilter, 'cat:New');
+  return new Promise(resolve => { resolveData = resolve; });
+};
+context.scrollStarted = false;
+context.scrollPageToTop = async ({ onNearTop }) => {
+  context.scrollStarted = true;
+  assert.equal(context.prepareStarted, true);
+  onNearTop();
+  return true;
+};
+
+const switching = context.selectFilter('cat:New', { scrollToTop: true });
+await Promise.resolve();
+assert.equal(context.scrollStarted, true);
+assert.equal(context.filter, 'cat:Old');
+assert.deepEqual(context.applied, []);
+resolveData({ marker: 'new', total: 45 });
+await switching;
+
+assert.equal(context.filter, 'cat:New');
+assert.equal(context.currentPage, 1);
+assert.deepEqual(context.applied, [['new', 1, 'cat:New']]);
+assert.deepEqual(context.consumed, ['cat:New']);
+assert.deepEqual(context.synced, [{ push: true }]);
+assert.deepEqual(context.prefetchCalls, [[1, 'cat:New', 45]]);
+assert.equal(context.stabilizeCalls, 1);
+assert.deepEqual(context.pendingStates, [true, false]);
+assert.deepEqual(context.released, ['transition-list']);
+""",
+    )
+
+
+def test_failed_top_category_change_keeps_list_state_and_restores_scroll_offset():
+    run_node(
+        select_filter_source(),
+        select_filter_runtime_setup()
+        + """
+context.currentPage = 3;
+context.preparePageNavigation = async () => null;
+context.scrollPageToTop = async ({ onNearTop }) => {
+  context.window.scrollY = 0;
+  context.scrollPositions.push(0);
+  onNearTop();
+  return true;
+};
+
+await context.selectFilter('cat:New', { scrollToTop: true });
+
+assert.equal(context.filter, 'cat:Old');
+assert.equal(context.currentPage, 3);
+assert.deepEqual(context.applied, []);
+assert.equal(context.scrollPositions.at(-1), 480);
+assert.deepEqual(context.consumed, []);
+assert.deepEqual(context.synced, []);
+assert.deepEqual(context.prefetchCalls, []);
+assert.deepEqual(context.pendingStates, [true, false]);
+""",
+    )
+
+
+def test_later_top_category_click_invalidates_an_older_inflight_transition():
+    run_node(
+        select_filter_source(),
+        select_filter_runtime_setup()
+        + """
+const resolvers = {};
+context.preparePageNavigation = (_page, activeFilter) => new Promise(resolve => {
+  resolvers[activeFilter] = resolve;
+});
+context.scrollPageToTop = async ({ onNearTop }) => { onNearTop(); return true; };
+
+const older = context.selectFilter('cat:Older', { scrollToTop: true });
+await Promise.resolve();
+const newer = context.selectFilter('cat:Newer', { scrollToTop: true });
+await Promise.resolve();
+resolvers['cat:Newer']({ marker: 'newer', total: 1 });
+await newer;
+resolvers['cat:Older']({ marker: 'older', total: 1 });
+await older;
+
+assert.equal(context.filter, 'cat:Newer');
+assert.deepEqual(context.applied, [['newer', 1, 'cat:Newer']]);
+assert.deepEqual(context.consumed, ['cat:Newer']);
+assert.deepEqual(context.synced, [{ push: true }]);
+""",
+    )
+
+
 def test_changed_notification_retry_requires_explicit_new_broadcast_id():
     source = source_between("let notifPubBroadcastId", "function renderNotifPreview")
     run_node(
