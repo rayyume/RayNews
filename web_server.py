@@ -73,6 +73,7 @@ from runtime_memory import runtime_memory_snapshot
 from source_categories import (
     CATEGORY_NAMES, CATEGORY_ORDER, cleanup_stale_source_categories,
     clamp_weighted, ensure_article_source_columns, ensure_article_sources,
+    delete_source_metadata,
     find_merge_target, maintain_source_categories, merge_source,
     promote_user_source_settings,
     recent_titles_for_source, source_aliases_for_target, source_rows,
@@ -5402,7 +5403,16 @@ def delete_source_articles():
         f"SELECT id FROM articles WHERE COALESCE(NULLIF(feed_source, ''), source) IN ({placeholders})",
         sources,
     ).fetchall()
-    result = _delete_article_ids([int(row["id"]) for row in rows], deleted_by=g.user_id)
+    result = _delete_article_ids(
+        [int(row["id"]) for row in rows],
+        deleted_by=g.user_id,
+        cleanup_sources=False,
+    )
+    try:
+        result["deleted_sources"] = delete_source_metadata(conn, sources)
+    except sqlite3.DatabaseError as exc:
+        print(f"[sources] Failed to delete source metadata: {exc}")
+        return jsonify({"error": "failed to delete source metadata"}), 500
     return jsonify({"ok": True, "sources": sources, **result})
 
 
