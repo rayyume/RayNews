@@ -2,7 +2,7 @@
 
 ## Goal
 
-Make the administrator delete action in source management remove the selected source label group itself as well as every article in that group. If a genuinely new article for one of those source names arrives later, RayNews must rediscover it as a new source with no retained label, category, or merge configuration.
+Make the administrator delete action in source management remove the selected source label group itself as well as every article in that group. If a genuinely new article for one of those source names arrives later, RayNews must rediscover it as a new source with no retained customized label, category, or merge configuration.
 
 ## Scope and deletion unit
 
@@ -28,7 +28,9 @@ The backend response continues to report the article count and also reports the 
 
 ## Rediscovery behavior
 
-No blocklist or source-level tombstone is introduced. When a later article with a new article ID arrives, the normal fetcher upsert stores it. The existing source discovery pass then creates a fresh `pending` source record, exactly as it does for a source seen for the first time. Old label text, category choices, user overrides, and merge relationships must not be restored.
+No blocklist or source-level tombstone is introduced. When a later article with a new article ID arrives, the normal fetcher upsert stores it. The existing source discovery pass then creates a fresh `pending` source record, exactly as it does for a source seen for the first time. Old customized label text, category choices, user overrides, and merge relationships must not be restored.
+
+`INITIAL_CATEGORY_MAP` remains the first-seen default for its known sources. However, initialization must only seed a known source when the articles table currently contains that effective source. This prevents a deleted known source from reappearing merely because a process restarted. When a later new article arrives, that article makes the source eligible for its original first-seen preset label and category; unknown sources continue to start as `Info` / `pending` through ordinary discovery.
 
 ## User interface
 
@@ -46,6 +48,7 @@ Backend endpoint tests will prove that deleting a grouped source:
 - preserves deletion tombstones for the removed article IDs;
 - removes shared and user-specific category records;
 - removes alias relationships connected as either alias or target; and
-- allows a later new article to recreate the source through normal discovery with `pending` status and without the old label/category.
+- does not reseed a known source while it has no articles; and
+- allows a later new article to recreate the source through normal discovery with `pending` status, using first-seen presets where applicable and never restoring the deleted customized settings.
 
 A frontend contract test will prove that the delete copy describes deletion of both the source and its articles and that the complete source group is still submitted.
