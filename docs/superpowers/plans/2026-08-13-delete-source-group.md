@@ -4,7 +4,7 @@
 
 **Goal:** Make the administrator source-delete action remove the complete visible source-label group, its articles, and all retained source metadata while allowing later new articles to rediscover the source from first-seen defaults.
 
-**Architecture:** Keep `DELETE /sources/articles` as the client contract. Add a focused source-metadata purge helper in `source_categories.py`, invoke it after tombstoned article deletion with automatic stale cleanup disabled, and make known-source seeding conditional on a matching article. The frontend continues to submit every source variant in the visible label group and updates its copy to describe source-plus-article deletion.
+**Architecture:** Keep `DELETE /sources/articles` as the client contract. Add a focused source-metadata purge helper in `source_categories.py`, compose it with article/tombstone/AI-result deletion inside one news-database transaction, and make known-source seeding conditional on a matching article. The frontend continues to submit every source variant in the visible label group and updates its copy to describe source-plus-article deletion.
 
 **Tech Stack:** Python 3, Flask, SQLite, vanilla JavaScript, pytest.
 
@@ -328,19 +328,27 @@ Expected: FAIL because the endpoint preserves manual/classified source metadata 
 
 - [ ] **Step 3: Update the endpoint to purge metadata explicitly**
 
-Import `delete_source_metadata` from `source_categories`. Change the endpoint tail to disable broad stale cleanup and purge only the resolved group:
+Import `delete_source_metadata` from `source_categories`. Delete the articles, tombstones, AI results, and resolved-group metadata in one caller-owned news-database transaction. `delete_source_metadata()` must preserve an existing transaction boundary. Run favorites and image-cache cleanup only after the news transaction commits:
 
 ```python
-result = _delete_article_ids(
-    [int(row["id"]) for row in rows],
-    deleted_by=g.user_id,
-    cleanup_sources=False,
-)
 try:
+    _ensure_news_schema(conn)
+    conn.execute("BEGIN")
+    rows = conn.execute(
+        f"SELECT id FROM articles WHERE COALESCE(NULLIF(feed_source, ''), source) IN ({placeholders})",
+        sources,
+    ).fetchall()
+    result, deleted_ids = _delete_source_article_ids_in_transaction(
+        conn, [int(row["id"]) for row in rows], deleted_by=g.user_id,
+    )
     result["deleted_sources"] = delete_source_metadata(conn, sources)
+    conn.commit()
 except sqlite3.DatabaseError as exc:
+    if conn.in_transaction:
+        conn.rollback()
     print(f"[sources] Failed to delete source metadata: {exc}")
     return jsonify({"error": "failed to delete source metadata"}), 500
+_cleanup_deleted_article_side_effects(deleted_ids, maintain_image_cache=True)
 return jsonify({"ok": True, "sources": sources, **result})
 ```
 

@@ -38,7 +38,7 @@ The delete button tooltip, confirmation prompt, and success message will say tha
 
 ## Error handling and consistency
 
-Input validation and administrator authorization remain unchanged. Article deletion must succeed before source metadata is purged. If article deletion fails, metadata must remain so the administrator can retry without leaving hidden articles. Metadata tables are cleaned in one news-database transaction after article deletion. The endpoint returns an error instead of reporting success if metadata deletion fails.
+Input validation and administrator authorization remain unchanged. The endpoint starts one news-database transaction that deletes the selected articles, their `deleted_articles` tombstones and `ai_results`, then purges the resolved group’s shared/user categories and shared/user aliases. A failure at any news-database step rolls back the entire transaction, so no article, tombstone, AI result, or source metadata change persists; the endpoint returns HTTP 500 rather than a partial success. Favorites in the application database and image-cache unpinning run only after the news transaction commits. They are deliberately post-commit side effects because they are outside the news database transaction.
 
 ## Testing
 
@@ -47,7 +47,8 @@ Backend endpoint tests will prove that deleting a grouped source:
 - removes articles from the primary source, submitted variants, and resolved aliases;
 - preserves deletion tombstones for the removed article IDs;
 - removes shared and user-specific category records;
-- removes alias relationships connected as either alias or target; and
+- removes alias relationships connected as either alias or target;
+- rolls back article, tombstone, AI-result, and source-metadata writes while preserving favorites and cache pins when a metadata write fails; and
 - does not reseed a known source while it has no articles; and
 - allows a later new article to recreate the source through normal discovery with `pending` status, using first-seen presets where applicable and never restoring the deleted customized settings.
 

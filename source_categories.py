@@ -489,12 +489,17 @@ def cleanup_stale_source_categories(conn: sqlite3.Connection) -> int:
 
 
 def delete_source_metadata(conn: sqlite3.Connection, sources: list[str]) -> int:
-    """Delete category and alias metadata connected to a source-label group."""
+    """Delete category and alias metadata connected to a source-label group.
+
+    When the caller already owns a transaction, its commit/rollback boundary is
+    preserved so article deletion can be atomic with this metadata purge.
+    """
     normalized = list(dict.fromkeys(
         str(source).strip() for source in sources if str(source).strip()
     ))
     if not normalized:
         return 0
+    owns_transaction = not conn.in_transaction
     _ensure_source_tables(conn)
     placeholders = ",".join("?" * len(normalized))
     deleted = 0
@@ -517,10 +522,12 @@ def delete_source_metadata(conn: sqlite3.Connection, sources: list[str]) -> int:
             f"DELETE FROM user_source_categories WHERE source IN ({placeholders})",
             normalized,
         ).rowcount
-        conn.commit()
+        if owns_transaction:
+            conn.commit()
         return deleted
     except Exception:
-        conn.rollback()
+        if owns_transaction:
+            conn.rollback()
         raise
 
 

@@ -34,6 +34,7 @@ def source_deletion_env(tmp_path, monkeypatch):
     news_conn = sqlite3.connect(news_path)
     news_conn.execute("PRAGMA journal_mode=WAL")
     news_conn.execute(ARTICLES_DDL)
+    news_conn.execute("CREATE TABLE ai_results (article_id INTEGER PRIMARY KEY, summary TEXT)")
     source_categories.init_source_categories(news_conn)
     news_conn.executemany(
         "INSERT INTO articles (id, title, source, feed_source) VALUES (?, ?, ?, ?)",
@@ -43,6 +44,10 @@ def source_deletion_env(tmp_path, monkeypatch):
             (3, "Legacy article", "Legacy", "Legacy"),
             (4, "Unrelated article", "Unrelated", "Unrelated"),
         ],
+    )
+    news_conn.executemany(
+        "INSERT INTO ai_results (article_id, summary) VALUES (?, ?)",
+        [(article_id, f"summary {article_id}") for article_id in range(1, 5)],
     )
     news_conn.executemany(
         "INSERT INTO source_categories (source, category, label, status) "
@@ -70,6 +75,7 @@ def source_deletion_env(tmp_path, monkeypatch):
         "INSERT INTO users (email, password, nickname, role) VALUES (?, ?, ?, ?)",
         ("admin@example.com", "unused-test-hash", "admin", "admin"),
     )
+    app_conn.execute("INSERT INTO favorites (user_id, article_id) VALUES (1, 1)")
     app_conn.commit()
 
     monkeypatch.setattr(web_server, "NEWS_DB", str(news_path))
@@ -157,26 +163,46 @@ def test_delete_source_group_removes_zero_article_source_metadata(source_deletio
 
 
 def test_delete_source_group_reports_metadata_failure(source_deletion_env, monkeypatch):
-    """A metadata write error is surfaced instead of reporting a partial success."""
+    """A metadata failure rolls back news writes and defers external side effects."""
     client = source_deletion_env["client"]
     admin_headers = source_deletion_env["admin_headers"]
     news_conn = source_deletion_env["news_conn"]
-    news_conn.execute(
-        "INSERT INTO source_categories (source, category, label, status) "
-        "VALUES ('Failure Feed', 'Info', 'Failure Feed', 'manual')"
-    )
-    news_conn.commit()
+    unpinned = []
 
     def fail_metadata_delete(_conn, _sources):
         raise sqlite3.OperationalError("locked")
 
     monkeypatch.setattr(web_server, "delete_source_metadata", fail_metadata_delete)
+    monkeypatch.setattr(web_server, "unpin_article_images", lambda ids: unpinned.append(ids))
 
     response = client.delete(
         "/sources/articles",
         headers=admin_headers,
-        json={"sources": ["Failure Feed"]},
+        json={"sources": ["Primary", "Variant"]},
     )
 
     assert response.status_code == 500
     assert response.get_json() == {"error": "failed to delete source metadata"}
+    assert {row[0] for row in news_conn.execute("SELECT id FROM articles")} == {1, 2, 3, 4}
+    assert news_conn.execute("SELECT 1 FROM deleted_articles").fetchone() is None
+    assert {row[0] for row in news_conn.execute("SELECT article_id FROM ai_results")} == {1, 2, 3, 4}
+    assert {row[0] for row in news_conn.execute("SELECT source FROM source_categories")} == {
+        "Primary", "Variant", "Unrelated",
+    }
+    assert {row[0] for row in news_conn.execute("SELECT source FROM user_source_categories")} == {
+        "Primary", "Variant", "Unrelated",
+    }
+    assert {
+        tuple(row) for row in news_conn.execute(
+            "SELECT alias_source, target_source FROM source_aliases"
+        )
+    } == {("Legacy", "Primary"), ("Variant", "External")}
+    assert {
+        tuple(row) for row in news_conn.execute(
+            "SELECT alias_source, target_source FROM user_source_aliases"
+        )
+    } == {("Legacy", "Primary"), ("Variant", "External")}
+    assert models.get_db().execute(
+        "SELECT 1 FROM favorites WHERE user_id = 1 AND article_id = 1"
+    ).fetchone() is not None
+    assert unpinned == []
