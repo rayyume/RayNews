@@ -1,0 +1,51 @@
+# Delete Source Group Design
+
+## Goal
+
+Make the administrator delete action in source management remove the selected source label group itself as well as every article in that group. If a genuinely new article for one of those source names arrives later, RayNews must rediscover it as a new source with no retained label, category, or merge configuration.
+
+## Scope and deletion unit
+
+The deletion unit is the source label row visible to the administrator. A row may contain one source name or several source variants that have been grouped under the same label. Deleting the row removes the complete group submitted by the frontend, not only its primary source.
+
+The operation removes:
+
+- all articles whose effective feed source belongs to the submitted group, including aliases resolved by the backend;
+- shared source category and label records for every source in the group;
+- user-specific category overrides for those sources;
+- shared and user-specific alias relationships whose alias or target belongs to the group; and
+- existing article-dependent data already handled by article deletion, including AI results, favorites, and image-cache pins.
+
+Article deletion tombstones remain. They prevent the same historical Telegram message IDs from returning after a refresh and do not prevent later articles with new IDs from being stored.
+
+## Architecture and data flow
+
+The existing `DELETE /sources/articles` endpoint remains the public interface so existing clients do not need a route migration. The frontend continues to send the row's complete `sources` array. The backend expands those names through known aliases, selects and deletes their articles, and then explicitly purges all source metadata connected to the resolved group.
+
+Metadata deletion must be explicit rather than delegated to `cleanup_stale_source_categories()`. That cleanup intentionally preserves `manual` and `classified` sources, which is the current reason an empty label remains in the source drawer.
+
+The backend response continues to report the article count and also reports the number of source-metadata rows removed. After success, the frontend reloads source metadata and news using the existing dependent-view refresh path. Because the source rows no longer exist, the label disappears from both the management list and the home drawer.
+
+## Rediscovery behavior
+
+No blocklist or source-level tombstone is introduced. When a later article with a new article ID arrives, the normal fetcher upsert stores it. The existing source discovery pass then creates a fresh `pending` source record, exactly as it does for a source seen for the first time. Old label text, category choices, user overrides, and merge relationships must not be restored.
+
+## User interface
+
+The delete button tooltip, confirmation prompt, and success message will say that both the source and its articles are deleted. The existing large-deletion confirmation behavior remains: groups with at least 20 articles require typing the displayed source label.
+
+## Error handling and consistency
+
+Input validation and administrator authorization remain unchanged. Article deletion must succeed before source metadata is purged. If article deletion fails, metadata must remain so the administrator can retry without leaving hidden articles. Metadata tables are cleaned in one news-database transaction after article deletion. The endpoint returns an error instead of reporting success if metadata deletion fails.
+
+## Testing
+
+Backend endpoint tests will prove that deleting a grouped source:
+
+- removes articles from the primary source, submitted variants, and resolved aliases;
+- preserves deletion tombstones for the removed article IDs;
+- removes shared and user-specific category records;
+- removes alias relationships connected as either alias or target; and
+- allows a later new article to recreate the source through normal discovery with `pending` status and without the old label/category.
+
+A frontend contract test will prove that the delete copy describes deletion of both the source and its articles and that the complete source group is still submitted.
