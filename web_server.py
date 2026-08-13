@@ -73,7 +73,7 @@ from runtime_memory import runtime_memory_snapshot
 from source_categories import (
     CATEGORY_NAMES, CATEGORY_ORDER, cleanup_stale_source_categories,
     clamp_weighted, ensure_article_source_columns, ensure_article_sources,
-    delete_source_metadata,
+    delete_source_metadata, init_source_categories,
     find_merge_target, maintain_source_categories, merge_source,
     promote_user_source_settings,
     recent_titles_for_source, source_aliases_for_target, source_rows,
@@ -5331,9 +5331,10 @@ def _delete_source_article_ids_in_transaction(
     cur = conn.execute(f"DELETE FROM articles WHERE id IN ({existing_placeholders})", existing_ids)
     try:
         conn.execute(f"DELETE FROM ai_results WHERE article_id IN ({existing_placeholders})", existing_ids)
-    except sqlite3.OperationalError as exc:
-        if "no such table" not in str(exc).lower():
-            raise
+    except sqlite3.OperationalError:
+        # Preserve the public deletion helper's legacy best-effort cleanup of
+        # optional AI rows. Article/tombstone deletion remains authoritative.
+        pass
     return {"deleted": cur.rowcount, "deleted_sources": 0}, existing_ids
 
 
@@ -5362,23 +5363,28 @@ def _delete_article_ids(article_ids: list[int], deleted_by: int | None = None,
     if not conn:
         raise FileNotFoundError("news db not found")
     _ensure_news_schema(conn)
-    result, existing_ids = _delete_source_article_ids_in_transaction(
-        conn, ids, deleted_by=deleted_by,
-    )
-    if not existing_ids:
-        # Honour cleanup_sources here too. A batch whose articles were all already
-        # gone would otherwise still trigger the full-table stale-source scan that
-        # the batched purge passes cleanup_sources=False precisely to avoid.
-        return {
-            "deleted": 0,
-            "deleted_sources": cleanup_stale_source_categories(conn) if cleanup_sources else 0,
-        }
-    conn.commit()
-    result["deleted_sources"] = cleanup_stale_source_categories(conn) if cleanup_sources else 0
-    _cleanup_deleted_article_side_effects(
-        existing_ids, maintain_image_cache=maintain_image_cache,
-    )
-    return result
+    try:
+        result, existing_ids = _delete_source_article_ids_in_transaction(
+            conn, ids, deleted_by=deleted_by,
+        )
+        if not existing_ids:
+            # Honour cleanup_sources here too. A batch whose articles were all already
+            # gone would otherwise still trigger the full-table stale-source scan that
+            # the batched purge passes cleanup_sources=False precisely to avoid.
+            return {
+                "deleted": 0,
+                "deleted_sources": cleanup_stale_source_categories(conn) if cleanup_sources else 0,
+            }
+        conn.commit()
+        result["deleted_sources"] = cleanup_stale_source_categories(conn) if cleanup_sources else 0
+        _cleanup_deleted_article_side_effects(
+            existing_ids, maintain_image_cache=maintain_image_cache,
+        )
+        return result
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
 
 
 @app.route("/articles", methods=["DELETE"])
@@ -5424,6 +5430,13 @@ def delete_source_articles():
     base_sources = base_sources[:100]
     if not base_sources:
         return jsonify({"error": "source required"}), 400
+    try:
+        # Source-table bootstrap may commit migrations/seeding, so it must finish
+        # before the group deletion transaction begins.
+        init_source_categories(conn)
+    except Exception as exc:
+        print(f"[sources] Failed to initialize source metadata: {exc}")
+        return jsonify({"error": "failed to delete source metadata"}), 500
     sources = []
     for source in base_sources:
         sources.append(source)

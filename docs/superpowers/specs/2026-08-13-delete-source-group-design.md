@@ -38,7 +38,7 @@ The delete button tooltip, confirmation prompt, and success message will say tha
 
 ## Error handling and consistency
 
-Input validation and administrator authorization remain unchanged. The endpoint starts one news-database transaction that deletes the selected articles, their `deleted_articles` tombstones and `ai_results`, then purges the resolved group’s shared/user categories and shared/user aliases. A failure at any news-database step rolls back the entire transaction, so no article, tombstone, AI result, or source metadata change persists; the endpoint returns HTTP 500 rather than a partial success. Favorites in the application database and image-cache unpinning run only after the news transaction commits. They are deliberately post-commit side effects because they are outside the news database transaction.
+Input validation and administrator authorization remain unchanged. Source-table bootstrap/migration finishes before deletion begins, because it may commit schema work. The endpoint then starts one news-database transaction that deletes the selected articles, their `deleted_articles` tombstones and `ai_results`, then purges the resolved group’s shared/user categories and shared/user aliases. A failure at any news-database step rolls back the entire transaction, so no article, tombstone, AI result, or source metadata change persists; the endpoint returns HTTP 500 rather than a partial success. Favorites in the application database and image-cache unpinning run only after the news transaction commits. They are deliberately post-commit side effects because they are outside the news database transaction.
 
 ## Testing
 

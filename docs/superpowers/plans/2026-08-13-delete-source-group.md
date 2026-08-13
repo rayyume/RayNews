@@ -331,6 +331,8 @@ Expected: FAIL because the endpoint preserves manual/classified source metadata 
 Import `delete_source_metadata` from `source_categories`. Delete the articles, tombstones, AI results, and resolved-group metadata in one caller-owned news-database transaction. `delete_source_metadata()` must preserve an existing transaction boundary. Run favorites and image-cache cleanup only after the news transaction commits:
 
 ```python
+# Bootstrap may commit migrations/seeding, so it must happen before BEGIN.
+init_source_categories(conn)
 try:
     _ensure_news_schema(conn)
     conn.execute("BEGIN")

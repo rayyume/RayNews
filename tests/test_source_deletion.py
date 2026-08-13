@@ -206,3 +206,100 @@ def test_delete_source_group_reports_metadata_failure(source_deletion_env, monke
         "SELECT 1 FROM favorites WHERE user_id = 1 AND article_id = 1"
     ).fetchone() is not None
     assert unpinned == []
+
+
+def test_delete_source_group_rolls_back_fresh_schema_metadata_failure(
+    source_deletion_env, monkeypatch,
+):
+    """Fresh source-table bootstrap cannot commit deletion before metadata fails."""
+    client = source_deletion_env["client"]
+    admin_headers = source_deletion_env["admin_headers"]
+    news_conn = source_deletion_env["news_conn"]
+    unpinned = []
+    for table in (
+        "user_source_aliases",
+        "user_source_categories",
+        "source_aliases",
+        "source_categories",
+    ):
+        news_conn.execute(f"DROP TABLE {table}")
+    # The pre-transaction alias lookup needs its minimal read table.
+    news_conn.execute(
+        "CREATE TABLE source_aliases (alias_source TEXT PRIMARY KEY, target_source TEXT NOT NULL)"
+    )
+    news_conn.commit()
+    metadata_delete = web_server.delete_source_metadata
+
+    def bootstrap_metadata_then_fail(conn, sources):
+        metadata_delete(conn, sources)
+        raise sqlite3.OperationalError("forced source metadata failure")
+
+    monkeypatch.setattr(web_server, "delete_source_metadata", bootstrap_metadata_then_fail)
+    monkeypatch.setattr(web_server, "unpin_article_images", lambda ids: unpinned.append(ids))
+
+    response = client.delete(
+        "/sources/articles",
+        headers=admin_headers,
+        json={"sources": ["Primary"]},
+    )
+
+    assert response.status_code == 500
+    assert {row[0] for row in news_conn.execute("SELECT id FROM articles")} == {1, 2, 3, 4}
+    assert news_conn.execute("SELECT 1 FROM deleted_articles").fetchone() is None
+    assert {row[0] for row in news_conn.execute("SELECT article_id FROM ai_results")} == {1, 2, 3, 4}
+    assert models.get_db().execute(
+        "SELECT 1 FROM favorites WHERE user_id = 1 AND article_id = 1"
+    ).fetchone() is not None
+    assert unpinned == []
+
+
+class _AiResultsFailureConnection:
+    """Delegates to SQLite while reproducing a non-missing ai_results DB error."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, sql, *args, **kwargs):
+        if sql.startswith("DELETE FROM ai_results"):
+            raise sqlite3.OperationalError("locked")
+        return self._conn.execute(sql, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+def test_delete_article_ids_ignores_ai_results_operational_error_and_commits(
+    source_deletion_env, monkeypatch,
+):
+    """The public deletion helper preserves legacy ai_results error tolerance."""
+    news_conn = source_deletion_env["news_conn"]
+    failing_conn = _AiResultsFailureConnection(web_server._get_news_db())
+    monkeypatch.setattr(web_server, "_get_news_db", lambda: failing_conn)
+
+    result = web_server._delete_article_ids(
+        [1], maintain_image_cache=False, cleanup_sources=False,
+    )
+
+    assert result == {"deleted": 1, "deleted_sources": 0}
+    assert news_conn.execute("SELECT 1 FROM articles WHERE id = 1").fetchone() is None
+    assert not failing_conn.in_transaction
+
+
+def test_delete_article_ids_rolls_back_unexpected_news_database_error(
+    source_deletion_env,
+):
+    """A propagated news-database write error cannot leave the cached connection open."""
+    news_conn = source_deletion_env["news_conn"]
+    news_conn.execute(
+        """CREATE TRIGGER reject_deleted_article
+           BEFORE INSERT ON deleted_articles
+           BEGIN SELECT RAISE(ABORT, 'forced tombstone failure'); END"""
+    )
+    news_conn.commit()
+    conn = web_server._get_news_db()
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced tombstone failure"):
+        web_server._delete_article_ids([1], maintain_image_cache=False, cleanup_sources=False)
+
+    assert not conn.in_transaction
+    assert news_conn.execute("SELECT 1 FROM articles WHERE id = 1").fetchone() is not None
