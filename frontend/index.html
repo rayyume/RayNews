@@ -2141,7 +2141,7 @@ function renderTopCatBar() {
     el.onclick = e => {
       const btn = e.target.closest('.topcat-btn');
       if (!btn) return;
-      selectFilter(btn.dataset.f);
+      selectFilter(btn.dataset.f, { scrollToTop: true });
     };
   }
   const isNarrow = window.matchMedia && window.matchMedia('(max-width: 640px)').matches;
@@ -7116,12 +7116,8 @@ function renderFilters() {
   };
 }
 
-async function selectFilter(value) {
-  cancelViewBoundRefreshWork();
+function applyFilterSelectionState(value) {
   const el = document.getElementById('filters');
-  rememberCurrentListHistory();
-  const previousFilter = filter;
-  const previousPage = currentPage;
   // Clear ALL selection classes from ALL elements
   el.querySelectorAll('.fbtn').forEach(b => b.classList.remove('active'));
   el.querySelectorAll('.cat-header').forEach(h => h.classList.remove('active'));
@@ -7162,6 +7158,114 @@ async function selectFilter(value) {
     const btn = [...el.querySelectorAll('.fbtn')].find(b => b.dataset.f === value);
     if (btn) btn.classList.add('active');
   }
+}
+
+async function selectFilterFromTopBar(value) {
+  rememberCurrentListHistory();
+  const previousFilter = filter;
+  const previousPage = currentPage;
+  const previousScrollY = window.scrollY || document.documentElement.scrollTop || 0;
+
+  // Re-activating the current first-page category is a viewport action only.
+  // Preserve the current view identity so an in-flight manual refresh can keep
+  // applying to this unchanged list. Only invalidate an older page navigation
+  // when one is actually pending, otherwise its late result could still win.
+  if (value === previousFilter && previousPage === 1) {
+    const navigationSeq = pageNavigationPending
+      ? ++pageNavigationSequence
+      : pageNavigationSequence;
+    if (pageNavigationPending) setPageNavigationPending(false);
+    programmaticScrollUntil = Date.now() + 1200;
+    const completed = await scrollPageToTop({
+      applicationGuard: () => (
+        navigationSeq === pageNavigationSequence
+        && filter === previousFilter
+        && currentPage === previousPage
+      ),
+    });
+    if (
+      !completed
+      || navigationSeq !== pageNavigationSequence
+      || filter !== previousFilter
+      || currentPage !== previousPage
+    ) return;
+    stabilizePageTop();
+    syncListUrl({ replace: true });
+    return;
+  }
+
+  const navigationSeq = ++pageNavigationSequence;
+  let transitionList = null;
+  let targetData = null;
+  let nearTopReached = false;
+  let pageApplied = false;
+  const ownsUnappliedNavigation = () => (
+    navigationSeq === pageNavigationSequence
+    && filter === previousFilter
+    && currentPage === previousPage
+  );
+  const applyTargetWhenReady = () => {
+    if (pageApplied || !targetData || !nearTopReached || !ownsUnappliedNavigation()) return;
+    applyFilterSelectionState(value);
+    transitionList = applyPageDuringScroll(targetData, 1, value);
+    pageApplied = true;
+  };
+
+  setPageNavigationPending(true);
+  programmaticScrollUntil = Date.now() + 1200;
+  try {
+    // Start data preparation before the scroll, but do not await it: both work
+    // concurrently and the old list stays visible until the viewport is near top.
+    const dataPromise = Promise.resolve(preparePageNavigation(1, value)).then(data => {
+      targetData = data;
+      applyTargetWhenReady();
+      return data;
+    });
+    const scrollPromise = scrollPageToTop({
+      onNearTop: () => {
+        nearTopReached = true;
+        applyTargetWhenReady();
+      },
+      applicationGuard: () => navigationSeq === pageNavigationSequence,
+    });
+    const [data, completed] = await Promise.all([dataPromise, scrollPromise]);
+    if (navigationSeq !== pageNavigationSequence) return;
+    if (completed && !nearTopReached) {
+      nearTopReached = true;
+      applyTargetWhenReady();
+    }
+    if (!data || !pageApplied) {
+      if (ownsUnappliedNavigation()) window.scrollTo(0, previousScrollY);
+      return;
+    }
+
+    stabilizePageTop();
+    consumePendingNewArticles(value);
+    syncListUrl({ push: true });
+    scheduleAdjacentPagePrefetch(1, value, Number(data.total || 0));
+    if (window.matchMedia && window.matchMedia('(max-width: 768px)').matches) closeSidebar();
+  } catch (error) {
+    if (ownsUnappliedNavigation()) window.scrollTo(0, previousScrollY);
+    console.error('Top category navigation failed', error);
+  } finally {
+    if (navigationSeq === pageNavigationSequence) setPageNavigationPending(false);
+    releasePageTransitionLock(transitionList);
+  }
+}
+
+async function selectFilter(value) {
+  const options = arguments[1] || {};
+  const scrollOnly = options.scrollToTop && value === filter && currentPage === 1;
+  if (!scrollOnly) cancelViewBoundRefreshWork();
+  if (options.scrollToTop) return selectFilterFromTopBar(value);
+
+  // A sidebar selection supersedes any in-flight top-bar/page navigation.
+  ++pageNavigationSequence;
+  setPageNavigationPending(false);
+  rememberCurrentListHistory();
+  const previousFilter = filter;
+  const previousPage = currentPage;
+  applyFilterSelectionState(value);
   const loaded = await loadNewsPage(1, {
     activeFilter: value,
     useCache: true,
