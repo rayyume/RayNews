@@ -73,6 +73,7 @@ from runtime_memory import runtime_memory_snapshot
 from source_categories import (
     CATEGORY_NAMES, CATEGORY_ORDER, cleanup_stale_source_categories,
     clamp_weighted, ensure_article_source_columns, ensure_article_sources,
+    delete_source_metadata, init_source_categories,
     find_merge_target, maintain_source_categories, merge_source,
     promote_user_source_settings,
     recent_titles_for_source, source_aliases_for_target, source_rows,
@@ -5294,29 +5295,57 @@ def list_source_articles():
     })
 
 
-def _delete_article_ids(article_ids: list[int], deleted_by: int | None = None,
-                        *, maintain_image_cache: bool = True,
-                        cleanup_sources: bool = True) -> dict:
+def _resolve_shared_source_alias_closure(
+    conn: sqlite3.Connection,
+    base_sources: list[str],
+) -> list[str]:
+    """Resolve every shared alias that transitively targets the source group."""
+    normalized = list(dict.fromkeys(
+        str(source).strip() for source in base_sources if str(source).strip()
+    ))
+    if not normalized:
+        return []
+    seed_values = ", ".join("(?)" for _source in normalized)
+    rows = conn.execute(
+        f"""
+        WITH RECURSIVE source_group(source) AS (
+            VALUES {seed_values}
+            UNION
+            SELECT aliases.alias_source
+            FROM source_aliases AS aliases
+            JOIN source_group AS resolved
+              ON aliases.target_source = resolved.source
+        )
+        SELECT source FROM source_group
+        """,
+        normalized,
+    ).fetchall()
+    resolved = [
+        row["source"] if isinstance(row, sqlite3.Row) else row[0]
+        for row in rows
+    ]
+    return list(dict.fromkeys((*normalized, *resolved)))
+
+
+def _delete_source_article_ids_in_transaction(
+    conn: sqlite3.Connection,
+    article_ids: list[int],
+    *,
+    deleted_by: int | None = None,
+    strict_ai_results: bool = False,
+) -> tuple[dict, list[int]]:
+    """Delete article rows inside a caller-owned news database transaction."""
     ids = sorted({int(article_id) for article_id in article_ids if int(article_id) > 0})
     if not ids:
-        return {"deleted": 0, "deleted_sources": 0}
-    conn = _get_news_db()
-    if not conn:
-        raise FileNotFoundError("news db not found")
-    _ensure_news_schema(conn)
+        return {"deleted": 0, "deleted_sources": 0}, []
     placeholders = ",".join("?" * len(ids))
     existing = conn.execute(
-        f"SELECT id, title, COALESCE(NULLIF(feed_source, ''), source) AS source FROM articles WHERE id IN ({placeholders})",
+        f"SELECT id, title, COALESCE(NULLIF(feed_source, ''), source) AS source "
+        f"FROM articles WHERE id IN ({placeholders})",
         ids,
     ).fetchall()
     if not existing:
-        # Honour cleanup_sources here too. A batch whose articles were all already
-        # gone would otherwise still trigger the full-table stale-source scan that
-        # the batched purge passes cleanup_sources=False precisely to avoid.
-        return {
-            "deleted": 0,
-            "deleted_sources": cleanup_stale_source_categories(conn) if cleanup_sources else 0,
-        }
+        return {"deleted": 0, "deleted_sources": 0}, []
     for row in existing:
         conn.execute(
             """
@@ -5333,20 +5362,75 @@ def _delete_article_ids(article_ids: list[int], deleted_by: int | None = None,
     existing_ids = [int(row["id"]) for row in existing]
     existing_placeholders = ",".join("?" * len(existing_ids))
     cur = conn.execute(f"DELETE FROM articles WHERE id IN ({existing_placeholders})", existing_ids)
-    try:
-        conn.execute(f"DELETE FROM ai_results WHERE article_id IN ({existing_placeholders})", existing_ids)
-    except sqlite3.OperationalError:
-        pass
-    conn.commit()
-    deleted_sources = cleanup_stale_source_categories(conn) if cleanup_sources else 0
+    if strict_ai_results:
+        ai_results_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ai_results'"
+        ).fetchone()
+        if ai_results_exists:
+            conn.execute(
+                f"DELETE FROM ai_results WHERE article_id IN ({existing_placeholders})",
+                existing_ids,
+            )
+    else:
+        try:
+            conn.execute(
+                f"DELETE FROM ai_results WHERE article_id IN ({existing_placeholders})",
+                existing_ids,
+            )
+        except sqlite3.OperationalError:
+            # Preserve the public deletion helper's legacy best-effort cleanup of
+            # optional AI rows. Article/tombstone deletion remains authoritative.
+            pass
+    return {"deleted": cur.rowcount, "deleted_sources": 0}, existing_ids
 
-    # Favorites live in raynews.db; remove global references to deleted articles.
+
+def _cleanup_deleted_article_side_effects(
+    article_ids: list[int], *, maintain_image_cache: bool,
+) -> None:
+    """Run cross-database/cache cleanup only after news deletion commits."""
+    if not article_ids:
+        return
+    placeholders = ",".join("?" * len(article_ids))
     app_db = get_db()
-    app_db.execute(f"DELETE FROM favorites WHERE article_id IN ({existing_placeholders})", existing_ids)
+    app_db.execute(f"DELETE FROM favorites WHERE article_id IN ({placeholders})", article_ids)
     app_db.commit()
     if maintain_image_cache:
-        threading.Thread(target=unpin_article_images, args=(existing_ids,), daemon=True).start()
-    return {"deleted": cur.rowcount, "deleted_sources": deleted_sources}
+        threading.Thread(target=unpin_article_images, args=(article_ids,), daemon=True).start()
+
+
+def _delete_article_ids(article_ids: list[int], deleted_by: int | None = None,
+                        *, maintain_image_cache: bool = True,
+                        cleanup_sources: bool = True) -> dict:
+    """Delete articles with the existing public commit and cleanup behavior."""
+    ids = sorted({int(article_id) for article_id in article_ids if int(article_id) > 0})
+    if not ids:
+        return {"deleted": 0, "deleted_sources": 0}
+    conn = _get_news_db()
+    if not conn:
+        raise FileNotFoundError("news db not found")
+    _ensure_news_schema(conn)
+    try:
+        result, existing_ids = _delete_source_article_ids_in_transaction(
+            conn, ids, deleted_by=deleted_by,
+        )
+        if not existing_ids:
+            # Honour cleanup_sources here too. A batch whose articles were all already
+            # gone would otherwise still trigger the full-table stale-source scan that
+            # the batched purge passes cleanup_sources=False precisely to avoid.
+            return {
+                "deleted": 0,
+                "deleted_sources": cleanup_stale_source_categories(conn) if cleanup_sources else 0,
+            }
+        conn.commit()
+        result["deleted_sources"] = cleanup_stale_source_categories(conn) if cleanup_sources else 0
+        _cleanup_deleted_article_side_effects(
+            existing_ids, maintain_image_cache=maintain_image_cache,
+        )
+        return result
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
 
 
 @app.route("/articles", methods=["DELETE"])
@@ -5392,17 +5476,36 @@ def delete_source_articles():
     base_sources = base_sources[:100]
     if not base_sources:
         return jsonify({"error": "source required"}), 400
-    sources = []
-    for source in base_sources:
-        sources.append(source)
-        sources.extend(source_aliases_for_target(conn, source))
-    sources = list(dict.fromkeys(sources))
-    placeholders = ",".join("?" * len(sources))
-    rows = conn.execute(
-        f"SELECT id FROM articles WHERE COALESCE(NULLIF(feed_source, ''), source) IN ({placeholders})",
-        sources,
-    ).fetchall()
-    result = _delete_article_ids([int(row["id"]) for row in rows], deleted_by=g.user_id)
+    try:
+        # Source/news schema bootstrap may commit migrations or seeding, so both
+        # must finish before the group deletion transaction begins.
+        init_source_categories(conn)
+        _ensure_news_schema(conn)
+    except Exception as exc:
+        print(f"[sources] Failed to initialize source metadata: {exc}")
+        return jsonify({"error": "failed to delete source metadata"}), 500
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        sources = _resolve_shared_source_alias_closure(conn, base_sources)
+        placeholders = ",".join("?" * len(sources))
+        rows = conn.execute(
+            f"SELECT id FROM articles WHERE COALESCE(NULLIF(feed_source, ''), source) IN ({placeholders})",
+            sources,
+        ).fetchall()
+        result, deleted_ids = _delete_source_article_ids_in_transaction(
+            conn,
+            [int(row["id"]) for row in rows],
+            deleted_by=g.user_id,
+            strict_ai_results=True,
+        )
+        result["deleted_sources"] = delete_source_metadata(conn, sources)
+        conn.commit()
+    except Exception as exc:
+        if conn.in_transaction:
+            conn.rollback()
+        print(f"[sources] Failed to delete source metadata: {exc}")
+        return jsonify({"error": "failed to delete source metadata"}), 500
+    _cleanup_deleted_article_side_effects(deleted_ids, maintain_image_cache=True)
     return jsonify({"ok": True, "sources": sources, **result})
 
 

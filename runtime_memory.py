@@ -21,6 +21,18 @@ _CGROUP_FIELDS = (
     "slab_bytes",
 )
 
+_V1_TOTAL_KERNEL_FIELDS = {
+    "total_kernel",
+    "total_kernel_stack",
+    "total_pagetables",
+    "total_percpu",
+    "total_sock",
+    "total_vmalloc",
+    "total_slab",
+    "total_slab_reclaimable",
+    "total_slab_unreclaimable",
+}
+
 
 def _read_int(path: Path) -> int | None:
     """Return an integer file value, or ``None`` when it is not available."""
@@ -107,7 +119,11 @@ def _v1_root(root: Path) -> Path:
 
 
 def read_cgroup_memory(root: str | Path = "/sys/fs/cgroup") -> dict[str, str | int | None]:
-    """Return a stable cgroup memory breakdown for v2, v1, or unavailable data."""
+    """Return a stable cgroup memory breakdown for v2, v1, or unavailable data.
+
+    "kernel_bytes" is an aggregate that includes "slab_bytes" whenever both
+    values are available. Consumers must not add the two fields together.
+    """
     root_path = Path(root)
     result = _empty_cgroup_memory()
 
@@ -130,22 +146,7 @@ def read_cgroup_memory(root: str | Path = "/sys/fs/cgroup") -> dict[str, str | i
         return result
 
     stat = _read_key_values(v1_root / "memory.stat")
-    has_total_kernel_data = any(
-        key.startswith("total_")
-        and key
-        in {
-            "total_kernel",
-            "total_kernel_stack",
-            "total_pagetables",
-            "total_percpu",
-            "total_sock",
-            "total_vmalloc",
-            "total_slab",
-            "total_slab_reclaimable",
-            "total_slab_unreclaimable",
-        }
-        for key in stat
-    )
+    has_total_kernel_data = any(key in _V1_TOTAL_KERNEL_FIELDS for key in stat)
     kernel_bytes, slab_bytes = _kernel_breakdown(
         stat, "total_" if has_total_kernel_data else ""
     )

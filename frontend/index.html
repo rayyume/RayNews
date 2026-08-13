@@ -2734,7 +2734,7 @@ function renderSourceManager(rows) {
     // Show all source names in tooltip for grouped rows
     const allSources = (row.sources || [row.source]).map(s => esc(s)).join('\n');
     const adminDelete = canManageSources
-      ? `<button class="source-delete-btn" onclick="deleteSourceArticles(${origIdx})" title="删除该订阅源全部文章">🗑</button>`
+      ? `<button class="source-delete-btn" onclick="deleteSourceArticles(${origIdx})" title="删除该订阅源及其全部文章">🗑</button>`
       : '<span></span>';
     const editAttrs = canManageSources ? '' : 'disabled aria-readonly="true"';
     const labelHandler = canManageSources ? `oninput="scheduleSourceSave(${origIdx})"` : '';
@@ -3019,10 +3019,11 @@ async function deleteSourceArticles(idx) {
   if (!row) return;
   const label = row.label || row.source;
   const count = row.article_count || 0;
-  if (!count) return;
   const confirmText = count >= 20
-    ? prompt(`将删除「${label}」下 ${count} 篇文章。请输入订阅源名称“${label}”确认。`)
-    : (confirm(`确定删除「${label}」下 ${count} 篇文章？删除后所有用户都不可见。`) ? label : '');
+    ? prompt(`将删除订阅源「${label}」及其 ${count} 篇文章。请输入订阅源名称“${label}”确认。`)
+    : (confirm(count
+        ? `确定删除订阅源「${label}」及其 ${count} 篇文章？删除后所有用户都不可见。`
+        : `确定删除订阅源「${label}」？`) ? label : '');
   if (confirmText !== label) return;
   try {
     const sources = row.sources && row.sources.length ? row.sources : [row.alias_target || row.source];
@@ -3035,7 +3036,12 @@ async function deleteSourceArticles(idx) {
     if (data.error) throw new Error(data.error);
     if (sourceArticlesState.rowIdx === idx) renderSourceArticles([]);
     await refreshSourceDependentViews({ refreshSettings: true, reloadNews: true });
-    showSettingsStatus(`已删除「${label}」下 ${data.deleted || 0} 篇文章`, 'ok');
+    showSettingsStatus(
+      data.deleted
+        ? `已删除订阅源「${label}」及其 ${data.deleted} 篇文章`
+        : `已删除订阅源「${label}」`,
+      'ok',
+    );
   } catch (e) {
     showSettingsStatus('删除失败: ' + e.message, 'error');
   }

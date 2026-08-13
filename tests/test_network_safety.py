@@ -46,18 +46,33 @@ def test_rejects_hostname_resolving_to_private_ip(monkeypatch):
         assert_public_http_url("https://model.example/v1")
 
 
-def test_rejects_hostname_with_any_non_public_dns_answer(monkeypatch):
+def test_mixed_dns_answers_dial_only_the_public_address(monkeypatch):
     monkeypatch.setattr(
         socket,
         "getaddrinfo",
         lambda *args, **kwargs: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
-            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("fe80::1", 443, 0, 0)),
+            # telegra.ph currently returns a usable public IPv4 answer together
+            # with a 2001::/32 Teredo answer that ipaddress does not classify as
+            # globally reachable. The latter must never be dialled, but it must
+            # not poison the independently safe IPv4 answer either.
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2001::3659:8781", 443, 0, 0)),
         ],
     )
+    captured = {}
 
-    with pytest.raises(UnsafeUrlError):
-        assert_public_http_url("https://mixed.example/v1")
+    def fake_request(url, **kwargs):
+        captured["resolved_addresses"] = kwargs["resolved_addresses"]
+        return _Response(200)
+
+    monkeypatch.setattr(network_safety, "_send_bound_request", fake_request)
+
+    response = safe_get("https://mixed.example/v1")
+
+    assert response.status_code == 200
+    assert captured["resolved_addresses"] == (
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+    )
 
 
 def test_accepts_public_ip():

@@ -51,9 +51,10 @@ def _resolve_http_url(
 ) -> tuple[str, tuple[tuple, ...]]:
     """Return a safe URL and the exact socket addresses it resolved to.
 
-    When ``allow_private`` is False, every resolved address must be global
-    (public). When True, loopback/private addresses are permitted so locally
-    self-hosted AI gateways (Ollama, one-api) remain usable behind an opt-in.
+    When ``allow_private`` is False, only global (public) resolved addresses
+    are retained and at least one must remain. When True, loopback/private
+    addresses are permitted so locally self-hosted AI gateways (Ollama,
+    one-api) remain usable behind an opt-in.
     """
     if not isinstance(url, str):
         raise _unsafe("A valid public HTTP(S) URL is required")
@@ -126,7 +127,7 @@ def _resolve_http_url(
                 raise ValueError
             resolved = ip_address(sockaddr[0])
             if not _addr_ok(resolved):
-                raise UnsafeUrlError
+                continue
             normalized_sockaddr = (
                 (str(resolved), target_port, sockaddr[2], sockaddr[3])
                 if family == socket.AF_INET6
@@ -141,8 +142,6 @@ def _resolve_http_url(
                     normalized_sockaddr,
                 )
             )
-    except UnsafeUrlError:
-        raise _unsafe() from None
     except (IndexError, TypeError, ValueError):
         raise _unsafe("URL target could not be safely resolved") from None
 
@@ -317,6 +316,8 @@ class _BoundAddressAdapter(HTTPAdapter):
         # for the HTTP Host header and for HTTPS SNI/certificate matching.
         # Only _new_conn's socket destination is replaced with validated IPs.
         if self._trusted_proxy is not None and parsed.scheme == "http":
+            # Requests supplies TLS-only values such as cert_reqs here even for
+            # plain HTTP. Passing them to HTTPConnection would raise TypeError.
             proxy = self._proxy_manager.proxy
             return _BoundHTTPConnectionPool(
                 proxy.host,
@@ -394,6 +395,8 @@ def _send_bound_request(
     try:
         response = session.request(method, url, proxies=proxies, **kwargs)
     except BaseException:
+        # Close the owned session even for process-level interruptions, then
+        # immediately re-raise the original exception without suppressing it.
         session.close()
         raise
     if kwargs.get("stream"):

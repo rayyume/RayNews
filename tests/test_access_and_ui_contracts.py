@@ -1504,6 +1504,18 @@ def test_sources_settings_tab_is_admin_only():
     assert 'id="sourcesSettingsTab"' not in html
 
 
+def test_source_delete_removes_the_group_even_when_it_has_no_articles():
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    start = html.index("async function deleteSourceArticles(idx)")
+    end = html.index("async function reinitializeSourceLabels()", start)
+    block = html[start:end]
+
+    assert "if (!count) return;" not in block
+    assert "body: JSON.stringify({ sources })" in block
+    assert "删除订阅源" in block
+    assert "及其全部文章" in html
+
+
 def test_header_avatar_search_and_summary_controls_are_aligned():
     html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     assert ".header-right{display:flex;min-width:0;align-items:center;gap:10px;" in html
