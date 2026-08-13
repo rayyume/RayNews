@@ -313,8 +313,25 @@ def init_source_categories(conn: sqlite3.Connection) -> None:
         )
     """)
 
+    article_table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'articles'"
+    ).fetchone()
+    article_sources = set()
+    if article_table:
+        article_sources = {
+            row[0]
+            for row in conn.execute(
+                "SELECT DISTINCT COALESCE(NULLIF(feed_source, ''), source) "
+                "FROM articles "
+                "WHERE COALESCE(NULLIF(feed_source, ''), source) IS NOT NULL "
+                "AND TRIM(COALESCE(NULLIF(feed_source, ''), source)) != ''"
+            ).fetchall()
+        }
+
     for category, sources in INITIAL_CATEGORY_MAP.items():
         for source in sources:
+            if source not in article_sources:
+                continue
             conn.execute(
                 """
                 INSERT OR IGNORE INTO source_categories
@@ -469,6 +486,42 @@ def cleanup_stale_source_categories(conn: sqlite3.Connection) -> int:
     if deleted:
         conn.commit()
     return deleted
+
+
+def delete_source_metadata(conn: sqlite3.Connection, sources: list[str]) -> int:
+    """Delete category and alias metadata connected to a source-label group."""
+    normalized = list(dict.fromkeys(
+        str(source).strip() for source in sources if str(source).strip()
+    ))
+    if not normalized:
+        return 0
+    _ensure_source_tables(conn)
+    placeholders = ",".join("?" * len(normalized))
+    deleted = 0
+    try:
+        deleted += conn.execute(
+            f"DELETE FROM source_aliases "
+            f"WHERE alias_source IN ({placeholders}) OR target_source IN ({placeholders})",
+            (*normalized, *normalized),
+        ).rowcount
+        deleted += conn.execute(
+            f"DELETE FROM user_source_aliases "
+            f"WHERE alias_source IN ({placeholders}) OR target_source IN ({placeholders})",
+            (*normalized, *normalized),
+        ).rowcount
+        deleted += conn.execute(
+            f"DELETE FROM source_categories WHERE source IN ({placeholders})",
+            normalized,
+        ).rowcount
+        deleted += conn.execute(
+            f"DELETE FROM user_source_categories WHERE source IN ({placeholders})",
+            normalized,
+        ).rowcount
+        conn.commit()
+        return deleted
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def find_merge_target(conn: sqlite3.Connection, source: str, label: str) -> str | None:

@@ -114,6 +114,92 @@ def test_source_rows_bootstraps_tables_on_fresh_db():
     assert exists is not None
 
 
+def test_known_source_preset_is_seeded_only_when_an_article_exists():
+    conn = _make_conn()
+
+    sc.init_source_categories(conn)
+    assert conn.execute(
+        "SELECT 1 FROM source_categories WHERE source = '少数派'"
+    ).fetchone() is None
+
+    _add_article(conn, 101, "少数派")
+    sc.init_source_categories(conn)
+    row = conn.execute(
+        "SELECT category, label, status, reason "
+        "FROM source_categories WHERE source = '少数派'"
+    ).fetchone()
+
+    assert tuple(row) == ("Tech", "少数派", "pending", "seeded")
+
+
+def test_delete_source_metadata_removes_group_and_all_connected_aliases():
+    conn = _make_conn()
+    sc.init_source_categories(conn)
+    conn.executemany(
+        "INSERT INTO source_categories (source, category, label, status) "
+        "VALUES (?, 'Tech', 'Group', 'manual')",
+        [("Primary",), ("Variant",), ("Unrelated",)],
+    )
+    conn.executemany(
+        "INSERT INTO user_source_categories "
+        "(user_id, source, category, label, status) VALUES (7, ?, 'Biz', 'Custom', 'manual')",
+        [("Primary",), ("Variant",), ("Unrelated",)],
+    )
+    conn.executemany(
+        "INSERT INTO source_aliases (alias_source, target_source) VALUES (?, ?)",
+        [
+            ("Legacy", "Primary"),
+            ("Variant", "External"),
+            ("Unrelated Alias", "Unrelated"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO user_source_aliases (user_id, alias_source, target_source) VALUES (7, ?, ?)",
+        [
+            ("User Legacy", "Primary"),
+            ("Variant", "User External"),
+            ("User Unrelated", "Unrelated"),
+        ],
+    )
+    conn.commit()
+
+    deleted = sc.delete_source_metadata(conn, ["Primary", "Variant"])
+
+    assert deleted == 8
+    assert {
+        row[0] for row in conn.execute("SELECT source FROM source_categories")
+    } == {"Unrelated"}
+    assert {
+        row[0] for row in conn.execute("SELECT source FROM user_source_categories")
+    } == {"Unrelated"}
+    assert {
+        row[0] for row in conn.execute("SELECT alias_source FROM source_aliases")
+    } == {"Unrelated Alias"}
+    assert {
+        row[0] for row in conn.execute("SELECT alias_source FROM user_source_aliases")
+    } == {"User Unrelated"}
+
+
+def test_deleted_unknown_source_is_rediscovered_without_old_settings():
+    conn = _make_conn()
+    sc.init_source_categories(conn)
+    conn.execute(
+        "INSERT INTO source_categories (source, category, label, status) "
+        "VALUES ('Fresh Feed', 'Biz', 'Old Custom Label', 'manual')"
+    )
+    conn.commit()
+
+    sc.delete_source_metadata(conn, ["Fresh Feed"])
+    _add_article(conn, 202, "Fresh Feed")
+    sc.ensure_article_sources(conn)
+
+    row = conn.execute(
+        "SELECT category, label, status, reason "
+        "FROM source_categories WHERE source = 'Fresh Feed'"
+    ).fetchone()
+    assert tuple(row) == ("Info", "Fresh Feed", "pending", "discovered")
+
+
 def test_maintain_discovers_and_cleans(monkeypatch):
     conn = _make_conn()
     sc.init_source_categories(conn)
