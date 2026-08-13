@@ -2,7 +2,7 @@
 
 ## Goal
 
-When a user activates the fixed category bar on the homepage, align the list state and viewport by returning to the top. A category change resets to page 1; reactivating the already-selected category on page 1 only returns to the top and does not request the same data again.
+When a user activates the fixed category bar on the homepage, align the list state and viewport by returning to the top. A category change resets to page 1; reactivating the already-selected category on page 1 only returns to the top, does not request the same data again, and does not cancel an in-flight manual refresh for the unchanged view.
 
 ## Interaction
 

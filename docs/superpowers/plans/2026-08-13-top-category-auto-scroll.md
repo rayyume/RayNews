@@ -18,7 +18,7 @@
 - [ ] Run each new test and confirm it fails because auto-scroll navigation is absent.
 - [ ] Pass `{ scrollToTop: true }` from the top category bar.
 - [ ] Refactor the existing selection-state DOM updates into a helper used when the target list is applied.
-- [ ] For page-1 reactivation, scroll only.
+- [ ] For page-1 reactivation, scroll only without cancelling view-bound refresh work or changing the view identity.
 - [ ] For target changes, prepare page 1 and scroll concurrently; apply only when data and near-top readiness are both true.
 - [ ] On failure, retain the prior list state and restore the previous scroll offset.
 - [ ] Run frontend runtime/contracts, then the full suite.

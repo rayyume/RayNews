@@ -7165,11 +7165,16 @@ async function selectFilterFromTopBar(value) {
   const previousFilter = filter;
   const previousPage = currentPage;
   const previousScrollY = window.scrollY || document.documentElement.scrollTop || 0;
-  const navigationSeq = ++pageNavigationSequence;
 
   // Re-activating the current first-page category is a viewport action only.
+  // Preserve the current view identity so an in-flight manual refresh can keep
+  // applying to this unchanged list. Only invalidate an older page navigation
+  // when one is actually pending, otherwise its late result could still win.
   if (value === previousFilter && previousPage === 1) {
-    setPageNavigationPending(false);
+    const navigationSeq = pageNavigationPending
+      ? ++pageNavigationSequence
+      : pageNavigationSequence;
+    if (pageNavigationPending) setPageNavigationPending(false);
     programmaticScrollUntil = Date.now() + 1200;
     const completed = await scrollPageToTop({
       applicationGuard: () => (
@@ -7189,6 +7194,7 @@ async function selectFilterFromTopBar(value) {
     return;
   }
 
+  const navigationSeq = ++pageNavigationSequence;
   let transitionList = null;
   let targetData = null;
   let nearTopReached = false;
@@ -7248,8 +7254,9 @@ async function selectFilterFromTopBar(value) {
 }
 
 async function selectFilter(value) {
-  cancelViewBoundRefreshWork();
   const options = arguments[1] || {};
+  const scrollOnly = options.scrollToTop && value === filter && currentPage === 1;
+  if (!scrollOnly) cancelViewBoundRefreshWork();
   if (options.scrollToTop) return selectFilterFromTopBar(value);
 
   // A sidebar selection supersedes any in-flight top-bar/page navigation.

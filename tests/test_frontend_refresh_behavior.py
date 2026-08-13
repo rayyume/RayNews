@@ -473,6 +473,7 @@ def select_filter_runtime_setup():
 context.filter = 'cat:Old';
 context.currentPage = 1;
 context.pageNavigationSequence = 0;
+context.pageNavigationPending = false;
 context.programmaticScrollUntil = 0;
 context.CATEGORY_ORDER = [];
 context.sourceFilterGroups = {};
@@ -490,7 +491,8 @@ context.window = {
   matchMedia: () => ({ matches: false }),
 };
 context.scrollPositions = [];
-context.cancelViewBoundRefreshWork = () => {};
+context.cancelCalls = 0;
+context.cancelViewBoundRefreshWork = () => { context.cancelCalls++; };
 context.rememberCurrentListHistory = () => { context.rememberCalls++; };
 context.rememberCalls = 0;
 context.renderTopCatBar = () => {};
@@ -538,6 +540,8 @@ context.preparePageNavigation = async () => { context.prepareCalls++; return { m
 await context.selectFilter('cat:Old', { scrollToTop: true });
 
 assert.equal(context.scrollCalls, 1);
+assert.equal(context.cancelCalls, 0);
+assert.equal(context.pageNavigationSequence, 0);
 assert.equal(context.prepareCalls, 0);
 assert.equal(context.legacyLoadCalls, 0);
 assert.deepEqual(context.applied, []);
@@ -545,6 +549,27 @@ assert.equal(context.filter, 'cat:Old');
 assert.equal(context.currentPage, 1);
 assert.equal(context.stabilizeCalls, 1);
 assert.deepEqual(context.synced, [{ replace: true }]);
+""",
+    )
+
+
+def test_active_top_category_scroll_invalidates_only_an_existing_page_navigation():
+    run_node(
+        select_filter_source(),
+        select_filter_runtime_setup()
+        + """
+context.pageNavigationSequence = 7;
+context.pageNavigationPending = true;
+context.scrollPageToTop = async () => true;
+context.preparePageNavigation = async () => { throw new Error('must not prepare'); };
+
+await context.selectFilter('cat:Old', { scrollToTop: true });
+
+assert.equal(context.cancelCalls, 0);
+assert.equal(context.pageNavigationSequence, 8);
+assert.deepEqual(context.pendingStates, [false]);
+assert.equal(context.filter, 'cat:Old');
+assert.equal(context.currentPage, 1);
 """,
     )
 
