@@ -5295,11 +5295,44 @@ def list_source_articles():
     })
 
 
+def _resolve_shared_source_alias_closure(
+    conn: sqlite3.Connection,
+    base_sources: list[str],
+) -> list[str]:
+    """Resolve every shared alias that transitively targets the source group."""
+    normalized = list(dict.fromkeys(
+        str(source).strip() for source in base_sources if str(source).strip()
+    ))
+    if not normalized:
+        return []
+    seed_values = ", ".join("(?)" for _source in normalized)
+    rows = conn.execute(
+        f"""
+        WITH RECURSIVE source_group(source) AS (
+            VALUES {seed_values}
+            UNION
+            SELECT aliases.alias_source
+            FROM source_aliases AS aliases
+            JOIN source_group AS resolved
+              ON aliases.target_source = resolved.source
+        )
+        SELECT source FROM source_group
+        """,
+        normalized,
+    ).fetchall()
+    resolved = [
+        row["source"] if isinstance(row, sqlite3.Row) else row[0]
+        for row in rows
+    ]
+    return list(dict.fromkeys((*normalized, *resolved)))
+
+
 def _delete_source_article_ids_in_transaction(
     conn: sqlite3.Connection,
     article_ids: list[int],
     *,
     deleted_by: int | None = None,
+    strict_ai_results: bool = False,
 ) -> tuple[dict, list[int]]:
     """Delete article rows inside a caller-owned news database transaction."""
     ids = sorted({int(article_id) for article_id in article_ids if int(article_id) > 0})
@@ -5329,12 +5362,25 @@ def _delete_source_article_ids_in_transaction(
     existing_ids = [int(row["id"]) for row in existing]
     existing_placeholders = ",".join("?" * len(existing_ids))
     cur = conn.execute(f"DELETE FROM articles WHERE id IN ({existing_placeholders})", existing_ids)
-    try:
-        conn.execute(f"DELETE FROM ai_results WHERE article_id IN ({existing_placeholders})", existing_ids)
-    except sqlite3.OperationalError:
-        # Preserve the public deletion helper's legacy best-effort cleanup of
-        # optional AI rows. Article/tombstone deletion remains authoritative.
-        pass
+    if strict_ai_results:
+        ai_results_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ai_results'"
+        ).fetchone()
+        if ai_results_exists:
+            conn.execute(
+                f"DELETE FROM ai_results WHERE article_id IN ({existing_placeholders})",
+                existing_ids,
+            )
+    else:
+        try:
+            conn.execute(
+                f"DELETE FROM ai_results WHERE article_id IN ({existing_placeholders})",
+                existing_ids,
+            )
+        except sqlite3.OperationalError:
+            # Preserve the public deletion helper's legacy best-effort cleanup of
+            # optional AI rows. Article/tombstone deletion remains authoritative.
+            pass
     return {"deleted": cur.rowcount, "deleted_sources": 0}, existing_ids
 
 
@@ -5431,21 +5477,17 @@ def delete_source_articles():
     if not base_sources:
         return jsonify({"error": "source required"}), 400
     try:
-        # Source-table bootstrap may commit migrations/seeding, so it must finish
-        # before the group deletion transaction begins.
+        # Source/news schema bootstrap may commit migrations or seeding, so both
+        # must finish before the group deletion transaction begins.
         init_source_categories(conn)
+        _ensure_news_schema(conn)
     except Exception as exc:
         print(f"[sources] Failed to initialize source metadata: {exc}")
         return jsonify({"error": "failed to delete source metadata"}), 500
-    sources = []
-    for source in base_sources:
-        sources.append(source)
-        sources.extend(source_aliases_for_target(conn, source))
-    sources = list(dict.fromkeys(sources))
-    placeholders = ",".join("?" * len(sources))
     try:
-        _ensure_news_schema(conn)
-        conn.execute("BEGIN")
+        conn.execute("BEGIN IMMEDIATE")
+        sources = _resolve_shared_source_alias_closure(conn, base_sources)
+        placeholders = ",".join("?" * len(sources))
         rows = conn.execute(
             f"SELECT id FROM articles WHERE COALESCE(NULLIF(feed_source, ''), source) IN ({placeholders})",
             sources,
@@ -5454,6 +5496,7 @@ def delete_source_articles():
             conn,
             [int(row["id"]) for row in rows],
             deleted_by=g.user_id,
+            strict_ai_results=True,
         )
         result["deleted_sources"] = delete_source_metadata(conn, sources)
         conn.commit()

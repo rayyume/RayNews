@@ -205,17 +205,39 @@ Expected: FAIL with `AttributeError` because `delete_source_metadata` does not e
 
 - [ ] **Step 7: Implement targeted metadata deletion**
 
-Add this focused helper after `cleanup_stale_source_categories()`:
+Add this focused helper after `cleanup_stale_source_categories()`.  Standalone
+calls may bootstrap and own their transaction.  A caller-owned transaction has
+an explicit precondition: all four source metadata tables were bootstrapped
+before `BEGIN`; the helper must neither commit nor roll back that transaction:
 
 ```python
 def delete_source_metadata(conn: sqlite3.Connection, sources: list[str]) -> int:
-    """Delete category and alias metadata connected to a source-label group."""
     normalized = list(dict.fromkeys(
         str(source).strip() for source in sources if str(source).strip()
     ))
     if not normalized:
         return 0
-    _ensure_source_tables(conn)
+    owns_transaction = not conn.in_transaction
+    if owns_transaction:
+        _ensure_source_tables(conn)
+    else:
+        required_tables = {
+            "source_categories", "source_aliases",
+            "user_source_categories", "user_source_aliases",
+        }
+        existing_tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND name IN (?, ?, ?, ?)",
+                tuple(required_tables),
+            ).fetchall()
+        }
+        if existing_tables != required_tables:
+            raise RuntimeError(
+                "bootstrap source metadata tables before starting the caller transaction"
+            )
+
     placeholders = ",".join("?" * len(normalized))
     deleted = 0
     try:
@@ -230,17 +252,17 @@ def delete_source_metadata(conn: sqlite3.Connection, sources: list[str]) -> int:
             (*normalized, *normalized),
         ).rowcount
         deleted += conn.execute(
-            f"DELETE FROM source_categories WHERE source IN ({placeholders})",
-            normalized,
+            f"DELETE FROM source_categories WHERE source IN ({placeholders})", normalized,
         ).rowcount
         deleted += conn.execute(
-            f"DELETE FROM user_source_categories WHERE source IN ({placeholders})",
-            normalized,
+            f"DELETE FROM user_source_categories WHERE source IN ({placeholders})", normalized,
         ).rowcount
-        conn.commit()
+        if owns_transaction:
+            conn.commit()
         return deleted
     except Exception:
-        conn.rollback()
+        if owns_transaction:
+            conn.rollback()
         raise
 ```
 
@@ -328,24 +350,37 @@ Expected: FAIL because the endpoint preserves manual/classified source metadata 
 
 - [ ] **Step 3: Update the endpoint to purge metadata explicitly**
 
-Import `delete_source_metadata` from `source_categories`. Delete the articles, tombstones, AI results, and resolved-group metadata in one caller-owned news-database transaction. `delete_source_metadata()` must preserve an existing transaction boundary. Run favorites and image-cache cleanup only after the news transaction commits:
+Import `delete_source_metadata` from `source_categories`.  Bootstrap both source
+metadata and the news schema before deletion because either initializer may
+commit.  Then use one `BEGIN IMMEDIATE` snapshot for the complete shared-alias
+transitive closure (cycle-safe and deduplicated), article selection,
+article/tombstone/strict-AI deletion, and source metadata purge.  The ordinary
+`_delete_article_ids()` path keeps best-effort AI cleanup; only the atomic source
+route requests strict AI deletion.  Favorites and image-cache cleanup remain
+after the news transaction commits:
 
 ```python
-# Bootstrap may commit migrations/seeding, so it must happen before BEGIN.
+# Bootstrap/migration may commit, so it must finish before BEGIN IMMEDIATE.
 init_source_categories(conn)
+_ensure_news_schema(conn)
 try:
-    _ensure_news_schema(conn)
-    conn.execute("BEGIN")
+    conn.execute("BEGIN IMMEDIATE")
+    sources = _resolve_shared_source_alias_closure(conn, base_sources)
+    placeholders = ",".join("?" * len(sources))
     rows = conn.execute(
-        f"SELECT id FROM articles WHERE COALESCE(NULLIF(feed_source, ''), source) IN ({placeholders})",
+        f"SELECT id FROM articles "
+        f"WHERE COALESCE(NULLIF(feed_source, ''), source) IN ({placeholders})",
         sources,
     ).fetchall()
     result, deleted_ids = _delete_source_article_ids_in_transaction(
-        conn, [int(row["id"]) for row in rows], deleted_by=g.user_id,
+        conn,
+        [int(row["id"]) for row in rows],
+        deleted_by=g.user_id,
+        strict_ai_results=True,
     )
     result["deleted_sources"] = delete_source_metadata(conn, sources)
     conn.commit()
-except sqlite3.DatabaseError as exc:
+except Exception as exc:
     if conn.in_transaction:
         conn.rollback()
     print(f"[sources] Failed to delete source metadata: {exc}")
@@ -353,6 +388,10 @@ except sqlite3.DatabaseError as exc:
 _cleanup_deleted_article_side_effects(deleted_ids, maintain_image_cache=True)
 return jsonify({"ok": True, "sources": sources, **result})
 ```
+
+Strict AI mode first checks whether the optional `ai_results` table exists.  A
+missing table is skipped; every locked/I/O/other database error from deleting AI
+rows propagates to the outer rollback.
 
 - [ ] **Step 4: Run the grouped endpoint test and verify GREEN**
 

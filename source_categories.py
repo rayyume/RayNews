@@ -491,8 +491,10 @@ def cleanup_stale_source_categories(conn: sqlite3.Connection) -> int:
 def delete_source_metadata(conn: sqlite3.Connection, sources: list[str]) -> int:
     """Delete category and alias metadata connected to a source-label group.
 
-    When the caller already owns a transaction, its commit/rollback boundary is
-    preserved so article deletion can be atomic with this metadata purge.
+    If ``conn`` is already in a transaction, all four source metadata tables
+    must have been bootstrapped before that transaction began.  This helper then
+    leaves the caller's commit/rollback boundary untouched.  A standalone call
+    may bootstrap missing tables and owns its own transaction boundary.
     """
     normalized = list(dict.fromkeys(
         str(source).strip() for source in sources if str(source).strip()
@@ -500,7 +502,27 @@ def delete_source_metadata(conn: sqlite3.Connection, sources: list[str]) -> int:
     if not normalized:
         return 0
     owns_transaction = not conn.in_transaction
-    _ensure_source_tables(conn)
+    if owns_transaction:
+        _ensure_source_tables(conn)
+    else:
+        required_tables = {
+            "source_categories",
+            "source_aliases",
+            "user_source_categories",
+            "user_source_aliases",
+        }
+        existing_tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND name IN (?, ?, ?, ?)",
+                tuple(required_tables),
+            ).fetchall()
+        }
+        if existing_tables != required_tables:
+            raise RuntimeError(
+                "bootstrap source metadata tables before starting the caller transaction"
+            )
     placeholders = ",".join("?" * len(normalized))
     deleted = 0
     try:

@@ -4,6 +4,8 @@ split introduced to keep GET /sources fast during a fetch cycle (cold-start fix)
 from pathlib import Path
 import sqlite3
 
+import pytest
+
 import source_categories as sc
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -178,6 +180,23 @@ def test_delete_source_metadata_removes_group_and_all_connected_aliases():
     assert {
         row[0] for row in conn.execute("SELECT alias_source FROM user_source_aliases")
     } == {"User Unrelated"}
+
+
+def test_delete_source_metadata_requires_bootstrap_before_caller_transaction():
+    """A missing-table bootstrap cannot commit a transaction owned by the caller."""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO articles (id, title, source, feed_source, origin_source, timestamp) "
+        "VALUES (303, 'pending', 'Pending Feed', 'Pending Feed', '', 1)"
+    )
+
+    with pytest.raises(RuntimeError, match="bootstrap source metadata tables"):
+        sc.delete_source_metadata(conn, ["Pending Feed"])
+
+    assert conn.in_transaction
+    assert conn.execute("SELECT 1 FROM articles WHERE id = 303").fetchone() is not None
+    conn.rollback()
+    assert conn.execute("SELECT 1 FROM articles WHERE id = 303").fetchone() is None
 
 
 def test_deleted_unknown_source_is_rediscovered_without_old_settings():

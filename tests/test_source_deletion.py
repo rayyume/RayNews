@@ -138,6 +138,116 @@ def test_delete_source_group_removes_articles_tombstones_and_metadata(source_del
     ).fetchone() is not None
 
 
+def test_delete_source_group_resolves_transitive_shared_aliases(source_deletion_env):
+    """Deleting a primary traverses every reverse alias edge once, even in a cycle."""
+    client = source_deletion_env["client"]
+    admin_headers = source_deletion_env["admin_headers"]
+    news_conn = source_deletion_env["news_conn"]
+    news_conn.executemany(
+        "INSERT INTO articles (id, title, source, feed_source) VALUES (?, ?, ?, ?)",
+        [
+            (5, "Bridge article", "Bridge", "Bridge"),
+            (6, "Ancestor article", "Ancestor", "Ancestor"),
+        ],
+    )
+    news_conn.executemany(
+        "INSERT INTO ai_results (article_id, summary) VALUES (?, ?)",
+        [(5, "summary 5"), (6, "summary 6")],
+    )
+    news_conn.executemany(
+        "INSERT INTO source_categories (source, category, label, status) "
+        "VALUES (?, 'Tech', 'Primary group', 'manual')",
+        [("Bridge",), ("Ancestor",)],
+    )
+    news_conn.executemany(
+        "INSERT INTO user_source_categories "
+        "(user_id, source, category, label, status) "
+        "VALUES (1, ?, 'Biz', 'Primary group', 'manual')",
+        [("Bridge",), ("Ancestor",)],
+    )
+    news_conn.executemany(
+        "INSERT INTO source_aliases (alias_source, target_source) VALUES (?, ?)",
+        [
+            ("Bridge", "Primary"),
+            ("Ancestor", "Bridge"),
+            ("Primary", "Ancestor"),
+        ],
+    )
+    news_conn.commit()
+
+    response = client.delete(
+        "/sources/articles",
+        headers=admin_headers,
+        json={"sources": ["Primary"]},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["deleted"] == 4
+    assert set(response.get_json()["sources"]) == {
+        "Primary", "Legacy", "Bridge", "Ancestor",
+    }
+    assert {row[0] for row in news_conn.execute("SELECT id FROM articles")} == {2, 4}
+    assert {row[0] for row in news_conn.execute("SELECT article_id FROM deleted_articles")} == {
+        1, 3, 5, 6,
+    }
+    assert {row[0] for row in news_conn.execute("SELECT article_id FROM ai_results")} == {2, 4}
+    assert news_conn.execute(
+        "SELECT 1 FROM source_categories "
+        "WHERE source IN ('Primary', 'Bridge', 'Ancestor')"
+    ).fetchone() is None
+    assert news_conn.execute(
+        "SELECT 1 FROM user_source_categories "
+        "WHERE source IN ('Primary', 'Bridge', 'Ancestor')"
+    ).fetchone() is None
+    assert news_conn.execute(
+        "SELECT 1 FROM source_aliases "
+        "WHERE alias_source IN ('Primary', 'Legacy', 'Bridge', 'Ancestor') "
+        "OR target_source IN ('Primary', 'Legacy', 'Bridge', 'Ancestor')"
+    ).fetchone() is None
+
+
+def test_delete_source_group_resolves_aliases_and_selects_articles_in_immediate_transaction(
+    source_deletion_env,
+):
+    """SQLite observes alias expansion and article selection in one immediate transaction."""
+    client = source_deletion_env["client"]
+    admin_headers = source_deletion_env["admin_headers"]
+    conn = web_server._get_news_db()
+    trace = []
+    conn.set_trace_callback(lambda statement: trace.append((statement, conn.in_transaction)))
+    try:
+        response = client.delete(
+            "/sources/articles",
+            headers=admin_headers,
+            json={"sources": ["Primary"]},
+        )
+    finally:
+        conn.set_trace_callback(None)
+
+    assert response.status_code == 200
+    alias_indexes = [
+        index
+        for index, (statement, _in_transaction) in enumerate(trace)
+        if "FROM SOURCE_ALIASES" in statement.upper()
+        and not statement.lstrip().upper().startswith("DELETE")
+    ]
+    article_indexes = [
+        index
+        for index, (statement, _in_transaction) in enumerate(trace)
+        if statement.lstrip().upper().startswith("SELECT ID FROM ARTICLES")
+    ]
+    assert alias_indexes
+    assert article_indexes
+    for index in (*alias_indexes, *article_indexes):
+        assert trace[index][1] is True
+        prior_begins = [
+            statement.strip().upper()
+            for statement, _in_transaction in trace[:index]
+            if statement.strip().upper().startswith("BEGIN")
+        ]
+        assert prior_begins[-1] == "BEGIN IMMEDIATE"
+
+
 def test_delete_source_group_removes_zero_article_source_metadata(source_deletion_env):
     """A manual source without articles still has all of its metadata purged."""
     client = source_deletion_env["client"]
@@ -160,6 +270,80 @@ def test_delete_source_group_removes_zero_article_source_metadata(source_deletio
     assert news_conn.execute(
         "SELECT 1 FROM source_categories WHERE source = 'Empty Feed'"
     ).fetchone() is None
+
+
+def test_delete_source_group_skips_missing_ai_results_table(source_deletion_env):
+    """Strict source deletion still supports deployments without optional AI rows."""
+    client = source_deletion_env["client"]
+    admin_headers = source_deletion_env["admin_headers"]
+    news_conn = source_deletion_env["news_conn"]
+    news_conn.execute("DROP TABLE ai_results")
+    news_conn.commit()
+
+    response = client.delete(
+        "/sources/articles",
+        headers=admin_headers,
+        json={"sources": ["Primary"]},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["deleted"] == 2
+    assert {row[0] for row in news_conn.execute("SELECT id FROM articles")} == {2, 4}
+    assert {row[0] for row in news_conn.execute("SELECT article_id FROM deleted_articles")} == {
+        1, 3,
+    }
+
+
+def test_delete_source_group_rolls_back_after_alias_delete_when_category_delete_fails(
+    source_deletion_env, monkeypatch,
+):
+    """A later category failure restores earlier alias and article/AI writes."""
+    client = source_deletion_env["client"]
+    admin_headers = source_deletion_env["admin_headers"]
+    news_conn = source_deletion_env["news_conn"]
+    unpinned = []
+    news_conn.execute(
+        """CREATE TRIGGER reject_primary_source_category_delete
+           BEFORE DELETE ON source_categories
+           WHEN OLD.source = 'Primary'
+           BEGIN SELECT RAISE(ABORT, 'forced category delete failure'); END"""
+    )
+    news_conn.commit()
+    monkeypatch.setattr(web_server, "unpin_article_images", lambda ids: unpinned.append(ids))
+
+    response = client.delete(
+        "/sources/articles",
+        headers=admin_headers,
+        json={"sources": ["Primary", "Variant"]},
+    )
+
+    assert response.status_code == 500
+    assert response.get_json() == {"error": "failed to delete source metadata"}
+    assert {row[0] for row in news_conn.execute("SELECT id FROM articles")} == {1, 2, 3, 4}
+    assert news_conn.execute("SELECT 1 FROM deleted_articles").fetchone() is None
+    assert {row[0] for row in news_conn.execute("SELECT article_id FROM ai_results")} == {
+        1, 2, 3, 4,
+    }
+    assert {row[0] for row in news_conn.execute("SELECT source FROM source_categories")} == {
+        "Primary", "Variant", "Unrelated",
+    }
+    assert {row[0] for row in news_conn.execute("SELECT source FROM user_source_categories")} == {
+        "Primary", "Variant", "Unrelated",
+    }
+    assert {
+        tuple(row) for row in news_conn.execute(
+            "SELECT alias_source, target_source FROM source_aliases"
+        )
+    } == {("Legacy", "Primary"), ("Variant", "External")}
+    assert {
+        tuple(row) for row in news_conn.execute(
+            "SELECT alias_source, target_source FROM user_source_aliases"
+        )
+    } == {("Legacy", "Primary"), ("Variant", "External")}
+    assert models.get_db().execute(
+        "SELECT 1 FROM favorites WHERE user_id = 1 AND article_id = 1"
+    ).fetchone() is not None
+    assert unpinned == []
 
 
 def test_delete_source_group_reports_metadata_failure(source_deletion_env, monkeypatch):
@@ -266,6 +450,54 @@ class _AiResultsFailureConnection:
 
     def __getattr__(self, name):
         return getattr(self._conn, name)
+
+
+def test_delete_source_group_rolls_back_non_missing_ai_results_error(
+    source_deletion_env, monkeypatch,
+):
+    """The atomic source route cannot ignore a real AI-row deletion failure."""
+    client = source_deletion_env["client"]
+    admin_headers = source_deletion_env["admin_headers"]
+    news_conn = source_deletion_env["news_conn"]
+    failing_conn = _AiResultsFailureConnection(web_server._get_news_db())
+    unpinned = []
+    monkeypatch.setattr(web_server, "_get_news_db", lambda: failing_conn)
+    monkeypatch.setattr(web_server, "unpin_article_images", lambda ids: unpinned.append(ids))
+
+    response = client.delete(
+        "/sources/articles",
+        headers=admin_headers,
+        json={"sources": ["Primary", "Variant"]},
+    )
+
+    assert response.status_code == 500
+    assert response.get_json() == {"error": "failed to delete source metadata"}
+    assert {row[0] for row in news_conn.execute("SELECT id FROM articles")} == {1, 2, 3, 4}
+    assert news_conn.execute("SELECT 1 FROM deleted_articles").fetchone() is None
+    assert {row[0] for row in news_conn.execute("SELECT article_id FROM ai_results")} == {
+        1, 2, 3, 4,
+    }
+    assert {row[0] for row in news_conn.execute("SELECT source FROM source_categories")} == {
+        "Primary", "Variant", "Unrelated",
+    }
+    assert {row[0] for row in news_conn.execute("SELECT source FROM user_source_categories")} == {
+        "Primary", "Variant", "Unrelated",
+    }
+    assert {
+        tuple(row) for row in news_conn.execute(
+            "SELECT alias_source, target_source FROM source_aliases"
+        )
+    } == {("Legacy", "Primary"), ("Variant", "External")}
+    assert {
+        tuple(row) for row in news_conn.execute(
+            "SELECT alias_source, target_source FROM user_source_aliases"
+        )
+    } == {("Legacy", "Primary"), ("Variant", "External")}
+    assert models.get_db().execute(
+        "SELECT 1 FROM favorites WHERE user_id = 1 AND article_id = 1"
+    ).fetchone() is not None
+    assert unpinned == []
+    assert not failing_conn.in_transaction
 
 
 def test_delete_article_ids_ignores_ai_results_operational_error_and_commits(
