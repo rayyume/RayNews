@@ -316,6 +316,8 @@ class _BoundAddressAdapter(HTTPAdapter):
         # for the HTTP Host header and for HTTPS SNI/certificate matching.
         # Only _new_conn's socket destination is replaced with validated IPs.
         if self._trusted_proxy is not None and parsed.scheme == "http":
+            # Requests supplies TLS-only values such as cert_reqs here even for
+            # plain HTTP. Passing them to HTTPConnection would raise TypeError.
             proxy = self._proxy_manager.proxy
             return _BoundHTTPConnectionPool(
                 proxy.host,
@@ -393,6 +395,8 @@ def _send_bound_request(
     try:
         response = session.request(method, url, proxies=proxies, **kwargs)
     except BaseException:
+        # Close the owned session even for process-level interruptions, then
+        # immediately re-raise the original exception without suppressing it.
         session.close()
         raise
     if kwargs.get("stream"):
