@@ -1271,11 +1271,10 @@ def complete_app_state_incident_if_stable(
 
     The write transaction begins before any incident or timestamp read so a
     concurrent failure cannot be committed between the eligibility check and
-    the close. A zero stability window explicitly disables this recovery path.
+    the close. A zero stability window removes the delay but still requires a
+    real success after the latest failure.
     """
     window = max(0.0, float(stability_seconds))
-    if window == 0:
-        return "0"
 
     db = get_db()
     current = time.time() if now is None else float(now)

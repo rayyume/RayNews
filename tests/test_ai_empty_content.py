@@ -41,7 +41,7 @@ def _patch_post(monkeypatch, payload):
     return captured
 
 
-def test_openai_empty_content_with_length_finish_raises_actionable_error(monkeypatch):
+def test_generic_openai_empty_content_does_not_name_an_unrelated_task_variable(monkeypatch):
     _patch_post(monkeypatch, {
         "choices": [{"finish_reason": "length",
                      "message": {"content": "", "reasoning_content": "lots of thinking..."}}],
@@ -51,7 +51,51 @@ def test_openai_empty_content_with_length_finish_raises_actionable_error(monkeyp
     msg = str(ei.value)
     assert "空内容" in msg
     assert "max_tokens=500" in msg          # names the exhausted budget
-    assert "AI_TITLE_MAX_TOKENS" in msg     # tells the operator how to fix it
+    assert "AI_TITLE_MAX_TOKENS" not in msg
+    assert "AI_SOURCE_CLASSIFY_MAX_TOKENS" not in msg
+
+
+def test_source_classification_uses_its_configurable_output_budget(monkeypatch):
+    captured = _patch_post(monkeypatch, {
+        "choices": [{"message": {"content": (
+            '{"category":"News","label":"Test","confidence":0.9,"reason":"news"}'
+        )}}],
+    })
+
+    _svc().classify_source("Test source")
+
+    assert captured["body"]["max_tokens"] == ai_service.SOURCE_CLASSIFY_MAX_TOKENS
+    assert captured["body"]["max_tokens"] >= 2048
+
+
+def test_source_classification_empty_content_names_its_own_budget_variable(monkeypatch):
+    _patch_post(monkeypatch, {
+        "choices": [{
+            "finish_reason": "length",
+            "message": {"content": "", "reasoning_content": "thinking"},
+        }],
+    })
+
+    with pytest.raises(RuntimeError) as ei:
+        _svc().classify_source("Test source")
+
+    msg = str(ei.value)
+    assert "AI_SOURCE_CLASSIFY_MAX_TOKENS" in msg
+    assert "AI_TITLE_MAX_TOKENS" not in msg
+
+
+def test_title_empty_content_names_the_title_budget_variable(monkeypatch):
+    _patch_post(monkeypatch, {
+        "choices": [{
+            "finish_reason": "length",
+            "message": {"content": "", "reasoning_content": "thinking"},
+        }],
+    })
+
+    with pytest.raises(RuntimeError) as ei:
+        _svc().summarize_title("A long title")
+
+    assert "AI_TITLE_MAX_TOKENS" in str(ei.value)
 
 
 def test_openai_normal_content_is_returned(monkeypatch):
@@ -100,5 +144,4 @@ def test_claude_text_blocks_are_joined(monkeypatch):
 def test_title_calls_use_the_configurable_title_budget(monkeypatch):
     captured = _patch_post(monkeypatch, {"choices": [{"message": {"content": "短标题"}}]})
     _svc().summarize_title("Some very long original headline that must be shortened")
-    assert captured["body"]["max_tokens"] == ai_service.TITLE_MAX_TOKENS
-    assert ai_service.TITLE_MAX_TOKENS >= 1024
+    assert captured["body"]["max_tokens"] == 4096

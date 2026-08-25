@@ -220,6 +220,8 @@ AI endpoints, keys, models, and providers are configured per user under **Settin
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AI_REQUEST_TIMEOUT_SECONDS` | `300` | AI request timeout in seconds |
+| `AI_SOURCE_CLASSIFY_MAX_TOKENS` | `2048` | Maximum source-classification output tokens; increase for reasoning models that return empty content |
+| `AI_TITLE_MAX_TOKENS` | `4096` | Maximum title translation/shortening output tokens |
 | `AUTO_SUMMARY_BATCH_LIMIT` | `20` | Articles per automatic summary batch |
 | `AUTO_SUMMARY_INTERVAL_SECONDS` | `30` | Automatic summary polling interval in seconds |
 | `AUTO_TRANSLATION_BATCH_LIMIT` | `5` | Articles per background translation batch |
@@ -231,9 +233,13 @@ AI endpoints, keys, models, and providers are configured per user under **Settin
 | `TITLE_SUMMARY_MAX_TOTAL_CHARS` | `40` | Maximum weighted shortened-title length |
 | `AUTO_SOURCE_CLASSIFY_BATCH_LIMIT` | `20` | Sources per administrator AI classification batch |
 | `AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS` | `120` | Source classification polling interval in seconds |
+| `SYSTEM_AI_FAILURE_ALERT_THRESHOLD` | `3` | Consecutive server-AI failures before administrators are alerted |
+| `SYSTEM_AI_RECOVERY_STABILITY_SECONDS` | `3600` | Send recovery only after a real success and this many seconds without a new failure; `0` removes the extra stability delay after a real success |
 | `TELEGRAM_EMBED_TIMEOUT_SECONDS` | `12` | Telegram embed fetch timeout |
 
 Additional `AI_DAILY_*` variables tune daily-digest candidate and output limits. Keep the built-in defaults unless needed; add any override explicitly to the Compose `environment`.
+
+The legacy `SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD` variable is deprecated and no longer enables call-count-based recovery. If it remains configured, startup logs direct the operator to `SYSTEM_AI_RECOVERY_STABILITY_SECONDS`.
 
 ### Image cache
 
