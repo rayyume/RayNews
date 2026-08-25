@@ -49,7 +49,6 @@ from models import (
     get_app_state, set_app_state, set_app_state_values, advance_app_state_epoch,
     claim_app_state_flag,
     claim_app_state_incident,
-    complete_app_state_incident,
     complete_app_state_incident_if_stable,
     get_system_ai_config, set_system_ai_config,
     create_invitation_code,
@@ -1671,9 +1670,11 @@ def _clear_email_delivery_failure_alert() -> None:
 SYSTEM_AI_FAILURE_ALERT_THRESHOLD = int(
     os.environ.get("SYSTEM_AI_FAILURE_ALERT_THRESHOLD", "3")
 )
-SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD = max(
-    1, int(os.environ.get("SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD", "3"))
-)
+if "SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD" in os.environ:
+    print(
+        "[system-ai] SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD 已废弃并忽略；"
+        "恢复现在由 SYSTEM_AI_RECOVERY_STABILITY_SECONDS 控制。"
+    )
 SYSTEM_AI_ALERT_COOLDOWN_SECONDS = max(
     0, int(os.environ.get("SYSTEM_AI_ALERT_COOLDOWN_SECONDS", "1800"))
 )
@@ -1685,7 +1686,6 @@ SYSTEM_AI_RECOVERED_TITLE = "服务端 AI 已恢复"
 
 _system_ai_health = {
     "failures": 0,
-    "successes": 0,
     "alerted": False,
     "last_error": "",
     "jobs": [],
@@ -1861,19 +1861,6 @@ def _release_system_ai_alert() -> None:
         print(f"[system-ai] alert state release failed: {exc}")
 
 
-def _complete_system_ai_alert() -> str:
-    """Close an incident and persist its notified-state cooldown together."""
-    try:
-        return complete_app_state_incident(
-            SYSTEM_AI_ALERTED_STATE_KEY,
-            SYSTEM_AI_ALERT_LAST_NOTIFIED_STATE_KEY,
-            now=time.time(),
-        )
-    except Exception as exc:
-        print(f"[system-ai] alert completion failed: {exc}")
-        return "0"
-
-
 def _record_system_ai_notification_time() -> None:
     try:
         set_app_state(SYSTEM_AI_ALERT_LAST_NOTIFIED_STATE_KEY, str(time.time()))
@@ -1926,7 +1913,6 @@ def _reset_system_ai_health() -> None:
         _system_ai_health.update(
             {
                 "failures": 0,
-                "successes": 0,
                 "alerted": False,
                 "last_error": "",
                 "jobs": [],
@@ -1938,9 +1924,11 @@ def _reset_system_ai_health() -> None:
 
 
 def _note_system_ai_success() -> None:
-    """A system-AI call came back. Ends the streak, and if admins were told the
-    AI was down, tells them it is back — matching the share_suspended /
-    share_restored pair users already get."""
+    """Record a real provider success and end the current failure streak.
+
+    Recovery notification is deliberately left to the periodic stability
+    check: call volume must never substitute for a quiet recovery interval.
+    """
     with _system_ai_health_lock:
         current = time.time()
         _system_ai_health["last_success_at"] = current
@@ -1953,36 +1941,12 @@ def _note_system_ai_success() -> None:
                 set_app_state(SYSTEM_AI_LAST_SUCCESS_STATE_KEY, str(current))
         except Exception as exc:
             print(f"[system-ai] success timestamp write failed: {exc}")
-        persisted_active = _system_ai_incident_is_active()
-        alerted_here = _system_ai_health["alerted"]
-        if not (alerted_here or persisted_active):
-            # A success before an alert still breaks a failure streak, but is
-            # not evidence that an already-reported outage has recovered.
-            _system_ai_health.update({"failures": 0, "successes": 0, "last_error": "", "jobs": []})
-            return
-        _system_ai_health["failures"] = 0
-        _system_ai_health["successes"] += 1
-        if _system_ai_health["successes"] < SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD:
-            return
-        # Complete the durable incident while still holding the same health
-        # lock used by the time-based path. The transaction's prior state is
-        # the sole ownership token for a recovery notification.
-        prior_state = _complete_system_ai_alert()
         _system_ai_health.update(
             {
                 "failures": 0,
-                "successes": 0,
-                "alerted": False,
                 "last_error": "",
                 "jobs": [],
-                "failure_timestamp_dirty": False,
             }
-        )
-    if prior_state == "1":
-        _notify_admins(
-            "system_ai_recovered",
-            SYSTEM_AI_RECOVERED_TITLE,
-            "服务端 AI 调用已恢复正常，自动摘要、翻译、标题精简和每日摘要等后台任务会继续运行。",
         )
 
 
@@ -1999,8 +1963,8 @@ def _redact_secrets(value, *known_secrets: str) -> str:
 
 def _note_system_ai_failure(job: str, error) -> None:
     """Count one failed system-AI call. Alerts every admin exactly once per
-    outage: the flag only clears on the next success (see above), so a provider
-    that fails every 30 seconds can't turn into a stream of notifications."""
+    outage: the flag only clears after a real success and the stability window,
+    so a provider that fails every 30 seconds cannot flap notifications."""
     reason = _redact_secrets(error).strip()[:300]
     with _system_ai_health_lock:
         current = time.time()
@@ -2015,7 +1979,6 @@ def _note_system_ai_failure(job: str, error) -> None:
         except Exception as exc:
             print(f"[system-ai] failure timestamp write failed: {exc}")
         _system_ai_health["failure_timestamp_dirty"] = not (marker_ok and db_ok)
-        _system_ai_health["successes"] = 0
         _system_ai_health["failures"] += 1
         _system_ai_health["last_error"] = reason
         if job not in _system_ai_health["jobs"]:
@@ -2090,7 +2053,6 @@ def _maybe_recover_stale_system_ai_incident() -> bool:
             _system_ai_health.update(
                 {
                     "failures": 0,
-                    "successes": 0,
                     "alerted": False,
                     "last_error": "",
                     "jobs": [],

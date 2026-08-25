@@ -4,10 +4,12 @@ Every background job (auto summary/translation/title, source classification)
 and the daily summary share the one admin-configured system AI. A dead key used
 to surface only as log lines plus, hours later, the daily-summary failure alert.
 Consecutive failures across all of those jobs now raise one alert, and the next
-success raises one recovery notice.
+real success arms a recovery notice after the configured stability window.
 """
 
+import os
 import sqlite3
+import subprocess
 import sys
 import threading
 import time as stdlib_time
@@ -50,7 +52,6 @@ def restart_system_ai_health_process():
             web_server._system_ai_health.update(
                 {
                     "failures": 0,
-                    "successes": 0,
                     "alerted": False,
                     "last_error": "",
                     "jobs": [],
@@ -63,15 +64,38 @@ def restart_system_ai_health_process():
     return restart
 
 
-def test_stable_complete_is_disabled_when_window_is_zero(isolated_app_state_db):
+def test_zero_stability_window_closes_after_a_real_success(isolated_app_state_db):
     models.set_app_state("incident", "1")
     models.set_app_state("failed", "100")
     models.set_app_state("succeeded", "101")
 
     assert models.complete_app_state_incident_if_stable(
         "incident", "notified", "failed", "succeeded", 0, now=10_000
-    ) == "0"
-    assert models.get_app_state("incident") == "1"
+    ) == "1"
+    assert models.get_app_state("incident") == "0"
+    assert models.get_app_state("notified") == "10000.0"
+
+
+def test_removed_success_threshold_emits_a_startup_migration_warning(tmp_path):
+    environment = os.environ.copy()
+    environment.update({
+        "DATA_DIR": str(tmp_path),
+        "SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD": "5",
+    })
+
+    result = subprocess.run(
+        [sys.executable, "-c", "import web_server"],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+    assert result.returncode == 0
+    output = result.stdout + result.stderr
+    assert "SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD" in output
+    assert "SYSTEM_AI_RECOVERY_STABILITY_SECONDS" in output
 
 
 def test_stable_complete_rechecks_timestamps_in_transaction(isolated_app_state_db):
@@ -215,6 +239,14 @@ def _success(times):
         web_server._note_system_ai_success()
 
 
+def _recover_after_stability(clock):
+    """Record one real success, then let the periodic stability check close."""
+    clock["now"] += 1
+    _success(1)
+    clock["now"] += web_server.SYSTEM_AI_RECOVERY_STABILITY_SECONDS
+    return web_server._maybe_recover_stale_system_ai_incident()
+
+
 def test_daily_summary_deduplication_recognizes_only_notified_incidents(
     isolated_app_state_db,
 ):
@@ -264,7 +296,7 @@ def test_stable_recovery_silently_closes_a_cooldown_incident(
     clock = {"now": 1_000.0}
     monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
     _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
-    _success(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD)
+    assert _recover_after_stability(clock) is True
     alerts.clear()
 
     _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
@@ -566,7 +598,6 @@ def test_stable_recovery_serializes_memory_reset_with_new_failures(
         web_server._system_ai_health.update(
             {
                 "failures": 3,
-                "successes": 1,
                 "alerted": True,
             }
         )
@@ -590,97 +621,6 @@ def test_stable_recovery_serializes_memory_reset_with_new_failures(
     assert not recovery.is_alive()
     assert not failure.is_alive()
     assert web_server._system_ai_health["failures"] == 1
-
-
-def test_counted_and_stable_recovery_emit_only_one_notice(
-    isolated_app_state_db, alerts, monkeypatch
-):
-    """The two recovery paths must share one linearized notification edge."""
-    clock = {"now": 1_000.0}
-    monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
-    _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
-    alerts.clear()
-    clock["now"] += 1
-    _success(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD - 1)
-    clock["now"] += web_server.SYSTEM_AI_RECOVERY_STABILITY_SECONDS + 1
-
-    counted_at_completion = threading.Event()
-    release_counted_completion = threading.Event()
-    stable_lock_attempted = threading.Event()
-    stable_lock_state_ready = threading.Event()
-    stable_lock_acquired = threading.Event()
-    stable_lock_blocked = threading.Event()
-    stable_finished = threading.Event()
-    original_complete = web_server._complete_system_ai_alert
-    original_health_lock = web_server._system_ai_health_lock
-    errors = []
-
-    class TrackingLock:
-        def __enter__(self):
-            if threading.current_thread().name == "stable-recovery":
-                stable_lock_attempted.set()
-                if original_health_lock.acquire(blocking=False):
-                    stable_lock_acquired.set()
-                    stable_lock_state_ready.set()
-                    return self
-                stable_lock_blocked.set()
-                stable_lock_state_ready.set()
-            original_health_lock.acquire()
-            return self
-
-        def __exit__(self, exc_type, exc, traceback):
-            original_health_lock.release()
-
-        def locked(self):
-            return original_health_lock.locked()
-
-    def block_counted_completion():
-        counted_at_completion.set()
-        assert release_counted_completion.wait(timeout=2)
-        return original_complete()
-
-    def run_counted_recovery():
-        try:
-            web_server._note_system_ai_success()
-        except Exception as exc:
-            errors.append(exc)
-
-    def run_stable_recovery():
-        try:
-            web_server._maybe_recover_stale_system_ai_incident()
-        except Exception as exc:
-            errors.append(exc)
-        finally:
-            stable_finished.set()
-
-    monkeypatch.setattr(web_server, "_system_ai_health_lock", TrackingLock())
-    monkeypatch.setattr(
-        web_server, "_complete_system_ai_alert", block_counted_completion
-    )
-    counted = threading.Thread(target=run_counted_recovery, name="counted-recovery")
-    stable = threading.Thread(target=run_stable_recovery, name="stable-recovery")
-
-    counted.start()
-    assert counted_at_completion.wait(timeout=2)
-    stable.start()
-    assert stable_lock_attempted.wait(timeout=2)
-    assert stable_lock_state_ready.wait(timeout=2)
-    if stable_lock_acquired.is_set():
-        # With the buggy lock gap the stable path owns and finishes the durable
-        # transition while counted completion is paused.
-        assert stable_finished.wait(timeout=2)
-    else:
-        # With linearization it is deterministically blocked on the same lock.
-        assert stable_lock_blocked.is_set()
-    release_counted_completion.set()
-    counted.join(timeout=2)
-    stable.join(timeout=2)
-
-    assert not counted.is_alive()
-    assert not stable.is_alive()
-    assert errors == []
-    assert web_server.get_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY) == "0"
-    assert [item["type"] for item in alerts] == ["system_ai_recovered"] * 2
 
 
 def test_reset_holds_health_lock_until_durable_state_is_cleared(
@@ -1020,50 +960,68 @@ def test_a_success_before_the_threshold_resets_the_streak(alerts):
     assert alerts == []
 
 
-def test_recovery_is_announced_once_after_an_alert(alerts):
+def test_rapid_successes_do_not_recover_before_the_stability_window(
+    isolated_app_state_db, alerts, monkeypatch
+):
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
     _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
     alerts.clear()
 
-    _success(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD)
+    clock["now"] += 1
+    _success(20)
+
+    assert alerts == []
+    assert web_server.get_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY) == "1"
+
+
+def test_recovery_is_announced_once_after_an_alert(
+    isolated_app_state_db, alerts, monkeypatch
+):
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
+    _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
+    alerts.clear()
+
+    assert _recover_after_stability(clock) is True
     assert [a["type"] for a in alerts] == ["system_ai_recovered"] * 2
 
     # Nothing further to announce while it keeps working.
     alerts.clear()
     web_server._note_system_ai_success()
+    clock["now"] += web_server.SYSTEM_AI_RECOVERY_STABILITY_SECONDS
+    assert web_server._maybe_recover_stale_system_ai_incident() is False
     assert alerts == []
 
 
-def test_system_ai_recovery_requires_consecutive_successes(alerts):
-    _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
-    alerts.clear()
-
-    _success(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD - 1)
-    assert alerts == []
-
-    web_server._note_system_ai_success()
-    assert [item["type"] for item in alerts] == ["system_ai_recovered"] * 2
-
-
-def test_failure_before_recovery_resets_the_success_streak(alerts):
-    _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
-    alerts.clear()
-
-    _success(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD - 1)
-    web_server._note_system_ai_failure("自动摘要", "503")
-    _success(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD - 1)
-
-    assert alerts == []
-
-
-def test_cooldown_suppresses_a_second_system_ai_incident(alerts, monkeypatch):
+def test_system_ai_recovery_requires_at_least_one_real_success(
+    isolated_app_state_db, alerts, monkeypatch
+):
     clock = {"now": 1_000.0}
     monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
     _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
-    _success(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD)
+    alerts.clear()
+
+    clock["now"] += web_server.SYSTEM_AI_RECOVERY_STABILITY_SECONDS + 1
+    assert web_server._maybe_recover_stale_system_ai_incident() is False
+    assert alerts == []
+
+    web_server._note_system_ai_success()
+    assert web_server._maybe_recover_stale_system_ai_incident() is True
+    assert [item["type"] for item in alerts] == ["system_ai_recovered"] * 2
+
+
+def test_cooldown_suppresses_a_second_system_ai_incident(
+    isolated_app_state_db, alerts, monkeypatch
+):
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
+    _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
+    assert _recover_after_stability(clock) is True
     alerts.clear()
 
     _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
-    _success(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD)
+    assert _recover_after_stability(clock) is True
 
     assert alerts == []
 
@@ -1080,23 +1038,25 @@ def test_cooldown_incident_stays_silent_and_closes_after_successes(
     monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
 
     _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
-    _success(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD)
+    assert _recover_after_stability(clock) is True
     alerts.clear()
 
     _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
     assert web_server.get_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY) == "2"
     assert alerts == []
 
-    _success(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD)
+    assert _recover_after_stability(clock) is True
     assert web_server.get_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY) == "0"
     assert alerts == []
 
 
-def test_system_ai_alert_can_be_sent_after_cooldown(alerts, monkeypatch):
+def test_system_ai_alert_can_be_sent_after_cooldown(
+    isolated_app_state_db, alerts, monkeypatch
+):
     clock = {"now": 1_000.0}
     monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
     _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
-    _success(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD)
+    assert _recover_after_stability(clock) is True
     alerts.clear()
 
     clock["now"] += web_server.SYSTEM_AI_ALERT_COOLDOWN_SECONDS + 1
@@ -1105,27 +1065,33 @@ def test_system_ai_alert_can_be_sent_after_cooldown(alerts, monkeypatch):
     assert [item["type"] for item in alerts] == ["system_ai_failed"] * 2
 
 
-def test_recovery_records_cooldown_before_email_delivery(alerts, monkeypatch):
+def test_recovery_records_cooldown_before_email_delivery(
+    isolated_app_state_db, alerts, monkeypatch
+):
     clock = {"now": 1_000.0}
     monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
     _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
 
     # Simulate the legacy post-delivery timestamp write being interrupted.
     monkeypatch.setattr(web_server, "_record_system_ai_notification_time", lambda: None)
-    clock["now"] += web_server.SYSTEM_AI_ALERT_COOLDOWN_SECONDS + 1
-    _success(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD)
+    assert _recover_after_stability(clock) is True
 
     assert float(web_server.get_app_state(
         web_server.SYSTEM_AI_ALERT_LAST_NOTIFIED_STATE_KEY
     )) == clock["now"]
 
 
-def test_a_new_outage_after_a_recovery_is_suppressed_during_cooldown(alerts):
+def test_a_new_outage_after_a_recovery_is_suppressed_during_cooldown(
+    isolated_app_state_db, alerts, monkeypatch
+):
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
     _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
-    _success(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD)
+    assert _recover_after_stability(clock) is True
     alerts.clear()
 
     _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
+    assert web_server.get_app_state(web_server.SYSTEM_AI_ALERTED_STATE_KEY) == "2"
     assert alerts == []
 
 
@@ -1245,19 +1211,27 @@ def news_db_free(monkeypatch, tmp_path):
     monkeypatch.setattr(web_server, "NEWS_DB", str(tmp_path / "absent.db"))
 
 
-def test_admin_connection_test_reports_recovery_without_waiting_for_a_job(alerts, monkeypatch):
+def test_admin_connection_test_arms_time_based_recovery_without_waiting_for_a_job(
+    isolated_app_state_db, alerts, monkeypatch
+):
     from flask import g
 
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
     _fail(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD)
     alerts.clear()
 
     monkeypatch.setattr(web_server, "get_system_ai_config", lambda: {"enabled": True})
     monkeypatch.setattr(web_server, "_run_ai_connection_test", lambda config: ({"ok": True}, 200))
-    for _ in range(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD):
-        with web_server.app.test_request_context("/admin/system-ai-config/test", method="POST"):
-            g.user_id = 1
-            g.user_role = "admin"
-            web_server.admin_system_ai_test_connection.__wrapped__()
+    clock["now"] += 1
+    with web_server.app.test_request_context("/admin/system-ai-config/test", method="POST"):
+        g.user_id = 1
+        g.user_role = "admin"
+        web_server.admin_system_ai_test_connection.__wrapped__()
+
+    assert alerts == []
+    clock["now"] += web_server.SYSTEM_AI_RECOVERY_STABILITY_SECONDS
+    assert web_server._maybe_recover_stale_system_ai_incident() is True
 
     assert [a["type"] for a in alerts] == ["system_ai_recovered"] * 2
 
@@ -1393,13 +1367,15 @@ def test_a_usable_config_is_returned_and_counts_nothing(admin_with_auto_jobs, al
 
 
 def test_fixing_the_config_sends_the_recovery_notice(admin_with_auto_jobs, alerts, monkeypatch):
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
     monkeypatch.setattr(web_server, "get_system_ai_config", lambda: {"enabled": 0, "api_key": ""})
     for _ in range(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD):
         web_server._system_auto_config("auto_summary_enabled")
     alerts.clear()
 
     # The admin saves a working config and the next job call succeeds.
-    _success(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD)
+    assert _recover_after_stability(clock) is True
 
     assert [a["type"] for a in alerts] == ["system_ai_recovered"] * 2
 
@@ -1424,10 +1400,12 @@ def test_a_restart_mid_outage_does_not_re_alert(admin_with_auto_jobs, alerts, mo
 
 def test_after_recovery_a_new_outage_is_suppressed_across_a_restart(admin_with_auto_jobs, alerts,
                                                                      monkeypatch):
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
     monkeypatch.setattr(web_server, "get_system_ai_config", lambda: {"enabled": 0, "api_key": ""})
     for _ in range(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD):
         web_server._system_auto_config("auto_summary_enabled")
-    _success(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD)  # fixed
+    assert _recover_after_stability(clock) is True  # fixed and stable
     alerts.clear()
 
     web_server._system_ai_health.update(
@@ -1440,6 +1418,8 @@ def test_after_recovery_a_new_outage_is_suppressed_across_a_restart(admin_with_a
 
 def test_the_recovery_notice_is_owed_even_if_the_alert_predates_the_restart(
         admin_with_auto_jobs, alerts, monkeypatch):
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
     monkeypatch.setattr(web_server, "get_system_ai_config", lambda: {"enabled": 0, "api_key": ""})
     for _ in range(web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD):
         web_server._system_auto_config("auto_summary_enabled")
@@ -1447,7 +1427,7 @@ def test_the_recovery_notice_is_owed_even_if_the_alert_predates_the_restart(
     web_server._system_ai_health.update(
         {"failures": 0, "alerted": False, "last_error": "", "jobs": []})   # restart
 
-    _success(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD)
+    assert _recover_after_stability(clock) is True
 
     assert [a["type"] for a in alerts] == ["system_ai_recovered"] * 2
 
@@ -1482,7 +1462,11 @@ def test_a_cached_result_does_not_count_as_the_ai_working(alerts, monkeypatch):
     assert alerts == []
 
 
-def test_a_real_call_that_returns_is_what_clears_an_outage(alerts, monkeypatch):
+def test_a_real_call_that_returns_arms_stable_recovery(
+    isolated_app_state_db, alerts, monkeypatch
+):
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(web_server.time, "time", lambda: clock["now"])
     class FakeService:
         def __init__(self, **kwargs):
             pass
@@ -1500,10 +1484,14 @@ def test_a_real_call_that_returns_is_what_clears_an_outage(alerts, monkeypatch):
         web_server._note_system_ai_failure("自动摘要", "AI API HTTP 401: Invalid API key.")
     alerts.clear()
 
-    for _ in range(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD):
-        summary, cached = web_server._generate_article_summary(
-            1, {"api_key": "k", "endpoint": "e", "model": "m"})
-        assert (summary, cached) == ("fresh summary", False)
+    clock["now"] += 1
+    summary, cached = web_server._generate_article_summary(
+        1, {"api_key": "k", "endpoint": "e", "model": "m"})
+    assert (summary, cached) == ("fresh summary", False)
+    assert alerts == []
+
+    clock["now"] += web_server.SYSTEM_AI_RECOVERY_STABILITY_SECONDS
+    assert web_server._maybe_recover_stale_system_ai_incident() is True
     assert [a["type"] for a in alerts] == ["system_ai_recovered"] * 2
 
 

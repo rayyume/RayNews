@@ -218,6 +218,8 @@ AI Endpoint、API Key、模型和供应商由用户在网页的“设置 → AI�
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `AI_REQUEST_TIMEOUT_SECONDS` | `300` | AI 请求超时，单位秒 |
+| `AI_SOURCE_CLASSIFY_MAX_TOKENS` | `2048` | 订阅源分类的最大输出 token；推理模型返回空内容时可适当增大 |
+| `AI_TITLE_MAX_TOKENS` | `4096` | 标题翻译和精简的最大输出 token |
 | `AUTO_SUMMARY_BATCH_LIMIT` | `20` | 每轮自动生成文章摘要的文章数 |
 | `AUTO_SUMMARY_INTERVAL_SECONDS` | `30` | 自动摘要轮询间隔，单位秒 |
 | `AUTO_TRANSLATION_BATCH_LIMIT` | `5` | 每轮后台翻译文章数 |
@@ -231,11 +233,14 @@ AI Endpoint、API Key、模型和供应商由用户在网页的“设置 → AI�
 | `AUTO_SOURCE_CLASSIFY_INTERVAL_SECONDS` | `60` | 订阅源分类轮询间隔，单位秒 |
 | `AI_SHARE_REVALIDATION_INTERVAL_HOURS` | `1` | 复核开启共享用户的个人 AI 连通性的间隔，支持小数，最短 5 分钟 |
 | `SYSTEM_AI_FAILURE_ALERT_THRESHOLD` | `3` | 服务端 AI 连续失败多少次后给管理员发告警 |
+| `SYSTEM_AI_RECOVERY_STABILITY_SECONDS` | `3600` | 故障后至少有一次真实成功，且最近失败后稳定达到该秒数，才发送恢复通知；设为 `0` 表示真实成功后无需额外稳定等待 |
 | `DAILY_SUMMARY_RETRY_INTERVAL_SECONDS` | `600` | 每日摘要生成失败后的重试间隔，单位秒 |
 | `DAILY_SUMMARY_MAX_RETRIES` | `3` | 每日摘要生成失败后的最大重试次数，用尽后告警管理员 |
 | `TELEGRAM_EMBED_TIMEOUT_SECONDS` | `12` | 读取 Telegram 嵌入页面的超时 |
 
 每日总结还有 `AI_DAILY_*` 高级调优变量。通常保留代码默认值即可；如需使用，请将变量显式加入 Compose 的 `environment`。
+
+旧变量 `SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD` 已废弃且不会恢复按调用次数判断健康的路径；若仍设置，启动日志会提示改用 `SYSTEM_AI_RECOVERY_STABILITY_SECONDS`。
 
 ### 图片缓存
 

@@ -248,6 +248,9 @@ def test_system_ai_claim_racing_daily_summary_claim_only_alerts_once(
 def test_daily_alert_remains_when_system_incident_was_cooldown_suppressed(
         isolated_app_db, news_db, clock, alerts, monkeypatch):
     """A muted cooldown incident must not suppress the daily-summary signal."""
+    health_clock = {"now": 1_000.0}
+    monkeypatch.setattr(web_server.time, "time", lambda: health_clock["now"])
+
     def failing(_date):
         web_server._note_system_ai_failure("每日摘要", "401 invalid key")
         web_server._set_daily_summary_error("AI 生成失败")
@@ -256,8 +259,10 @@ def test_daily_alert_remains_when_system_incident_was_cooldown_suppressed(
     _failures_to_notify = web_server.SYSTEM_AI_FAILURE_ALERT_THRESHOLD
     for _ in range(_failures_to_notify):
         web_server._note_system_ai_failure("自动摘要", "401 invalid key")
-    for _ in range(web_server.SYSTEM_AI_RECOVERY_SUCCESS_THRESHOLD):
-        web_server._note_system_ai_success()
+    health_clock["now"] += 1
+    web_server._note_system_ai_success()
+    health_clock["now"] += web_server.SYSTEM_AI_RECOVERY_STABILITY_SECONDS
+    assert web_server._maybe_recover_stale_system_ai_incident() is True
     alerts.clear()
 
     for _ in range(_failures_to_notify):

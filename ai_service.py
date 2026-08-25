@@ -17,7 +17,11 @@ from source_categories import CATEGORY_NAMES, CATEGORY_ORDER, clamp_weighted, lo
 # small a budget the reasoning eats every token and the model returns empty content,
 # surfacing as "empty AI title summary". Give these calls enough room to finish; tune
 # via AI_TITLE_MAX_TOKENS if a heavier reasoning model still comes back empty.
-TITLE_MAX_TOKENS = max(200, int(os.environ.get("AI_TITLE_MAX_TOKENS", "1024")))
+TITLE_MAX_TOKENS = max(200, int(os.environ.get("AI_TITLE_MAX_TOKENS", "4096")))
+SOURCE_CLASSIFY_MAX_TOKENS = max(
+    200, int(os.environ.get("AI_SOURCE_CLASSIFY_MAX_TOKENS", "2048"))
+)
+_MAX_TOKENS_ACTION_HINT = "请增大 max_tokens"
 
 
 def _redact_api_error(value: str, *known_secrets: str) -> str:
@@ -69,7 +73,7 @@ def _empty_ai_content_error(finish_reason, has_reasoning: bool, max_tokens: int)
     if has_reasoning or finish_reason in ("length", "max_tokens"):
         hint = (
             f"；该模型疑似为推理(thinking)模型，隐藏推理耗尽了 max_tokens={max_tokens} 的预算导致正文为空。"
-            "请增大 max_tokens（标题任务可设环境变量 AI_TITLE_MAX_TOKENS）或改用非推理模型。"
+            f"{_MAX_TOKENS_ACTION_HINT} 或改用非推理模型。"
         )
     return f"AI 返回空内容（finish_reason={finish_reason}{hint}）"
 
@@ -364,6 +368,29 @@ class AIService:
             return self._call_claude(messages, max_tokens, temperature)
         return self._call_openai(messages, max_tokens, temperature)
 
+    def _chat_for_task(self, messages: list, max_tokens: int,
+                       temperature: float, max_tokens_env: str) -> str:
+        """Call ``chat`` without widening its override contract.
+
+        Task methods decorate only the actionable empty-output error; provider
+        errors and custom ``chat`` overrides otherwise keep their exact behavior.
+        """
+        try:
+            return self.chat(messages, max_tokens=max_tokens, temperature=temperature)
+        except RuntimeError as exc:
+            message = str(exc)
+            if (
+                message.startswith("AI 返回空内容（")
+                and _MAX_TOKENS_ACTION_HINT in message
+            ):
+                message = message.replace(
+                    _MAX_TOKENS_ACTION_HINT,
+                    f"{_MAX_TOKENS_ACTION_HINT}（可设环境变量 {max_tokens_env}）",
+                    1,
+                )
+                raise RuntimeError(message) from exc
+            raise
+
     # ─── Summarize ───────────────────────────────────────────
 
     def summarize(self, article_text: str, title: str = "") -> str:
@@ -423,7 +450,12 @@ class AIService:
                 ),
             },
         ]
-        raw = self.chat(messages, max_tokens=300, temperature=0.1).strip()
+        raw = self._chat_for_task(
+            messages,
+            max_tokens=SOURCE_CLASSIFY_MAX_TOKENS,
+            temperature=0.1,
+            max_tokens_env="AI_SOURCE_CLASSIFY_MAX_TOKENS",
+        ).strip()
         match = re.search(r"\{.*\}", raw, flags=re.S)
         if not match:
             raise ValueError("AI source classification did not return JSON")
@@ -499,7 +531,12 @@ class AIService:
                 ),
             },
         ]
-        return _normalize_cjk_quotes(self.chat(messages, max_tokens=TITLE_MAX_TOKENS, temperature=temperature).strip())
+        return _normalize_cjk_quotes(self._chat_for_task(
+            messages,
+            max_tokens=TITLE_MAX_TOKENS,
+            temperature=temperature,
+            max_tokens_env="AI_TITLE_MAX_TOKENS",
+        ).strip())
 
     def _title_summary_system_prompt(self, max_chars: int, min_chars: int) -> str:
         return (
@@ -539,7 +576,12 @@ class AIService:
                 "content": f"原标题：{title}" + self._retry_feedback_line(feedback),
             },
         ]
-        return self.chat(messages, max_tokens=TITLE_MAX_TOKENS, temperature=temperature).strip()
+        return self._chat_for_task(
+            messages,
+            max_tokens=TITLE_MAX_TOKENS,
+            temperature=temperature,
+            max_tokens_env="AI_TITLE_MAX_TOKENS",
+        ).strip()
 
     def translate_and_condense_title(self, title: str, target_lang: str = "zh-CN",
                                      max_chars: int = 30, min_chars: int = 18,
@@ -565,7 +607,12 @@ class AIService:
             },
         ]
         return _normalize_cjk_quotes(
-            self.chat(messages, max_tokens=TITLE_MAX_TOKENS, temperature=temperature).strip()
+            self._chat_for_task(
+                messages,
+                max_tokens=TITLE_MAX_TOKENS,
+                temperature=temperature,
+                max_tokens_env="AI_TITLE_MAX_TOKENS",
+            ).strip()
         )
 
 
